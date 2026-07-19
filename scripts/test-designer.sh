@@ -1,0 +1,800 @@
+#!/usr/bin/env bash
+
+# Non-mutating contract tests for the Minimal Designer launcher.
+# The launcher is always given an isolated runtime directory, and commands that
+# could install packages or start containers use harmless PATH stubs.
+
+set -u
+set -o pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LAUNCHER="$PROJECT_ROOT/designer"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+CAPTURE_INDEX=0
+CAPTURE_STATUS=0
+CAPTURE_OUTPUT=""
+SENSITIVE_TOKEN="designer-test-secret-0123456789"
+
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/minimal-designer-launcher.XXXXXX")" || exit 1
+
+cleanup() {
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup EXIT HUP INT TERM
+
+pass_test() {
+  PASS_COUNT=$((PASS_COUNT + 1))
+  printf 'ok %d - %s\n' "$((PASS_COUNT + FAIL_COUNT))" "$1"
+}
+
+fail_test() {
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+  printf 'not ok %d - %s\n' "$((PASS_COUNT + FAIL_COUNT))" "$1" >&2
+}
+
+show_capture() {
+  local safe_output="$CAPTURE_OUTPUT"
+  safe_output="${safe_output//$SENSITIVE_TOKEN/[REDACTED]}"
+  if [ -n "$safe_output" ]; then
+    printf '%s\n' "$safe_output" | sed 's/^/    /' >&2
+  fi
+}
+
+capture() {
+  local output_file="$TMP_ROOT/capture-$CAPTURE_INDEX.log"
+  CAPTURE_INDEX=$((CAPTURE_INDEX + 1))
+  "$@" >"$output_file" 2>&1
+  CAPTURE_STATUS=$?
+  CAPTURE_OUTPUT="$(cat "$output_file")"
+}
+
+capture_in_dir() {
+  local directory="$1"
+  local output_file
+  shift
+  output_file="$TMP_ROOT/capture-$CAPTURE_INDEX.log"
+  CAPTURE_INDEX=$((CAPTURE_INDEX + 1))
+  (cd "$directory" && "$@") >"$output_file" 2>&1
+  CAPTURE_STATUS=$?
+  CAPTURE_OUTPUT="$(cat "$output_file")"
+}
+
+expect_status() {
+  local expected="$1" label="$2"
+  if [ "$CAPTURE_STATUS" -eq "$expected" ]; then
+    pass_test "$label"
+  else
+    fail_test "$label (expected exit $expected, got $CAPTURE_STATUS)"
+    show_capture
+  fi
+}
+
+expect_status_zero_or_one() {
+  local label="$1"
+  case "$CAPTURE_STATUS" in
+    0|1) pass_test "$label" ;;
+    *)
+      fail_test "$label (expected exit 0 or 1, got $CAPTURE_STATUS)"
+      show_capture
+      ;;
+  esac
+}
+
+expect_contains() {
+  local needle="$1" label="$2"
+  case "$CAPTURE_OUTPUT" in
+    *"$needle"*) pass_test "$label" ;;
+    *)
+      fail_test "$label (missing expected text)"
+      show_capture
+      ;;
+  esac
+}
+
+expect_not_contains() {
+  local needle="$1" label="$2"
+  case "$CAPTURE_OUTPUT" in
+    *"$needle"*) fail_test "$label (sensitive or forbidden text was emitted)" ;;
+    *) pass_test "$label" ;;
+  esac
+}
+
+expect_absent() {
+  local path="$1" label="$2"
+  if [ ! -e "$path" ]; then
+    pass_test "$label"
+  else
+    fail_test "$label (unexpected path: $path)"
+  fi
+}
+
+expect_file_contains() {
+  local path="$1" needle="$2" label="$3"
+  if [ -f "$path" ] && grep -F -- "$needle" "$path" >/dev/null 2>&1; then
+    pass_test "$label"
+  else
+    fail_test "$label (missing expected file content)"
+    if [ -f "$path" ]; then
+      local safe_content
+      safe_content="$(cat "$path")"
+      safe_content="${safe_content//$SENSITIVE_TOKEN/[REDACTED]}"
+      printf '%s\n' "$safe_content" | sed 's/^/    /' >&2
+    fi
+  fi
+}
+
+expect_file_not_contains() {
+  local path="$1" needle="$2" label="$3"
+  if [ ! -f "$path" ] || ! grep -F -- "$needle" "$path" >/dev/null 2>&1; then
+    pass_test "$label"
+  else
+    fail_test "$label (forbidden file content was found)"
+  fi
+}
+
+expect_equal() {
+  local expected="$1" actual="$2" label="$3"
+  if [ "$expected" = "$actual" ]; then
+    pass_test "$label"
+  else
+    fail_test "$label (values differ)"
+  fi
+}
+
+make_stub_toolchain() {
+  MOCK_BIN="$TMP_ROOT/mock toolchain/bin"
+  mkdir -p "$MOCK_BIN"
+
+  cat >"$MOCK_BIN/node" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'v24.1.0\n'
+  exit 0
+fi
+if [ -n "${DESIGNER_TEST_MUTATION_LOG:-}" ]; then
+  printf 'node %s\n' "$*" >>"$DESIGNER_TEST_MUTATION_LOG"
+fi
+exit 0
+EOF
+
+  cat >"$MOCK_BIN/pnpm" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf '11.9.0\n'
+  exit 0
+fi
+if [ -n "${DESIGNER_TEST_MUTATION_LOG:-}" ]; then
+  printf 'pnpm %s\n' "$*" >>"$DESIGNER_TEST_MUTATION_LOG"
+fi
+exit 0
+EOF
+
+  cat >"$MOCK_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf 'Docker version 28.0.0, build test\n'
+    exit 0
+    ;;
+  info)
+    # Deliberately model an installed CLI with a stopped daemon.
+    if [ "${DESIGNER_TEST_DOCKER_DAEMON:-stopped}" = "ready" ]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  compose)
+    if [ "${2:-}" = "version" ]; then
+      printf 'Docker Compose version v2.35.0\n'
+      exit 0
+    fi
+    for argument in "$@"; do
+      if [ "$argument" = "logs" ]; then
+        printf '%s\n' "${DESIGNER_TEST_DOCKER_LOG_OUTPUT:-fake active Docker log}"
+        exit 0
+      fi
+    done
+    if [ -n "${DESIGNER_TEST_MUTATION_LOG:-}" ]; then
+      printf 'docker %s\n' "$*" >>"$DESIGNER_TEST_MUTATION_LOG"
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+
+  cat >"$MOCK_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+
+  cat >"$MOCK_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+if [ "${DESIGNER_TEST_CURL_OK:-0}" = "1" ]; then
+  exit 0
+fi
+exit 1
+EOF
+
+  chmod +x "$MOCK_BIN/node" "$MOCK_BIN/pnpm" "$MOCK_BIN/docker" "$MOCK_BIN/lsof" "$MOCK_BIN/curl"
+  MOCK_PATH="$MOCK_BIN:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
+run_static_contract_tests() {
+  capture bash -n "$LAUNCHER"
+  expect_status 0 "launcher has valid Bash syntax"
+
+  if [ -x "$LAUNCHER" ]; then
+    pass_test "launcher is executable"
+  else
+    fail_test "launcher is executable (run: chmod +x designer)"
+  fi
+
+  local menu_input="$TMP_ROOT/menu-input.txt"
+  printf '5\n' >"$menu_input"
+  capture bash -c 'bash "$1" <"$2"' _ "$LAUNCHER" "$menu_input"
+  expect_status 0 "no-argument guided menu works on Bash with nounset enabled"
+  expect_contains "guided launcher" "no-argument invocation displays the guided menu"
+  expect_contains "Minimal Designer launcher" "guided menu can select help"
+
+  capture bash "$LAUNCHER" help
+  expect_status 0 "help exits successfully"
+  expect_contains "Minimal Designer launcher" "help identifies the launcher"
+  expect_contains "--dry-run" "help documents dry-run mode"
+
+  capture bash "$LAUNCHER" version
+  expect_status 0 "version exits successfully"
+  if printf '%s\n' "$CAPTURE_OUTPUT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    pass_test "version prints a semantic version"
+  else
+    fail_test "version prints a semantic version"
+    show_capture
+  fi
+
+  capture bash "$LAUNCHER" definitely-not-a-command
+  expect_status 2 "unknown command returns a usage error"
+  expect_contains "Unknown command" "unknown command explains the error"
+}
+
+run_location_and_read_only_tests() {
+  local outside_dir="$TMP_ROOT/outside repository cwd with spaces"
+  local outside_runtime="$TMP_ROOT/outside-runtime-must-not-exist"
+  mkdir -p "$outside_dir"
+
+  capture_in_dir "$outside_dir" env \
+    DESIGNER_RUNTIME_DIR="$outside_runtime" \
+    bash "$LAUNCHER" plan auto
+  expect_status 0 "launcher works outside the repository from a path containing spaces"
+  expect_contains "Plan only" "outside-repository invocation resolves the launcher correctly"
+  expect_absent "$outside_runtime" "outside-repository plan creates no runtime state"
+
+  local doctor_runtime="$TMP_ROOT/doctor-runtime-must-not-exist"
+  capture env \
+    DESIGNER_RUNTIME_DIR="$doctor_runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor auto
+  # Doctor intentionally returns 1 when neither supported runtime is ready.
+  expect_status_zero_or_one "doctor completes with a documented readiness status"
+  expect_contains "Minimal Designer doctor" "doctor prints its diagnostic heading"
+  expect_absent "$doctor_runtime" "doctor creates no runtime state"
+
+  local target runtime
+  for target in auto local docker server; do
+    runtime="$TMP_ROOT/plan-$target-runtime-must-not-exist"
+    capture env DESIGNER_RUNTIME_DIR="$runtime" bash "$LAUNCHER" plan "$target"
+    expect_status 0 "plan $target exits successfully"
+    expect_contains "Plan only" "plan $target declares that it is non-mutating"
+    expect_absent "$runtime" "plan $target creates no runtime state"
+  done
+}
+
+run_dry_run_tests() {
+  make_stub_toolchain
+
+  local runtime mutation_log
+
+  runtime="$TMP_ROOT/dry-setup-local-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-setup-local-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run setup local --skip-browser
+  expect_status 0 "dry-run native setup exits successfully"
+  expect_absent "$mutation_log" "dry-run native setup does not invoke pnpm mutations"
+  expect_absent "$runtime" "dry-run native setup creates no runtime state"
+
+  runtime="$TMP_ROOT/dry-dev-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-dev-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run dev --api-port 54320 --web-port 54321 --skip-setup --no-open
+  expect_status 0 "dry-run development mode exits successfully"
+  expect_contains "_run-native" "dry-run development mode prints the child command"
+  expect_absent "$mutation_log" "dry-run development mode starts no package process"
+  expect_absent "$runtime" "dry-run development mode creates no runtime state"
+
+  runtime="$TMP_ROOT/dry-start-local-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-start-local-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run start local --port 54322 --no-open
+  expect_status 0 "dry-run local production start exits successfully"
+  expect_absent "$mutation_log" "dry-run local production start invokes no package mutation"
+  expect_absent "$runtime" "dry-run local production start creates no logs or runtime state"
+
+  runtime="$TMP_ROOT/dry-setup-docker-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-setup-docker-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run setup docker
+  expect_status 0 "dry-run Docker setup succeeds with a stopped daemon"
+  expect_contains "Would start Docker" "dry-run Docker setup reports the stopped daemon action"
+  expect_absent "$mutation_log" "dry-run Docker setup invokes no Compose mutation"
+  expect_absent "$runtime" "dry-run Docker setup creates no runtime state"
+
+  runtime="$TMP_ROOT/dry-start-docker-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-start-docker-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run start docker --port 54323 --no-build --no-open
+  expect_status 0 "dry-run Docker start exits successfully"
+  expect_contains "up -d" "dry-run Docker start prints the Compose action"
+  expect_absent "$mutation_log" "dry-run Docker start does not call Compose up"
+  expect_absent "$runtime" "dry-run Docker start creates no env or runtime state"
+}
+
+run_cli_validation_tests() {
+  local case_index=0
+
+  run_usage_case() {
+    local slug="$1" label="$2" expected_text="$3"
+    local runtime mutation_log
+    shift 3
+    case_index=$((case_index + 1))
+    runtime="$TMP_ROOT/usage-$case_index-$slug-runtime-must-not-exist"
+    mutation_log="$TMP_ROOT/usage-$case_index-$slug-mutations.log"
+    capture env \
+      PATH="$MOCK_PATH" \
+      HOME="$TMP_ROOT/home" \
+      DESIGNER_RUNTIME_DIR="$runtime" \
+      DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+      DESIGNER_NO_OPEN=1 \
+      bash "$LAUNCHER" --dry-run "$@"
+    expect_status 2 "$label"
+    expect_contains "$expected_text" "$label explains the invalid option"
+    expect_absent "$mutation_log" "$label invokes no package or Compose mutation"
+    expect_absent "$runtime" "$label creates no runtime state"
+  }
+
+  run_usage_case "dev-api-port" \
+    "dev rejects --api-port without a value" \
+    "--api-port needs a value" \
+    dev --api-port
+  run_usage_case "dev-web-port" \
+    "dev rejects --web-port without a value" \
+    "--web-port needs a value" \
+    dev --web-port
+  run_usage_case "docker-port" \
+    "Docker start rejects --port without a value" \
+    "--port needs a value" \
+    start docker --port
+  run_usage_case "docker-skip-browser" \
+    "Docker setup rejects the local-only --skip-browser flag" \
+    "--skip-browser" \
+    setup docker --skip-browser
+  run_usage_case "server-port" \
+    "server start rejects the ignored --port flag" \
+    "--port" \
+    start server --port 54326
+  run_usage_case "local-no-build" \
+    "local start rejects the Docker-only --no-build flag" \
+    "--no-build" \
+    start local --no-build
+  run_usage_case "server-no-open" \
+    "server start rejects the ignored --no-open flag" \
+    "--no-open" \
+    start server --no-open
+  run_usage_case "server-conflicting-access" \
+    "server init rejects simultaneous SSH-only and public-proxy modes" \
+    "--ssh-only" \
+    server init --ssh-only --public-url https://designer.example.test
+}
+
+run_server_security_tests() {
+  local runtime="$TMP_ROOT/dry-server-init-runtime-must-not-exist"
+
+  capture env \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run server init \
+      --public-url https://designer.example.test \
+      --port 54324 \
+      --token "$SENSITIVE_TOKEN" \
+      --identity-header X-Designer-User \
+      --force
+  expect_status 0 "dry-run trusted-proxy server initialization exits successfully"
+  expect_contains "secret redacted" "dry-run server initialization labels secret output as redacted"
+  expect_not_contains "$SENSITIVE_TOKEN" "dry-run server initialization never prints the bearer token"
+  expect_absent "$runtime" "dry-run server initialization creates no secret or runtime files"
+
+  runtime="$TMP_ROOT/invalid-http-runtime-must-not-exist"
+  capture env \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run server init \
+      --public-url http://designer.example.test \
+      --token "$SENSITIVE_TOKEN" \
+      --force
+  expect_status 1 "plain-HTTP public server URL is rejected"
+  expect_contains "HTTPS origin" "plain-HTTP rejection explains the HTTPS requirement"
+  expect_not_contains "$SENSITIVE_TOKEN" "invalid server configuration never echoes the bearer token"
+  expect_absent "$runtime" "rejected server initialization creates no runtime state"
+
+  local invalid_url invalid_slug invalid_index=0
+  for invalid_url in \
+    "https://designer.example.test/path" \
+    "https://designer.example.test?x=1" \
+    "https://user@designer.example.test" \
+    "https://designer.example.test//"
+  do
+    invalid_index=$((invalid_index + 1))
+    invalid_slug="invalid-origin-$invalid_index"
+    runtime="$TMP_ROOT/$invalid_slug-runtime-must-not-exist"
+    capture env \
+      DESIGNER_RUNTIME_DIR="$runtime" \
+      DESIGNER_NO_OPEN=1 \
+      bash "$LAUNCHER" --dry-run server init \
+        --public-url "$invalid_url" \
+        --token "$SENSITIVE_TOKEN" \
+        --force
+    expect_status 1 "server init rejects non-origin URL form $invalid_index"
+    expect_contains "HTTPS origin" "non-origin URL rejection $invalid_index explains the origin requirement"
+    expect_not_contains "$SENSITIVE_TOKEN" "non-origin URL rejection $invalid_index never echoes the bearer token"
+    expect_absent "$runtime" "non-origin URL rejection $invalid_index creates no runtime state"
+  done
+
+  runtime="$TMP_ROOT/single-trailing-slash-runtime-must-not-exist"
+  capture env \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run server init \
+      --public-url https://designer.example.test/ \
+      --token "$SENSITIVE_TOKEN" \
+      --force
+  expect_status 0 "server init accepts a single trailing slash on an HTTPS origin"
+  expect_not_contains "$SENSITIVE_TOKEN" "accepted trailing-slash origin still redacts the bearer token"
+  expect_absent "$runtime" "accepted trailing-slash origin creates no dry-run state"
+
+  local configured_runtime="$TMP_ROOT/configured-server-runtime"
+  local server_env="$configured_runtime/env/server.env"
+  local mutation_log="$TMP_ROOT/dry-start-server-mutations.log"
+  local checksum_before checksum_after
+  mkdir -p "$configured_runtime/env"
+  {
+    printf 'DESIGNER_SERVER_ACCESS=proxy\n'
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=54325\n'
+    printf 'PUBLIC_BASE_URL=https://designer.example.test\n'
+    printf 'AUTH_MODE=trusted-header\n'
+    printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$server_env"
+  chmod 600 "$server_env"
+  checksum_before="$(cksum "$server_env")"
+
+  capture env \
+    DESIGNER_RUNTIME_DIR="$configured_runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" codex-config server
+  expect_status 0 "server Codex configuration exits successfully"
+  expect_contains "bearer_token_env_var" "server Codex configuration references an environment variable"
+  expect_not_contains "$SENSITIVE_TOKEN" "server Codex configuration does not print the stored token"
+
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$configured_runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run start server --no-build
+  expect_status 0 "dry-run server start succeeds with a stopped Docker daemon"
+  expect_contains "up -d" "dry-run server start prints the Compose action"
+  expect_not_contains "$SENSITIVE_TOKEN" "dry-run server start does not print the stored token"
+  expect_absent "$mutation_log" "dry-run server start does not call Compose up"
+  expect_absent "$configured_runtime/run" "dry-run server start creates no run-state directory"
+  checksum_after="$(cksum "$server_env")"
+  expect_equal "$checksum_before" "$checksum_after" "dry-run server start leaves the secure env unchanged"
+}
+
+run_codex_config_state_tests() {
+  local runtime="$TMP_ROOT/codex-config-state-runtime"
+  local env_dir="$runtime/env"
+  local run_dir="$runtime/run"
+  local server_env="$env_dir/server.env"
+  local docker_env="$env_dir/docker.env"
+  local docker_port=55601
+  local local_port=55602
+  local server_url="https://designer-config.example.test"
+
+  mkdir -p "$env_dir" "$run_dir"
+  {
+    printf 'DESIGNER_SERVER_ACCESS=proxy\n'
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=55603\n'
+    printf 'PUBLIC_BASE_URL=%s/\n' "$server_url"
+    printf 'AUTH_MODE=trusted-header\n'
+    printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$server_env"
+  {
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=%s\n' "$docker_port"
+    printf 'PUBLIC_BASE_URL=http://127.0.0.1:%s\n' "$docker_port"
+    printf 'AUTH_MODE=none\n'
+    printf 'DESIGNER_TOKEN=\n'
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$docker_env"
+  chmod 600 "$server_env" "$docker_env"
+
+  printf 'docker\n' >"$run_dir/mode"
+  printf '%s\n' "$docker_port" >"$run_dir/api-port"
+  printf '0\n' >"$run_dir/web-port"
+  printf 'http://127.0.0.1:%s\n' "$docker_port" >"$run_dir/url"
+  printf '%s\n' "$docker_env" >"$run_dir/env-file"
+
+  capture env DESIGNER_RUNTIME_DIR="$runtime" bash "$LAUNCHER" codex-config auto
+  expect_status 0 "automatic Codex config reads active Docker state"
+  expect_contains "url = \"http://127.0.0.1:$docker_port/mcp\"" "automatic Codex config uses the active custom Docker port"
+  expect_not_contains "$server_url" "automatic Codex config does not prefer an inactive server env"
+  expect_not_contains "bearer_token_env_var" "automatic Docker Codex config requires no bearer token"
+
+  capture env DESIGNER_RUNTIME_DIR="$runtime" bash "$LAUNCHER" codex-config local
+  expect_status 0 "explicit local Codex config reads active Docker state"
+  expect_contains "url = \"http://127.0.0.1:$docker_port/mcp\"" "explicit local Codex config uses the active custom Docker port"
+  expect_not_contains "$server_url" "explicit local Codex config ignores the server env"
+
+  capture env DESIGNER_RUNTIME_DIR="$runtime" bash "$LAUNCHER" codex-config server
+  expect_status 0 "explicit server Codex config reads the validated server env"
+  expect_contains "url = \"$server_url/mcp\"" "explicit server Codex config uses and normalizes the server URL"
+  expect_contains "bearer_token_env_var" "explicit server Codex config requires the bearer-token environment variable"
+  expect_not_contains "$SENSITIVE_TOKEN" "explicit server Codex config does not reveal the stored token"
+
+  printf 'local\n' >"$run_dir/mode"
+  printf '%s\n' "$local_port" >"$run_dir/api-port"
+  printf 'http://127.0.0.1:%s\n' "$local_port" >"$run_dir/url"
+  printf '\n' >"$run_dir/env-file"
+
+  capture env DESIGNER_RUNTIME_DIR="$runtime" bash "$LAUNCHER" codex-config auto
+  expect_status 0 "automatic Codex config reads active native-local state"
+  expect_contains "url = \"http://127.0.0.1:$local_port/mcp\"" "automatic Codex config uses the active custom native port"
+  expect_not_contains "$server_url" "automatic native Codex config still ignores the inactive server env"
+
+  capture env DESIGNER_RUNTIME_DIR="$runtime" bash "$LAUNCHER" codex-config local
+  expect_status 0 "explicit local Codex config reads active native-local state"
+  expect_contains "url = \"http://127.0.0.1:$local_port/mcp\"" "explicit local Codex config uses the active custom native port"
+}
+
+run_log_selection_regression_test() {
+  local runtime="$TMP_ROOT/log-selection-runtime"
+  local env_dir="$runtime/env"
+  local run_dir="$runtime/run"
+  local log_dir="$runtime/logs"
+  local docker_env="$env_dir/docker.env"
+  local mutation_log="$TMP_ROOT/log-selection-mutations.log"
+  local stale_marker="STALE_NATIVE_LOG_MUST_NOT_WIN"
+  local docker_marker="ACTIVE_DOCKER_LOG_SELECTED"
+
+  mkdir -p "$env_dir" "$run_dir" "$log_dir"
+  {
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=55604\n'
+    printf 'PUBLIC_BASE_URL=http://127.0.0.1:55604\n'
+    printf 'AUTH_MODE=none\n'
+    printf 'DESIGNER_TOKEN=\n'
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$docker_env"
+  chmod 600 "$docker_env"
+  printf 'docker\n' >"$run_dir/mode"
+  printf '55604\n' >"$run_dir/api-port"
+  printf '0\n' >"$run_dir/web-port"
+  printf 'http://127.0.0.1:55604\n' >"$run_dir/url"
+  printf '%s\n' "$docker_env" >"$run_dir/env-file"
+  printf '%s\n' "$stale_marker" >"$log_dir/local.log"
+
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_DOCKER_LOG_OUTPUT="$docker_marker" \
+    bash "$LAUNCHER" logs
+  expect_status 0 "logs succeeds for active Docker state with a stale local log"
+  expect_contains "$docker_marker" "logs selects the active Docker container output"
+  expect_not_contains "$stale_marker" "logs ignores a stale native log while Docker mode is active"
+  expect_absent "$mutation_log" "reading active Docker logs performs no Compose mutation"
+}
+
+run_gnu_stat_permission_regression_test() {
+  local runtime="$TMP_ROOT/gnu-stat-runtime"
+  local env_dir="$runtime/env"
+  local server_env="$env_dir/server.env"
+  local stat_bin="$TMP_ROOT/fake GNU stat/bin"
+  local stat_log="$TMP_ROOT/fake-gnu-stat-calls.log"
+  local mutation_log="$TMP_ROOT/gnu-stat-start-mutations.log"
+  local server_url="https://gnu-stat.example.test"
+  local checksum_before checksum_after
+
+  mkdir -p "$env_dir" "$stat_bin"
+  cat >"$stat_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -c)
+    if [ -n "${DESIGNER_TEST_STAT_LOG:-}" ]; then
+      printf 'gnu-c %s\n' "$*" >>"$DESIGNER_TEST_STAT_LOG"
+    fi
+    printf '600\n'
+    exit 0
+    ;;
+  -f)
+    if [ -n "${DESIGNER_TEST_STAT_LOG:-}" ]; then
+      printf 'bsd-f %s\n' "$*" >>"$DESIGNER_TEST_STAT_LOG"
+    fi
+    # GNU stat may accept an unknown BSD-style option shape and emit text that
+    # is nonempty but is not a permission mode. BSD-first probing is unsafe.
+    printf 'misleading GNU stat output for BSD format\n'
+    exit 0
+    ;;
+esac
+exit 2
+EOF
+  chmod +x "$stat_bin/stat"
+
+  {
+    printf 'DESIGNER_SERVER_ACCESS=proxy\n'
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=55605\n'
+    printf 'PUBLIC_BASE_URL=%s\n' "$server_url"
+    printf 'AUTH_MODE=trusted-header\n'
+    printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$server_env"
+  chmod 600 "$server_env"
+  checksum_before="$(cksum "$server_env")"
+
+  capture env \
+    PATH="$stat_bin:$MOCK_PATH" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_STAT_LOG="$stat_log" \
+    bash "$LAUNCHER" codex-config server
+  expect_status 0 "explicit server Codex config accepts GNU stat mode 600"
+  expect_contains "url = \"$server_url/mcp\"" "GNU-stat Codex config emits the validated server URL"
+  expect_not_contains "$SENSITIVE_TOKEN" "GNU-stat Codex config does not reveal the stored token"
+  expect_file_contains "$stat_log" "gnu-c" "server permission validation probes GNU stat syntax first"
+  expect_file_not_contains "$stat_log" "bsd-f" "server permission validation avoids misleading BSD stat output on GNU"
+
+  capture env \
+    PATH="$stat_bin:$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_STAT_LOG="$stat_log" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run start server --no-build
+  expect_status 0 "dry-run server start accepts GNU stat mode 600"
+  expect_contains "up -d" "GNU-stat dry-run server start reaches the Compose preview"
+  expect_not_contains "$SENSITIVE_TOKEN" "GNU-stat dry-run server start does not reveal the token"
+  expect_absent "$mutation_log" "GNU-stat dry-run server start performs no Compose mutation"
+  expect_absent "$runtime/run" "GNU-stat dry-run server start creates no runtime state"
+  expect_file_not_contains "$stat_log" "bsd-f" "server start also avoids BSD-first stat probing on GNU"
+  checksum_after="$(cksum "$server_env")"
+  expect_equal "$checksum_before" "$checksum_after" "GNU-stat validation leaves server.env unchanged"
+}
+
+run_restart_regression_test() {
+  local runtime="$TMP_ROOT/restart-runtime"
+  local env_dir="$runtime/env"
+  local run_dir="$runtime/run"
+  local docker_env="$env_dir/docker.env"
+  local server_env="$env_dir/server.env"
+  local compose_log="$TMP_ROOT/restart-compose.log"
+  local custom_port=55431
+  local custom_url="http://127.0.0.1:$custom_port"
+
+  mkdir -p "$env_dir" "$run_dir"
+  {
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=%s\n' "$custom_port"
+    printf 'PUBLIC_BASE_URL=%s\n' "$custom_url"
+    printf 'AUTH_MODE=none\n'
+    printf 'DESIGNER_TOKEN=\n'
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$docker_env"
+  {
+    printf 'DESIGNER_SERVER_ACCESS=proxy\n'
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=55432\n'
+    printf 'PUBLIC_BASE_URL=https://wrong-env.example.test\n'
+    printf 'AUTH_MODE=trusted-header\n'
+    printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$server_env"
+  chmod 600 "$docker_env" "$server_env"
+  printf 'docker\n' >"$run_dir/mode"
+  printf '%s\n' "$custom_port" >"$run_dir/api-port"
+  printf '0\n' >"$run_dir/web-port"
+  printf '%s\n' "$custom_url" >"$run_dir/url"
+  printf '%s\n' "$docker_env" >"$run_dir/env-file"
+
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$compose_log" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open restart
+  expect_status 0 "Docker restart with a recorded non-default port exits successfully"
+  expect_file_contains "$compose_log" "--env-file $docker_env -f $PROJECT_ROOT/docker-compose.yml down" "restart stops Compose with the recorded Docker env"
+  expect_file_contains "$compose_log" "--env-file $docker_env -f $PROJECT_ROOT/docker-compose.yml up -d" "restart starts Compose with the recorded Docker env"
+  expect_file_not_contains "$compose_log" "--env-file $server_env" "restart does not select a different server env"
+  expect_equal "docker" "$(cat "$run_dir/mode" 2>/dev/null || true)" "restart preserves Docker mode"
+  expect_equal "$custom_port" "$(cat "$run_dir/api-port" 2>/dev/null || true)" "restart preserves the non-default API port"
+  expect_equal "$custom_url" "$(cat "$run_dir/url" 2>/dev/null || true)" "restart preserves the non-default URL"
+  expect_equal "$docker_env" "$(cat "$run_dir/env-file" 2>/dev/null || true)" "restart records the same Docker env file"
+  expect_file_contains "$docker_env" "PORT=$custom_port" "restart rewrites Docker config with the recorded port"
+  expect_file_contains "$docker_env" "PUBLIC_BASE_URL=$custom_url" "restart rewrites Docker config with the recorded URL"
+}
+
+printf 'TAP version 13\n'
+
+if [ ! -f "$LAUNCHER" ]; then
+  printf 'Bail out! launcher not found at %s\n' "$LAUNCHER" >&2
+  exit 1
+fi
+
+run_static_contract_tests
+run_location_and_read_only_tests
+run_dry_run_tests
+run_cli_validation_tests
+run_server_security_tests
+run_codex_config_state_tests
+run_log_selection_regression_test
+run_gnu_stat_permission_regression_test
+run_restart_regression_test
+
+printf '# %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+if [ "$FAIL_COUNT" -ne 0 ]; then
+  exit 1
+fi

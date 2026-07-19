@@ -1,0 +1,21 @@
+{
+  "name": "minimal-ai-designer",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @designer/core build && pnpm --parallel --filter @designer/core --filter @designer/server --filter @designer/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:run": "pnpm -r test:run",
+    "test:launcher": "bash scripts/test-designer.sh",
+    "clean": "pnpm -r clean"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

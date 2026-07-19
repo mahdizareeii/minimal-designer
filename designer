@@ -1,0 +1,1430 @@
+#!/usr/bin/env bash
+
+# Minimal Designer launcher. Compatible with the Bash 3.2 shipped by macOS.
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+PROJECT_ROOT="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+RUNTIME_DIR="${DESIGNER_RUNTIME_DIR:-$PROJECT_ROOT/.designer}"
+ENV_DIR="$RUNTIME_DIR/env"
+RUN_DIR="$RUNTIME_DIR/run"
+LOG_DIR="$RUNTIME_DIR/logs"
+BACKUP_DIR="$RUNTIME_DIR/backups"
+LOCAL_LOG="$LOG_DIR/local.log"
+PID_FILE="$RUN_DIR/pid"
+MODE_FILE="$RUN_DIR/mode"
+API_PORT_FILE="$RUN_DIR/api-port"
+WEB_PORT_FILE="$RUN_DIR/web-port"
+URL_FILE="$RUN_DIR/url"
+ENV_FILE_RECORD="$RUN_DIR/env-file"
+LOCK_DIR="$RUN_DIR/launcher.lock"
+DOCKER_ENV="$ENV_DIR/docker.env"
+SERVER_ENV="$ENV_DIR/server.env"
+COMPOSE_PROJECT="minimalappdesigner"
+NODE_MIN_MAJOR=24
+PNPM_MAJOR=11
+PNPM_VERSION=11.9.0
+DEFAULT_API_PORT=4310
+DEFAULT_WEB_PORT=4311
+VERSION=1.0.0
+
+DRY_RUN="${DESIGNER_DRY_RUN:-0}"
+ASSUME_YES="${DESIGNER_ASSUME_YES:-0}"
+NO_OPEN="${DESIGNER_NO_OPEN:-0}"
+STRICT=0
+PNPM_MODE=""
+OS_KIND=""
+ARCH_KIND=""
+SERVER_ENV_ERROR=""
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_RED=$'\033[31m'
+  C_BLUE=$'\033[34m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_RED=""
+  C_BLUE=""
+fi
+
+say() { printf '%s\n' "$*"; }
+info() { printf '%s[INFO]%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
+pass() { printf '%s[PASS]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+fail() { printf '%s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+die() { fail "$*"; exit 1; }
+usage_error() { fail "$*"; say "Run '$SCRIPT_PATH help' for usage." >&2; exit 2; }
+
+print_command() {
+  printf '  '
+  while [ "$#" -gt 0 ]; do
+    printf '%q ' "$1"
+    shift
+  done
+  printf '\n'
+}
+
+run() {
+  if [ "$DRY_RUN" = "1" ]; then
+    print_command "$@"
+    return 0
+  fi
+  "$@"
+}
+
+confirm() {
+  if [ "$ASSUME_YES" = "1" ]; then return 0; fi
+  if [ ! -t 0 ]; then return 1; fi
+  local answer
+  printf '%s [y/N] ' "$1"
+  read -r answer
+  case "$answer" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+detect_platform() {
+  local system machine
+  system="${DESIGNER_OS_OVERRIDE:-$(uname -s 2>/dev/null || printf unknown)}"
+  machine="${DESIGNER_ARCH_OVERRIDE:-$(uname -m 2>/dev/null || printf unknown)}"
+  case "$system" in
+    Darwin) OS_KIND="macos" ;;
+    Linux)
+      if grep -qi microsoft /proc/version 2>/dev/null; then OS_KIND="wsl"; else OS_KIND="linux"; fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*) OS_KIND="windows" ;;
+    *) OS_KIND="unknown" ;;
+  esac
+  case "$machine" in
+    arm64|aarch64) ARCH_KIND="arm64" ;;
+    x86_64|amd64) ARCH_KIND="x64" ;;
+    *) ARCH_KIND="$machine" ;;
+  esac
+}
+
+ensure_supported_os() {
+  detect_platform
+  case "$OS_KIND" in
+    macos|linux|wsl) return 0 ;;
+    windows) die "Native Windows shells are not supported. Run this launcher from WSL2 or use Docker Desktop with WSL integration." ;;
+    *) die "Unsupported operating system: $(uname -s 2>/dev/null || printf unknown). Use macOS, Linux, or WSL2." ;;
+  esac
+}
+
+command_path() { command -v "$1" 2>/dev/null || true; }
+
+major_version() {
+  local raw
+  raw="$("$@" --version 2>/dev/null | head -n 1 || true)"
+  raw="${raw#v}"
+  raw="${raw%%.*}"
+  case "$raw" in ''|*[!0-9]*) return 1 ;; *) printf '%s' "$raw" ;; esac
+}
+
+is_codex_runtime_path() {
+  case "$1" in *"/.cache/codex-runtimes/"*|*"/.codex/"*"/dependencies/"*) return 0 ;; *) return 1 ;; esac
+}
+
+node_ready() {
+  local path major
+  path="$(command_path node)"
+  [ -n "$path" ] || return 1
+  major="$(major_version node)" || return 1
+  [ "$major" -ge "$NODE_MIN_MAJOR" ]
+}
+
+direct_pnpm_ready() {
+  local path major
+  path="$(command_path pnpm)"
+  [ -n "$path" ] || return 1
+  if is_codex_runtime_path "$path"; then return 1; fi
+  major="$(major_version pnpm)" || return 1
+  [ "$major" -eq "$PNPM_MAJOR" ]
+}
+
+resolve_pnpm() {
+  if direct_pnpm_ready; then
+    PNPM_MODE="direct"
+    return 0
+  fi
+  if command -v corepack >/dev/null 2>&1 && corepack pnpm --version >/dev/null 2>&1; then
+    local major
+    major="$(major_version corepack pnpm)" || return 1
+    if [ "$major" -eq "$PNPM_MAJOR" ]; then PNPM_MODE="corepack"; return 0; fi
+  fi
+  return 1
+}
+
+run_pnpm() {
+  if [ "$DRY_RUN" = "1" ]; then
+    if [ "$PNPM_MODE" = "direct" ]; then
+      print_command pnpm "$@"
+    elif [ "$PNPM_MODE" = "corepack" ]; then
+      print_command corepack pnpm "$@"
+    else
+      local pnpm_path
+      pnpm_path="$(command_path pnpm)"
+      if [ -n "$pnpm_path" ] && ! is_codex_runtime_path "$pnpm_path"; then
+        print_command pnpm "$@"
+      elif command -v corepack >/dev/null 2>&1; then
+        print_command corepack pnpm "$@"
+      else
+        print_command pnpm "$@"
+      fi
+    fi
+    return 0
+  fi
+  if [ -z "$PNPM_MODE" ]; then resolve_pnpm || die "pnpm $PNPM_MAJOR is not ready. Run '$SCRIPT_PATH setup local'."; fi
+  case "$PNPM_MODE" in
+    direct) pnpm "$@" ;;
+    corepack) corepack pnpm "$@" ;;
+    *) die "Internal pnpm mode error." ;;
+  esac
+}
+
+print_node_help() {
+  case "$OS_KIND" in
+    macos)
+      say "Install Node.js 24 or newer with one of:"
+      say "  brew install node"
+      say "  nvm install 24"
+      ;;
+    linux|wsl)
+      say "Install Node.js 24 or newer with nvm/fnm or your distribution's trusted Node repository:"
+      say "  nvm install 24"
+      if [ "$OS_KIND" = "wsl" ]; then say "Or use Docker Desktop with WSL2 integration."; fi
+      ;;
+  esac
+  say "Then reopen the terminal and run: $SCRIPT_PATH setup local"
+}
+
+ensure_node() {
+  if node_ready; then return 0; fi
+  detect_platform
+  warn "Node.js $NODE_MIN_MAJOR+ is not available in this terminal."
+  if [ "$OS_KIND" = "macos" ] && command -v brew >/dev/null 2>&1; then
+    if confirm "Install the current Homebrew Node.js package now?"; then
+      run brew install node
+      hash -r
+      node_ready && return 0
+    fi
+  fi
+  print_node_help
+  return 1
+}
+
+ensure_pnpm() {
+  if resolve_pnpm; then return 0; fi
+  warn "A normal pnpm $PNPM_MAJOR installation is not available. Codex's bundled pnpm shim is intentionally ignored."
+  if command -v corepack >/dev/null 2>&1; then
+    if confirm "Activate pnpm $PNPM_VERSION with Corepack?"; then
+      run corepack prepare "pnpm@$PNPM_VERSION" --activate
+      hash -r
+      resolve_pnpm && return 0
+    fi
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    if confirm "Install pnpm $PNPM_VERSION with npm?"; then
+      run npm install --global "pnpm@$PNPM_VERSION"
+      hash -r
+      resolve_pnpm && return 0
+    fi
+  fi
+  say "Install pnpm $PNPM_VERSION, then rerun this command:"
+  say "  corepack prepare pnpm@$PNPM_VERSION --activate"
+  say "or"
+  say "  npm install --global pnpm@$PNPM_VERSION"
+  return 1
+}
+
+browser_available() {
+  if [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then return 0; fi
+  if [ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]; then return 0; fi
+  command -v google-chrome >/dev/null 2>&1 && return 0
+  command -v chromium >/dev/null 2>&1 && return 0
+  command -v chromium-browser >/dev/null 2>&1 && return 0
+  if [ -n "${HOME:-}" ]; then
+    [ -d "$HOME/Library/Caches/ms-playwright" ] && return 0
+    [ -d "$HOME/.cache/ms-playwright" ] && return 0
+  fi
+  return 1
+}
+
+install_browser_if_needed() {
+  if browser_available; then
+    pass "Chrome/Chromium is available for full-fidelity PNG rendering."
+    return 0
+  fi
+  warn "Chrome/Chromium was not found. The app can start, but PNG output will use a simplified software fallback."
+  if confirm "Install Playwright Chromium now?"; then
+    if ! run_pnpm --filter @designer/server exec playwright install chromium; then
+      warn "Chromium installation failed. On Debian/Ubuntu, try: pnpm --filter @designer/server exec playwright install --with-deps chromium"
+      return 1
+    fi
+    pass "Playwright Chromium installed."
+  fi
+}
+
+validate_port() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+port_busy() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -Eq "[:.]$port[[:space:]]"
+  else
+    return 1
+  fi
+}
+
+port_owner() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 | head -n 3 || true
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep -E "[:.]$port[[:space:]]" | head -n 3 || true
+  fi
+}
+
+curl_ok() { command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 "$1" >/dev/null 2>&1; }
+
+wait_for_url() {
+  local url="$1" timeout_seconds="${2:-90}" elapsed=0
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    if curl_ok "$url"; then return 0; fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+open_url() {
+  local url="$1"
+  if [ "$DRY_RUN" = "1" ]; then info "Would open $url"; return 0; fi
+  if [ "$NO_OPEN" = "1" ]; then info "Open $url"; return 0; fi
+  detect_platform
+  case "$OS_KIND" in
+    macos) command -v open >/dev/null 2>&1 && open "$url" >/dev/null 2>&1 & ;;
+    linux) command -v xdg-open >/dev/null 2>&1 && xdg-open "$url" >/dev/null 2>&1 & ;;
+    wsl)
+      if command -v wslview >/dev/null 2>&1; then wslview "$url" >/dev/null 2>&1 &
+      elif command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command "Start-Process '$url'" >/dev/null 2>&1 &
+      fi
+      ;;
+  esac
+  info "Open $url"
+}
+
+ensure_runtime_dirs() {
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+  mkdir -p "$ENV_DIR" "$RUN_DIR" "$LOG_DIR" "$BACKUP_DIR"
+}
+
+acquire_lock() {
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+  ensure_runtime_dirs
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    return 0
+  fi
+  local owner=""
+  [ -f "$LOCK_DIR/pid" ] && owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    die "Another launcher command is running (PID $owner)."
+  fi
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR"
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+release_lock() {
+  if [ "$DRY_RUN" != "1" ]; then rm -rf "$LOCK_DIR"; fi
+}
+
+write_runtime_state() {
+  local mode="$1" api_port="$2" web_port="$3" url="$4" env_file="${5:-}"
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+  ensure_runtime_dirs
+  printf '%s\n' "$mode" >"$MODE_FILE"
+  printf '%s\n' "$api_port" >"$API_PORT_FILE"
+  printf '%s\n' "$web_port" >"$WEB_PORT_FILE"
+  printf '%s\n' "$url" >"$URL_FILE"
+  printf '%s\n' "$env_file" >"$ENV_FILE_RECORD"
+}
+
+clear_runtime_state() {
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+  rm -f "$PID_FILE" "$MODE_FILE" "$API_PORT_FILE" "$WEB_PORT_FILE" "$URL_FILE" "$ENV_FILE_RECORD"
+}
+
+pid_alive() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+pid_owned_by_designer() {
+  pid_alive || return 1
+  local pid command_line
+  pid="$(cat "$PID_FILE")"
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$command_line" in *"$SCRIPT_PATH"*|*"@designer/server"*|*"pnpm"*"dev"*) return 0 ;; *) return 1 ;; esac
+}
+
+docker_cli_ready() { command -v docker >/dev/null 2>&1; }
+docker_compose_ready() { docker_cli_ready && docker compose version >/dev/null 2>&1; }
+docker_daemon_ready() { docker_cli_ready && docker info >/dev/null 2>&1; }
+
+wait_for_docker() {
+  local elapsed=0
+  while [ "$elapsed" -lt 120 ]; do
+    if docker_daemon_ready; then return 0; fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  return 1
+}
+
+ensure_docker() {
+  ensure_supported_os
+  docker_cli_ready || die "Docker is not installed. Install Docker Desktop (macOS/WSL) or Docker Engine plus Compose v2 (Linux)."
+  docker_compose_ready || die "Docker Compose v2 is missing. Install/enable the 'docker compose' plugin."
+  if docker_daemon_ready; then return 0; fi
+  warn "Docker is installed, but its daemon is not running."
+  if [ "$DRY_RUN" = "1" ]; then
+    info "Would start Docker and wait for 'docker info'."
+    return 0
+  fi
+  case "$OS_KIND" in
+    macos)
+      if [ -d "/Applications/Docker.app" ] && confirm "Start Docker Desktop now?"; then
+        open -a Docker
+        info "Waiting for Docker Desktop (up to 2 minutes)..."
+        wait_for_docker && return 0
+      fi
+      die "Start Docker Desktop, wait until it reports Engine running, then retry."
+      ;;
+    linux)
+      if command -v systemctl >/dev/null 2>&1 && confirm "Start the Docker service with sudo?"; then
+        run sudo systemctl start docker
+        wait_for_docker && return 0
+      fi
+      die "Start Docker Engine (often: sudo systemctl start docker), then retry."
+      ;;
+    wsl) die "Start Docker Desktop on Windows and enable WSL integration for this distribution, then retry." ;;
+  esac
+}
+
+compose() {
+  local env_file="$1"
+  shift
+  (
+    cd "$PROJECT_ROOT"
+    env -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
+      -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES \
+      docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+  )
+}
+
+run_compose() {
+  local env_file="$1"
+  shift
+  if [ "$DRY_RUN" = "1" ]; then
+    print_command docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+  else
+    compose "$env_file" "$@"
+  fi
+}
+
+compose_project() {
+  (cd "$PROJECT_ROOT" && docker compose -p "$COMPOSE_PROJECT" -f "$PROJECT_ROOT/docker-compose.yml" "$@")
+}
+
+run_compose_project() {
+  if [ "$DRY_RUN" = "1" ]; then
+    print_command docker compose -p "$COMPOSE_PROJECT" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+  else
+    compose_project "$@"
+  fi
+}
+
+select_compose_env() {
+  local mode="$1" recorded_env="$2"
+  if [ -n "$recorded_env" ] && [ -f "$recorded_env" ]; then
+    printf '%s\n' "$recorded_env"
+    return 0
+  fi
+  case "$mode" in
+    docker)
+      [ -f "$DOCKER_ENV" ] || return 1
+      printf '%s\n' "$DOCKER_ENV"
+      return 0
+      ;;
+    server)
+      [ -f "$SERVER_ENV" ] || return 1
+      printf '%s\n' "$SERVER_ENV"
+      return 0
+      ;;
+  esac
+  if [ -f "$DOCKER_ENV" ] && [ ! -f "$SERVER_ENV" ]; then
+    printf '%s\n' "$DOCKER_ENV"
+    return 0
+  fi
+  if [ -f "$SERVER_ENV" ] && [ ! -f "$DOCKER_ENV" ]; then
+    printf '%s\n' "$SERVER_ENV"
+    return 0
+  fi
+  return 1
+}
+
+docker_project_present() {
+  docker_daemon_ready || return 1
+  [ -n "$(docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)" ]
+}
+
+env_value() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 1
+  awk -F= -v wanted="$key" '
+    $1 == wanted { sub(/^[^=]*=/, ""); value = $0; found = 1 }
+    END { if (found) print value; else exit 1 }
+  ' "$file"
+}
+
+validate_token() {
+  [ "${#1}" -ge 16 ] || return 1
+  case "$1" in *[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+}
+
+generate_token() {
+  if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
+  else od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; fi
+}
+
+validate_public_url() {
+  local url="$1" authority host port="" suffix="" bracketed=0
+  case "$url" in https://*) ;; *) return 1 ;; esac
+  case "$url" in *" "*|*$'\t'*|*$'\n'*|*"#"*|*"?"*|*"@"*) return 1 ;; esac
+  authority="${url#https://}"
+  case "$authority" in
+    */)
+      authority="${authority%/}"
+      case "$authority" in */*) return 1 ;; esac
+      ;;
+    */*) return 1 ;;
+  esac
+  [ -n "$authority" ] || return 1
+  case "$authority" in
+    \[*\]:*)
+      bracketed=1
+      host="${authority#\[}"
+      host="${host%%\]*}"
+      suffix="${authority#*\]}"
+      case "$suffix" in :*) port="${suffix#:}" ;; *) return 1 ;; esac
+      case "$host" in ''|*[!A-Fa-f0-9:.]*) return 1 ;; esac
+      validate_port "$port" || return 1
+      ;;
+    \[*\])
+      bracketed=1
+      host="${authority#\[}"
+      host="${host%\]}"
+      case "$host" in ''|*[!A-Fa-f0-9:.]*) return 1 ;; esac
+      ;;
+    \[*|*\]*) return 1 ;;
+    *:*)
+      host="${authority%:*}"
+      port="${authority##*:}"
+      case "$host" in *:*) return 1 ;; esac
+      validate_port "$port" || return 1
+      ;;
+    *) host="$authority" ;;
+  esac
+  if [ "$bracketed" -eq 0 ]; then
+    case "$host" in ''|.*|*.|*..*|-*|*-|*.-*|*-.*|*[!A-Za-z0-9.-]*) return 1 ;; esac
+  fi
+  return 0
+}
+
+validate_header() {
+  case "$1" in ''|*[!A-Za-z0-9-]*) return 1 ;; *) return 0 ;; esac
+}
+
+server_env_mode() {
+  local mode=""
+  mode="$(stat -c '%a' "$1" 2>/dev/null || true)"
+  case "$mode" in ''|*[!0-7]*) mode="" ;; esac
+  if [ -z "$mode" ]; then
+    mode="$(stat -f '%Lp' "$1" 2>/dev/null || true)"
+    case "$mode" in ''|*[!0-7]*) mode="" ;; esac
+  fi
+  printf '%s\n' "$mode"
+}
+
+validate_server_env_file() {
+  local file="$1" access bind port public_url auth_mode token header mode
+  SERVER_ENV_ERROR=""
+  if [ ! -f "$file" ]; then SERVER_ENV_ERROR="Server configuration is missing: $file"; return 1; fi
+  mode="$(server_env_mode "$file")"
+  if [ -n "$mode" ] && [ "$mode" != "600" ]; then
+    SERVER_ENV_ERROR="Server configuration must have mode 0600 (found $mode). Run: chmod 600 '$file'"
+    return 1
+  fi
+  access="$(env_value "$file" DESIGNER_SERVER_ACCESS || true)"
+  bind="$(env_value "$file" BIND_ADDRESS || true)"
+  port="$(env_value "$file" PORT || true)"
+  public_url="$(env_value "$file" PUBLIC_BASE_URL || true)"
+  auth_mode="$(env_value "$file" AUTH_MODE || true)"
+  token="$(env_value "$file" DESIGNER_TOKEN || true)"
+  header="$(env_value "$file" TRUSTED_USER_HEADER || true)"
+  case "$access" in ssh|proxy) ;; *) SERVER_ENV_ERROR="DESIGNER_SERVER_ACCESS must be exactly 'ssh' or 'proxy'."; return 1 ;; esac
+  if [ "$bind" != "127.0.0.1" ]; then SERVER_ENV_ERROR="BIND_ADDRESS must be 127.0.0.1 so the application is never exposed directly."; return 1; fi
+  if ! validate_port "$port"; then SERVER_ENV_ERROR="PORT must be an integer from 1 to 65535."; return 1; fi
+  if ! validate_header "$header"; then SERVER_ENV_ERROR="TRUSTED_USER_HEADER is missing or invalid."; return 1; fi
+  if [ "$access" = "proxy" ]; then
+    if [ "$auth_mode" != "trusted-header" ]; then SERVER_ENV_ERROR="Proxy mode requires AUTH_MODE=trusted-header."; return 1; fi
+    if ! validate_public_url "$public_url"; then SERVER_ENV_ERROR="Proxy mode requires PUBLIC_BASE_URL to be a valid HTTPS origin."; return 1; fi
+    if ! validate_token "$token"; then SERVER_ENV_ERROR="Proxy mode requires a valid bearer token of at least 16 safe characters."; return 1; fi
+  else
+    if [ "$auth_mode" != "none" ]; then SERVER_ENV_ERROR="SSH-only mode requires AUTH_MODE=none."; return 1; fi
+    if [ "$public_url" != "http://127.0.0.1:$port" ]; then SERVER_ENV_ERROR="SSH-only mode requires PUBLIC_BASE_URL=http://127.0.0.1:$port."; return 1; fi
+    if [ -n "$token" ]; then SERVER_ENV_ERROR="SSH-only mode must not contain a bearer token."; return 1; fi
+  fi
+  return 0
+}
+
+write_docker_env() {
+  local port="$1"
+  validate_port "$port" || die "Invalid port: $port"
+  if [ "$DRY_RUN" = "1" ]; then info "Would write a loopback-only Docker configuration to $DOCKER_ENV"; return 0; fi
+  ensure_runtime_dirs
+  umask 077
+  {
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=%s\n' "$port"
+    printf 'PUBLIC_BASE_URL=http://127.0.0.1:%s\n' "$port"
+    printf 'AUTH_MODE=none\n'
+    printf 'DESIGNER_TOKEN=\n'
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$DOCKER_ENV.tmp.$$"
+  mv "$DOCKER_ENV.tmp.$$" "$DOCKER_ENV"
+  chmod 600 "$DOCKER_ENV"
+}
+
+write_server_env() {
+  local access="$1" port="$2" public_url="$3" token="$4" header="$5" force="$6"
+  validate_port "$port" || die "Invalid port: $port"
+  validate_header "$header" || die "Invalid trusted identity header: $header"
+  if [ "$access" = "proxy" ]; then
+    validate_public_url "$public_url" || die "Public server URL must be a true HTTPS origin without userinfo, path, query, or fragment. Example: https://designer.company.example"
+    validate_token "$token" || die "Server token must be at least 16 characters and contain only letters, digits, dot, underscore, or hyphen."
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    info "Would write a mode-0600 $access server configuration to $SERVER_ENV (secret redacted)."
+    return 0
+  fi
+  if [ -f "$SERVER_ENV" ] && [ "$force" != "1" ]; then
+    confirm "Replace the existing secure server configuration at $SERVER_ENV?" || die "Server configuration was not changed. Use --force to replace it non-interactively."
+  fi
+  ensure_runtime_dirs
+  umask 077
+  {
+    printf 'DESIGNER_SERVER_ACCESS=%s\n' "$access"
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=%s\n' "$port"
+    if [ "$access" = "proxy" ]; then
+      printf 'PUBLIC_BASE_URL=%s\n' "$public_url"
+      printf 'AUTH_MODE=trusted-header\n'
+      printf 'DESIGNER_TOKEN=%s\n' "$token"
+    else
+      printf 'PUBLIC_BASE_URL=http://127.0.0.1:%s\n' "$port"
+      printf 'AUTH_MODE=none\n'
+      printf 'DESIGNER_TOKEN=\n'
+    fi
+    printf 'TRUSTED_USER_HEADER=%s\n' "$header"
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$SERVER_ENV.tmp.$$"
+  mv "$SERVER_ENV.tmp.$$" "$SERVER_ENV"
+  chmod 600 "$SERVER_ENV"
+  pass "Server configuration saved to $SERVER_ENV"
+}
+
+native_environment() {
+  local api_port="$1" web_port="$2"
+  export HOST=127.0.0.1
+  export PORT="$api_port"
+  export DATA_DIR="$PROJECT_ROOT/data"
+  export PUBLIC_BASE_URL="http://127.0.0.1:$api_port"
+  export AUTH_MODE=none
+  export DESIGNER_TOKEN=""
+  export DESIGNER_API_URL="http://127.0.0.1:$api_port"
+  export DESIGNER_WEB_HOST=127.0.0.1
+  export DESIGNER_WEB_PORT="$web_port"
+  export DESIGNER_CORS_ORIGINS="http://127.0.0.1:$api_port,http://localhost:$api_port,http://127.0.0.1:$web_port,http://localhost:$web_port"
+}
+
+setup_local() {
+  local skip_browser="${1:-0}"
+  ensure_supported_os
+  if [ "$DRY_RUN" = "1" ]; then
+    info "Would verify Node.js $NODE_MIN_MAJOR+ and pnpm $PNPM_VERSION."
+    info "Would install dependencies with the frozen lockfile."
+    (cd "$PROJECT_ROOT" && run_pnpm install --frozen-lockfile --prefer-offline)
+    info "Would build the workspace and deterministic bundled fonts."
+    (cd "$PROJECT_ROOT" && run_pnpm build)
+    info "Would verify the native SQLite binding."
+    (cd "$PROJECT_ROOT" && run_pnpm --filter @designer/server exec node -e 'require("better-sqlite3")')
+    if [ "$skip_browser" != "1" ]; then info "Would verify Chrome/Chromium for full-fidelity PNG rendering."; fi
+    pass "Dry run complete; no packages or files were changed."
+    return 0
+  fi
+  ensure_node || exit 1
+  ensure_pnpm || exit 1
+  info "Installing dependencies with the frozen lockfile..."
+  (cd "$PROJECT_ROOT" && CI=1 run_pnpm install --frozen-lockfile --prefer-offline)
+  info "Building the workspace (also prepares deterministic bundled fonts)..."
+  (cd "$PROJECT_ROOT" && run_pnpm build)
+  info "Checking native SQLite bindings..."
+  if ! (cd "$PROJECT_ROOT" && run_pnpm --filter @designer/server exec node -e 'require("better-sqlite3")'); then
+    die "better-sqlite3 could not load. Install Python, make, and a C/C++ compiler, then rerun setup."
+  fi
+  pass "Native dependencies and production build are ready."
+  if [ "$skip_browser" != "1" ]; then install_browser_if_needed || true; fi
+}
+
+setup_docker() {
+  ensure_docker
+  if [ "$DRY_RUN" = "1" ]; then
+    print_command docker compose -p "$COMPOSE_PROJECT" -f "$PROJECT_ROOT/docker-compose.yml" config --quiet
+    return 0
+  fi
+  (cd "$PROJECT_ROOT" && docker compose -p "$COMPOSE_PROJECT" -f "$PROJECT_ROOT/docker-compose.yml" config --quiet)
+  pass "Docker and Compose are ready."
+}
+
+ensure_ports_free() {
+  local api_port="$1" web_port="${2:-0}"
+  if port_busy "$api_port" && ! curl_ok "http://127.0.0.1:$api_port/health"; then
+    fail "Port $api_port is already used by another process:"
+    port_owner "$api_port" >&2
+    die "Choose another port with --api-port/--port."
+  fi
+  if [ "$web_port" -gt 0 ] && port_busy "$web_port"; then
+    fail "Port $web_port is already used:"
+    port_owner "$web_port" >&2
+    die "Choose another web port with --web-port."
+  fi
+}
+
+run_native_child() {
+  local mode="$1" api_port="$2" web_port="$3"
+  if [ "$DRY_RUN" = "1" ]; then
+    native_environment "$api_port" "$web_port"
+    cd "$PROJECT_ROOT"
+    if [ "$mode" = "dev" ]; then run_pnpm dev; else run_pnpm --filter @designer/server start; fi
+    return 0
+  fi
+  ensure_node || exit 1
+  ensure_pnpm || exit 1
+  native_environment "$api_port" "$web_port"
+  ensure_runtime_dirs
+  printf '%s\n' "$$" >"$PID_FILE"
+  local child=""
+  cleanup_native_child() {
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then kill "$child" 2>/dev/null || true; fi
+    wait "$child" 2>/dev/null || true
+    if [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$$" ]; then clear_runtime_state; fi
+  }
+  trap cleanup_native_child EXIT INT TERM
+  cd "$PROJECT_ROOT"
+  if [ "$mode" = "dev" ]; then run_pnpm dev & else run_pnpm --filter @designer/server start & fi
+  child=$!
+  wait "$child"
+}
+
+start_native_background() {
+  local api_port="$1" no_open="$2"
+  validate_port "$api_port" || die "Invalid port: $api_port"
+  if [ "$DRY_RUN" != "1" ] && curl_ok "http://127.0.0.1:$api_port/ready"; then
+    pass "Minimal Designer is already running on port $api_port."
+    [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
+    return 0
+  fi
+  ensure_supported_os
+  ensure_ports_free "$api_port" 0
+  setup_local 1
+  acquire_lock
+  ensure_runtime_dirs
+  if [ "$DRY_RUN" = "1" ]; then
+    print_command bash "$SCRIPT_PATH" _run-native prod "$api_port" "$DEFAULT_WEB_PORT"
+    release_lock
+    return 0
+  fi
+  : >"$LOCAL_LOG"
+  nohup bash "$SCRIPT_PATH" _run-native prod "$api_port" "$DEFAULT_WEB_PORT" >>"$LOCAL_LOG" 2>&1 &
+  local launcher_pid=$!
+  printf '%s\n' "$launcher_pid" >"$PID_FILE"
+  write_runtime_state "local" "$api_port" 0 "http://127.0.0.1:$api_port" ""
+  release_lock
+  info "Waiting for the production server..."
+  if ! wait_for_url "http://127.0.0.1:$api_port/ready" 90; then
+    fail "Local server did not become ready. Recent log output:"
+    tail -n 80 "$LOCAL_LOG" >&2 || true
+    stop_native || true
+    clear_runtime_state
+    exit 1
+  fi
+  pass "Minimal Designer is running at http://127.0.0.1:$api_port"
+  [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
+}
+
+start_dev() {
+  local api_port="$1" web_port="$2" no_open="$3" skip_setup="$4"
+  validate_port "$api_port" || die "Invalid API port: $api_port"
+  validate_port "$web_port" || die "Invalid web port: $web_port"
+  [ "$api_port" != "$web_port" ] || die "API and web ports must be different."
+  ensure_supported_os
+  if [ "$skip_setup" != "1" ]; then
+    setup_local 0
+  elif [ "$DRY_RUN" = "1" ]; then
+    info "Would verify the existing Node.js and pnpm development setup."
+  else
+    ensure_node && ensure_pnpm || exit 1
+  fi
+  ensure_ports_free "$api_port" "$web_port"
+  if [ "$DRY_RUN" = "1" ]; then
+    print_command bash "$SCRIPT_PATH" _run-native dev "$api_port" "$web_port"
+    return 0
+  fi
+  write_runtime_state "dev" "$api_port" "$web_port" "http://127.0.0.1:$web_port" ""
+  if [ "$no_open" != "1" ]; then (wait_for_url "http://127.0.0.1:$web_port" 90 && open_url "http://127.0.0.1:$web_port") & fi
+  info "Starting development mode. Press Ctrl+C to stop."
+  local exit_status=0
+  bash "$SCRIPT_PATH" _run-native dev "$api_port" "$web_port" || exit_status=$?
+  clear_runtime_state
+  return "$exit_status"
+}
+
+start_docker_local() {
+  local port="$1" no_open="$2" no_build="$3"
+  validate_port "$port" || die "Invalid port: $port"
+  ensure_docker
+  ensure_ports_free "$port" 0
+  write_docker_env "$port"
+  acquire_lock
+  if [ "$no_build" = "1" ]; then
+    if ! run_compose "$DOCKER_ENV" up -d; then release_lock; die "Docker Compose could not start Minimal Designer."; fi
+  else
+    if ! run_compose "$DOCKER_ENV" up -d --build; then release_lock; die "Docker Compose could not build/start Minimal Designer."; fi
+  fi
+  write_runtime_state "docker" "$port" 0 "http://127.0.0.1:$port" "$DOCKER_ENV"
+  release_lock
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+  info "Waiting for the Docker service..."
+  if ! wait_for_url "http://127.0.0.1:$port/ready" 150; then
+    fail "Docker service did not become ready."
+    compose "$DOCKER_ENV" logs --tail 100 designer >&2 || true
+    compose "$DOCKER_ENV" down >/dev/null 2>&1 || true
+    clear_runtime_state
+    exit 1
+  fi
+  pass "Minimal Designer is running at http://127.0.0.1:$port"
+  [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$port"
+}
+
+server_init() {
+  local public_url="" port="$DEFAULT_API_PORT" token="" header="x-designer-user" force=0 ssh_only=0 public_url_set=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --public-url) [ "$#" -ge 2 ] || usage_error "--public-url needs a value"; public_url="$2"; public_url_set=1; shift 2 ;;
+      --port) [ "$#" -ge 2 ] || usage_error "--port needs a value"; port="$2"; shift 2 ;;
+      --token) [ "$#" -ge 2 ] || usage_error "--token needs a value"; token="$2"; shift 2 ;;
+      --identity-header) [ "$#" -ge 2 ] || usage_error "--identity-header needs a value"; header="$2"; shift 2 ;;
+      --ssh-only) ssh_only=1; shift ;;
+      --force) force=1; shift ;;
+      *) usage_error "Unknown server init option: $1" ;;
+    esac
+  done
+  if [ "$public_url_set" = "1" ] && [ -z "$public_url" ]; then
+    usage_error "--public-url needs a non-empty HTTPS origin"
+  fi
+  if [ "$ssh_only" = "1" ] && [ "$public_url_set" = "1" ]; then
+    usage_error "--ssh-only and --public-url are mutually exclusive"
+  fi
+  if { [ "$ssh_only" = "1" ] || [ "$public_url_set" = "0" ]; } && [ -n "$token" ]; then
+    usage_error "--token requires trusted-proxy mode with --public-url"
+  fi
+  if [ "$ssh_only" = "1" ] || [ -z "$public_url" ]; then
+    write_server_env "ssh" "$port" "" "" "$header" "$force"
+    say
+    say "SSH-only server mode keeps the app on loopback with no public exposure."
+    say "After starting it, connect from your computer with:"
+    say "  ssh -L $port:127.0.0.1:$port user@your-server"
+    say "Then open http://127.0.0.1:$port"
+  else
+    if [ -z "$token" ]; then
+      if [ "$DRY_RUN" = "1" ]; then token="dry-run-token-placeholder"
+      else token="$(generate_token)"
+      fi
+    fi
+    write_server_env "proxy" "$port" "$public_url" "$token" "$header" "$force"
+    say
+    say "The app port remains loopback-only. Configure your HTTPS/SSO reverse proxy using docs/deployment.md."
+    say "The MCP bearer secret is stored with mode 0600; run '$SCRIPT_PATH token' when configuring Codex."
+  fi
+}
+
+start_server() {
+  local no_build="$1"
+  [ -f "$SERVER_ENV" ] || die "Server configuration is missing. Run '$SCRIPT_PATH server init --ssh-only' or '$SCRIPT_PATH server init --public-url https://designer.company.example'."
+  validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
+  local port access public_url header
+  port="$(env_value "$SERVER_ENV" PORT)"
+  access="$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)"
+  public_url="$(env_value "$SERVER_ENV" PUBLIC_BASE_URL)"
+  header="$(env_value "$SERVER_ENV" TRUSTED_USER_HEADER)"
+  ensure_docker
+  ensure_ports_free "$port" 0
+  acquire_lock
+  if [ "$no_build" = "1" ]; then
+    if ! run_compose "$SERVER_ENV" up -d; then release_lock; die "Docker Compose could not start the server."; fi
+  else
+    if ! run_compose "$SERVER_ENV" up -d --build; then release_lock; die "Docker Compose could not build/start the server."; fi
+  fi
+  write_runtime_state "server" "$port" 0 "$public_url" "$SERVER_ENV"
+  release_lock
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+  info "Waiting for the server container..."
+  wait_for_url "http://127.0.0.1:$port/ready" 150 || {
+    compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
+    compose "$SERVER_ENV" down >/dev/null 2>&1 || true
+    clear_runtime_state
+    die "Server container did not become ready."
+  }
+  if [ "$access" = "proxy" ]; then
+    if ! curl -fsS --max-time 5 -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
+      compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
+      compose "$SERVER_ENV" down >/dev/null 2>&1 || true
+      clear_runtime_state
+      die "The trusted-header API check failed. Inspect the container logs above."
+    fi
+    pass "Server is ready behind the reverse proxy at $public_url"
+  else
+    pass "SSH-only server is ready on 127.0.0.1:$port"
+    say "Tunnel command: ssh -L $port:127.0.0.1:$port user@your-server"
+  fi
+}
+
+stop_native() {
+  if ! pid_alive; then return 0; fi
+  pid_owned_by_designer || die "PID file exists, but the process does not look like Minimal Designer. Refusing to kill it. Remove $PID_FILE manually after inspection."
+  local pid elapsed=0
+  pid="$(cat "$PID_FILE")"
+  info "Stopping local process $pid..."
+  run kill "$pid" 2>/dev/null || true
+  if [ "$DRY_RUN" != "1" ]; then
+    while kill -0 "$pid" 2>/dev/null && [ "$elapsed" -lt 15 ]; do sleep 1; elapsed=$((elapsed + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then warn "Process did not stop after 15 seconds; inspect it manually."; return 1; fi
+  fi
+  clear_runtime_state
+  pass "Local process stopped."
+}
+
+stop_all() {
+  local recorded_mode="${1:-}" recorded_env="${2:-}" env_file="" needs_compose=0
+  if [ -z "$recorded_mode" ] && [ -f "$MODE_FILE" ]; then
+    recorded_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  fi
+  if [ -z "$recorded_env" ] && [ -f "$ENV_FILE_RECORD" ]; then
+    recorded_env="$(cat "$ENV_FILE_RECORD" 2>/dev/null || true)"
+  fi
+  case "$recorded_mode" in docker|server) needs_compose=1 ;; esac
+  if [ -n "$recorded_env" ]; then needs_compose=1; fi
+  if [ "$needs_compose" -eq 0 ] && docker_project_present; then needs_compose=1; fi
+  if [ "$needs_compose" -eq 1 ] && [ "$DRY_RUN" != "1" ] && ! docker_daemon_ready; then
+    if docker_cli_ready; then
+      die "Docker Desktop/Engine is stopped. Start it before stopping the recorded $recorded_mode service; runtime state was preserved."
+    fi
+    die "Docker is unavailable, so the recorded $recorded_mode service cannot be stopped; runtime state was preserved."
+  fi
+  env_file="$(select_compose_env "$recorded_mode" "$recorded_env" || true)"
+  acquire_lock
+  stop_native || true
+  if [ "$needs_compose" -eq 1 ]; then
+    if [ -n "$env_file" ]; then run_compose "$env_file" down
+    else run_compose_project down
+    fi
+  fi
+  clear_runtime_state
+  release_lock
+  if [ "$DRY_RUN" = "1" ]; then
+    pass "Dry run complete; no processes, containers, or state files were changed."
+  else
+    pass "Minimal Designer is stopped. Persistent data was preserved."
+  fi
+}
+
+restart_recorded() {
+  local mode="" api_port="" web_port="" recorded_url="" env_file=""
+  [ -f "$MODE_FILE" ] && mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  [ -f "$API_PORT_FILE" ] && api_port="$(cat "$API_PORT_FILE" 2>/dev/null || true)"
+  [ -f "$WEB_PORT_FILE" ] && web_port="$(cat "$WEB_PORT_FILE" 2>/dev/null || true)"
+  [ -f "$URL_FILE" ] && recorded_url="$(cat "$URL_FILE" 2>/dev/null || true)"
+  [ -f "$ENV_FILE_RECORD" ] && env_file="$(cat "$ENV_FILE_RECORD" 2>/dev/null || true)"
+  case "$mode" in
+    local|docker)
+      validate_port "$api_port" || die "The recorded API port is missing or invalid; start the designer explicitly instead."
+      ;;
+    dev)
+      validate_port "$api_port" || die "The recorded API port is missing or invalid; start development mode explicitly instead."
+      validate_port "$web_port" || die "The recorded web port is missing or invalid; start development mode explicitly instead."
+      ;;
+    server)
+      [ -f "$SERVER_ENV" ] || die "The recorded server configuration is missing. Run '$SCRIPT_PATH server init' before restarting."
+      validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
+      ;;
+    *) die "No restartable mode was recorded." ;;
+  esac
+  if [ -n "$recorded_url" ]; then info "Restarting $mode service previously recorded at $recorded_url"; fi
+  stop_all "$mode" "$env_file"
+  case "$mode" in
+    local) start_native_background "$api_port" "$NO_OPEN" ;;
+    docker) start_docker_local "$api_port" "$NO_OPEN" 1 ;;
+    dev) start_dev "$api_port" "$web_port" "$NO_OPEN" 1 ;;
+    server) start_server 1 ;;
+  esac
+}
+
+show_status() {
+  local found=0 mode="" url=""
+  [ -f "$MODE_FILE" ] && mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  [ -f "$URL_FILE" ] && url="$(cat "$URL_FILE" 2>/dev/null || true)"
+  if pid_alive; then
+    pass "Native process is running (PID $(cat "$PID_FILE"), mode ${mode:-unknown})."
+    found=1
+  fi
+  if docker_daemon_ready; then
+    local containers
+    containers="$(docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.Names}} {{.Status}}' 2>/dev/null || true)"
+    if [ -n "$containers" ]; then pass "Docker container: $containers"; found=1; fi
+  elif docker_cli_ready; then
+    warn "Docker CLI is installed, but Docker Desktop/Engine is stopped."
+  fi
+  if [ -n "$url" ]; then
+    if curl_ok "http://127.0.0.1:$(cat "$API_PORT_FILE" 2>/dev/null || printf 4310)/ready"; then pass "Health check passed."; else warn "Saved service URL is not healthy."; fi
+    info "URL: $url"
+  fi
+  [ "$found" -eq 1 ] || info "Minimal Designer is not currently running."
+}
+
+show_logs() {
+  local follow="$1" mode="" env_file=""
+  [ -f "$MODE_FILE" ] && mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  [ -f "$ENV_FILE_RECORD" ] && env_file="$(cat "$ENV_FILE_RECORD" 2>/dev/null || true)"
+  case "$mode" in
+    local)
+      [ -f "$LOCAL_LOG" ] || die "The recorded local log file is missing: $LOCAL_LOG"
+      if [ "$follow" = "1" ]; then tail -n 200 -f "$LOCAL_LOG"; else tail -n 200 "$LOCAL_LOG"; fi
+      return 0
+      ;;
+    dev)
+      die "Development logs are attached to the terminal running '$SCRIPT_PATH dev'."
+      ;;
+    docker|server)
+      if [ -z "$env_file" ] || [ ! -f "$env_file" ]; then env_file="$(select_compose_env "$mode" "$env_file" || true)"; fi
+      [ -n "$env_file" ] || die "The recorded $mode Compose environment is missing."
+      docker_daemon_ready || die "Docker Desktop/Engine must be running to read $mode logs."
+      if [ "$follow" = "1" ]; then compose "$env_file" logs -f --tail 200 designer; else compose "$env_file" logs --tail 200 designer; fi
+      return 0
+      ;;
+    "") ;;
+    *) warn "Unknown recorded mode '$mode'; falling back to discovered logs." ;;
+  esac
+  if pid_alive || [ -f "$LOCAL_LOG" ]; then
+    if [ "$follow" = "1" ]; then tail -n 200 -f "$LOCAL_LOG"; else tail -n 200 "$LOCAL_LOG"; fi
+    return 0
+  fi
+  if [ -n "$env_file" ] && [ -f "$env_file" ] && docker_daemon_ready; then
+    if [ "$follow" = "1" ]; then compose "$env_file" logs -f --tail 200 designer; else compose "$env_file" logs --tail 200 designer; fi
+    return 0
+  fi
+  die "No local or Docker logs were found."
+}
+
+show_codex_config() {
+  local target="${1:-auto}" requested_target="${1:-auto}" access public_url port="" recorded_mode="" recorded_port=""
+  case "$target" in auto|local|server) ;; *) usage_error "Unknown Codex configuration target: $target" ;; esac
+  [ -f "$MODE_FILE" ] && recorded_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  [ -f "$API_PORT_FILE" ] && recorded_port="$(cat "$API_PORT_FILE" 2>/dev/null || true)"
+  if [ "$target" = "auto" ]; then
+    case "$recorded_mode" in server) target="server" ;; *) target="local" ;; esac
+  fi
+  if [ "$target" = "server" ]; then
+    [ -f "$SERVER_ENV" ] || die "Server configuration is missing."
+    validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
+    access="$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)"
+    public_url="$(env_value "$SERVER_ENV" PUBLIC_BASE_URL)"
+    port="$(env_value "$SERVER_ENV" PORT)"
+    if [ "$access" = "proxy" ]; then
+      cat <<EOF
+[mcp_servers.minimal_ui]
+url = "${public_url%/}/mcp"
+required = true
+bearer_token_env_var = "MINIMAL_UI_MCP_TOKEN"
+default_tools_approval_mode = "writes"
+tool_timeout_sec = 60
+EOF
+      say
+      say "Set MINIMAL_UI_MCP_TOKEN to the output of: $SCRIPT_PATH token"
+    else
+      target="local"
+    fi
+  fi
+  if [ "$target" = "local" ]; then
+    if [ -z "$port" ]; then
+      case "$recorded_mode" in
+        local|docker|dev) if validate_port "$recorded_port"; then port="$recorded_port"; fi ;;
+        server)
+          if validate_server_env_file "$SERVER_ENV" && [ "$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)" = "ssh" ]; then
+            port="$(env_value "$SERVER_ENV" PORT)"
+          fi
+          ;;
+      esac
+      if [ -z "$port" ] && [ "$requested_target" = "local" ] && validate_server_env_file "$SERVER_ENV" \
+        && [ "$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)" = "ssh" ]; then
+        port="$(env_value "$SERVER_ENV" PORT)"
+      fi
+    fi
+    port="${port:-$DEFAULT_API_PORT}"
+    cat <<EOF
+[mcp_servers.minimal_ui]
+url = "http://127.0.0.1:$port/mcp"
+required = true
+default_tools_approval_mode = "writes"
+tool_timeout_sec = 60
+EOF
+  fi
+}
+
+show_token() {
+  [ -f "$SERVER_ENV" ] || die "Server configuration is missing."
+  validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
+  [ "$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)" = "proxy" ] || die "SSH-only server mode has no MCP bearer token."
+  local token
+  token="$(env_value "$SERVER_ENV" DESIGNER_TOKEN)"
+  validate_token "$token" || die "This server configuration has no bearer token (it may be SSH-only mode)."
+  printf '%s\n' "$token"
+}
+
+backup_data() {
+  local destination="${1:-$BACKUP_DIR/$(date +%Y%m%d-%H%M%S)}"
+  if [ "$DRY_RUN" = "1" ]; then info "Would back up all SQLite/WAL/asset data to $destination"; return 0; fi
+  mkdir -p "$destination/data"
+  local env_file=""
+  [ -f "$ENV_FILE_RECORD" ] && env_file="$(cat "$ENV_FILE_RECORD" 2>/dev/null || true)"
+  if [ -n "$env_file" ] && [ -f "$env_file" ] && docker_daemon_ready; then
+    compose "$env_file" stop designer
+    compose "$env_file" cp designer:/data/. "$destination/data/"
+    compose "$env_file" start designer
+  else
+    if pid_alive; then die "Stop the native server before backup so SQLite WAL files are copied consistently."; fi
+    [ -d "$PROJECT_ROOT/data" ] || die "No local data directory exists at $PROJECT_ROOT/data"
+    cp -R "$PROJECT_ROOT/data/." "$destination/data/"
+  fi
+  {
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'project=%s\n' "minimal-ai-designer"
+  } >"$destination/manifest.txt"
+  pass "Backup created at $destination"
+}
+
+doctor() {
+  local target="${1:-auto}" failures=0 local_ok=1 docker_ok=1 server_config_ok=1 pnpm_path="" port=""
+  case "$target" in auto|local|docker|server) ;; *) usage_error "Unknown doctor target: $target" ;; esac
+  detect_platform
+  say "${C_BOLD}Minimal Designer doctor${C_RESET}"
+  say "OS: $OS_KIND  Architecture: $ARCH_KIND  Bash: ${BASH_VERSION:-unknown}"
+  if [ "$OS_KIND" = "windows" ] || [ "$OS_KIND" = "unknown" ]; then fail "Use macOS, Linux, or WSL2."; return 1; fi
+  [ -w "$PROJECT_ROOT" ] && pass "Workspace is writable: $PROJECT_ROOT" || { fail "Workspace is not writable: $PROJECT_ROOT"; failures=$((failures + 1)); }
+  if [ "$target" = "local" ] || [ "$target" = "auto" ]; then
+    if node_ready; then pass "Node $(node --version) is ready."
+    else local_ok=0; fail "Node.js $NODE_MIN_MAJOR+ is missing or too old."; print_node_help; fi
+    pnpm_path="$(command_path pnpm)"
+    if resolve_pnpm; then
+      case "$PNPM_MODE" in
+        direct) pass "pnpm $(pnpm --version) is ready." ;;
+        corepack) pass "Corepack pnpm $(corepack pnpm --version) is ready." ;;
+      esac
+    else
+      local_ok=0
+      if [ -n "$pnpm_path" ] && is_codex_runtime_path "$pnpm_path"; then warn "Found only Codex's bundled pnpm shim ($pnpm_path); it is not a complete terminal toolchain."
+      elif command -v corepack >/dev/null 2>&1; then fail "Corepack is present, but pnpm $PNPM_MAJOR is not ready. Run '$SCRIPT_PATH setup local'."
+      else fail "pnpm $PNPM_MAJOR is missing."; fi
+    fi
+    if browser_available; then pass "Chrome/Chromium is available."
+    elif [ "$STRICT" = "1" ]; then local_ok=0; fail "Chrome/Chromium is missing in strict mode."
+    else warn "Chrome/Chromium is missing; PNG rendering will be simplified until installed."; fi
+  fi
+  if [ "$target" = "docker" ] || [ "$target" = "server" ] || [ "$target" = "auto" ]; then
+    if docker_cli_ready; then pass "Docker CLI is installed: $(docker --version 2>/dev/null | head -n 1)"; else docker_ok=0; fail "Docker CLI is missing."; fi
+    if docker_compose_ready; then pass "Docker Compose is installed: $(docker compose version 2>/dev/null | head -n 1)"; else docker_ok=0; fail "Docker Compose v2 is missing."; fi
+    if docker_daemon_ready; then pass "Docker daemon is running."
+    else docker_ok=0; warn "Docker Desktop/Engine is installed but not running."; fi
+  fi
+  if [ "$target" = "server" ]; then
+    if [ -f "$SERVER_ENV" ]; then
+      if validate_server_env_file "$SERVER_ENV"; then pass "Server configuration is secure and internally consistent."
+      else server_config_ok=0; fail "$SERVER_ENV_ERROR"
+      fi
+    else
+      warn "Server configuration is not initialized. Run '$SCRIPT_PATH server init --ssh-only' or use --public-url after this host is ready."
+    fi
+  fi
+  if [ "$target" = "local" ] || [ "$target" = "auto" ]; then
+    for port in "$DEFAULT_API_PORT" "$DEFAULT_WEB_PORT"; do
+      if port_busy "$port"; then warn "Port $port is already in use."; port_owner "$port"; else pass "Port $port is available."; fi
+    done
+  else
+    port="$DEFAULT_API_PORT"
+    if [ "$target" = "server" ] && [ -f "$SERVER_ENV" ]; then
+      local configured_port
+      configured_port="$(env_value "$SERVER_ENV" PORT || true)"
+      if validate_port "$configured_port"; then port="$configured_port"; fi
+    fi
+    if port_busy "$port"; then warn "Port $port is already in use."; port_owner "$port"; else pass "Port $port is available."; fi
+  fi
+  if [ "$OS_KIND" = "wsl" ]; then case "$PROJECT_ROOT" in /mnt/*) warn "The project is under /mnt; moving it into the Linux filesystem improves pnpm and file watching." ;; esac; fi
+  case "$target" in
+    local) [ "$local_ok" -eq 1 ] || failures=$((failures + 1)) ;;
+    docker) [ "$docker_ok" -eq 1 ] || failures=$((failures + 1)) ;;
+    server)
+      [ "$docker_ok" -eq 1 ] || failures=$((failures + 1))
+      [ "$server_config_ok" -eq 1 ] || failures=$((failures + 1))
+      ;;
+    auto) if [ "$local_ok" -ne 1 ] && [ "$docker_ok" -ne 1 ]; then failures=$((failures + 1)); fi ;;
+  esac
+  if [ "$failures" -eq 0 ]; then pass "Selected mode can run."; return 0; fi
+  fail "Selected mode is not ready yet. Follow the remedies above."
+  return 1
+}
+
+show_plan() {
+  local target="${1:-auto}"
+  say "Plan only; no files, packages, processes, or containers will be changed."
+  case "$target" in
+    local) say "1. Verify Node $NODE_MIN_MAJOR+ and pnpm $PNPM_VERSION."; say "2. Frozen install, build fonts/app, verify SQLite, check Chrome."; say "3. Run API on 4310 and Vite UI on 4311." ;;
+    docker) say "1. Verify Docker CLI, Compose, and daemon."; say "2. Write a loopback-only runtime env under .designer/."; say "3. Build and start the pinned Playwright container on 127.0.0.1:4310." ;;
+    server) say "1. Choose SSH-tunnel-only or trusted HTTPS proxy mode."; say "2. Store secrets in a mode-0600 env under .designer/."; say "3. Build/start Docker on loopback and print proxy/tunnel plus Codex instructions." ;;
+    auto) say "Recommended: Docker local. If Docker is unavailable, use native local after installing Node." ;;
+    *) usage_error "Unknown plan target: $target" ;;
+  esac
+}
+
+show_help() {
+  cat <<EOF
+${C_BOLD}Minimal Designer launcher $VERSION${C_RESET}
+
+Usage:
+  ./designer                         Guided setup menu
+  ./designer doctor [auto|local|docker|server] [--strict]
+  ./designer plan [auto|local|docker|server]
+  ./designer setup local [--skip-browser]
+  ./designer setup docker
+  ./designer dev [--api-port 4310] [--web-port 4311] [--no-open] [--skip-setup]
+  ./designer start local [--port 4310] [--no-open]
+  ./designer start docker [--port 4310] [--no-open] [--no-build]
+  ./designer server init [--ssh-only | --public-url https://host] [--port 4310]
+                         [--token SECRET] [--identity-header HEADER] [--force]
+  ./designer start server [--no-build]
+  ./designer status | logs [--follow] | stop | restart | open
+  ./designer codex-config [local|server]
+  ./designer token                    Print the stored server MCP token
+  ./designer backup [DESTINATION]
+  ./designer version
+
+Global flags (before the command):
+  --dry-run    Print planned mutations without executing them
+  --yes        Accept safe installation/start prompts
+  --no-open    Never launch a browser
+
+Recommended first command:
+  ./designer doctor auto
+EOF
+}
+
+interactive_menu() {
+  detect_platform
+  say "${C_BOLD}Minimal Designer${C_RESET} — guided launcher"
+  say
+  say "1) Run locally with Docker (recommended)"
+  say "2) Run from source in development mode"
+  say "3) Prepare/start a secure server"
+  say "4) Diagnose this computer"
+  say "5) Show help"
+  say
+  local choice public_url
+  printf 'Choose [1-5]: '
+  read -r choice
+  case "$choice" in
+    1) start_docker_local "$DEFAULT_API_PORT" "$NO_OPEN" 0 ;;
+    2) start_dev "$DEFAULT_API_PORT" "$DEFAULT_WEB_PORT" "$NO_OPEN" 0 ;;
+    3)
+      say "Leave the URL blank for safe SSH-tunnel-only mode."
+      printf 'Public HTTPS URL: '
+      read -r public_url
+      if [ -n "$public_url" ]; then server_init --public-url "$public_url"; else server_init --ssh-only; fi
+      start_server 0
+      ;;
+    4) doctor auto ;;
+    5) show_help ;;
+    *) usage_error "Invalid menu choice." ;;
+  esac
+}
+
+main() {
+  # Parse in-place. Bash 3.2 with `set -u` treats an empty array expansion as
+  # an unbound variable, so handing arguments through an array breaks the
+  # guided no-argument invocation (`./designer`).
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --yes) ASSUME_YES=1; shift ;;
+      --no-open) NO_OPEN=1; shift ;;
+      *) break ;;
+    esac
+  done
+  local command="${1:-}"
+  [ "$#" -eq 0 ] || shift
+  case "$command" in
+    "") interactive_menu ;;
+    help|-h|--help)
+      [ "$#" -eq 0 ] || usage_error "Unexpected help argument: $1"
+      show_help
+      ;;
+    version)
+      [ "$#" -eq 0 ] || usage_error "Unexpected version argument: $1"
+      say "$VERSION"
+      ;;
+    doctor)
+      local target="auto"
+      if [ "${1:-}" != "" ] && [ "${1:-}" != "--strict" ]; then target="$1"; shift; fi
+      if [ "${1:-}" = "--strict" ]; then STRICT=1; shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected doctor argument: $1"
+      doctor "$target"
+      ;;
+    plan)
+      local target="${1:-auto}"
+      if [ "$#" -gt 0 ]; then shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected plan argument: $1"
+      show_plan "$target"
+      ;;
+    setup)
+      local target="${1:-}" skip_browser=0
+      [ -n "$target" ] || usage_error "setup requires local or docker"
+      shift
+      if [ "${1:-}" = "--skip-browser" ]; then skip_browser=1; shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected setup option: $1"
+      case "$target" in
+        local) setup_local "$skip_browser" ;;
+        docker)
+          [ "$skip_browser" -eq 0 ] || usage_error "--skip-browser is only valid with 'setup local'"
+          setup_docker
+          ;;
+        *) usage_error "Unknown setup target: $target" ;;
+      esac
+      ;;
+    dev)
+      local api_port="$DEFAULT_API_PORT" web_port="$DEFAULT_WEB_PORT" no_open="$NO_OPEN" skip_setup=0
+      while [ "$#" -gt 0 ]; do case "$1" in
+        --api-port) [ "$#" -ge 2 ] || usage_error "--api-port needs a value"; api_port="$2"; shift 2 ;;
+        --web-port) [ "$#" -ge 2 ] || usage_error "--web-port needs a value"; web_port="$2"; shift 2 ;;
+        --no-open) no_open=1; shift ;; --skip-setup) skip_setup=1; shift ;;
+        *) usage_error "Unknown dev option: $1" ;; esac; done
+      start_dev "$api_port" "$web_port" "$no_open" "$skip_setup"
+      ;;
+    start)
+      local target="${1:-}" port="$DEFAULT_API_PORT" no_open="$NO_OPEN" no_build=0 port_set=0 no_open_set=0
+      [ -n "$target" ] || usage_error "start requires local, docker, or server"
+      shift
+      while [ "$#" -gt 0 ]; do case "$1" in
+        --port) [ "$#" -ge 2 ] || usage_error "--port needs a value"; port="$2"; port_set=1; shift 2 ;;
+        --no-open) no_open=1; no_open_set=1; shift ;; --no-build) no_build=1; shift ;;
+        *) usage_error "Unknown start option: $1" ;; esac; done
+      case "$target" in
+        local)
+          [ "$no_build" -eq 0 ] || usage_error "--no-build is only valid with 'start docker' or 'start server'"
+          start_native_background "$port" "$no_open"
+          ;;
+        docker) start_docker_local "$port" "$no_open" "$no_build" ;;
+        server)
+          [ "$port_set" -eq 0 ] || usage_error "Set the server port with 'server init --port'; 'start server --port' is not supported"
+          [ "$no_open_set" -eq 0 ] || usage_error "--no-open is only valid with 'start local' or 'start docker'"
+          start_server "$no_build"
+          ;;
+        *) usage_error "Unknown start target: $target" ;;
+      esac
+      ;;
+    server)
+      [ "${1:-}" = "init" ] || usage_error "Use: ./designer server init ..."
+      shift
+      server_init "$@"
+      ;;
+    status)
+      [ "$#" -eq 0 ] || usage_error "Unexpected status argument: $1"
+      show_status
+      ;;
+    logs)
+      local follow=0
+      if [ "${1:-}" = "--follow" ] || [ "${1:-}" = "-f" ]; then follow=1; shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected logs argument: $1"
+      show_logs "$follow"
+      ;;
+    stop)
+      [ "$#" -eq 0 ] || usage_error "Unexpected stop argument: $1"
+      stop_all
+      ;;
+    restart)
+      [ "$#" -eq 0 ] || usage_error "Unexpected restart argument: $1"
+      restart_recorded
+      ;;
+    open)
+      [ "$#" -eq 0 ] || usage_error "Unexpected open argument: $1"
+      [ -f "$URL_FILE" ] || die "No active URL is recorded. Start the designer first."
+      open_url "$(cat "$URL_FILE")"
+      ;;
+    codex-config)
+      local target="${1:-auto}"
+      if [ "$#" -gt 0 ]; then shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected codex-config argument: $1"
+      show_codex_config "$target"
+      ;;
+    token)
+      [ "$#" -eq 0 ] || usage_error "Unexpected token argument: $1"
+      show_token
+      ;;
+    backup)
+      local destination="${1:-}"
+      if [ "$#" -gt 0 ]; then shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected backup argument: $1"
+      backup_data "$destination"
+      ;;
+    _run-native)
+      [ "$#" -eq 3 ] || exit 2
+      run_native_child "$1" "$2" "$3"
+      ;;
+    *) usage_error "Unknown command: $command" ;;
+  esac
+}
+
+main "$@"
