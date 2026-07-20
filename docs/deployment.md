@@ -522,5 +522,6 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
   20-step PM-to-backup-restore integration scenario;
 - artifact-specific container/native SBOMs, dependency/image/OS scanning,
   reproducibility, unsigned/signed artifact instructions, and zero unresolved
-  critical/high security findings. The Sharp-free source-workspace gate now
-  passes but does not replace target-artifact evidence.
+  critical/high security findings. The earlier Sharp-free schema-10 source-
+  workspace gate passed but requires a schema-11 rerun and never replaces
+  target-artifact evidence.

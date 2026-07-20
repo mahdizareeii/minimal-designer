@@ -23,8 +23,9 @@ notarization, a real Windows service host and ACL/process-tree/runtime proof,
 real Linux lifecycle proof, offline disaster recovery, signed backup
 provenance, the comprehensive security/cross-platform browser matrices,
 vulnerability/license scanning and reproducibility, and several advanced
-product/design-system workflows remain release blockers. The
-source-workspace permissive-only license gate now passes.
+product/design-system workflows remain release blockers. The earlier schema-10
+source-workspace permissive-only license gate passed; a schema-11 rerun remains
+required.
 
 ## Implemented foundation
 
@@ -156,7 +157,7 @@ source-workspace permissive-only license gate now passes.
 | 1,000-node foundation | Validation 17.71 ms p95; 25 updates 36.18 ms p95; preview persistence 132.17 ms p95; 512×320 Playwright render 118.12 ms p95 |
 | 1,000-node browser gate | All budgets passed over the final 20-sample run: 232.8 ms p95 load; 20.8 ms p95 selection; 16.7 ms gesture p95 and maximum; 261.9 ms p95 commit/autosave; 19.0 ms p95 history; 216.65 ms p95 preview validation; 199.22 ms p95 1440×900 pinned-Chromium render |
 | Integrated release scenario | 1/1 Playwright project passed the complete 20-step PM→MCP→human correction→history→export→backup/restore/restart scenario |
-| Release evidence | 8/8 focused tests passed; deterministic CycloneDX/license/checksum generation is byte-identical; 342 installed third-party components pass with zero policy violations |
+| Release evidence | At the schema-10 checkpoint, 8/8 focused tests passed; deterministic CycloneDX/license/checksum generation was byte-identical; 342 installed third-party components passed with zero policy violations. A schema-11 rerun remains required. |
 | Unsigned macOS PKG evidence | Checkpoint integrity verification passed for `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`, SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`, size 184,835,514 bytes. It belongs to the earlier schema-10 tree and must not be presented as the current artifact. Release remains `NO-GO`. |
 | Compose | `docker compose config --quiet` passed |
 | Fresh Docker smoke | The last disposable schema-10 project reached healthy Playwright-worker readiness with no fallback, processed a real 1,303-byte PNG, and preserved a project across API restart. Both services ran as `pwuser` with read-only roots, dropped capabilities, and resource bounds; renderer networking was disabled; the base image was digest-pinned; cleanup completed. A fresh schema-11 rebuild/smoke is required. |

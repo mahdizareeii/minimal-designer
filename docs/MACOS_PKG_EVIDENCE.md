@@ -48,7 +48,7 @@ evidence. They invoke only local macOS tools: `pkgutil`, `lsbom`, `plutil`, and
 ## Generated files
 
 Evidence is normally written below
-`artifacts/release-evidence/macos-pkg/<artifact-name>/`. The current isolated
+`artifacts/release-evidence/macos-pkg/<artifact-name>/`. The stale schema-10
 candidate evidence is retained below
 `artifacts/candidates/schema10-current/release-evidence/macos-pkg/<artifact-name>/`:
 

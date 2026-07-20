@@ -838,5 +838,5 @@ and evidenced:
   prompt-injection security evidence;
 - produce artifact-specific container/native SBOMs, dependency/image/OS scans,
   reproducibility, signed provenance, and release-artifact evidence with no
-  unresolved critical/high findings; the Sharp-free source-workspace gate now
-  passes.
+  unresolved critical/high findings; the earlier Sharp-free schema-10 source-
+  workspace gate passed, but schema 11 requires a fresh evidence run.
