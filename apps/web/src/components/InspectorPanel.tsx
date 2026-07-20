@@ -9,6 +9,7 @@ import {
   CornerDownRight,
   Grid2X2,
   Image,
+  Eye,
   Layers3,
   Link2,
   List,
@@ -38,6 +39,7 @@ import {
   type TokenId,
 } from "../domain";
 import { createTokenDraft, useDesignerStore } from "../store/designer-store";
+import { navigate } from "../App";
 
 function NodeTypeIcon({ node }: { node: DesignNode }) {
   const props = { size: 14, strokeWidth: 1.7 };
@@ -265,6 +267,7 @@ function TokensPanel() {
 }
 
 function HistoryPanel() {
+  const document = useDesignerStore((state) => state.document);
   const revisions = useDesignerStore((state) => state.revisions);
   const loading = useDesignerStore((state) => state.historyLoading);
   const loadHistory = useDesignerStore((state) => state.loadHistory);
@@ -280,7 +283,10 @@ function HistoryPanel() {
               <span className="history-dot" />
               <strong>{revision.message || "Saved revision"}</strong>
               <small><Clock3 size={9} /> v{revision.version} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(revision.createdAt))}</small>
-              {index > 0 && <button onClick={() => void restoreRevision(revision.version)}>Restore</button>}
+              <div className="history-actions">
+                {document && <button onClick={() => navigate(`/projects/${encodeURIComponent(document.id)}/revisions/${encodeURIComponent(revision.id)}/inspect`)}><Eye size={9} /> Inspect</button>}
+                {index > 0 && <button onClick={() => void restoreRevision(revision.version)}>Restore</button>}
+              </div>
             </div>
           ))}
         </div>

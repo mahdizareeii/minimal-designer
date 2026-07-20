@@ -9,34 +9,144 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 
 import { registerAuthentication } from "./auth.js";
+import { ContentAddressedRasterStore } from "./assets.js";
+import { BackupManager, inspectRestoreJournal } from "./backup.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { DesignerDatabase } from "./db/database.js";
+import { DesignSystemService } from "./design-system-service.js";
+import { registerEnterpriseDomainHttpRoutes } from "./enterprise-domain-http-routes.js";
 import { asDomainError, DomainError } from "./errors.js";
-import { EventHub } from "./events.js";
+import { EventHub, flushPersistedEventOutbox } from "./events.js";
+import { EnterpriseService } from "./enterprise-service.js";
+import { registerEnterpriseHttpRoutes } from "./enterprise-http-routes.js";
 import { registerHttpRoutes } from "./http-routes.js";
+import {
+  MaintenanceStore,
+  registerMaintenanceGuard,
+  registerMaintenanceStatusRoute,
+} from "./maintenance.js";
 import { registerMcpEndpoint } from "./mcp.js";
+import { registerOperationsHttpRoutes } from "./operations-http-routes.js";
+import { OperationsService } from "./operations-service.js";
+import { registerOrganizationPolicyHttpRoutes } from "./organization-policy-http-routes.js";
+import { OrganizationPolicyService } from "./organization-policy-service.js";
 import { PngRenderer } from "./render.js";
+import { RedesignStudioService } from "./redesign-studio-service.js";
+import { RestoreOperationStore } from "./restore-operation-store.js";
+import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
 import { DesignerService } from "./service.js";
+import { WorkspaceHandoffService } from "./workspace-handoff-service.js";
 
 export interface DesignerApplication {
   app: FastifyInstance;
   config: ServerConfig;
   database: DesignerDatabase;
   service: DesignerService;
+  enterprise: EnterpriseService;
+  designSystems: DesignSystemService;
+  handoffs: WorkspaceHandoffService;
+  redesign: RedesignStudioService;
   events: EventHub;
   renderer: PngRenderer;
+  backups: BackupManager;
+  operations: OperationsService;
+  policies: OrganizationPolicyService;
+  maintenance: MaintenanceStore;
 }
 
 export async function buildApplication(config = loadConfig()): Promise<DesignerApplication> {
+  const maintenance = new MaintenanceStore(config.backupDir, config.dataDir);
+  const [startupMaintenance, startupWorkerLock, startupOperation, startupJournal] = await Promise.all([
+    maintenance.read(),
+    new RestoreWorkerLockStore(config.backupDir).read(),
+    new RestoreOperationStore(config.backupDir).read(),
+    inspectRestoreJournal(config.dataDir),
+  ]);
+  if (startupWorkerLock.active) {
+    throw new DomainError(
+      "TEMPORARILY_UNAVAILABLE",
+      "FormaSpec will not open its database while a restore worker owns the shared volume lock.",
+      503,
+      {
+        retryable: true,
+        details: {
+          maintenance: true,
+          restoreWorkerLocked: true,
+          lockValid: startupWorkerLock.lockValid,
+          ...(startupWorkerLock.lockValid ? { operationId: startupWorkerLock.operationId } : {}),
+        },
+      },
+    );
+  }
+  const terminalWithoutMaintenance = !startupMaintenance.active
+    && (startupOperation === null
+      || startupOperation.phase === "reconciled"
+      || startupOperation.phase === "rolled_back")
+    && !startupJournal.present;
+  const verifiedRestore = startupMaintenance.active
+    && startupMaintenance.markerValid
+    && startupMaintenance.phase === "verification"
+    && startupOperation?.operationId === startupMaintenance.operationId
+    && startupOperation.phase === "reconciled"
+    && !startupJournal.present;
+  const verifiedRollback = startupMaintenance.active
+    && startupMaintenance.markerValid
+    && (startupMaintenance.phase === "rollback" || startupMaintenance.phase === "verification")
+    && startupOperation?.operationId === startupMaintenance.operationId
+    && startupOperation.phase === "rolled_back"
+    && (!startupJournal.present || startupJournal.phase === "rolled-back");
+  if (!terminalWithoutMaintenance && !verifiedRestore && !verifiedRollback) {
+    throw new DomainError(
+      "TEMPORARILY_UNAVAILABLE",
+      "FormaSpec will not open its database without matching terminal restore evidence.",
+      503,
+      {
+        retryable: true,
+        details: {
+          maintenance: startupMaintenance.active,
+          phase: startupMaintenance.active ? startupMaintenance.phase : null,
+          operationPhase: startupOperation?.phase ?? null,
+          journalPhase: startupJournal.present ? startupJournal.phase : null,
+        },
+      },
+    );
+  }
   const app = Fastify({
     logger: config.logLevel === "silent" ? false : { level: config.logLevel },
     bodyLimit: Math.max(config.maxAssetBytes + 1024 * 1024, 2 * 1024 * 1024),
-    trustProxy: config.authMode === "trusted-header",
+    trustProxy: config.appMode === "server" ? config.trustedProxies : false,
   });
+  const assetStore = new ContentAddressedRasterStore(config.dataDir);
   const database = new DesignerDatabase(config.databasePath);
   const events = new EventHub();
-  const renderer = new PngRenderer();
-  const service = new DesignerService(database, events, config.previewTtlSeconds);
+  const renderer = new PngRenderer({
+    timeoutMs: config.renderTimeoutMs,
+    maxPixels: config.renderMaxPixels,
+    concurrency: config.renderConcurrency,
+    queueLimit: config.renderQueueLimit,
+    allowSoftwareFallback: config.allowSoftwareRenderer,
+    allowSystemChrome: config.allowSystemChrome,
+    ...(config.renderSocket ? { socketPath: config.renderSocket } : {}),
+    ipcMaxMessageBytes: config.renderIpcMaxBytes,
+  });
+  const service = new DesignerService(database, events, config.previewTtlSeconds, {}, assetStore);
+  const enterprise = new EnterpriseService(database, events, {
+    productSpecPreviewTtlSeconds: config.previewTtlSeconds,
+  });
+  const designSystems = new DesignSystemService(database, {
+    upgradePreviewTtlSeconds: config.previewTtlSeconds,
+  });
+  const handoffs = new WorkspaceHandoffService(database);
+  const redesign = new RedesignStudioService(database);
+  const backups = new BackupManager(database, config.dataDir, config.backupDir, {
+    engine: renderer,
+    limits: {
+      maxBytes: config.maxAssetBytes,
+      maxPixels: config.maxAssetPixels,
+    },
+  });
+  const operations = new OperationsService(service, enterprise, renderer, backups, config.backupDir);
+  const policies = new OrganizationPolicyService(database);
 
   app.setErrorHandler((error, request, reply) => {
     let domainError: DomainError;
@@ -63,21 +173,91 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     return reply.code(domainError.statusCode).send({ error: domainError.toJSON() });
   });
 
+  app.addHook("onRequest", async (request) => {
+    if (config.appMode === "local") {
+      if (config.containerLocalMode) {
+        const host = request.headers.host?.trim().toLowerCase();
+        if (!host || !config.allowedHosts.includes(host)) {
+          throw new DomainError("FORBIDDEN", "Container-local mode accepts only the configured loopback Host.", 403);
+        }
+        const forwarded = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]
+          .some((header) => request.headers[header] !== undefined);
+        if (forwarded || request.headers[config.trustedUserHeader] !== undefined) {
+          throw new DomainError("FORBIDDEN", "Container-local mode rejects proxy and caller identity headers.", 403);
+        }
+        return;
+      }
+      const address = request.ip.replace(/^::ffff:/, "");
+      if (address !== "127.0.0.1" && address !== "::1") {
+        throw new DomainError("FORBIDDEN", "Local mode accepts loopback requests only.", 403);
+      }
+      return;
+    }
+
+    const host = request.headers.host?.trim().toLowerCase();
+    if (!host || !config.allowedHosts.includes(host)) {
+      throw new DomainError("FORBIDDEN", "Host is not allowed.", 403);
+    }
+    if (request.url.startsWith("/api/") && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      const origin = request.headers.origin;
+      if (!origin || !config.corsOrigins.includes(origin)) {
+        throw new DomainError("FORBIDDEN", "A trusted Origin is required for browser writes.", 403);
+      }
+      if (request.headers[config.csrfHeader] !== "1") {
+        throw new DomainError("FORBIDDEN", `Missing CSRF intent header ${config.csrfHeader}.`, 403);
+      }
+    }
+  });
+
+  app.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("x-frame-options", "DENY");
+    reply.header("referrer-policy", "no-referrer");
+    reply.header("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    reply.header(
+      "content-security-policy",
+      "default-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    );
+    if (config.appMode === "server") reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+    try {
+      flushPersistedEventOutbox(database.sqlite, events);
+    } catch {
+      // The durable outbox remains replayable and can be flushed by a later request.
+    }
+    return payload;
+  });
+
+  registerMaintenanceGuard(app, maintenance);
+
   await app.register(cors, {
     origin(origin, callback) {
       if (!origin || config.corsOrigins.includes(origin)) callback(null, true);
       else callback(new DomainError("FORBIDDEN", "Origin is not allowed.", 403), false);
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["authorization", "content-type", config.trustedUserHeader],
+    allowedHeaders: ["authorization", "content-type", "idempotency-key", config.trustedUserHeader, config.csrfHeader],
   });
   await app.register(multipart, {
     limits: { fileSize: config.maxAssetBytes, files: 1, fields: 8 },
   });
 
-  registerAuthentication(app, config);
-  registerHttpRoutes(app, { config, service, events, renderer });
-  registerMcpEndpoint(app, { config, service, renderer });
+  registerAuthentication(app, config, database);
+  registerMaintenanceStatusRoute(app, maintenance);
+  registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance });
+  registerEnterpriseHttpRoutes(app, enterprise);
+  registerEnterpriseDomainHttpRoutes(app, { designSystems, handoffs, redesign });
+  registerOperationsHttpRoutes(app, operations);
+  registerOrganizationPolicyHttpRoutes(app, policies);
+  registerMcpEndpoint(app, {
+    config,
+    service,
+    enterprise,
+    designSystems,
+    handoffs,
+    redesign,
+    renderer,
+    policies,
+  });
 
   const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
   if (fs.existsSync(path.join(webDist, "index.html"))) {
@@ -87,7 +267,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
       wildcard: false,
     });
     app.setNotFoundHandler((request, reply) => {
-      const protectedPrefix = ["/api", "/mcp", "/health", "/ready"].some((prefix) =>
+      const protectedPrefix = ["/api", "/events", "/mcp", "/health", "/ready"].some((prefix) =>
         request.url === prefix || request.url.startsWith(`${prefix}/`) || request.url.startsWith(`${prefix}?`));
       const acceptsHtml = request.method === "GET" && (request.headers.accept?.includes("text/html") ?? false);
       if (!protectedPrefix && acceptsHtml) return reply.sendFile("index.html");
@@ -102,5 +282,20 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     database.close();
   });
 
-  return { app, config, database, service, events, renderer };
+  return {
+    app,
+    config,
+    database,
+    service,
+    enterprise,
+    designSystems,
+    handoffs,
+    redesign,
+    events,
+    renderer,
+    backups,
+    operations,
+    policies,
+    maintenance,
+  };
 }

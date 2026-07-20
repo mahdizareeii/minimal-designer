@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Non-mutating contract tests for the Minimal Designer launcher.
+# Non-mutating contract tests for the FormaSpec compatibility launcher.
 # The launcher is always given an isolated runtime directory, and commands that
 # could install packages or start containers use harmless PATH stubs.
 
@@ -18,6 +18,11 @@ CAPTURE_INDEX=0
 CAPTURE_STATUS=0
 CAPTURE_OUTPUT=""
 SENSITIVE_TOKEN="designer-test-secret-0123456789"
+
+# These tests exercise the Bash compatibility implementation itself. The
+# separately tested formaspecctl wrapper normally delegates supported commands
+# back into this launcher with the same guard.
+export FORMASPEC_LEGACY_DELEGATE=1
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/minimal-designer-launcher.XXXXXX")" || exit 1
 
@@ -214,6 +219,9 @@ EOF
 
   cat >"$MOCK_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${DESIGNER_TEST_CURL_LOG:-}" ]; then
+  printf '%s\n' "$*" >>"$DESIGNER_TEST_CURL_LOG"
+fi
 if [ "${DESIGNER_TEST_CURL_OK:-0}" = "1" ]; then
   exit 0
 fi
@@ -239,11 +247,11 @@ run_static_contract_tests() {
   capture bash -c 'bash "$1" <"$2"' _ "$LAUNCHER" "$menu_input"
   expect_status 0 "no-argument guided menu works on Bash with nounset enabled"
   expect_contains "guided launcher" "no-argument invocation displays the guided menu"
-  expect_contains "Minimal Designer launcher" "guided menu can select help"
+  expect_contains "FormaSpec launcher" "guided menu can select help"
 
   capture bash "$LAUNCHER" help
   expect_status 0 "help exits successfully"
-  expect_contains "Minimal Designer launcher" "help identifies the launcher"
+  expect_contains "FormaSpec launcher" "help identifies the launcher"
   expect_contains "--dry-run" "help documents dry-run mode"
 
   capture bash "$LAUNCHER" version
@@ -258,6 +266,19 @@ run_static_contract_tests() {
   capture bash "$LAUNCHER" definitely-not-a-command
   expect_status 2 "unknown command returns a usage error"
   expect_contains "Unknown command" "unknown command explains the error"
+
+  expect_file_contains "$PROJECT_ROOT/Dockerfile" \
+    "FROM mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48" \
+    "Docker image pins the human-readable Playwright tag to the cached registry digest"
+
+  local designer_service
+  designer_service="$(sed -n '/^  designer:/,/^  restore-worker:/p' "$PROJECT_ROOT/docker-compose.yml")"
+  case "$designer_service" in
+    *"pids_limit: 256"*"mem_limit: 2g"*"cpus: \"2.0\""*)
+      pass_test "Compose bounds the API service PID, memory, and CPU resources"
+      ;;
+    *) fail_test "Compose bounds the API service PID, memory, and CPU resources" ;;
+  esac
 }
 
 run_location_and_read_only_tests() {
@@ -279,7 +300,7 @@ run_location_and_read_only_tests() {
     bash "$LAUNCHER" doctor auto
   # Doctor intentionally returns 1 when neither supported runtime is ready.
   expect_status_zero_or_one "doctor completes with a documented readiness status"
-  expect_contains "Minimal Designer doctor" "doctor prints its diagnostic heading"
+  expect_contains "FormaSpec doctor" "doctor prints its diagnostic heading"
   expect_absent "$doctor_runtime" "doctor creates no runtime state"
 
   local target runtime
@@ -491,6 +512,7 @@ run_server_security_tests() {
   local configured_runtime="$TMP_ROOT/configured-server-runtime"
   local server_env="$configured_runtime/env/server.env"
   local mutation_log="$TMP_ROOT/dry-start-server-mutations.log"
+  local curl_log="$TMP_ROOT/server-health-curl.log"
   local checksum_before checksum_after
   mkdir -p "$configured_runtime/env"
   {
@@ -528,6 +550,26 @@ run_server_security_tests() {
   expect_absent "$configured_runtime/run" "dry-run server start creates no run-state directory"
   checksum_after="$(cksum "$server_env")"
   expect_equal "$checksum_before" "$checksum_after" "dry-run server start leaves the secure env unchanged"
+
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$configured_runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_TEST_CURL_LOG="$curl_log" \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --yes start server --no-build
+  expect_status 0 "strict server start accepts a healthy loopback container"
+  expect_file_contains "$curl_log" \
+    "-H Host: designer.example.test http://127.0.0.1:54325/health/ready" \
+    "strict server readiness uses /health/ready with the public Host header"
+  expect_file_contains "$curl_log" \
+    "-H Host: designer.example.test -H x-designer-user: launcher-health-check http://127.0.0.1:54325/api/designs" \
+    "strict server API verification preserves the public Host header"
+  expect_file_not_contains "$curl_log" "http://127.0.0.1:54325/ready" \
+    "strict server startup never polls the legacy readiness endpoint"
 }
 
 run_codex_config_state_tests() {

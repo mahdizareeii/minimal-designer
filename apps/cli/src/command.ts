@@ -1,0 +1,948 @@
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline/promises";
+import { pathToFileURL } from "node:url";
+
+import { verifyBackup, type BackupVerification } from "./backup.js";
+import { createBridgeController, type BridgeController } from "./bridge-lifecycle.js";
+import { connectCodex } from "./codex.js";
+import { captureDockerRuntimeBinding, persistDockerRuntimeBinding } from "./docker-runtime-binding.js";
+import {
+  abortDockerRestore,
+  assertBackupId,
+  clearStaleDockerRestoreLock,
+  dockerRestoreStatus,
+  restoreDockerBackup,
+  resumeDockerRestore,
+  rollbackDockerRestore,
+  type DockerRestoreDependencies,
+  type DockerRestoreAbortResult,
+  type DockerRestoreOperationStatus,
+  type DockerRestoreResult,
+  type DockerRestoreStaleLockResult,
+} from "./docker-restore.js";
+import { runGenericMcpConfigCli } from "./generic-mcp-config.js";
+import { CLI_SUPPORTED_DATABASE_VERSION, defaultDatabasePath, readMigrationStatus } from "./migrations.js";
+import { localApiRequest } from "./local-api.js";
+import { findExecutable, runCommand, type CommandRunner } from "./process.js";
+import { findProjectRoot, launcherPath } from "./project.js";
+import { runSupportBundleCli } from "./support-bundle-cli.js";
+
+export type RestoreVerifiedBackup = (
+  bundlePath: string,
+  destinationDataDirectory: string,
+  options: {
+    databaseClosed: true;
+    expectedSource?: { sha256: string; sizeBytes?: number };
+    healthCheck?: (dataDirectory: string) => Promise<void>;
+    sourcePinDirectory?: string;
+  },
+) => Promise<void>;
+
+export interface CliIo {
+  stdout(message: string): void;
+  stderr(message: string): void;
+  isInteractive: boolean;
+}
+
+export interface CliDependencies {
+  environment?: NodeJS.ProcessEnv;
+  projectRoot?: string;
+  commandRunner?: CommandRunner;
+  bridge?: BridgeController;
+  io?: CliIo;
+  confirm?: (message: string) => Promise<boolean>;
+  backupVerifier?: (bundlePath: string) => Promise<BackupVerification>;
+  restoreVerifiedBackup?: RestoreVerifiedBackup;
+  dockerRestoreStatus?: (projectRoot: string, dependencies?: DockerRestoreDependencies) => Promise<DockerRestoreOperationStatus>;
+  restoreDockerBackup?: (
+    projectRoot: string,
+    backupId: string,
+    io: Pick<CliIo, "stdout">,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreResult>;
+  resumeDockerRestore?: (
+    projectRoot: string,
+    backupId: string | undefined,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreResult>;
+  rollbackDockerRestore?: (
+    projectRoot: string,
+    io: Pick<CliIo, "stdout">,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreResult>;
+  abortDockerRestore?: (
+    projectRoot: string,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreAbortResult>;
+  clearStaleDockerRestoreLock?: (
+    projectRoot: string,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreStaleLockResult>;
+  recordDockerRuntimeBinding?: (projectRoot: string) => Promise<void>;
+  now?: () => Date;
+}
+
+const defaultIo: CliIo = {
+  stdout: (message) => process.stdout.write(`${message}\n`),
+  stderr: (message) => process.stderr.write(`${message}\n`),
+  isInteractive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+};
+
+async function interactiveConfirm(message: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false;
+  const terminal = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await terminal.question(`${message} [y/N] `)).trim().toLowerCase();
+    return answer === "y" || answer === "yes";
+  } finally {
+    terminal.close();
+  }
+}
+
+function usage(): string {
+  return `FormaSpec control CLI
+
+Usage:
+  formaspecctl install [local|docker] [--yes]
+  formaspecctl doctor [auto|local|docker|server] [--strict]
+  formaspecctl status
+  formaspecctl start [local|docker|server] [launcher options]
+  formaspecctl stop
+  formaspecctl restart
+  formaspecctl migrate status [--json]
+  formaspecctl backup create [--json]
+  formaspecctl backup list [--json]
+  formaspecctl backup schedule show|enable|disable|run [--at HH:MM] [--json]
+  formaspecctl backup prune preview [--json]
+  formaspecctl backup prune execute --preview-id <id> --plan-hash <sha256> --yes [--json]
+  formaspecctl backup verify <formaspec-backup.tar> [--json]
+  formaspecctl backup restore <formaspec-backup.tar> --yes [--json]
+  formaspecctl backup restore --backup-id <id> --yes [--json]
+  formaspecctl backup restore status [--json]
+  formaspecctl backup restore resume [--backup-id <id>] --yes [--json]
+  formaspecctl backup restore rollback --yes [--json]
+  formaspecctl backup restore abort --yes [--json]
+  formaspecctl backup restore clear-stale-lock --yes [--json]
+  formaspecctl audit retention preview|list [--json]
+  formaspecctl audit retention execute --preview-id <id> --plan-hash <sha256> --yes [--idempotency-key <key>] [--json]
+  formaspecctl agent connect codex [--yes]
+  formaspecctl agent config generic [--format all|json|toml] [--snippet-only]
+  formaspecctl support-bundle preview [--json]
+  formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]
+
+Global option:
+  --yes      Authorize the requested safe setup changes without an interactive prompt
+  --no-open  Do not open a browser after installation or startup`;
+}
+
+type RecordedRuntimeMode = "local" | "dev" | "docker" | "server";
+
+function optionalRuntimeFile(projectRoot: string, filename: string): string | undefined {
+  const target = path.join(projectRoot, ".designer", "run", filename);
+  if (!fs.existsSync(target)) return undefined;
+  const value = fs.readFileSync(target, "utf8").trim();
+  return value || undefined;
+}
+
+function recordedRuntimeMode(projectRoot: string): RecordedRuntimeMode | undefined {
+  const value = optionalRuntimeFile(projectRoot, "mode");
+  if (value === undefined) return undefined;
+  if (value === "local" || value === "dev" || value === "docker" || value === "server") return value;
+  throw new Error(`Recorded FormaSpec runtime mode is unknown: ${value}. Run 'formaspecctl stop' and inspect .designer/run before restoring.`);
+}
+
+function managedPidIsAlive(projectRoot: string): boolean {
+  const value = optionalRuntimeFile(projectRoot, "pid");
+  if (value === undefined) return false;
+  if (!/^\d+$/.test(value)) throw new Error("Recorded FormaSpec PID is invalid; refusing an offline restore.");
+  const pid = Number(value);
+  if (!Number.isSafeInteger(pid) || pid <= 1) throw new Error("Recorded FormaSpec PID is invalid; refusing an offline restore.");
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function loadRestoreVerifiedBackup(projectRoot: string): Promise<RestoreVerifiedBackup> {
+  const modulePath = path.join(projectRoot, "apps", "server", "dist", "backup.js");
+  if (!fs.existsSync(modulePath)) {
+    throw new Error("The built FormaSpec restore engine is missing. Run 'pnpm --filter @designer/server build' before a source-local restore.");
+  }
+  const loaded = await import(pathToFileURL(modulePath).href) as { restoreVerifiedBackup?: unknown };
+  if (typeof loaded.restoreVerifiedBackup !== "function") {
+    throw new Error("The built FormaSpec server does not expose the required restoreVerifiedBackup engine.");
+  }
+  return loaded.restoreVerifiedBackup as RestoreVerifiedBackup;
+}
+
+function assertSourceLocalRestoreMode(projectRoot: string, mode: RecordedRuntimeMode | undefined): void {
+  if (mode === "docker") {
+    throw new Error("backup restore supports only the source-local ./data directory. The recorded Docker runtime uses a managed volume; no Docker data was changed.");
+  }
+  if (mode === "server") {
+    throw new Error("backup restore is not a server maintenance workflow. Restore on the server only after a supported maintenance-mode and volume procedure exists; no server data was changed.");
+  }
+  if (mode === undefined) {
+    const recordedEnvironment = optionalRuntimeFile(projectRoot, "env-file");
+    if (recordedEnvironment !== undefined) {
+      throw new Error("Runtime state references a Compose environment without a recorded mode. Refusing to guess whether the data is local, Docker, or server-managed.");
+    }
+    if (managedPidIsAlive(projectRoot)) {
+      throw new Error("A FormaSpec process is running without a recognized local runtime mode. Stop it explicitly before restoring.");
+    }
+  }
+}
+
+function preRestoreBackupPath(projectRoot: string, now: Date): string {
+  const timestamp = now.toISOString().replaceAll(/[:.]/g, "-");
+  return path.join(projectRoot, ".designer", "backups", `pre-restore-${timestamp}-${randomUUID().slice(0, 8)}`);
+}
+
+function validateStartArguments(arguments_: string[]): string[] {
+  const allowedTargets = new Set(["local", "docker", "server"]);
+  const target = arguments_[0] !== undefined && allowedTargets.has(arguments_[0]) ? arguments_[0] : "docker";
+  const options = target === arguments_[0] ? arguments_.slice(1) : arguments_;
+  const result = [target];
+  for (let index = 0; index < options.length; index += 1) {
+    const option = options[index]!;
+    if (option === "--no-open" && target !== "server") result.push(option);
+    else if (option === "--no-build" && target !== "local") result.push(option);
+    else if (option === "--port" && target !== "server") {
+      const value = options[index + 1];
+      if (value === undefined || !/^\d{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 65_535) {
+        throw new Error("--port requires a valid port number.");
+      }
+      result.push(option, value);
+      index += 1;
+    } else {
+      throw new Error(`Unsupported start option for ${target}: ${option}`);
+    }
+  }
+  return result;
+}
+
+export async function runCli(rawArguments: readonly string[], dependencies: CliDependencies = {}): Promise<number> {
+  const environment = dependencies.environment ?? process.env;
+  const io = dependencies.io ?? defaultIo;
+  const runner = dependencies.commandRunner ?? runCommand;
+  const confirm = dependencies.confirm ?? interactiveConfirm;
+  const arguments_ = [...rawArguments];
+  let globalNoOpen = false;
+  while (arguments_[0] === "--yes" || arguments_[0] === "--no-open") {
+    if (arguments_.shift() === "--no-open") globalNoOpen = true;
+  }
+  const assumeYes = rawArguments.includes("--yes");
+  for (let index = arguments_.length - 1; index >= 0; index -= 1) {
+    if (arguments_[index] === "--yes") arguments_.splice(index, 1);
+  }
+
+  try {
+    const command = arguments_.shift();
+    if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+      io.stdout(usage());
+      return 0;
+    }
+    let resolvedProjectRoot: string | undefined = dependencies.projectRoot;
+    let resolvedBridge: BridgeController | undefined = dependencies.bridge;
+    const projectRoot = (): string => {
+      resolvedProjectRoot ??= findProjectRoot();
+      return resolvedProjectRoot;
+    };
+    const bridge = (): BridgeController => {
+      resolvedBridge ??= createBridgeController(projectRoot(), environment);
+      return resolvedBridge;
+    };
+    const recordDockerBinding = async (): Promise<void> => {
+      const root = projectRoot();
+      if (dependencies.recordDockerRuntimeBinding) {
+        await dependencies.recordDockerRuntimeBinding(root);
+      } else {
+        const binding = await captureDockerRuntimeBinding(root, {
+          environment,
+          commandRunner: runner,
+        });
+        persistDockerRuntimeBinding(root, binding);
+      }
+      io.stdout("Pinned the exact local Docker daemon, image, containers, and data volumes for safe restore.");
+    };
+    const delegate = async (launcherArguments: string[]): Promise<number> => {
+      const root = projectRoot();
+      const result = await runner(launcherPath(root), launcherArguments, {
+        cwd: root,
+        env: { ...environment, FORMASPEC_LEGACY_DELEGATE: "1" },
+        inherit: true,
+      });
+      return result.exitCode;
+    };
+    const reportCodexConnection = (result: Awaited<ReturnType<typeof connectCodex>>): void => {
+      io.stdout(`Codex MCP 'formaspec' verified at ${result.mcpUrl}.`);
+      io.stdout(`Managed Minimal UI skill installed at ${result.skillPath}.`);
+      io.stdout(`Managed Minimal UI plugin installed at ${result.pluginPath}.`);
+      io.stdout("Codex mention: [@Minimal UI](plugin://minimal-ui@formaspec)");
+      io.stdout("Use FormaSpec, Use Minimal UI, or Design this with FormaSpec in a new Codex task.");
+    };
+    const offerCodexConnection = async (alreadyAuthorized = false): Promise<void> => {
+      if (findExecutable("codex", environment) === null) {
+        io.stdout("Codex was not detected; FormaSpec is running and can be connected later with 'formaspecctl agent connect codex'.");
+        return;
+      }
+      const authorized = alreadyAuthorized || assumeYes || await confirm(
+        "Allow FormaSpec to configure Codex, install the managed Minimal UI plugin, and verify the loopback MCP connection?",
+      );
+      if (!authorized) {
+        io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");
+        return;
+      }
+      reportCodexConnection(await connectCodex({
+        environment,
+        commandRunner: runner,
+        bridge: bridge(),
+        confirm,
+        assumeYes: true,
+      }));
+    };
+
+    if (command === "install") {
+      const target = arguments_.shift() ?? "docker";
+      if (target !== "local" && target !== "docker") throw new Error("Use: formaspecctl install [local|docker] [--yes]");
+      if (arguments_[0] === "--no-open") {
+        globalNoOpen = true;
+        arguments_.shift();
+      }
+      if (arguments_.length > 0) throw new Error(`Unexpected install option: ${arguments_[0]}`);
+      const authorized = assumeYes || await confirm(
+        `Allow FormaSpec to prepare the ${target} runtime, start the local service, configure the bridge, and connect supported Codex?`,
+      );
+      if (!authorized) throw new Error("FormaSpec installation was cancelled; no setup command was run.");
+      const setupExitCode = await delegate(["--yes", "setup", target]);
+      if (setupExitCode !== 0) return setupExitCode;
+      const startExitCode = await delegate(["--yes", "start", target, ...(globalNoOpen ? ["--no-open"] : [])]);
+      if (startExitCode !== 0) return startExitCode;
+      if (target === "docker") await recordDockerBinding();
+      const bridgeStatus = await bridge().ensureStarted();
+      io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
+      await offerCodexConnection(true);
+      io.stdout("FormaSpec installation and startup completed.");
+      return 0;
+    }
+
+    if (command === "doctor") {
+      const target = arguments_.shift() ?? "auto";
+      if (!["auto", "local", "docker", "server"].includes(target)) throw new Error(`Unknown doctor target: ${target}`);
+      const strict = arguments_.shift();
+      if (strict !== undefined && strict !== "--strict") throw new Error(`Unexpected doctor option: ${strict}`);
+      if (arguments_.length > 0) throw new Error(`Unexpected doctor option: ${arguments_[0]}`);
+      const exitCode = await delegate(["doctor", target, ...(strict === undefined ? [] : [strict])]);
+      const codex = findExecutable("codex", environment);
+      io.stdout(codex === null ? "Codex: not detected" : `Codex: detected at ${codex}`);
+      const bridgeStatus = await bridge().status();
+      io.stdout(`Local bridge: ${bridgeStatus.running ? "running" : "stopped"} (${bridgeStatus.url})`);
+      return exitCode;
+    }
+
+    if (command === "status") {
+      if (arguments_.length > 0) throw new Error(`Unexpected status option: ${arguments_[0]}`);
+      const exitCode = await delegate(["status"]);
+      const bridgeStatus = await bridge().status();
+      io.stdout(`FormaSpec bridge is ${bridgeStatus.running ? "running" : "stopped"} at ${bridgeStatus.url}.`);
+      return exitCode;
+    }
+
+    if (command === "start") {
+      const startArguments = validateStartArguments([...arguments_, ...(globalNoOpen ? ["--no-open"] : [])]);
+      const exitCode = await delegate([...(assumeYes ? ["--yes"] : []), "start", ...startArguments]);
+      if (exitCode !== 0) return exitCode;
+      if (startArguments[0] === "docker") await recordDockerBinding();
+      const bridgeStatus = await bridge().ensureStarted();
+      io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
+      await offerCodexConnection();
+      return 0;
+    }
+
+    if (command === "stop") {
+      if (arguments_.length > 0) throw new Error(`Unexpected stop option: ${arguments_[0]}`);
+      await bridge().stop();
+      return await delegate(["stop"]);
+    }
+
+    if (command === "restart") {
+      if (arguments_.length > 0) throw new Error(`Unexpected restart option: ${arguments_[0]}`);
+      await bridge().stop();
+      const exitCode = await delegate(["restart"]);
+      if (exitCode !== 0) return exitCode;
+      if (recordedRuntimeMode(projectRoot()) === "docker") await recordDockerBinding();
+      const bridgeStatus = await bridge().ensureStarted();
+      io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
+      return 0;
+    }
+
+    if (command === "migrate") {
+      if (arguments_.shift() !== "status") throw new Error("Use: formaspecctl migrate status [--json]");
+      const option = arguments_.shift();
+      if (option !== undefined && option !== "--json") throw new Error(`Unexpected migrate status option: ${option}`);
+      const json = option === "--json";
+      if (arguments_.length > 0) throw new Error(`Unexpected migrate status option: ${arguments_[0]}`);
+      const database = defaultDatabasePath(projectRoot());
+      if (!fs.existsSync(database)) throw new Error(`Database is not available at ${database}. Docker volume databases must be verified through a FormaSpec backup.`);
+      const status = readMigrationStatus(database);
+      if (json) io.stdout(JSON.stringify(status));
+      else {
+        io.stdout(`Database: ${status.databasePath}`);
+        io.stdout(`Migration ledger: ${status.latestAppliedVersion}/${status.supportedVersion} (${status.state})`);
+        for (const migration of status.migrations) io.stdout(`  ${migration.version} ${migration.name} ${migration.appliedAt}`);
+      }
+      return 0;
+    }
+
+    if (command === "support-bundle") {
+      return await runSupportBundleCli(arguments_, {
+        projectRoot: projectRoot(),
+        io,
+        assumeYes,
+      });
+    }
+
+    if (command === "audit") {
+      if (arguments_.shift() !== "retention") {
+        throw new Error("Use: formaspecctl audit retention preview|list|execute [options]");
+      }
+      const retentionCommand = arguments_.shift();
+      type CandidateSummary = {
+        count: number;
+        bytes: number;
+        firstId: number | null;
+        lastId: number | null;
+        sha256: string;
+        hasMore: boolean;
+      };
+      type RetentionPreview = {
+        previewId: string;
+        configurationHash: string;
+        policyHash: string;
+        retentionDays: number;
+        cutoffAt: string;
+        planHash: string;
+        auditEvents: CandidateSummary;
+        outboxEvents: CandidateSummary;
+        generatedAt: string;
+        expiresAt: string;
+      };
+      type RetentionRun = Omit<RetentionPreview, "generatedAt" | "expiresAt"> & {
+        runId: string;
+        previousRunHash: string | null;
+        runHash: string;
+        commitAuditEventId: number;
+        commitOutboxEventId: number;
+        completedAt: string;
+      };
+      if (retentionCommand === "list") {
+        const option = arguments_.shift();
+        if (option !== undefined && option !== "--json") throw new Error(`Unexpected audit retention list option: ${option}`);
+        if (arguments_.length > 0) throw new Error(`Unexpected audit retention list option: ${arguments_[0]}`);
+        const { runs } = await localApiRequest<{ runs: RetentionRun[] }>(
+          projectRoot(),
+          "/api/organization/audit-retention/runs",
+        );
+        if (option === "--json") io.stdout(JSON.stringify(runs));
+        else if (runs.length === 0) io.stdout("No audit-retention runs were found.");
+        else for (const run of runs) {
+          io.stdout(`${run.runId}  completed=${run.completedAt}  audit=${run.auditEvents.count}  outbox=${run.outboxEvents.count}  sha256=${run.runHash}`);
+        }
+        return 0;
+      }
+      if (retentionCommand === "preview") {
+        const option = arguments_.shift();
+        if (option !== undefined && option !== "--json") throw new Error(`Unexpected audit retention preview option: ${option}`);
+        if (arguments_.length > 0) throw new Error(`Unexpected audit retention preview option: ${arguments_[0]}`);
+        const { preview } = await localApiRequest<{ preview: RetentionPreview }>(
+          projectRoot(),
+          "/api/organization/audit-retention/previews",
+          { method: "POST", body: JSON.stringify({}) },
+        );
+        if (option === "--json") io.stdout(JSON.stringify(preview));
+        else {
+          io.stdout(`Audit-retention preview: ${preview.previewId}`);
+          io.stdout(`Policy: ${preview.retentionDays} days; cutoff: ${preview.cutoffAt}; expires: ${preview.expiresAt}`);
+          io.stdout(`Would prune ${preview.auditEvents.count} audit events (${preview.auditEvents.bytes} canonical bytes) and ${preview.outboxEvents.count} published outbox events (${preview.outboxEvents.bytes} canonical bytes).`);
+          if (preview.auditEvents.hasMore || preview.outboxEvents.hasMore) {
+            io.stdout("This is a bounded batch; create another preview after committing it to continue retention.");
+          }
+          io.stdout(`Plan hash: ${preview.planHash}`);
+          io.stdout(`Review the exact counts and hashes, then run: formaspecctl audit retention execute --preview-id ${preview.previewId} --plan-hash ${preview.planHash} --yes`);
+        }
+        return 0;
+      }
+      if (retentionCommand === "execute") {
+        let previewId: string | undefined;
+        let planHash: string | undefined;
+        let idempotencyKey: string | undefined;
+        let json = false;
+        while (arguments_.length > 0) {
+          const option = arguments_.shift();
+          if (option === "--json") json = true;
+          else if (option === "--preview-id") previewId = arguments_.shift();
+          else if (option === "--plan-hash") planHash = arguments_.shift();
+          else if (option === "--idempotency-key") idempotencyKey = arguments_.shift();
+          else throw new Error(`Unexpected audit retention execute option: ${option}`);
+        }
+        if (!assumeYes) {
+          throw new Error("audit retention is destructive. Create and review a preview, then rerun execute with explicit --yes authorization.");
+        }
+        if (!previewId || !/^audit_retention_preview_[a-f0-9]{32}$/.test(previewId)) {
+          throw new Error("--preview-id requires an exact audit-retention preview ID.");
+        }
+        if (!planHash || !/^[a-f0-9]{64}$/.test(planHash)) {
+          throw new Error("--plan-hash requires the exact audit-retention preview SHA-256.");
+        }
+        idempotencyKey ??= `audit-retention:${previewId}`;
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/.test(idempotencyKey)) {
+          throw new Error("--idempotency-key must be 8-200 safe identifier characters.");
+        }
+        const { result } = await localApiRequest<{ result: RetentionRun }>(projectRoot(), `/api/organization/audit-retention/previews/${previewId}/commit`, {
+          method: "POST",
+          body: JSON.stringify({ expectedPlanHash: planHash, idempotencyKey }),
+        });
+        if (json) io.stdout(JSON.stringify(result));
+        else {
+          io.stdout(`Audit retention committed: ${result.runId}`);
+          io.stdout(`Pruned ${result.auditEvents.count} audit events and ${result.outboxEvents.count} published outbox events.`);
+          io.stdout(`Immutable run hash: ${result.runHash}; completed: ${result.completedAt}`);
+        }
+        return 0;
+      }
+      throw new Error("Use: formaspecctl audit retention preview|list|execute [options]");
+    }
+
+    if (command === "backup") {
+      const backupCommand = arguments_.shift();
+      if (backupCommand === "schedule") {
+        const scheduleCommand = arguments_.shift();
+        if (!scheduleCommand || !["show", "enable", "disable", "run"].includes(scheduleCommand)) {
+          throw new Error("Use: formaspecctl backup schedule show|enable|disable|run [--at HH:MM] [--json]");
+        }
+        let json = false;
+        let at: string | undefined;
+        while (arguments_.length > 0) {
+          const option = arguments_.shift();
+          if (option === "--json") json = true;
+          else if (option === "--at") {
+            at = arguments_.shift();
+            if (!at || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(at)) throw new Error("--at requires a UTC time in HH:MM form.");
+          } else throw new Error(`Unexpected backup schedule option: ${option}`);
+        }
+        if (at !== undefined && scheduleCommand !== "enable") throw new Error("--at is supported only by backup schedule enable.");
+
+        type Schedule = {
+          enabled: boolean;
+          cronExpression: string;
+          timezone: "UTC";
+          retention: { daily: number; weekly: number; monthly: number };
+          updatedAt: string | null;
+          lastScheduledBackupAt: string | null;
+          nextDueAt: string | null;
+        };
+        if (scheduleCommand === "run") {
+          const result = await localApiRequest<{ run: {
+            status: "disabled" | "already_completed" | "created";
+            dueAt: string | null;
+            nextDueAt: string | null;
+            retentionClass: string | null;
+            backup: { id: string; filename: string } | null;
+          } }>(projectRoot(), "/api/backups/schedule/run", { method: "POST", body: JSON.stringify({}) });
+          if (json) io.stdout(JSON.stringify(result.run));
+          else if (result.run.status === "disabled") io.stdout("Managed backup scheduling is disabled.");
+          else if (result.run.status === "already_completed") {
+            io.stdout(`Scheduled window already completed: ${result.run.dueAt}; backup=${result.run.backup?.id ?? "unknown"}`);
+          } else {
+            io.stdout(`Scheduled backup created: ${result.run.backup?.filename ?? "unknown"}`);
+            io.stdout(`Window: ${result.run.dueAt}; retention class: ${result.run.retentionClass}`);
+          }
+          return 0;
+        }
+
+        const current = await localApiRequest<{ schedule: Schedule }>(projectRoot(), "/api/backups/schedule");
+        let schedule = current.schedule;
+        if (scheduleCommand === "enable" || scheduleCommand === "disable") {
+          const cronExpression = at === undefined
+            ? schedule.cronExpression
+            : `${Number(at.slice(3, 5))} ${Number(at.slice(0, 2))} * * *`;
+          const updated = await localApiRequest<{ schedule: Schedule }>(projectRoot(), "/api/backups/schedule", {
+            method: "PUT",
+            body: JSON.stringify({ enabled: scheduleCommand === "enable", cronExpression }),
+          });
+          schedule = updated.schedule;
+        }
+        if (json) io.stdout(JSON.stringify(schedule));
+        else {
+          io.stdout(`Managed backup schedule: ${schedule.enabled ? "enabled" : "disabled"}`);
+          io.stdout(`UTC cron: ${schedule.cronExpression}; retention: ${schedule.retention.daily} daily / ${schedule.retention.weekly} weekly / ${schedule.retention.monthly} monthly`);
+          io.stdout(`Last scheduled backup: ${schedule.lastScheduledBackupAt ?? "never"}; next due: ${schedule.nextDueAt ?? "disabled"}`);
+        }
+        return 0;
+      }
+      if (backupCommand === "prune") {
+        const pruneCommand = arguments_.shift();
+        if (pruneCommand === "preview") {
+          const option = arguments_.shift();
+          if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup prune preview option: ${option}`);
+          if (arguments_.length > 0) throw new Error(`Unexpected backup prune preview option: ${arguments_[0]}`);
+          const preview = await localApiRequest<{ preview: {
+            previewId: string;
+            planHash: string;
+            expiresAt: string;
+            candidates: Array<{ id: string; filename: string; sizeBytes: number; retentionClass: string }>;
+            retainedCount: number;
+            manualExemptCount: number;
+            protectedCount: number;
+            totalCandidateBytes: number;
+          } }>(projectRoot(), "/api/backups/prune/previews", { method: "POST", body: JSON.stringify({}) });
+          if (option === "--json") io.stdout(JSON.stringify(preview.preview));
+          else {
+            io.stdout(`Prune preview: ${preview.preview.previewId}`);
+            io.stdout(`Plan hash: ${preview.preview.planHash}; expires: ${preview.preview.expiresAt}`);
+            io.stdout(`Would prune ${preview.preview.candidates.length} scheduled backups (${preview.preview.totalCandidateBytes} bytes).`);
+            io.stdout(`Manual backups exempt: ${preview.preview.manualExemptCount}; retained scheduled backups: ${preview.preview.retainedCount}; protected/incomplete: ${preview.preview.protectedCount}.`);
+            for (const candidate of preview.preview.candidates) {
+              io.stdout(`  ${candidate.id}  ${candidate.retentionClass}  ${candidate.sizeBytes}  ${candidate.filename}`);
+            }
+            io.stdout(`Review this exact list, then run: formaspecctl backup prune execute --preview-id ${preview.preview.previewId} --plan-hash ${preview.preview.planHash} --yes`);
+          }
+          return 0;
+        }
+        if (pruneCommand === "execute") {
+          let previewId: string | undefined;
+          let planHash: string | undefined;
+          let json = false;
+          while (arguments_.length > 0) {
+            const option = arguments_.shift();
+            if (option === "--json") json = true;
+            else if (option === "--preview-id") previewId = arguments_.shift();
+            else if (option === "--plan-hash") planHash = arguments_.shift();
+            else throw new Error(`Unexpected backup prune execute option: ${option}`);
+          }
+          if (!assumeYes) throw new Error("backup prune is destructive. Create and review a preview, then rerun execute with explicit --yes authorization.");
+          if (!previewId || !/^backup_prune_preview_[a-f0-9]{32}$/.test(previewId)) throw new Error("--preview-id requires an exact backup-prune preview ID.");
+          if (!planHash || !/^[a-f0-9]{64}$/.test(planHash)) throw new Error("--plan-hash requires the exact preview SHA-256.");
+          const committed = await localApiRequest<{ result: {
+            previewId: string;
+            planHash: string;
+            prunedBackupIds: string[];
+            prunedBytes: number;
+            cleanupPending: boolean;
+          } }>(projectRoot(), `/api/backups/prune/previews/${previewId}/commit`, {
+            method: "POST",
+            body: JSON.stringify({ expectedPlanHash: planHash }),
+          });
+          if (json) io.stdout(JSON.stringify(committed.result));
+          else {
+            io.stdout(`Pruned ${committed.result.prunedBackupIds.length} scheduled backups (${committed.result.prunedBytes} bytes).`);
+            if (committed.result.cleanupPending) io.stdout("Warning: staged filesystem cleanup remains pending; inspect the backup operations audit.");
+          }
+          return 0;
+        }
+        throw new Error("Use: formaspecctl backup prune preview|execute [options]");
+      }
+      if (backupCommand === "create" || backupCommand === "list") {
+        const option = arguments_.shift();
+        if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup ${backupCommand} option: ${option}`);
+        if (arguments_.length > 0) throw new Error(`Unexpected backup ${backupCommand} option: ${arguments_[0]}`);
+        const json = option === "--json";
+        if (backupCommand === "create") {
+          const result = await localApiRequest<{ backup: {
+            id: string;
+            filename: string;
+            status: string;
+            bundleSha256: string | null;
+            verifiedAt: string | null;
+          } }>(projectRoot(), "/api/backups", { method: "POST", body: JSON.stringify({}) });
+          if (json) io.stdout(JSON.stringify(result.backup));
+          else {
+            io.stdout(`Backup created: ${result.backup.filename}`);
+            io.stdout(`Record: ${result.backup.id}; status: ${result.backup.status}; verified: ${result.backup.verifiedAt ?? "not verified"}`);
+            if (result.backup.bundleSha256) io.stdout(`SHA-256: ${result.backup.bundleSha256}`);
+          }
+          return 0;
+        }
+        const result = await localApiRequest<{ backups: Array<{
+          id: string;
+          filename: string;
+          status: string;
+          createdAt: string;
+          verifiedAt: string | null;
+        }> }>(projectRoot(), "/api/backups");
+        if (json) io.stdout(JSON.stringify(result.backups));
+        else if (result.backups.length === 0) io.stdout("No managed FormaSpec backups were found.");
+        else for (const backup of result.backups) {
+          io.stdout(`${backup.id}  ${backup.status}  ${backup.filename}  created=${backup.createdAt}  verified=${backup.verifiedAt ?? "never"}`);
+        }
+        return 0;
+      }
+      if (backupCommand === "restore") {
+        const subject = arguments_.shift();
+        const dockerDependencies: DockerRestoreDependencies = { environment, commandRunner: runner };
+        const reportDockerResult = (result: DockerRestoreResult, json: boolean): void => {
+          if (json) {
+            io.stdout(JSON.stringify(result));
+            return;
+          }
+          if (result.status === "restored") {
+            io.stdout(`Managed backup restored: ${result.backupId}`);
+            io.stdout(`Pre-restore safety backup: ${result.safetyBackupId}`);
+          } else {
+            io.stdout(`Restore operation rolled back safely: ${result.operationId}`);
+          }
+          io.stdout("FormaSpec passed database and deterministic renderer verification and is ready.");
+          io.stdout("All restored agent grants were revoked. Reconnect Codex with 'formaspecctl agent connect codex'.");
+        };
+        if (subject === "status") {
+          const option = arguments_.shift();
+          if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup restore status option: ${option}`);
+          if (arguments_.length > 0) throw new Error(`Unexpected backup restore status option: ${arguments_[0]}`);
+          const status = await (dependencies.dockerRestoreStatus ?? dockerRestoreStatus)(projectRoot(), dockerDependencies);
+          if (option === "--json") io.stdout(JSON.stringify(status));
+          else {
+            if (!status.maintenance.active) io.stdout("Restore maintenance: inactive");
+            else if (!status.maintenance.markerValid) io.stdout("Restore maintenance: active with invalid state; operator inspection is required");
+            else io.stdout(`Restore maintenance: ${status.maintenance.phase} (${status.maintenance.operationId})`);
+            if (status.operation === null) io.stdout("Durable restore operation: not created");
+            else {
+              io.stdout(`Durable restore operation: ${status.operation.phase} (${status.operation.operationId})`);
+              io.stdout(`Target backup: ${status.operation.backupId}; safety backup: ${status.operation.safetyBackupId}`);
+              if (status.operation.errorCode) io.stdout(`Terminal error code: ${status.operation.errorCode}`);
+            }
+            if (!status.workerLock.active) io.stdout("Shared restore worker lock: inactive");
+            else if (!status.workerLock.lockValid) io.stdout("Shared restore worker lock: invalid; operator inspection is required");
+            else {
+              io.stdout(`Shared restore worker lock: active (${status.workerLock.operationId})`);
+              io.stdout(`Worker container: ${status.workerLock.containerId ?? "unavailable"}; acquired: ${status.workerLock.acquiredAt}`);
+            }
+          }
+          return 0;
+        }
+        if (subject === "abort" || subject === "clear-stale-lock") {
+          const option = arguments_.shift();
+          if (option !== undefined && option !== "--json") {
+            throw new Error(`Unexpected backup restore ${subject} option: ${option}`);
+          }
+          if (arguments_.length > 0) throw new Error(`Unexpected backup restore ${subject} option: ${arguments_[0]}`);
+          if (!assumeYes) {
+            throw new Error(`backup restore ${subject} changes recovery state. Rerun with explicit --yes authorization.`);
+          }
+          if (subject === "abort") {
+            const result = await (dependencies.abortDockerRestore ?? abortDockerRestore)(projectRoot(), dockerDependencies);
+            if (option === "--json") io.stdout(JSON.stringify(result));
+            else {
+              io.stdout(`Restore operation aborted before cutover: ${result.operationId}`);
+              io.stdout("Maintenance cleared and the unchanged FormaSpec service is ready.");
+            }
+          } else {
+            const result = await (dependencies.clearStaleDockerRestoreLock ?? clearStaleDockerRestoreLock)(
+              projectRoot(),
+              dockerDependencies,
+            );
+            if (option === "--json") io.stdout(JSON.stringify(result));
+            else {
+              io.stdout(`Cleared proven-stale restore worker lock: ${result.operationId}`);
+              io.stdout("Run 'formaspecctl backup restore resume --yes' to continue recovery.");
+            }
+          }
+          return 0;
+        }
+        if (subject === "resume") {
+          let backupId: string | undefined;
+          let json = false;
+          while (arguments_.length > 0) {
+            const option = arguments_.shift();
+            if (option === "--json") json = true;
+            else if (option === "--backup-id") {
+              const value = arguments_.shift();
+              if (value === undefined) throw new Error("--backup-id requires a managed backup ID.");
+              backupId = assertBackupId(value);
+            } else throw new Error(`Unexpected backup restore resume option: ${option}`);
+          }
+          if (!assumeYes) throw new Error("backup restore resume may complete a database cutover. Rerun with explicit --yes authorization.");
+          await bridge().stop();
+          const result = await (dependencies.resumeDockerRestore ?? resumeDockerRestore)(
+            projectRoot(),
+            backupId,
+            dockerDependencies,
+          );
+          reportDockerResult(result, json);
+          return 0;
+        }
+        if (subject === "rollback") {
+          const option = arguments_.shift();
+          if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup restore rollback option: ${option}`);
+          if (arguments_.length > 0) throw new Error(`Unexpected backup restore rollback option: ${arguments_[0]}`);
+          if (!assumeYes) throw new Error("backup restore rollback restores the verified safety backup. Rerun with explicit --yes authorization.");
+          await bridge().stop();
+          const result = await (dependencies.rollbackDockerRestore ?? rollbackDockerRestore)(
+            projectRoot(),
+            io,
+            dockerDependencies,
+          );
+          reportDockerResult(result, option === "--json");
+          return 0;
+        }
+        if (subject === "--backup-id") {
+          const value = arguments_.shift();
+          if (value === undefined) throw new Error("--backup-id requires a managed backup ID.");
+          const backupId = assertBackupId(value);
+          const option = arguments_.shift();
+          if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup restore option: ${option}`);
+          if (arguments_.length > 0) throw new Error(`Unexpected backup restore option: ${arguments_[0]}`);
+          if (!assumeYes) {
+            throw new Error("backup restore replaces the local Docker data volume. Review the managed backup and rerun with explicit --yes authorization.");
+          }
+          await bridge().stop();
+          const result = await (dependencies.restoreDockerBackup ?? restoreDockerBackup)(
+            projectRoot(),
+            backupId,
+            io,
+            dockerDependencies,
+          );
+          reportDockerResult(result, option === "--json");
+          return 0;
+        }
+
+        const bundle = subject;
+        if (bundle === undefined || bundle.startsWith("--")) {
+          throw new Error("backup restore requires a source-local bundle path or Docker --backup-id.");
+        }
+        const option = arguments_.shift();
+        if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup restore option: ${option}`);
+        const json = option === "--json";
+        if (arguments_.length > 0) throw new Error(`Unexpected backup restore option: ${arguments_[0]}`);
+        if (!assumeYes) {
+          throw new Error("backup restore replaces the source-local ./data directory. Review the bundle and rerun with explicit --yes authorization.");
+        }
+
+        const root = projectRoot();
+        const mode = recordedRuntimeMode(root);
+        assertSourceLocalRestoreMode(root, mode);
+        const resolvedBundle = path.resolve(bundle);
+        const verification = await (dependencies.backupVerifier ?? verifyBackup)(resolvedBundle);
+        if (verification.migrationVersion > CLI_SUPPORTED_DATABASE_VERSION) {
+          throw new Error(
+            `Backup database version ${verification.migrationVersion} is newer than this formaspecctl supports (${CLI_SUPPORTED_DATABASE_VERSION}); no data was changed.`,
+          );
+        }
+
+        const dataDirectory = path.join(root, "data");
+        if (fs.existsSync(dataDirectory)) {
+          const dataStat = fs.lstatSync(dataDirectory);
+          if (!dataStat.isDirectory() || dataStat.isSymbolicLink()) {
+            throw new Error(`The source-local data target must be a real directory: ${dataDirectory}`);
+          }
+        }
+        const restore = dependencies.restoreVerifiedBackup ?? await loadRestoreVerifiedBackup(root);
+
+        await bridge().stop();
+        if (mode === "local" || mode === "dev") {
+          const stopExitCode = await delegate(["stop"]);
+          if (stopExitCode !== 0) throw new Error("FormaSpec did not stop cleanly; restore was cancelled before data mutation.");
+        }
+        if (managedPidIsAlive(root)) {
+          throw new Error("The managed FormaSpec process is still running after stop; restore was cancelled before data mutation.");
+        }
+
+        let preRestoreBackup: string | null = null;
+        if (fs.existsSync(dataDirectory)) {
+          preRestoreBackup = preRestoreBackupPath(root, dependencies.now?.() ?? new Date());
+          const backupExitCode = await delegate(["backup", preRestoreBackup]);
+          if (backupExitCode !== 0) {
+            throw new Error("The pre-restore safety backup failed; restore was cancelled and the active data directory was not replaced.");
+          }
+        }
+
+        await restore(resolvedBundle, dataDirectory, {
+          databaseClosed: true,
+          expectedSource: {
+            sha256: verification.bundleSha256,
+            sizeBytes: verification.bundleSizeBytes,
+          },
+          healthCheck: async (restoredDataDirectory) => {
+            const status = readMigrationStatus(path.join(restoredDataDirectory, "designer.sqlite"));
+            if (status.latestAppliedVersion !== verification.migrationVersion) {
+              throw new Error(
+                `Restored migration ledger ${status.latestAppliedVersion} does not match the verified bundle ${verification.migrationVersion}.`,
+              );
+            }
+            if (status.state === "newer") {
+              throw new Error(`Restored database version ${status.latestAppliedVersion} is newer than this formaspecctl supports.`);
+            }
+          },
+        });
+
+        const result = {
+          restored: true as const,
+          bundle: resolvedBundle,
+          destination: dataDirectory,
+          migrationVersion: verification.migrationVersion,
+          preRestoreBackup,
+          serviceState: "stopped" as const,
+        };
+        if (json) io.stdout(JSON.stringify(result));
+        else {
+          io.stdout(`Backup restored to: ${dataDirectory}`);
+          io.stdout(`Verified migration version: ${verification.migrationVersion}`);
+          if (preRestoreBackup === null) io.stdout("Pre-restore backup: not needed because no existing source-local data directory was present.");
+          else io.stdout(`Pre-restore safety copy: ${preRestoreBackup}`);
+          io.stdout("FormaSpec remains stopped. Inspect the restored data, then run 'formaspecctl start local'.");
+        }
+        return 0;
+      }
+      if (backupCommand !== "verify") throw new Error("Use: formaspecctl backup create|list|schedule|prune|verify|restore [arguments]");
+      const bundle = arguments_.shift();
+      if (bundle === undefined || bundle.startsWith("--")) throw new Error("backup verify requires a bundle path.");
+      const option = arguments_.shift();
+      if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup verify option: ${option}`);
+      const json = option === "--json";
+      if (arguments_.length > 0) throw new Error(`Unexpected backup verify option: ${arguments_[0]}`);
+      const verification = await verifyBackup(path.resolve(bundle));
+      if (json) io.stdout(JSON.stringify(verification));
+      else {
+        io.stdout(`Backup verified: ${path.resolve(bundle)}`);
+        io.stdout(`Database integrity: ${verification.sqliteIntegrity}; migration version: ${verification.migrationVersion}`);
+        io.stdout(`Entries: ${verification.entryCount}; expanded bytes: ${verification.expandedBytes}`);
+      }
+      return 0;
+    }
+
+    if (command === "agent") {
+      const agentCommand = arguments_.shift();
+      if (agentCommand === "config" && arguments_.shift() === "generic") {
+        const hasExplicitUrl = arguments_.some((argument) => argument === "--url" || argument.startsWith("--url="));
+        const status = await bridge().status();
+        return runGenericMcpConfigCli([
+          ...arguments_,
+          ...(hasExplicitUrl ? [] : ["--url", `${status.url}/mcp`]),
+        ], io);
+      }
+      if (agentCommand !== "connect" || arguments_.shift() !== "codex" || arguments_.length > 0) {
+        throw new Error("Use: formaspecctl agent connect codex [--yes] | agent config generic [options]");
+      }
+      const result = await connectCodex({
+        environment,
+        commandRunner: runner,
+        bridge: bridge(),
+        confirm,
+        assumeYes,
+      });
+      reportCodexConnection(result);
+      return 0;
+    }
+
+    throw new Error(`Unknown command: ${command}`);
+  } catch (error) {
+    io.stderr(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}

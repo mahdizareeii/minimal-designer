@@ -8,23 +8,43 @@ import {
   Scan,
   Sparkles,
   Square,
-  Type,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import Moveable from "react-moveable";
 import Selecto from "react-selecto";
 
 import {
-  isNodeContainer,
   linksForNode,
   nodeChildren,
-  parentLayoutMode,
+  parentOf,
   styleForNode,
   type DesignDocument,
   type DesignNode,
   type NodeId,
   type PageId,
 } from "../domain";
+import {
+  autoLayoutDropContainers,
+  autoLayoutInsertionIndex,
+  canonicalizeNodeSelection,
+  chooseAutoLayoutDropContainer,
+  composeDraftTransform,
+  normalizeGeometryNumber,
+  resizePatchForGesture,
+  selectionGestureCapabilities,
+  sameNodeSelection,
+} from "../lib/canvas-geometry";
+import { clientPointInViewport, ViewportTransform } from "../lib/viewport-transform";
 import { activePage, useDesignerStore } from "../store/designer-store";
 
 const iconGlyphs = {
@@ -38,28 +58,43 @@ const iconGlyphs = {
 interface NodeViewProps {
   document: DesignDocument;
   nodeId: NodeId;
+  parentMode?: DesignNode["layout"]["mode"] | null;
   interactive?: boolean;
   prototype?: boolean;
+  highlightedIds?: ReadonlySet<NodeId>;
+  reviewTone?: "before" | "after";
   onPrototypeNavigate?: (pageId: PageId) => void;
 }
 
-export function NodeView({ document, nodeId, interactive = true, prototype = false, onPrototypeNavigate }: NodeViewProps) {
-  const node = document.nodes[nodeId];
-  const selectedIds = useDesignerStore((state) => state.selectedIds);
+function NodeViewComponent({
+  document,
+  nodeId,
+  parentMode = null,
+  interactive = true,
+  prototype = false,
+  highlightedIds,
+  reviewTone,
+  onPrototypeNavigate,
+}: NodeViewProps) {
+  const selected = useDesignerStore((state) => interactive && state.selectedIds.includes(nodeId));
   const select = useDesignerStore((state) => state.select);
+  const node = document.nodes[nodeId];
   if (!node || node.archived) return null;
 
   const children = nodeChildren(node);
   const links = linksForNode(document, nodeId);
   const clickLink = links.find((link) => link.trigger.type === "click");
-  const css = styleForNode(document, node);
+  const css = styleForNode(document, node, { parentLayoutMode: parentMode });
   const className = [
     prototype ? "prototype-node" : "designer-node",
     `is-${node.type}`,
-    selectedIds.includes(node.id) ? "is-selected" : "",
+    selected ? "is-selected" : "",
     node.locked ? "is-locked" : "",
     !node.visible ? "is-hidden" : "",
     links.length > 0 && !prototype ? "has-prototype" : "",
+    reviewTone ? "is-review-node" : "",
+    reviewTone ? `is-review-${reviewTone}` : "",
+    highlightedIds?.has(node.id) ? "is-review-changed" : "",
   ].filter(Boolean).join(" ");
 
   const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -70,15 +105,13 @@ export function NodeView({ document, nodeId, interactive = true, prototype = fal
       }
       return;
     }
-    if (!interactive || node.locked) return;
+    if (!interactive || node.locked || !node.visible) return;
     event.stopPropagation();
     select([node.id], event.shiftKey || event.metaKey);
   };
 
   const content = (() => {
-    if (node.type === "text") {
-      return <>{node.content}</>;
-    }
+    if (node.type === "text") return <>{node.content}</>;
     if (node.type === "image") {
       return node.asset_id
         ? <img src={`/api/assets/${encodeURIComponent(node.asset_id)}`} alt={node.alt} draggable={false} style={{ width: "100%", height: "100%", objectFit: node.object_fit }} />
@@ -93,8 +126,11 @@ export function NodeView({ document, nodeId, interactive = true, prototype = fal
         key={childId}
         document={document}
         nodeId={childId}
+        parentMode={node.layout.mode}
         interactive={interactive}
         prototype={prototype}
+        highlightedIds={highlightedIds}
+        reviewTone={reviewTone}
         onPrototypeNavigate={onPrototypeNavigate}
       />
     ));
@@ -118,6 +154,35 @@ export function NodeView({ document, nodeId, interactive = true, prototype = fal
   );
 }
 
+export const NodeView = memo(NodeViewComponent);
+NodeView.displayName = "NodeView";
+
+function nodeForTarget(document: DesignDocument | null, target: HTMLElement): DesignNode | undefined {
+  const nodeId = target.dataset.nodeId as NodeId | undefined;
+  return nodeId ? document?.nodes[nodeId] : undefined;
+}
+
+function setDraftTranslation(target: HTMLElement, node: DesignNode, translation: readonly [number, number]): void {
+  target.style.transform = composeDraftTransform(node.layout.rotation, translation);
+}
+
+function restoreCanonicalGeometry(target: HTMLElement, node: DesignNode, restoreSize = false): void {
+  target.style.transform = composeDraftTransform(node.layout.rotation);
+  if (restoreSize) {
+    target.style.width = node.layout.width_sizing === "fill"
+      ? "100%"
+      : node.layout.width_sizing === "hug" ? "fit-content" : `${node.layout.width}px`;
+    target.style.height = node.layout.height_sizing === "fill"
+      ? "100%"
+      : node.layout.height_sizing === "hug" ? "fit-content" : `${node.layout.height}px`;
+  }
+}
+
+function parentLayoutModeForNode(document: DesignDocument, nodeId: NodeId): DesignNode["layout"]["mode"] | undefined {
+  const parent = parentOf(document, nodeId);
+  return parent && "node_id" in parent ? document.nodes[parent.node_id]?.layout.mode : undefined;
+}
+
 export function Canvas() {
   const document = useDesignerStore((state) => state.document);
   const activePageId = useDesignerStore((state) => state.activePageId);
@@ -127,60 +192,188 @@ export function Canvas() {
   const tool = useDesignerStore((state) => state.tool);
   const prototypeOpen = useDesignerStore((state) => state.prototypeOpen);
   const select = useDesignerStore((state) => state.select);
-  const updateNode = useDesignerStore((state) => state.updateNode);
+  const updateNodes = useDesignerStore((state) => state.updateNodes);
+  const moveNodeByGesture = useDesignerStore((state) => state.moveNodeByGesture);
   const setZoom = useDesignerStore((state) => state.setZoom);
   const setPan = useDesignerStore((state) => state.setPan);
-  const viewportRef = useRef<HTMLDivElement>(null);
+  const setViewport = useDesignerStore((state) => state.setViewport);
+
+  const [editorRoot, setEditorRoot] = useState<HTMLElement | null>(null);
+  const [canvasLayer, setCanvasLayer] = useState<HTMLDivElement | null>(null);
+  const [interactionOverlay, setInteractionOverlay] = useState<HTMLDivElement | null>(null);
   const [targets, setTargets] = useState<HTMLElement[]>([]);
   const [panning, setPanning] = useState(false);
+  const moveableRef = useRef<Moveable>(null);
+  const geometryFrame = useRef<number | null>(null);
   const pointerStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const spacePressed = useRef(false);
-  const page = activePage(document, activePageId);
-  const canDragSelection = Boolean(document) && selectedIds.every((id) =>
-    (parentLayoutMode(document!, id) ?? "absolute") === "absolute");
-  const selectedNode = document && selectedIds.length === 1 ? document.nodes[selectedIds[0]!] : undefined;
-  const canResizeSelection = canDragSelection
-    && selectedIds.length === 1
-    && selectedNode?.layout.width_sizing === "fixed"
-    && selectedNode.layout.height_sizing === "fixed";
 
-  useEffect(() => {
-    const down = (event: KeyboardEvent) => { if (event.code === "Space" && !event.repeat) spacePressed.current = true; };
-    const up = (event: KeyboardEvent) => { if (event.code === "Space") spacePressed.current = false; };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+  const page = activePage(document, activePageId);
+  const viewportTransform = useMemo(() => new ViewportTransform({ pan, zoom }), [pan, zoom]);
+  const canonicalSelectedIds = useMemo(
+    () => document ? canonicalizeNodeSelection(document, selectedIds, page?.id ?? activePageId) : [],
+    [activePageId, document, page?.id, selectedIds],
+  );
+  const gestureCapabilities = useMemo(
+    () => document
+      ? selectionGestureCapabilities(document, canonicalSelectedIds)
+      : { draggable: false, resizable: false, flow: "none" as const },
+    [canonicalSelectedIds, document],
+  );
+  const canDragSelection = gestureCapabilities.draggable;
+  const canResizeSelection = gestureCapabilities.resizable;
+
+  const scheduleGeometryRefresh = useCallback(() => {
+    if (geometryFrame.current !== null) return;
+    geometryFrame.current = requestAnimationFrame(() => {
+      geometryFrame.current = null;
+      moveableRef.current?.updateRect();
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (geometryFrame.current !== null) cancelAnimationFrame(geometryFrame.current);
   }, []);
 
   useEffect(() => {
-    const root = viewportRef.current;
-    if (!root) return;
-    setTargets(selectedIds.flatMap((id) => {
-      const element = root.querySelector<HTMLElement>(`.designer-node[data-node-id="${CSS.escape(id)}"]`);
-      return element ? [element] : [];
-    }));
-  }, [document, selectedIds, activePageId]);
+    if (!document || !page || !editorRoot || !canvasLayer) return;
+    let cancelled = false;
+    const revision = document.revision;
+    const markInteractive = async () => {
+      await globalThis.document.fonts.ready;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      if (cancelled || !editorRoot.isConnected || !canvasLayer.isConnected) return;
+      const renderedNodeCount = canvasLayer.querySelectorAll(".designer-node[data-node-id]").length;
+      editorRoot.dataset.formaspecEditorReady = "true";
+      editorRoot.dataset.formaspecReadyRevision = String(revision);
+      editorRoot.dataset.formaspecRenderedNodeCount = String(renderedNodeCount);
+      performance.clearMarks("formaspec:editor-interactive");
+      performance.mark("formaspec:editor-interactive", {
+        detail: {
+          designId: document.id,
+          pageId: page.id,
+          revision,
+          renderedNodeCount,
+        },
+      });
+    };
+    void markInteractive();
+    return () => { cancelled = true; };
+  }, [canvasLayer, document, editorRoot, page]);
 
-  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+  useEffect(() => {
+    const down = (event: KeyboardEvent) => {
+      if (event.code === "Space" && !event.repeat) spacePressed.current = true;
+    };
+    const up = (event: KeyboardEvent) => {
+      if (event.code === "Space") spacePressed.current = false;
+    };
+    const blur = () => { spacePressed.current = false; };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (document && !sameNodeSelection(selectedIds, canonicalSelectedIds)) select(canonicalSelectedIds);
+  }, [canonicalSelectedIds, document, select, selectedIds]);
+
+  useLayoutEffect(() => {
+    if (!canvasLayer) {
+      setTargets([]);
+      return;
+    }
+    const elementsById = new Map<NodeId, HTMLElement>();
+    for (const element of canvasLayer.querySelectorAll<HTMLElement>(".designer-node[data-node-id]")) {
+      const nodeId = element.dataset.nodeId as NodeId | undefined;
+      if (nodeId) elementsById.set(nodeId, element);
+    }
+    const next = canonicalSelectedIds.flatMap((id) => {
+      const element = elementsById.get(id);
+      return element ? [element] : [];
+    });
+    setTargets((current) => current.length === next.length && current.every((target, index) => target === next[index])
+      ? current
+      : next);
+  }, [activePageId, canonicalSelectedIds, canvasLayer, document]);
+
+  useLayoutEffect(() => {
+    scheduleGeometryRefresh();
+  }, [activePageId, canvasLayer, document, interactionOverlay, pan.x, pan.y, scheduleGeometryRefresh, targets, zoom]);
+
+  useEffect(() => {
+    if (!editorRoot || !canvasLayer) return;
+    const refresh = () => scheduleGeometryRefresh();
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(refresh);
+    resizeObserver?.observe(editorRoot);
+    resizeObserver?.observe(canvasLayer);
+    targets.forEach((target) => resizeObserver?.observe(target));
+
+    const mutationObserver = typeof MutationObserver === "undefined" ? null : new MutationObserver(refresh);
+    mutationObserver?.observe(canvasLayer, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+
+    editorRoot.addEventListener("scroll", refresh, true);
+    canvasLayer.addEventListener("load", refresh, true);
+    canvasLayer.addEventListener("error", refresh, true);
+    window.addEventListener("resize", refresh);
+    window.addEventListener("scroll", refresh, true);
+
+    const fonts = (globalThis.document as Document & { fonts?: FontFaceSet }).fonts;
+    let active = true;
+    if (fonts) {
+      void fonts.ready.then(() => { if (active) refresh(); });
+      fonts.addEventListener("loadingdone", refresh);
+      fonts.addEventListener("loadingerror", refresh);
+    }
+
+    for (const image of canvasLayer.querySelectorAll("img")) {
+      if (typeof image.decode === "function") void image.decode().then(refresh).catch(refresh);
+    }
+
+    return () => {
+      active = false;
+      resizeObserver?.disconnect();
+      mutationObserver?.disconnect();
+      editorRoot.removeEventListener("scroll", refresh, true);
+      canvasLayer.removeEventListener("load", refresh, true);
+      canvasLayer.removeEventListener("error", refresh, true);
+      window.removeEventListener("resize", refresh);
+      window.removeEventListener("scroll", refresh, true);
+      fonts?.removeEventListener("loadingdone", refresh);
+      fonts?.removeEventListener("loadingerror", refresh);
+    };
+  }, [canvasLayer, editorRoot, scheduleGeometryRefresh, targets]);
+
+  const handleWheel = (event: React.WheelEvent<HTMLElement>) => {
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) {
-      const rect = event.currentTarget.getBoundingClientRect();
-      const cursorX = event.clientX - rect.left;
-      const cursorY = event.clientY - rect.top;
-      const nextZoom = Math.max(.12, Math.min(3.2, zoom * Math.exp(-event.deltaY * .002)));
-      const worldX = (cursorX - pan.x) / zoom;
-      const worldY = (cursorY - pan.y) / zoom;
-      setZoom(nextZoom);
-      setPan({ x: cursorX - worldX * nextZoom, y: cursorY - worldY * nextZoom });
+      const cursor = clientPointInViewport(
+        { x: event.clientX, y: event.clientY },
+        event.currentTarget.getBoundingClientRect(),
+      );
+      const next = viewportTransform.withZoomAt(cursor, zoom * Math.exp(-event.deltaY * .002));
+      setViewport({ pan: next.pan, zoom: next.zoom });
     } else {
       setPan({ x: pan.x - event.deltaX, y: pan.y - event.deltaY });
     }
   };
 
-  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const background = event.target === event.currentTarget || (event.target as HTMLElement).classList.contains("canvas-world");
+  const handlePointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+    const target = event.target as Element;
+    const background = !target.closest(".designer-node, .moveable-control-box, .canvas-floatbar");
     const shouldPan = tool === "hand" || spacePressed.current || event.button === 1;
     if (shouldPan) {
+      event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
       pointerStart.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
       setPanning(true);
@@ -189,7 +382,7 @@ export function Canvas() {
     if (background) select([]);
   };
 
-  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const handlePointerMove = (event: ReactPointerEvent<HTMLElement>) => {
     if (!panning) return;
     setPan({
       x: pointerStart.current.panX + event.clientX - pointerStart.current.x,
@@ -197,52 +390,122 @@ export function Canvas() {
     });
   };
 
-  const stopPanning = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (panning && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  const stopPanning = (event: ReactPointerEvent<HTMLElement>) => {
+    if (panning && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     setPanning(false);
+    scheduleGeometryRefresh();
   };
 
   const fitCanvas = useCallback(() => {
-    if (!document || !page || !viewportRef.current || page.children.length === 0) return;
-    const frames = page.children.map((id) => document.nodes[id]).filter(Boolean) as DesignNode[];
+    if (!document || !page || !editorRoot || page.children.length === 0) return;
+    const frames = page.children
+      .map((id) => document.nodes[id])
+      .filter((node): node is DesignNode => Boolean(node && !node.archived && node.visible));
+    if (frames.length === 0) return;
     const left = Math.min(...frames.map((node) => node.layout.x));
     const top = Math.min(...frames.map((node) => node.layout.y));
     const right = Math.max(...frames.map((node) => node.layout.x + node.layout.width));
     const bottom = Math.max(...frames.map((node) => node.layout.y + node.layout.height));
-    const rect = viewportRef.current.getBoundingClientRect();
-    const nextZoom = Math.max(.12, Math.min(1.15, Math.min((rect.width - 140) / (right - left), (rect.height - 140) / (bottom - top))));
-    setZoom(nextZoom);
-    setPan({
-      x: (rect.width - (right - left) * nextZoom) / 2 - left * nextZoom,
-      y: (rect.height - (bottom - top) * nextZoom) / 2 - top * nextZoom,
+    const rect = editorRoot.getBoundingClientRect();
+    const nextZoom = Math.max(.12, Math.min(1.15, Math.min(
+      (rect.width - 140) / (right - left),
+      (rect.height - 140) / (bottom - top),
+    )));
+    setViewport({
+      zoom: nextZoom,
+      pan: {
+        x: (rect.width - (right - left) * nextZoom) / 2 - left * nextZoom,
+        y: (rect.height - (bottom - top) * nextZoom) / 2 - top * nextZoom,
+      },
     });
-  }, [document, page, setPan, setZoom]);
+  }, [document, editorRoot, page, setViewport]);
 
+  const fitCanvasRef = useRef(fitCanvas);
+  useLayoutEffect(() => { fitCanvasRef.current = fitCanvas; }, [fitCanvas]);
   useEffect(() => {
-    if (document && page) requestAnimationFrame(fitCanvas);
-  }, [document?.id, page?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!document || !page) return;
+    const frame = requestAnimationFrame(() => fitCanvasRef.current());
+    return () => cancelAnimationFrame(frame);
+  }, [document?.id, page?.id]);
 
-  const commitDrag = (target: HTMLElement, delta: readonly number[]) => {
-    const nodeId = target.dataset.nodeId as NodeId | undefined;
-    const node = nodeId ? document?.nodes[nodeId] : undefined;
-    target.style.transform = "";
-    if (!node || (!delta[0] && !delta[1])) return;
-    updateNode(node.id, { layout: { x: Math.round(node.layout.x + delta[0]!), y: Math.round(node.layout.y + delta[1]!) } });
+  const dragUpdate = (target: HTMLElement, delta: readonly number[]) => {
+    const node = nodeForTarget(document, target);
+    if (!node) return null;
+    restoreCanonicalGeometry(target, node);
+    const dx = normalizeGeometryNumber(delta[0] ?? 0);
+    const dy = normalizeGeometryNumber(delta[1] ?? 0);
+    if (dx === 0 && dy === 0) return null;
+    return {
+      nodeId: node.id,
+      patch: {
+        layout: {
+          x: normalizeGeometryNumber(node.layout.x + dx),
+          y: normalizeGeometryNumber(node.layout.y + dy),
+        },
+      },
+    };
   };
+
+  const resolveAutoLayoutDrop = useCallback((node: DesignNode, point: { x: number; y: number }) => {
+    if (!document || !canvasLayer) return null;
+    const currentParent = parentOf(document, node.id);
+    if (!currentParent || !("node_id" in currentParent)) return null;
+    const currentParentNode = document.nodes[currentParent.node_id];
+    if (!currentParentNode || currentParentNode.layout.mode === "absolute") return null;
+
+    const elementsById = new Map<NodeId, HTMLElement>();
+    for (const element of canvasLayer.querySelectorAll<HTMLElement>(".designer-node[data-node-id]")) {
+      const nodeId = element.dataset.nodeId as NodeId | undefined;
+      if (nodeId) elementsById.set(nodeId, element);
+    }
+    const candidates = autoLayoutDropContainers(document, node.id).flatMap((descriptor) => {
+      const element = elementsById.get(descriptor.nodeId);
+      return element ? [{ ...descriptor, rect: element.getBoundingClientRect() }] : [];
+    });
+    const destination = chooseAutoLayoutDropContainer(candidates, point, currentParent.node_id);
+    if (!destination) return null;
+    const destinationNode = document.nodes[destination.nodeId];
+    if (!destinationNode) return null;
+    const destinationChildren = nodeChildren(destinationNode).filter((childId) => childId !== node.id);
+    const siblingGeometry = destinationChildren.flatMap((childId, index) => {
+      const sibling = document.nodes[childId];
+      const element = elementsById.get(childId);
+      if (!sibling || sibling.archived || !sibling.visible || sibling.locked || !element) return [];
+      return [{ index, rect: element.getBoundingClientRect() }];
+    });
+    return {
+      parent: { node_id: destination.nodeId } as const,
+      index: autoLayoutInsertionIndex(
+        destination.mode,
+        destination.wrap,
+        siblingGeometry,
+        point,
+        destinationChildren.length,
+      ),
+    };
+  }, [canvasLayer, document]);
 
   const frameLabels = useMemo(() => {
     if (!document || !page) return [];
     return page.children.flatMap((id) => {
       const node = document.nodes[id];
-      if (!node || node.archived) return [];
+      if (!node || node.archived || !node.visible) return [];
       return [{ id, name: node.name, width: node.layout.width, height: node.layout.height, x: node.layout.x, y: node.layout.y }];
     });
   }, [document, page]);
 
+  const elementGuidelines = useMemo(() => {
+    if (!canvasLayer || targets.length === 0) return [];
+    return [...canvasLayer.querySelectorAll<HTMLElement>(".designer-node:not(.is-hidden)")].filter((candidate) =>
+      !targets.some((target) => target === candidate || target.contains(candidate)));
+  }, [canvasLayer, document, targets]);
+
   return (
     <section
-      ref={viewportRef}
-      className={`canvas-viewport ${panning ? "is-panning" : ""}`}
+      ref={setEditorRoot}
+      className={`canvas-viewport canvas-editor-root ${panning ? "is-panning" : ""}`}
       data-tool={tool}
       onWheel={handleWheel}
       onPointerDown={handlePointerDown}
@@ -251,78 +514,128 @@ export function Canvas() {
       onPointerCancel={stopPanning}
     >
       {document && page ? (
-        <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
+        <div
+          ref={setCanvasLayer}
+          className="canvas-world canvas-layer"
+          style={{ transform: viewportTransform.toCssTransform() }}
+        >
           {frameLabels.map((frame) => (
             <div key={`label-${frame.id}`} className="canvas-frame-label" style={{ left: frame.x, top: frame.y - 24 }}>
               {frame.name} <span>{Math.round(frame.width)} × {Math.round(frame.height)}</span>
             </div>
           ))}
-          {page.children.map((nodeId) => <NodeView key={nodeId} document={document} nodeId={nodeId} />)}
+          {page.children.map((nodeId) => (
+            <NodeView key={nodeId} document={document} nodeId={nodeId} parentMode={null} />
+          ))}
         </div>
       ) : (
         <div className="canvas-empty"><div><span><Scan size={23} /></span><strong>No frame on this page</strong><small>Add a responsive frame to begin designing.</small></div></div>
       )}
 
-      {document && viewportRef.current && tool === "select" && !prototypeOpen && (
-        <Selecto
-          container={viewportRef.current}
-          dragContainer={viewportRef.current}
-          selectableTargets={[".designer-node:not(.is-locked)"]}
-          selectByClick
-          selectFromInside={false}
-          continueSelect={false}
-          toggleContinueSelect={["shift"]}
-          hitRate={12}
-          onSelectEnd={(event) => {
-            const ids = event.selected.flatMap((element) => {
-              const id = (element as HTMLElement).dataset.nodeId as NodeId | undefined;
-              return id ? [id] : [];
-            });
-            select(ids, event.inputEvent.shiftKey || event.inputEvent.metaKey);
-          }}
-        />
-      )}
+      <div ref={setInteractionOverlay} className="canvas-interaction-overlay">
+        {document && canvasLayer && editorRoot && interactionOverlay && tool === "select" && !prototypeOpen && (
+          <Selecto
+            container={interactionOverlay}
+            rootContainer={editorRoot.ownerDocument.body}
+            dragContainer={editorRoot}
+            boundContainer={editorRoot}
+            selectableTargets={[() => [...canvasLayer.querySelectorAll<HTMLElement>(".designer-node:not(.is-locked):not(.is-hidden)")]]}
+            selectByClick
+            selectFromInside={false}
+            continueSelect={false}
+            toggleContinueSelect={["shift"]}
+            hitRate={12}
+            onSelectEnd={(event) => {
+              const ids = event.selected.flatMap((element) => {
+                const id = (element as HTMLElement).dataset.nodeId as NodeId | undefined;
+                return id ? [id] : [];
+              });
+              const inputEvent = event.inputEvent as MouseEvent | PointerEvent;
+              select(ids, inputEvent.shiftKey || inputEvent.metaKey);
+            }}
+          />
+        )}
 
-      {document && targets.length > 0 && tool === "select" && !prototypeOpen && (
-        <Moveable
-          target={targets}
-          container={viewportRef.current}
-          origin={false}
-          draggable={canDragSelection}
-          resizable={canResizeSelection}
-          snappable
-          snapThreshold={6}
-          elementGuidelines={viewportRef.current ? [...viewportRef.current.querySelectorAll<HTMLElement>(".designer-node")].filter((item) => !targets.includes(item)) : []}
-          bounds={undefined}
-          throttleDrag={1}
-          throttleResize={1}
-          onDrag={(event) => { event.target.style.transform = event.transform; }}
-          onDragEnd={(event) => commitDrag(event.target as HTMLElement, event.lastEvent?.beforeTranslate ?? [0, 0])}
-          onDragGroup={(event) => event.events.forEach((item) => { (item.target as HTMLElement).style.transform = item.transform; })}
-          onDragGroupEnd={(event) => event.events.forEach((item) => commitDrag(item.target as HTMLElement, item.lastEvent?.beforeTranslate ?? [0, 0]))}
-          onResize={(event) => {
-            event.target.style.width = `${event.width}px`;
-            event.target.style.height = `${event.height}px`;
-            event.target.style.transform = event.drag.transform;
-          }}
-          onResizeEnd={(event) => {
-            const target = event.target as HTMLElement;
-            const nodeId = target.dataset.nodeId as NodeId | undefined;
-            const node = nodeId ? document.nodes[nodeId] : undefined;
-            const last = event.lastEvent;
-            target.style.transform = "";
-            if (!node || !last) return;
-            updateNode(node.id, {
-              layout: {
-                x: Math.round(node.layout.x + last.drag.beforeTranslate[0]),
-                y: Math.round(node.layout.y + last.drag.beforeTranslate[1]),
-                width: Math.max(1, Math.round(last.width)),
-                height: Math.max(1, Math.round(last.height)),
-              },
-            });
-          }}
-        />
-      )}
+        {document && editorRoot && interactionOverlay && targets.length > 0 && tool === "select" && !prototypeOpen && (
+          <Moveable
+            ref={moveableRef}
+            target={targets}
+            container={interactionOverlay}
+            rootContainer={editorRoot.ownerDocument.body}
+            dragContainer={editorRoot}
+            origin={false}
+            draggable={canDragSelection}
+            resizable={canResizeSelection}
+            snappable
+            snapThreshold={6}
+            elementGuidelines={elementGuidelines}
+            bounds={undefined}
+            throttleDrag={0}
+            throttleResize={0}
+            useResizeObserver
+            useMutationObserver
+            useAccuratePosition
+            onDrag={(event) => {
+              const node = nodeForTarget(document, event.target as HTMLElement);
+              if (node) setDraftTranslation(event.target as HTMLElement, node, event.beforeTranslate as [number, number]);
+            }}
+            onDragEnd={(event) => {
+              const target = event.target as HTMLElement;
+              const node = nodeForTarget(document, target);
+              if (node && parentLayoutModeForNode(document, node.id) !== "absolute"
+                && parentLayoutModeForNode(document, node.id) !== undefined) {
+                const drop = event.lastEvent
+                  ? resolveAutoLayoutDrop(node, { x: event.clientX, y: event.clientY })
+                  : null;
+                restoreCanonicalGeometry(target, node);
+                if (drop) moveNodeByGesture(node.id, drop.parent, drop.index);
+              } else {
+                const update = dragUpdate(target, event.lastEvent?.beforeTranslate ?? [0, 0]);
+                if (update) updateNodes([update]);
+              }
+              scheduleGeometryRefresh();
+            }}
+            onDragGroup={(event) => event.events.forEach((item) => {
+              const target = item.target as HTMLElement;
+              const node = nodeForTarget(document, target);
+              if (node) setDraftTranslation(target, node, item.beforeTranslate as [number, number]);
+            })}
+            onDragGroupEnd={(event) => {
+              const updates = event.events.flatMap((item) => {
+                const update = dragUpdate(item.target as HTMLElement, item.lastEvent?.beforeTranslate ?? [0, 0]);
+                return update ? [update] : [];
+              });
+              if (updates.length > 0) updateNodes(updates);
+              scheduleGeometryRefresh();
+            }}
+            onResize={(event) => {
+              const target = event.target as HTMLElement;
+              const node = nodeForTarget(document, target);
+              if (!node) return;
+              target.style.width = `${event.width}px`;
+              target.style.height = `${event.height}px`;
+              setDraftTranslation(target, node, event.drag.beforeTranslate as [number, number]);
+            }}
+            onResizeEnd={(event) => {
+              const target = event.target as HTMLElement;
+              const node = nodeForTarget(document, target);
+              const last = event.lastEvent;
+              if (!node) return;
+              restoreCanonicalGeometry(target, node, true);
+              if (last) {
+                const patch = resizePatchForGesture(node, parentLayoutModeForNode(document, node.id), {
+                  width: last.width,
+                  height: last.height,
+                  direction: last.direction ?? [1, 1],
+                  translation: last.drag.beforeTranslate,
+                });
+                if (patch) updateNodes([{ nodeId: node.id, patch }]);
+              }
+              scheduleGeometryRefresh();
+            }}
+          />
+        )}
+      </div>
 
       <div className="canvas-floatbar">
         <button onClick={() => setZoom(zoom / 1.18)} aria-label="Zoom out"><Minus size={14} /></button>
@@ -345,7 +658,7 @@ export function PrototypeCanvas({ document, pageId, onNavigate }: { document: De
       className="prototype-frame"
       style={{ width: root.layout.width, height: root.layout.height, background: typeof page.background === "string" ? page.background : "#fff" } as CSSProperties}
     >
-      <NodeView document={document} nodeId={rootId} interactive={false} prototype onPrototypeNavigate={onNavigate} />
+      <NodeView document={document} nodeId={rootId} parentMode={null} interactive={false} prototype onPrototypeNavigate={onNavigate} />
     </div>
   );
 }

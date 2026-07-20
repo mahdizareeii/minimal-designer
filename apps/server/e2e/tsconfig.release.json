@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "exactOptionalPropertyTypes": false,
+    "noEmit": true,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "./product-manager-backup-restore.spec.ts",
+    "./revision-inspect-immutability.spec.ts",
+    "../playwright.release.config.ts"
+  ]
+}

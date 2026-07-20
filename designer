@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Minimal Designer launcher. Compatible with the Bash 3.2 shipped by macOS.
+# FormaSpec compatibility launcher. Compatible with the Bash 3.2 shipped by macOS.
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -37,6 +37,61 @@ PNPM_MODE=""
 OS_KIND=""
 ARCH_KIND=""
 SERVER_ENV_ERROR=""
+
+resolve_formaspecctl_node() {
+  local candidate=""
+  candidate="$(command -v node 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ]; then
+    for candidate in \
+      "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" \
+      "$HOME/.codex/runtime/dependencies/node/bin/node"
+    do
+      if [ -x "$candidate" ]; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+delegate_to_formaspecctl_if_available() {
+  [ "${FORMASPEC_LEGACY_DELEGATE:-0}" != "1" ] || return 0
+  [ "$#" -gt 0 ] || return 0
+  local original_args=("$@")
+  local command="" candidate="" cli_entry="$PROJECT_ROOT/apps/cli/dist/index.js"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes|--no-open) shift ;;
+      --dry-run) return 0 ;;
+      *) command="$1"; shift; break ;;
+    esac
+  done
+  case "$command" in
+    install|doctor|status|start|stop|restart|migrate|agent|audit|support-bundle) ;;
+    backup)
+      case "${1:-}" in create|list|verify|restore|schedule|prune) ;; *) return 0 ;; esac
+      ;;
+    *) return 0 ;;
+  esac
+  candidate="$(resolve_formaspecctl_node || true)"
+  [ -n "$candidate" ] || return 0
+  if [ -f "$cli_entry" ]; then
+    exec env FORMASPEC_LEGACY_DELEGATE=1 "$candidate" "$cli_entry" "${original_args[@]}"
+  fi
+  if [ -f "$PROJECT_ROOT/node_modules/tsx/dist/cli.mjs" ] && [ -f "$PROJECT_ROOT/apps/cli/src/index.ts" ]; then
+    exec env FORMASPEC_LEGACY_DELEGATE=1 "$candidate" "$PROJECT_ROOT/node_modules/tsx/dist/cli.mjs" "$PROJECT_ROOT/apps/cli/src/index.ts" "${original_args[@]}"
+  fi
+}
+
+# Once the FormaSpec CLI is available, supported compatibility commands are
+# delegated to it. The CLI sets FORMASPEC_LEGACY_DELEGATE while calling back
+# into the proven launcher implementation, preventing recursion.
+delegate_to_formaspecctl_if_available "$@"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   C_RESET=$'\033[0m'
@@ -295,12 +350,20 @@ port_owner() {
   fi
 }
 
-curl_ok() { command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 "$1" >/dev/null 2>&1; }
+curl_ok() {
+  local url="$1" host_header="${2:-}"
+  command -v curl >/dev/null 2>&1 || return 1
+  if [ -n "$host_header" ]; then
+    curl -fsS --max-time 2 -H "Host: $host_header" "$url" >/dev/null 2>&1
+  else
+    curl -fsS --max-time 2 "$url" >/dev/null 2>&1
+  fi
+}
 
 wait_for_url() {
-  local url="$1" timeout_seconds="${2:-90}" elapsed=0
+  local url="$1" timeout_seconds="${2:-90}" host_header="${3:-}" elapsed=0
   while [ "$elapsed" -lt "$timeout_seconds" ]; do
-    if curl_ok "$url"; then return 0; fi
+    if curl_ok "$url" "$host_header"; then return 0; fi
     sleep 1
     elapsed=$((elapsed + 1))
   done
@@ -429,11 +492,30 @@ ensure_docker() {
 compose() {
   local env_file="$1"
   shift
+  local access="" public_url="" allowed_host=""
+  access="$(env_value "$env_file" DESIGNER_SERVER_ACCESS || true)"
+  public_url="$(env_value "$env_file" PUBLIC_BASE_URL || true)"
+  allowed_host="${public_url#https://}"
   (
     cd "$PROJECT_ROOT"
-    env -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
-      -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES \
-      docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+    if [ "$access" = "proxy" ]; then
+      env -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
+        -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES \
+        APP_MODE=server FORMASPEC_CONTAINER_LOCAL=false FORMASPEC_ALLOWED_HOSTS="$allowed_host" \
+        FORMASPEC_TRUSTED_PROXIES="127.0.0.1,::1,172.16.0.0/12" DESIGNER_CORS_ORIGINS="$public_url" \
+        docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+    elif [ "$access" = "ssh" ]; then
+      env -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
+        -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES -u FORMASPEC_ALLOWED_HOSTS \
+        -u FORMASPEC_TRUSTED_PROXIES -u DESIGNER_CORS_ORIGINS \
+        APP_MODE=local FORMASPEC_CONTAINER_LOCAL=true \
+        docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+    else
+      env -u APP_MODE -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
+        -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES -u FORMASPEC_CONTAINER_LOCAL \
+        -u FORMASPEC_ALLOWED_HOSTS -u FORMASPEC_TRUSTED_PROXIES -u DESIGNER_CORS_ORIGINS \
+        docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
+    fi
   )
 }
 
@@ -572,7 +654,7 @@ server_env_mode() {
 }
 
 validate_server_env_file() {
-  local file="$1" access bind port public_url auth_mode token header mode
+  local file="$1" access app_mode container_local bind port public_url auth_mode token header mode trusted_proxies allowed_hosts cors_origins
   SERVER_ENV_ERROR=""
   if [ ! -f "$file" ]; then SERVER_ENV_ERROR="Server configuration is missing: $file"; return 1; fi
   mode="$(server_env_mode "$file")"
@@ -581,21 +663,29 @@ validate_server_env_file() {
     return 1
   fi
   access="$(env_value "$file" DESIGNER_SERVER_ACCESS || true)"
+  app_mode="$(env_value "$file" APP_MODE || true)"
+  container_local="$(env_value "$file" FORMASPEC_CONTAINER_LOCAL || true)"
   bind="$(env_value "$file" BIND_ADDRESS || true)"
   port="$(env_value "$file" PORT || true)"
   public_url="$(env_value "$file" PUBLIC_BASE_URL || true)"
   auth_mode="$(env_value "$file" AUTH_MODE || true)"
   token="$(env_value "$file" DESIGNER_TOKEN || true)"
   header="$(env_value "$file" TRUSTED_USER_HEADER || true)"
+  trusted_proxies="$(env_value "$file" FORMASPEC_TRUSTED_PROXIES || true)"
+  allowed_hosts="$(env_value "$file" FORMASPEC_ALLOWED_HOSTS || true)"
+  cors_origins="$(env_value "$file" DESIGNER_CORS_ORIGINS || true)"
   case "$access" in ssh|proxy) ;; *) SERVER_ENV_ERROR="DESIGNER_SERVER_ACCESS must be exactly 'ssh' or 'proxy'."; return 1 ;; esac
   if [ "$bind" != "127.0.0.1" ]; then SERVER_ENV_ERROR="BIND_ADDRESS must be 127.0.0.1 so the application is never exposed directly."; return 1; fi
   if ! validate_port "$port"; then SERVER_ENV_ERROR="PORT must be an integer from 1 to 65535."; return 1; fi
   if ! validate_header "$header"; then SERVER_ENV_ERROR="TRUSTED_USER_HEADER is missing or invalid."; return 1; fi
   if [ "$access" = "proxy" ]; then
+    if { [ -n "$app_mode" ] && [ "$app_mode" != "server" ]; } || { [ -n "$container_local" ] && [ "$container_local" != "false" ]; }; then SERVER_ENV_ERROR="Proxy mode requires APP_MODE=server and FORMASPEC_CONTAINER_LOCAL=false."; return 1; fi
     if [ "$auth_mode" != "trusted-header" ]; then SERVER_ENV_ERROR="Proxy mode requires AUTH_MODE=trusted-header."; return 1; fi
     if ! validate_public_url "$public_url"; then SERVER_ENV_ERROR="Proxy mode requires PUBLIC_BASE_URL to be a valid HTTPS origin."; return 1; fi
     if ! validate_token "$token"; then SERVER_ENV_ERROR="Proxy mode requires a valid bearer token of at least 16 safe characters."; return 1; fi
+    if [ -n "$trusted_proxies$allowed_hosts$cors_origins" ] && { [ -z "$trusted_proxies" ] || [ -z "$allowed_hosts" ] || [ "$cors_origins" != "$public_url" ]; }; then SERVER_ENV_ERROR="Proxy mode requires explicit trusted proxies, allowed hosts, and matching CORS origin."; return 1; fi
   else
+    if { [ -n "$app_mode" ] && [ "$app_mode" != "local" ]; } || { [ -n "$container_local" ] && [ "$container_local" != "true" ]; }; then SERVER_ENV_ERROR="SSH-only mode requires APP_MODE=local and FORMASPEC_CONTAINER_LOCAL=true."; return 1; fi
     if [ "$auth_mode" != "none" ]; then SERVER_ENV_ERROR="SSH-only mode requires AUTH_MODE=none."; return 1; fi
     if [ "$public_url" != "http://127.0.0.1:$port" ]; then SERVER_ENV_ERROR="SSH-only mode requires PUBLIC_BASE_URL=http://127.0.0.1:$port."; return 1; fi
     if [ -n "$token" ]; then SERVER_ENV_ERROR="SSH-only mode must not contain a bearer token."; return 1; fi
@@ -610,6 +700,8 @@ write_docker_env() {
   ensure_runtime_dirs
   umask 077
   {
+    printf 'APP_MODE=local\n'
+    printf 'FORMASPEC_CONTAINER_LOCAL=true\n'
     printf 'BIND_ADDRESS=127.0.0.1\n'
     printf 'PORT=%s\n' "$port"
     printf 'PUBLIC_BASE_URL=http://127.0.0.1:%s\n' "$port"
@@ -644,10 +736,17 @@ write_server_env() {
     printf 'BIND_ADDRESS=127.0.0.1\n'
     printf 'PORT=%s\n' "$port"
     if [ "$access" = "proxy" ]; then
+      printf 'APP_MODE=server\n'
+      printf 'FORMASPEC_CONTAINER_LOCAL=false\n'
       printf 'PUBLIC_BASE_URL=%s\n' "$public_url"
       printf 'AUTH_MODE=trusted-header\n'
       printf 'DESIGNER_TOKEN=%s\n' "$token"
+      printf 'FORMASPEC_ALLOWED_HOSTS=%s\n' "${public_url#https://}"
+      printf 'FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12\n'
+      printf 'DESIGNER_CORS_ORIGINS=%s\n' "$public_url"
     else
+      printf 'APP_MODE=local\n'
+      printf 'FORMASPEC_CONTAINER_LOCAL=true\n'
       printf 'PUBLIC_BASE_URL=http://127.0.0.1:%s\n' "$port"
       printf 'AUTH_MODE=none\n'
       printf 'DESIGNER_TOKEN=\n'
@@ -663,6 +762,8 @@ write_server_env() {
 native_environment() {
   local api_port="$1" web_port="$2"
   export HOST=127.0.0.1
+  export APP_MODE=local
+  export FORMASPEC_CONTAINER_LOCAL=false
   export PORT="$api_port"
   export DATA_DIR="$PROJECT_ROOT/data"
   export PUBLIC_BASE_URL="http://127.0.0.1:$api_port"
@@ -756,8 +857,8 @@ run_native_child() {
 start_native_background() {
   local api_port="$1" no_open="$2"
   validate_port "$api_port" || die "Invalid port: $api_port"
-  if [ "$DRY_RUN" != "1" ] && curl_ok "http://127.0.0.1:$api_port/ready"; then
-    pass "Minimal Designer is already running on port $api_port."
+  if [ "$DRY_RUN" != "1" ] && curl_ok "http://127.0.0.1:$api_port/health/ready"; then
+    pass "FormaSpec is already running on port $api_port."
     [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
     return 0
   fi
@@ -778,14 +879,14 @@ start_native_background() {
   write_runtime_state "local" "$api_port" 0 "http://127.0.0.1:$api_port" ""
   release_lock
   info "Waiting for the production server..."
-  if ! wait_for_url "http://127.0.0.1:$api_port/ready" 90; then
+  if ! wait_for_url "http://127.0.0.1:$api_port/health/ready" 90; then
     fail "Local server did not become ready. Recent log output:"
     tail -n 80 "$LOCAL_LOG" >&2 || true
     stop_native || true
     clear_runtime_state
     exit 1
   fi
-  pass "Minimal Designer is running at http://127.0.0.1:$api_port"
+  pass "FormaSpec is running at http://127.0.0.1:$api_port"
   [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
 }
 
@@ -824,22 +925,22 @@ start_docker_local() {
   write_docker_env "$port"
   acquire_lock
   if [ "$no_build" = "1" ]; then
-    if ! run_compose "$DOCKER_ENV" up -d; then release_lock; die "Docker Compose could not start Minimal Designer."; fi
+    if ! run_compose "$DOCKER_ENV" up -d; then release_lock; die "Docker Compose could not start FormaSpec."; fi
   else
-    if ! run_compose "$DOCKER_ENV" up -d --build; then release_lock; die "Docker Compose could not build/start Minimal Designer."; fi
+    if ! run_compose "$DOCKER_ENV" up -d --build; then release_lock; die "Docker Compose could not build/start FormaSpec."; fi
   fi
   write_runtime_state "docker" "$port" 0 "http://127.0.0.1:$port" "$DOCKER_ENV"
   release_lock
   if [ "$DRY_RUN" = "1" ]; then return 0; fi
   info "Waiting for the Docker service..."
-  if ! wait_for_url "http://127.0.0.1:$port/ready" 150; then
+  if ! wait_for_url "http://127.0.0.1:$port/health/ready" 150; then
     fail "Docker service did not become ready."
     compose "$DOCKER_ENV" logs --tail 100 designer >&2 || true
     compose "$DOCKER_ENV" down >/dev/null 2>&1 || true
     clear_runtime_state
     exit 1
   fi
-  pass "Minimal Designer is running at http://127.0.0.1:$port"
+  pass "FormaSpec is running at http://127.0.0.1:$port"
   [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$port"
 }
 
@@ -889,11 +990,15 @@ start_server() {
   local no_build="$1"
   [ -f "$SERVER_ENV" ] || die "Server configuration is missing. Run '$SCRIPT_PATH server init --ssh-only' or '$SCRIPT_PATH server init --public-url https://designer.company.example'."
   validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
-  local port access public_url header
+  local port access public_url header health_host=""
   port="$(env_value "$SERVER_ENV" PORT)"
   access="$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)"
   public_url="$(env_value "$SERVER_ENV" PUBLIC_BASE_URL)"
   header="$(env_value "$SERVER_ENV" TRUSTED_USER_HEADER)"
+  if [ "$access" = "proxy" ]; then
+    health_host="${public_url#https://}"
+    health_host="${health_host%/}"
+  fi
   ensure_docker
   ensure_ports_free "$port" 0
   acquire_lock
@@ -906,14 +1011,14 @@ start_server() {
   release_lock
   if [ "$DRY_RUN" = "1" ]; then return 0; fi
   info "Waiting for the server container..."
-  wait_for_url "http://127.0.0.1:$port/ready" 150 || {
+  wait_for_url "http://127.0.0.1:$port/health/ready" 150 "$health_host" || {
     compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
     compose "$SERVER_ENV" down >/dev/null 2>&1 || true
     clear_runtime_state
     die "Server container did not become ready."
   }
   if [ "$access" = "proxy" ]; then
-    if ! curl -fsS --max-time 5 -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
+    if ! curl -fsS --max-time 5 -H "Host: $health_host" -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
       compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
       compose "$SERVER_ENV" down >/dev/null 2>&1 || true
       clear_runtime_state
@@ -928,7 +1033,7 @@ start_server() {
 
 stop_native() {
   if ! pid_alive; then return 0; fi
-  pid_owned_by_designer || die "PID file exists, but the process does not look like Minimal Designer. Refusing to kill it. Remove $PID_FILE manually after inspection."
+  pid_owned_by_designer || die "PID file exists, but the process does not look like FormaSpec. Refusing to kill it. Remove $PID_FILE manually after inspection."
   local pid elapsed=0
   pid="$(cat "$PID_FILE")"
   info "Stopping local process $pid..."
@@ -971,7 +1076,7 @@ stop_all() {
   if [ "$DRY_RUN" = "1" ]; then
     pass "Dry run complete; no processes, containers, or state files were changed."
   else
-    pass "Minimal Designer is stopped. Persistent data was preserved."
+    pass "FormaSpec is stopped. Persistent data was preserved."
   fi
 }
 
@@ -1007,9 +1112,14 @@ restart_recorded() {
 }
 
 show_status() {
-  local found=0 mode="" url=""
+  local found=0 mode="" url="" health_host=""
   [ -f "$MODE_FILE" ] && mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
   [ -f "$URL_FILE" ] && url="$(cat "$URL_FILE" 2>/dev/null || true)"
+  if [ "$mode" = "server" ]; then
+    case "$url" in
+      https://*) health_host="${url#https://}"; health_host="${health_host%/}" ;;
+    esac
+  fi
   if pid_alive; then
     pass "Native process is running (PID $(cat "$PID_FILE"), mode ${mode:-unknown})."
     found=1
@@ -1022,10 +1132,10 @@ show_status() {
     warn "Docker CLI is installed, but Docker Desktop/Engine is stopped."
   fi
   if [ -n "$url" ]; then
-    if curl_ok "http://127.0.0.1:$(cat "$API_PORT_FILE" 2>/dev/null || printf 4310)/ready"; then pass "Health check passed."; else warn "Saved service URL is not healthy."; fi
+    if curl_ok "http://127.0.0.1:$(cat "$API_PORT_FILE" 2>/dev/null || printf 4310)/health/ready" "$health_host"; then pass "Health check passed."; else warn "Saved service URL is not healthy."; fi
     info "URL: $url"
   fi
-  [ "$found" -eq 1 ] || info "Minimal Designer is not currently running."
+  [ "$found" -eq 1 ] || info "FormaSpec is not currently running."
 }
 
 show_logs() {
@@ -1078,15 +1188,15 @@ show_codex_config() {
     port="$(env_value "$SERVER_ENV" PORT)"
     if [ "$access" = "proxy" ]; then
       cat <<EOF
-[mcp_servers.minimal_ui]
+[mcp_servers.formaspec]
 url = "${public_url%/}/mcp"
 required = true
-bearer_token_env_var = "MINIMAL_UI_MCP_TOKEN"
+bearer_token_env_var = "FORMASPEC_MCP_TOKEN"
 default_tools_approval_mode = "writes"
 tool_timeout_sec = 60
 EOF
       say
-      say "Set MINIMAL_UI_MCP_TOKEN to the output of: $SCRIPT_PATH token"
+      say "Set FORMASPEC_MCP_TOKEN to the output of: $SCRIPT_PATH token"
     else
       target="local"
     fi
@@ -1108,7 +1218,7 @@ EOF
     fi
     port="${port:-$DEFAULT_API_PORT}"
     cat <<EOF
-[mcp_servers.minimal_ui]
+[mcp_servers.formaspec]
 url = "http://127.0.0.1:$port/mcp"
 required = true
 default_tools_approval_mode = "writes"
@@ -1153,7 +1263,7 @@ doctor() {
   local target="${1:-auto}" failures=0 local_ok=1 docker_ok=1 server_config_ok=1 pnpm_path="" port=""
   case "$target" in auto|local|docker|server) ;; *) usage_error "Unknown doctor target: $target" ;; esac
   detect_platform
-  say "${C_BOLD}Minimal Designer doctor${C_RESET}"
+  say "${C_BOLD}FormaSpec doctor${C_RESET}"
   say "OS: $OS_KIND  Architecture: $ARCH_KIND  Bash: ${BASH_VERSION:-unknown}"
   if [ "$OS_KIND" = "windows" ] || [ "$OS_KIND" = "unknown" ]; then fail "Use macOS, Linux, or WSL2."; return 1; fi
   [ -w "$PROJECT_ROOT" ] && pass "Workspace is writable: $PROJECT_ROOT" || { fail "Workspace is not writable: $PROJECT_ROOT"; failures=$((failures + 1)); }
@@ -1233,10 +1343,11 @@ show_plan() {
 
 show_help() {
   cat <<EOF
-${C_BOLD}Minimal Designer launcher $VERSION${C_RESET}
+${C_BOLD}FormaSpec launcher $VERSION${C_RESET}
 
 Usage:
   ./designer                         Guided setup menu
+  ./designer [--yes] install [local|docker]
   ./designer doctor [auto|local|docker|server] [--strict]
   ./designer plan [auto|local|docker|server]
   ./designer setup local [--skip-browser]
@@ -1248,9 +1359,28 @@ Usage:
                          [--token SECRET] [--identity-header HEADER] [--force]
   ./designer start server [--no-build]
   ./designer status | logs [--follow] | stop | restart | open
+  ./designer --yes agent connect codex
+  ./designer agent config generic [--format all|json|toml]
+  ./designer migrate status [--json]
+  ./designer backup create | list
+  ./designer backup verify <formaspec-backup.tar>
+  ./designer --yes backup restore <formaspec-backup.tar>
+  ./designer --yes backup restore --backup-id BACKUP_ID
+  ./designer backup restore status
+  ./designer --yes backup restore resume [--backup-id BACKUP_ID]
+  ./designer --yes backup restore rollback
+  ./designer --yes backup restore abort
+  ./designer --yes backup restore clear-stale-lock
+  ./designer backup schedule show | enable | disable | run
+  ./designer backup prune preview
+  ./designer --yes backup prune execute --preview-id ID --plan-hash SHA256
+  ./designer audit retention preview | list
+  ./designer --yes audit retention execute --preview-id ID --plan-hash SHA256
+  ./designer support-bundle preview
+  ./designer --yes support-bundle create [OUTPUT.tar]
   ./designer codex-config [local|server]
   ./designer token                    Print the stored server MCP token
-  ./designer backup [DESTINATION]
+  ./designer backup [DESTINATION]     Legacy compatibility backup
   ./designer version
 
 Global flags (before the command):
@@ -1259,13 +1389,31 @@ Global flags (before the command):
   --no-open    Never launch a browser
 
 Recommended first command:
-  ./designer doctor auto
+  ./designer --yes install docker
 EOF
+}
+
+install_formaspec_source() {
+  local target="${1:-docker}"
+  case "$target" in local|docker) ;; *) usage_error "install requires local or docker" ;; esac
+  if [ "$ASSUME_YES" != "1" ]; then
+    confirm "Allow FormaSpec to install its source dependencies, start the $target runtime, and configure supported Codex?" \
+      || die "FormaSpec installation was cancelled."
+  fi
+  ASSUME_YES=1
+  ensure_supported_os
+  if [ "$target" = "docker" ]; then setup_docker; fi
+  # The source installer needs Node only to build formaspecctl/local-bridge.
+  # Packaged PKG/MSI/DEB/RPM builds bundle this runtime instead.
+  setup_local 1
+  run_pnpm --filter @formaspec/local-bridge --filter @formaspec/cli build
+  [ -f "$PROJECT_ROOT/apps/cli/dist/index.js" ] || die "formaspecctl did not build successfully."
+  exec env FORMASPEC_LEGACY_DELEGATE=1 node "$PROJECT_ROOT/apps/cli/dist/index.js" --yes install "$target"
 }
 
 interactive_menu() {
   detect_platform
-  say "${C_BOLD}Minimal Designer${C_RESET} — guided launcher"
+  say "${C_BOLD}FormaSpec${C_RESET} — guided launcher"
   say
   say "1) Run locally with Docker (recommended)"
   say "2) Run from source in development mode"
@@ -1315,6 +1463,12 @@ main() {
     version)
       [ "$#" -eq 0 ] || usage_error "Unexpected version argument: $1"
       say "$VERSION"
+      ;;
+    install)
+      local target="${1:-docker}"
+      if [ "$#" -gt 0 ]; then shift; fi
+      [ "$#" -eq 0 ] || usage_error "Unexpected install argument: $1"
+      install_formaspec_source "$target"
       ;;
     doctor)
       local target="auto"
@@ -1415,9 +1569,17 @@ main() {
       ;;
     backup)
       local destination="${1:-}"
+      case "$destination" in
+        create|list|verify|restore|schedule|prune)
+          die "The enterprise backup command requires formaspecctl. Run './designer --yes install docker' (or local), then retry."
+          ;;
+      esac
       if [ "$#" -gt 0 ]; then shift; fi
       [ "$#" -eq 0 ] || usage_error "Unexpected backup argument: $1"
       backup_data "$destination"
+      ;;
+    audit)
+      die "The enterprise audit command requires formaspecctl. Run './designer --yes install docker' (or local), then retry."
       ;;
     _run-native)
       [ "$#" -eq 3 ] || exit 2

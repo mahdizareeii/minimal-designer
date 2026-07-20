@@ -1,16 +1,16 @@
-# Local development. Keep AUTH_MODE=none bound to 127.0.0.1 only.
-[mcp_servers.minimal_ui]
-url = "http://127.0.0.1:4310/mcp"
+# Preferred setup: let FormaSpec start and authorize the loopback bridge,
+# configure Codex, install the managed Minimal UI skill/plugin, and verify the
+# connection automatically:
+#
+#   pnpm formaspecctl --yes agent connect codex
+#
+# Manual fallback. Point Codex at the token-free local bridge, not directly at
+# the upstream API on port 4310, and do not add a bearer token to Codex config.
+[mcp_servers.formaspec]
+url = "http://127.0.0.1:4312/mcp"
 required = true
 default_tools_approval_mode = "writes"
 tool_timeout_sec = 60
 
-# For a server deployment, replace the URL and provide the token through the
-# environment rather than committing it to this file:
-#
-# [mcp_servers.minimal_ui]
-# url = "https://designer.company.example/mcp"
-# required = true
-# bearer_token_env_var = "MINIMAL_UI_MCP_TOKEN"
-# default_tools_approval_mode = "writes"
-# tool_timeout_sec = 60
+# After the managed plugin is installed, mention it in Codex with:
+# [@Minimal UI](plugin://minimal-ui@formaspec)

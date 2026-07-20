@@ -33,9 +33,13 @@ import {
   type RevisionSummary,
   type TokenId,
 } from "../domain";
+import { canonicalizeNodeSelection } from "../lib/canvas-geometry";
+import { clampCanvasZoom, type ViewportState } from "../lib/viewport-transform";
 import {
   ApiError,
+  commitArchivePreview,
   commitRevision,
+  createArchivePreview,
   createDesign as createRemoteDesign,
   listDesigns,
   listHistory,
@@ -55,6 +59,15 @@ interface CommandBatch {
   redoable: boolean;
 }
 
+interface ArchiveReview {
+  previewId: string;
+  baseVersion: number;
+  changedNodeIds: string[];
+  operations: DesignOperation[];
+  baseDocument: DesignDocument;
+  previewDocument: DesignDocument;
+}
+
 interface DesignerState {
   projects: DesignProjectSummary[];
   document: DesignDocument | null;
@@ -69,7 +82,7 @@ interface DesignerState {
   editorLoading: boolean;
   creating: boolean;
   saving: boolean;
-  saveState: "idle" | "dirty" | "saving" | "saved" | "error" | "conflict";
+  saveState: "idle" | "dirty" | "saving" | "saved" | "review" | "error" | "conflict";
   offline: boolean;
   error: string | null;
   notice: string | null;
@@ -81,6 +94,7 @@ interface DesignerState {
   prototypeOpen: boolean;
   prototypePageId: PageId | null;
   sidebarsHidden: boolean;
+  archiveReview: ArchiveReview | null;
   loadProjects: () => Promise<void>;
   createProject: (name: string, preset: DevicePreset) => Promise<string>;
   openDesign: (id: string) => Promise<void>;
@@ -89,17 +103,23 @@ interface DesignerState {
   select: (ids: NodeId[], additive?: boolean) => void;
   setZoom: (zoom: number) => void;
   setPan: (pan: { x: number; y: number }) => void;
+  setViewport: (viewport: ViewportState) => void;
   setTool: (tool: EditorTool) => void;
   setInspectorTab: (tab: InspectorTab) => void;
   setNotice: (notice: string | null) => void;
   setSidebarsHidden: (hidden: boolean) => void;
+  setProductBrief: (brief: string) => void;
   updateNode: (nodeId: NodeId, patch: UpdateNodePatch) => void;
+  updateNodes: (updates: Array<{ nodeId: NodeId; patch: UpdateNodePatch }>) => void;
   addNode: (type: NodeType) => void;
   insertTemplate: (template: "button" | "card" | "stack") => void;
   addPage: () => void;
   addFrame: (preset: DevicePreset) => void;
   duplicateSelection: () => void;
   deleteSelection: () => void;
+  approveArchiveReview: () => Promise<void>;
+  discardArchiveReview: () => void;
+  moveNodeByGesture: (nodeId: NodeId, parent: ParentReference, index: number) => void;
   moveSelection: (direction: -1 | 1) => void;
   reparentSelection: (parent: ParentReference) => void;
   setNodePrototype: (nodeId: NodeId, targetPageId: PageId, targetNodeId?: NodeId) => void;
@@ -266,6 +286,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   prototypeOpen: false,
   prototypePageId: null,
   sidebarsHidden: false,
+  archiveReview: null,
 
   loadProjects: async () => {
     set({ dashboardLoading: true, error: null });
@@ -305,7 +326,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   },
 
   openDesign: async (id) => {
-    set({ editorLoading: true, error: null, selectedIds: [], pendingOperations: [], undoStack: [], redoStack: [] });
+    set({ editorLoading: true, error: null, selectedIds: [], pendingOperations: [], undoStack: [], redoStack: [], archiveReview: null });
     try {
       const document = await readDesign(id);
       const requestedPage = new URLSearchParams(window.location.search).get("page") as PageId | null;
@@ -313,7 +334,9 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       const activePageId = requestedPage && document.pages.some((page) => page.id === requestedPage)
         ? requestedPage
         : document.pages.find((page) => !page.archived)?.id ?? null;
-      const selectedIds = requestedNode && document.nodes[requestedNode] ? [requestedNode] : [];
+      const selectedIds = requestedNode
+        ? canonicalizeNodeSelection(document, [requestedNode], activePageId)
+        : [];
       set({
         document,
         baseVersion: document.revision,
@@ -348,6 +371,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     pendingOperations: [],
     revisions: [],
     prototypeOpen: false,
+    archiveReview: null,
     saving: false,
     saveState: "idle",
     error: null,
@@ -363,33 +387,51 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   select: (ids, additive = false) => {
     const document = get().document;
     if (!document) return;
-    const valid = ids.filter((id) => Boolean(document.nodes[id] && !document.nodes[id]?.archived));
-    const selectedIds = additive
-      ? [...new Set([...get().selectedIds, ...valid])]
-      : [...new Set(valid)];
+    const requested = additive ? [...get().selectedIds, ...ids] : ids;
+    const activePageId = get().activePageId
+      ?? document.pages.find((page) => !page.archived)?.id
+      ?? null;
+    const selectedIds = canonicalizeNodeSelection(document, requested, activePageId);
     set({ selectedIds });
-    syncDeepLink(get().activePageId, selectedIds[0]);
+    syncDeepLink(activePageId, selectedIds[0]);
     void updateContext({
       designId: document.id,
-      ...(get().activePageId ? { pageId: get().activePageId! } : {}),
+      ...(activePageId ? { pageId: activePageId } : {}),
       selectedNodeIds: selectedIds,
     }).catch(() => undefined);
   },
 
-  setZoom: (zoom) => set({ zoom: Math.max(0.12, Math.min(3.2, zoom)) }),
+  setZoom: (zoom) => set({ zoom: clampCanvasZoom(zoom) }),
   setPan: (pan) => set({ pan }),
+  setViewport: ({ pan, zoom }) => set({ pan, zoom: clampCanvasZoom(zoom) }),
   setTool: (tool) => set({ tool }),
   setInspectorTab: (inspectorTab) => set({ inspectorTab }),
   setNotice: (notice) => set({ notice }),
   setSidebarsHidden: (sidebarsHidden) => set({ sidebarsHidden }),
 
-  updateNode: (nodeId, patch) => set((state) => {
-    const node = state.document?.nodes[nodeId];
-    if (!node) return state;
+  setProductBrief: (brief) => set((state) => {
+    if (!state.document) return state;
+    const previous = structuredClone(state.document.metadata);
     return executeBatch(
       state,
-      [{ type: "update_node", node_id: nodeId, patch }],
-      [{ type: "update_node", node_id: nodeId, patch: inversePatch(node, patch) }],
+      [{ type: "set_metadata", target: { kind: "document" }, metadata: { product_brief: brief }, mode: "merge" }],
+      [{ type: "set_metadata", target: { kind: "document" }, metadata: previous, mode: "replace" }],
+    );
+  }),
+
+  updateNode: (nodeId, patch) => get().updateNodes([{ nodeId, patch }]),
+
+  updateNodes: (updates) => set((state) => {
+    if (!state.document) return state;
+    const applicable = updates.flatMap(({ nodeId, patch }) => {
+      const node = state.document?.nodes[nodeId];
+      return node ? [{ node, patch }] : [];
+    });
+    if (applicable.length === 0) return state;
+    return executeBatch(
+      state,
+      applicable.map(({ node, patch }) => ({ type: "update_node", node_id: node.id, patch })),
+      applicable.map(({ node, patch }) => ({ type: "update_node", node_id: node.id, patch: inversePatch(node, patch) })),
     );
   }),
 
@@ -510,6 +552,115 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       selectedIds: [],
       notice: "Deleted layers can be recovered from immutable history.",
     };
+  }),
+
+  approveArchiveReview: async () => {
+    const current = get();
+    const review = current.archiveReview;
+    const designId = current.document?.id;
+    if (!review || !designId || current.saving) return;
+    set({ saving: true, saveState: "saving", error: null });
+    try {
+      const result = await commitArchivePreview(
+        designId,
+        review.previewId,
+        review.baseVersion,
+        createClientKey("archive"),
+      );
+      const committed = result.document ?? await readDesign(designId);
+      set((latest) => {
+        if (latest.document?.id !== designId) return { saving: false, archiveReview: null };
+        let document = committed;
+        if (latest.pendingOperations.length > 0) {
+          document = applyOperations(committed, latest.pendingOperations, { expectedRevision: committed.revision }).document;
+        }
+        return {
+          document,
+          baseVersion: result.version,
+          archiveReview: null,
+          selectedIds: [],
+          saving: false,
+          saveState: latest.pendingOperations.length > 0 ? "dirty" : "saved",
+          offline: false,
+          error: null,
+          notice: `Committed destructive preview for ${review.changedNodeIds.length} changed layer${review.changedNodeIds.length === 1 ? "" : "s"}.`,
+        };
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
+        set((latest) => ({
+          archiveReview: null,
+          pendingOperations: [...review.operations, ...latest.pendingOperations],
+          saving: false,
+          saveState: "conflict",
+          offline: false,
+          error: "The project changed before the destructive preview was committed. Reload the latest revision to review the deletion again.",
+          notice: "Archive preview conflict: no automatic merge was performed.",
+        }));
+        return;
+      }
+      set({
+        saving: false,
+        saveState: "review",
+        offline: error instanceof ApiError && error.code === "NETWORK_ERROR",
+        error: error instanceof Error ? error.message : "The archive preview could not be committed.",
+      });
+    }
+  },
+
+  discardArchiveReview: () => set((state) => {
+    const review = state.archiveReview;
+    if (!review) return state;
+    try {
+      const document = state.pendingOperations.length > 0
+        ? applyOperations(review.baseDocument, state.pendingOperations, { expectedRevision: review.baseDocument.revision }).document
+        : review.baseDocument;
+      return {
+        document,
+        archiveReview: null,
+        selectedIds: [],
+        saveState: state.pendingOperations.length > 0 ? "dirty" : "saved",
+        notice: "Discarded the destructive preview. No revision was created.",
+        error: null,
+      };
+    } catch {
+      return {
+        document: review.baseDocument,
+        archiveReview: null,
+        selectedIds: [],
+        pendingOperations: [],
+        saveState: "saved",
+        notice: "Discarded the destructive preview and reloaded its base revision.",
+        error: null,
+      };
+    }
+  }),
+
+  moveNodeByGesture: (nodeId, parent, index) => set((state) => {
+    const document = state.document;
+    const currentParent = document ? parentOf(document, nodeId) : undefined;
+    if (!document || !currentParent) return state;
+    const sameParent = "node_id" in currentParent && "node_id" in parent
+      ? currentParent.node_id === parent.node_id
+      : "page_id" in currentParent && "page_id" in parent && currentParent.page_id === parent.page_id;
+    const currentSiblings = "node_id" in currentParent
+      ? nodeChildren(document.nodes[currentParent.node_id]!)
+      : document.pages.find((page) => page.id === currentParent.page_id)?.children ?? [];
+    const destination = "node_id" in parent
+      ? document.nodes[parent.node_id]
+      : document.pages.find((page) => page.id === parent.page_id);
+    const destinationChildren = destination && "children" in destination ? destination.children : undefined;
+    const currentIndex = currentSiblings.indexOf(nodeId);
+    const destinationLength = (destinationChildren?.length ?? 0) - (sameParent ? 1 : 0);
+    if (currentIndex < 0 || !destinationChildren || index < 0 || index > destinationLength) {
+      return { error: "The layer cannot be moved to that auto-layout position." };
+    }
+    if (sameParent && currentIndex === index) return state;
+    return executeBatch(
+      state,
+      [{ type: "move_node", node_id: nodeId, parent, index }],
+      [{ type: "move_node", node_id: nodeId, parent: currentParent, index: currentIndex }],
+    );
   }),
 
   moveSelection: (direction) => set((state) => {
@@ -654,14 +805,42 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   save: () => {
     if (activeSavePromise) return activeSavePromise;
     const state = get();
+    if (state.archiveReview) {
+      set({ notice: "Commit or discard the destructive preview before saving more changes." });
+      return Promise.resolve();
+    }
     if (!state.document || state.saveState === "conflict" || state.pendingOperations.length === 0) return Promise.resolve();
     const designId = state.document.id;
     const baseVersion = state.baseVersion;
     const operations = state.pendingOperations;
+    const destructive = operations.some((operation) => operation.type === "archive_nodes");
     set({ saving: true, saveState: "saving", pendingOperations: [] });
 
     const run = async () => {
       try {
+        if (destructive) {
+          const [preview, baseDocument] = await Promise.all([
+            createArchivePreview(designId, baseVersion, operations),
+            readDesign(designId, baseVersion),
+          ]);
+          if (!preview.canCommit) throw new ApiError("The destructive preview contains validation errors.", { code: "PREVIEW_NOT_COMMITTABLE", status: 422 });
+          set((latest) => latest.document?.id !== designId ? { saving: false } : {
+            archiveReview: {
+              previewId: preview.previewId,
+              baseVersion,
+              changedNodeIds: preview.changedNodeIds,
+              operations,
+              baseDocument,
+              previewDocument: preview.document,
+            },
+            saving: false,
+            saveState: "review",
+            offline: false,
+            error: null,
+            notice: "Destructive changes are ready for before/after review.",
+          });
+          return;
+        }
         const result = await commitRevision(designId, baseVersion, operations, createClientKey("revision"));
         const serverDocument = result.document ?? await readDesign(designId);
         set((latest) => {
@@ -716,7 +895,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       const activePageId = fresh.pages.some((page) => page.id === current.activePageId && !page.archived)
         ? current.activePageId
         : fresh.pages.find((page) => !page.archived)?.id ?? null;
-      const selectedIds = current.selectedIds.filter((id) => fresh.nodes[id] && !fresh.nodes[id]?.archived);
+      const selectedIds = canonicalizeNodeSelection(fresh, current.selectedIds, activePageId);
       set({
         document: fresh,
         baseVersion: fresh.revision,
@@ -798,7 +977,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       const activePageId = document.pages.some((page) => page.id === latest.activePageId && !page.archived)
         ? latest.activePageId
         : document.pages.find((page) => !page.archived)?.id ?? null;
-      const selectedIds = latest.selectedIds.filter((id) => document.nodes[id] && !document.nodes[id]?.archived);
+      const selectedIds = canonicalizeNodeSelection(document, latest.selectedIds, activePageId);
       set({
         document,
         baseVersion: document.revision,

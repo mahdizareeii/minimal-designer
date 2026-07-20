@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "./browser-performance.spec.ts",
+    "./fixture.ts",
+    "./stats.ts",
+    "../playwright.performance.config.ts"
+  ]
+}

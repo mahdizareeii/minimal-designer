@@ -336,7 +336,7 @@ export function createSampleDocument(options: SampleDocumentFactoryOptions = {})
   const title = createTextNode(
     {
       name: "Title",
-      content: "Minimal Designer",
+      content: "FormaSpec",
       layout: { width: 342, height: 48, width_sizing: "fill" },
       style: {
         color: { token_id: primaryToken.id },

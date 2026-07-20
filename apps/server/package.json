@@ -7,9 +7,16 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "start:renderer": "node dist/renderer-worker.js",
+    "start:restore-worker": "node dist/restore-worker.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:e2e:alignment": "playwright test --config playwright.config.ts e2e/selection-alignment.spec.ts",
+    "test:e2e:performance": "tsc -p performance/tsconfig.browser.json && playwright test --config playwright.performance.config.ts",
+    "test:e2e:release": "tsc -p e2e/tsconfig.release.json && playwright test --config playwright.release.config.ts",
+    "test:e2e:visual": "tsc -p e2e/tsconfig.json && playwright test --config playwright.visual.config.ts e2e/visual-regression.spec.ts",
+    "test:e2e:visual:update": "tsc -p e2e/tsconfig.json && playwright test --config playwright.visual.config.ts e2e/visual-regression.spec.ts --update-snapshots",
     "clean": "rm -rf dist coverage"
   },
   "dependencies": {
@@ -21,11 +28,14 @@
     "better-sqlite3": "^12.2.0",
     "drizzle-orm": "^0.44.2",
     "fastify": "^5.4.0",
+    "fflate": "0.8.3",
     "playwright": "1.61.1",
+    "tar-stream": "^3.2.0",
     "zod": "^3.25.67",
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13"
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/tar-stream": "^3.1.4"
   }
 }

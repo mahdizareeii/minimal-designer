@@ -1,4 +1,4 @@
-import { createStarterDocument, validateDesignDocument } from "@designer/core";
+import { createGroupNode, createRectangleNode, createStarterDocument, validateDesignDocument } from "@designer/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { normalizeDocument, resolvedDirection, serializeDocument } from "../domain";
@@ -63,6 +63,82 @@ describe("canonical web editor contract", () => {
     expect(operation.root_ids).toHaveLength(1);
     expect(updated.document!.nodes[operation.root_ids[0]!]!.type).toBe("text");
     expect(validateDesignDocument(updated.document!).success).toBe(true);
+  });
+
+  it("batches fractional multi-node gesture geometry into one undo command", () => {
+    const document = useDesignerStore.getState().document!;
+    const frameId = document.pages[0]!.children[0]!;
+    const frame = document.nodes[frameId]!;
+    if (frame.type !== "frame") throw new Error("Expected starter frame");
+    const child = createRectangleNode({ layout: { x: 8.25, y: 9.5, rotation: 17.5 } });
+    frame.children.push(child.id);
+    document.nodes[child.id] = child;
+
+    useDesignerStore.getState().updateNodes([
+      { nodeId: frame.id, patch: { layout: { x: 12.125, y: 14.375 } } },
+      { nodeId: child.id, patch: { layout: { x: 21.625, y: 32.875, width: 140.25 } } },
+    ]);
+
+    const updated = useDesignerStore.getState();
+    expect(updated.pendingOperations).toHaveLength(2);
+    expect(updated.undoStack).toHaveLength(1);
+    expect(updated.undoStack[0]?.operations).toHaveLength(2);
+    expect(updated.document!.nodes[child.id]!.layout).toMatchObject({
+      x: 21.625,
+      y: 32.875,
+      width: 140.25,
+      rotation: 17.5,
+    });
+    expect(validateDesignDocument(updated.document!).success).toBe(true);
+  });
+
+  it("commits one normalized move_node command for an auto-layout drag and restores it with undo", () => {
+    const document = useDesignerStore.getState().document!;
+    const frame = document.nodes[document.pages[0]!.children[0]!]!;
+    if (frame.type !== "frame") throw new Error("Expected starter frame");
+    const child = createRectangleNode({
+      name: "Dragged child",
+      layout: { x: 7.125, y: 9.875, rotation: 14.25, width_sizing: "fill", height_sizing: "hug" },
+    });
+    const source = createGroupNode({ name: "Source stack", children: [child.id], layout: { mode: "vertical" } });
+    const destination = createGroupNode({ name: "Destination stack", layout: { mode: "horizontal" } });
+    frame.children.push(source.id, destination.id);
+    Object.assign(document.nodes, {
+      [source.id]: source,
+      [destination.id]: destination,
+      [child.id]: child,
+    });
+
+    useDesignerStore.getState().moveNodeByGesture(child.id, { node_id: destination.id }, 0);
+    const moved = useDesignerStore.getState();
+    expect(moved.pendingOperations).toEqual([{
+      type: "move_node",
+      node_id: child.id,
+      parent: { node_id: destination.id },
+      index: 0,
+    }]);
+    expect(moved.undoStack).toHaveLength(1);
+    expect(moved.undoStack[0]?.operations).toHaveLength(1);
+    const movedSource = moved.document!.nodes[source.id]!;
+    const movedDestination = moved.document!.nodes[destination.id]!;
+    if (movedSource.type !== "group" || movedDestination.type !== "group") throw new Error("Expected gesture stacks");
+    expect(movedSource.children).toEqual([]);
+    expect(movedDestination.children).toEqual([child.id]);
+    expect(moved.document!.nodes[child.id]!.layout).toMatchObject({
+      x: 7.125,
+      y: 9.875,
+      rotation: 14.25,
+      width_sizing: "fill",
+      height_sizing: "hug",
+    });
+
+    moved.undo();
+    const restored = useDesignerStore.getState().document!;
+    const restoredSource = restored.nodes[source.id]!;
+    const restoredDestination = restored.nodes[destination.id]!;
+    if (restoredSource.type !== "group" || restoredDestination.type !== "group") throw new Error("Expected gesture stacks");
+    expect(restoredSource.children).toEqual([child.id]);
+    expect(restoredDestination.children).toEqual([]);
   });
 
   it("uses automatic RTL direction for Persian and keeps mixed content deterministic", () => {

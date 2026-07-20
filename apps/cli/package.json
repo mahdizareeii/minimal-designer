@@ -1,0 +1,31 @@
+{
+  "name": "@formaspec/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "formaspecctl": "./dist/index.js",
+    "formaspec-mcp-config": "./dist/generic-mcp-config-cli.js"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "scripts": {
+    "formaspecctl": "tsx src/index.ts",
+    "mcp-config": "tsx src/generic-mcp-config-cli.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "clean": "rm -rf dist coverage"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "tar-stream": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/tar-stream": "^3.1.4"
+  }
+}

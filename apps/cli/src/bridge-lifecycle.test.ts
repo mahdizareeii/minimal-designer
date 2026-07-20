@@ -1,0 +1,122 @@
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { createBridgeController, type BridgeController } from "./bridge-lifecycle.js";
+
+const temporaryDirectories: string[] = [];
+const controllers: BridgeController[] = [];
+const testServers: http.Server[] = [];
+
+afterEach(async () => {
+  await Promise.allSettled(controllers.splice(0).map((controller) => controller.stop()));
+  await Promise.allSettled(testServers.splice(0).map((server) => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  })));
+  for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
+});
+
+async function availablePort(): Promise<number> {
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("No test port.");
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return address.port;
+}
+
+describe("local bridge lifecycle", () => {
+  it("starts, owns, reports, and safely stops its loopback process", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-bridge-lifecycle-"));
+    temporaryDirectories.push(root);
+    const runtimeDirectory = path.join(root, "packaged-user-state");
+    fs.mkdirSync(path.join(runtimeDirectory, "run"), { recursive: true });
+    fs.writeFileSync(path.join(runtimeDirectory, "run", "api-port"), "4310\n");
+    const port = await availablePort();
+    const controller = createBridgeController(root, {
+      ...process.env,
+      FORMASPEC_BRIDGE_PORT: String(port),
+      FORMASPEC_RUNTIME_DIR: runtimeDirectory,
+    });
+    controllers.push(controller);
+
+    const started = await controller.ensureStarted();
+    expect(started).toEqual({ running: true, url: `http://127.0.0.1:${port}`, owned: true });
+    expect(await controller.status()).toMatchObject({ running: true, owned: true });
+    expect(await fetch(`${started.url}/health`).then((response) => response.json())).toMatchObject({
+      service: "formaspec-local-bridge",
+      status: "ok",
+      buildId: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(await controller.stop()).toBe(true);
+    expect(await controller.status()).toMatchObject({ running: false, owned: false });
+    expect(fs.existsSync(path.join(root, ".designer"))).toBe(false);
+  }, 15_000);
+
+  it("rejects a relative packaged runtime-state override", () => {
+    expect(() => createBridgeController("/tmp/formaspec", {
+      ...process.env,
+      FORMASPEC_RUNTIME_DIR: "relative/state",
+    })).toThrow(/absolute path/);
+  });
+
+  it("restarts an owned bridge when its running build fingerprint is stale", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-bridge-upgrade-"));
+    temporaryDirectories.push(root);
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4310\n");
+    const port = await availablePort();
+    const instanceId = "stale-owned-bridge-instance";
+    let shutdownAccepted = false;
+    const staleServer = http.createServer((request, response) => {
+      if (request.method === "GET" && request.url === "/health") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          service: "formaspec-local-bridge",
+          status: "ok",
+          buildId: "stale-build",
+        }));
+        return;
+      }
+      if (request.method === "POST" && request.url === "/_control/shutdown") {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { instanceId?: unknown };
+          if (body.instanceId !== instanceId) {
+            response.writeHead(403).end();
+            return;
+          }
+          shutdownAccepted = true;
+          response.writeHead(202, { "content-type": "application/json" });
+          response.end('{"stopping":true}');
+          setImmediate(() => staleServer.close());
+        });
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    testServers.push(staleServer);
+    await new Promise<void>((resolve) => staleServer.listen(port, "127.0.0.1", resolve));
+    fs.writeFileSync(path.join(runDirectory, "formaspec-bridge.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      pid: process.pid,
+      url: `http://127.0.0.1:${port}`,
+      instanceId,
+    })}\n`, { mode: 0o600 });
+
+    const controller = createBridgeController(root, { ...process.env, FORMASPEC_BRIDGE_PORT: String(port) });
+    controllers.push(controller);
+    const started = await controller.ensureStarted();
+    const health = await fetch(`${started.url}/health`).then((response) => response.json()) as { buildId?: unknown };
+
+    expect(shutdownAccepted).toBe(true);
+    expect(started).toMatchObject({ running: true, owned: true });
+    expect(health.buildId).toMatch(/^[a-f0-9]{64}$/);
+    expect(health.buildId).not.toBe("stale-build");
+  }, 15_000);
+});

@@ -124,10 +124,21 @@ export function parentLayoutMode(document: DesignDocument, nodeId: NodeId) {
   return parent && "node_id" in parent ? document.nodes[parent.node_id]?.layout.mode : undefined;
 }
 
-export function styleForNode(document: DesignDocument, node: DesignNode, includePosition = true): CSSProperties {
+export function styleForNode(
+  document: DesignDocument,
+  node: DesignNode,
+  options: {
+    includePosition?: boolean;
+    /** `null` explicitly means that the node is a page child. */
+    parentLayoutMode?: DesignNode["layout"]["mode"] | null;
+  } = {},
+): CSSProperties {
+  const parentMode = Object.prototype.hasOwnProperty.call(options, "parentLayoutMode")
+    ? options.parentLayoutMode ?? undefined
+    : parentLayoutMode(document, node.id);
   return nodeToCss(node, document, {
-    parentLayoutMode: parentLayoutMode(document, node.id),
-    includePosition,
+    parentLayoutMode: parentMode,
+    includePosition: options.includePosition ?? true,
   }) as CSSProperties;
 }
 

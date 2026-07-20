@@ -3,11 +3,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
-import type { Browser } from "playwright";
+import type { Browser, BrowserContext } from "playwright";
 import { chromium } from "playwright";
-import { nodeToCss, type CssStyle, type DesignDocument, type DesignNode, type LayoutMode } from "@designer/core";
+import {
+  V2CompatibilityError,
+  nodeToCss,
+  toV1CompatibleDesignDocument,
+  type AnyDesignDocument,
+  type CssStyle,
+  type DesignDocument,
+  type DesignNode,
+  type LayoutMode,
+} from "@designer/core";
 
+import type { NormalizedImageAsset, RasterNormalizationOptions } from "./assets.js";
 import { DomainError } from "./errors.js";
+import { RendererSocketClient } from "./renderer-ipc.js";
 
 export interface RenderOptions {
   pageId?: string;
@@ -21,6 +32,87 @@ export interface RenderResult {
   height: number;
   renderer: "playwright" | "software";
   warnings: string[];
+}
+
+export interface RenderHealth {
+  ok: true;
+  mode: "in-process" | "worker";
+  renderer: "playwright" | "software";
+  softwareFallback: boolean;
+  warnings: string[];
+}
+
+export interface PngRendererOptions {
+  timeoutMs?: number;
+  maxPixels?: number;
+  concurrency?: number;
+  queueLimit?: number;
+  allowSoftwareFallback?: boolean;
+  allowSystemChrome?: boolean;
+  socketPath?: string;
+  ipcMaxMessageBytes?: number;
+}
+
+interface BrowserNormalizedRaster {
+  ok: true;
+  width: number;
+  height: number;
+  pngBase64: string;
+}
+
+type ExifOrientation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+function tiffOrientation(data: Buffer): ExifOrientation {
+  const tiffOffset = data.subarray(0, 6).equals(Buffer.from("Exif\0\0", "binary")) ? 6 : 0;
+  if (data.length < tiffOffset + 8) return 1;
+  const littleEndian = data[tiffOffset] === 0x49 && data[tiffOffset + 1] === 0x49;
+  const bigEndian = data[tiffOffset] === 0x4d && data[tiffOffset + 1] === 0x4d;
+  if (!littleEndian && !bigEndian) return 1;
+  const readUInt16 = (offset: number): number | undefined => {
+    if (offset < 0 || offset + 2 > data.length) return undefined;
+    return littleEndian ? data.readUInt16LE(offset) : data.readUInt16BE(offset);
+  };
+  const readUInt32 = (offset: number): number | undefined => {
+    if (offset < 0 || offset + 4 > data.length) return undefined;
+    return littleEndian ? data.readUInt32LE(offset) : data.readUInt32BE(offset);
+  };
+  if (readUInt16(tiffOffset + 2) !== 42) return 1;
+  const relativeIfdOffset = readUInt32(tiffOffset + 4);
+  if (relativeIfdOffset === undefined) return 1;
+  const ifdOffset = tiffOffset + relativeIfdOffset;
+  const entryCount = readUInt16(ifdOffset);
+  if (entryCount === undefined || entryCount > 4_096) return 1;
+  for (let index = 0; index < entryCount; index += 1) {
+    const entryOffset = ifdOffset + 2 + index * 12;
+    if (entryOffset + 12 > data.length) return 1;
+    if (readUInt16(entryOffset) !== 0x0112) continue;
+    const type = readUInt16(entryOffset + 2);
+    const count = readUInt32(entryOffset + 4);
+    if (type !== 3 || count !== 1) return 1;
+    const orientation = readUInt16(entryOffset + 8);
+    return orientation !== undefined && orientation >= 1 && orientation <= 8
+      ? orientation as ExifOrientation
+      : 1;
+  }
+  return 1;
+}
+
+function webpExifOrientation(data: Buffer): ExifOrientation {
+  if (data.length < 12
+    || data.toString("ascii", 0, 4) !== "RIFF"
+    || data.toString("ascii", 8, 12) !== "WEBP") return 1;
+  let offset = 12;
+  while (offset + 8 <= data.length) {
+    const type = data.toString("ascii", offset, offset + 4);
+    const length = data.readUInt32LE(offset + 4);
+    const payloadOffset = offset + 8;
+    const payloadEnd = payloadOffset + length;
+    const nextOffset = payloadEnd + (length % 2);
+    if (payloadEnd > data.length || nextOffset > data.length) return 1;
+    if (type === "EXIF") return tiffOrientation(data.subarray(payloadOffset, payloadEnd));
+    offset = nextOffset;
+  }
+  return 1;
 }
 
 type Color = [number, number, number, number];
@@ -127,6 +219,10 @@ function renderNode(
     : "";
   let content = children;
   let attributes = "";
+  const containerDirection = node.metadata.text_direction;
+  if ((containerDirection === "ltr" || containerDirection === "rtl") && node.type !== "text") {
+    attributes = ` dir="${containerDirection}"`;
+  }
   if (node.type === "text") {
     const direction = node.direction ?? "auto";
     attributes = ` dir="${direction}"`;
@@ -172,7 +268,7 @@ function renderHtml(document: DesignDocument, options: RenderOptions, assetDataU
   return {
     width,
     height,
-    html: `<!doctype html><html><head><meta charset="utf-8"><style>${fontFaces()}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}body{background:${colorValue(page.background, document, "#ffffff")};transform-origin:top left;transform:scale(${scale});width:${naturalWidth}px;height:${naturalHeight}px;font-family:Inter,Vazirmatn,system-ui,sans-serif}</style></head><body>${body}</body></html>`,
+    html: `<!doctype html><html${page.metadata.text_direction === "ltr" || page.metadata.text_direction === "rtl" ? ` dir="${page.metadata.text_direction}"` : ""}><head><meta charset="utf-8"><style>${fontFaces()}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}body{background:${colorValue(page.background, document, "#ffffff")};transform-origin:top left;transform:scale(${scale});width:${naturalWidth}px;height:${naturalHeight}px;font-family:Inter,Vazirmatn,system-ui,sans-serif}</style></head><body>${body}</body></html>`,
   };
 }
 
@@ -222,7 +318,7 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeBuffer, data, checksum]);
 }
 
-function encodePng(width: number, height: number, rgba: Buffer): Buffer {
+export function encodeRgbaPng(width: number, height: number, rgba: Buffer): Buffer {
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
@@ -268,7 +364,7 @@ function softwareRender(document: DesignDocument, options: RenderOptions): Rende
   if (target) visit(target.id, 0, 0, true);
   else for (const rootId of page.children) visit(rootId, 0, 0);
   return {
-    png: encodePng(width, height, pixels),
+    png: encodeRgbaPng(width, height, pixels),
     width,
     height,
     renderer: "software",
@@ -280,16 +376,71 @@ export class PngRenderer {
   #browser: Browser | null = null;
   #playwrightUnavailable = false;
   #browserWarning: string | null = null;
+  readonly #timeoutMs: number;
+  readonly #maxPixels: number;
+  readonly #concurrency: number;
+  readonly #queueLimit: number;
+  readonly #allowSoftwareFallback: boolean;
+  readonly #allowSystemChrome: boolean;
+  readonly #remoteClient: RendererSocketClient | null;
+  #active = 0;
+  #waiters: Array<() => void> = [];
+
+  constructor(options: PngRendererOptions = {}) {
+    this.#timeoutMs = options.timeoutMs ?? 15_000;
+    this.#maxPixels = options.maxPixels ?? 32_000_000;
+    this.#concurrency = options.concurrency ?? 2;
+    this.#queueLimit = options.queueLimit ?? 32;
+    this.#allowSoftwareFallback = options.allowSoftwareFallback ?? false;
+    this.#allowSystemChrome = options.allowSystemChrome ?? false;
+    this.#remoteClient = options.socketPath
+      ? new RendererSocketClient({
+        socketPath: options.socketPath,
+        timeoutMs: this.#timeoutMs + 1_000,
+        ...(options.ipcMaxMessageBytes === undefined ? {} : { maxMessageBytes: options.ipcMaxMessageBytes }),
+      })
+      : null;
+  }
+
+  async #acquire(): Promise<() => void> {
+    if (this.#active >= this.#concurrency) {
+      if (this.#waiters.length >= this.#queueLimit) {
+        throw new DomainError("RATE_LIMITED", "The render queue is full; retry later.", 429, { retryable: true });
+      }
+      await new Promise<void>((resolve) => this.#waiters.push(resolve));
+    }
+    this.#active += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#active -= 1;
+      this.#waiters.shift()?.();
+    };
+  }
 
   async #ensureBrowser(): Promise<Browser | null> {
-    if (this.#browser) return this.#browser;
+    if (this.#browser?.isConnected()) return this.#browser;
+    this.#browser = null;
     if (this.#playwrightUnavailable) return null;
     try {
-      this.#browser = await chromium.launch({ headless: true });
+      this.#browser = await chromium.launch({
+        headless: true,
+        args: [
+          "--disable-background-networking",
+          "--disable-component-update",
+          "--disable-default-apps",
+          "--disable-domain-reliability",
+          "--disable-features=MediaRouter,OptimizationHints,Translate",
+          "--disable-sync",
+          "--metrics-recording-only",
+          "--no-first-run",
+        ],
+      });
       this.#browserWarning = null;
       return this.#browser;
     } catch {
-      try {
+      if (this.#allowSystemChrome) try {
         this.#browser = await chromium.launch({ headless: true, channel: "chrome" });
         this.#browserWarning = "Using system Chrome because Playwright-managed Chromium is not installed.";
         return this.#browser;
@@ -297,44 +448,268 @@ export class PngRenderer {
         this.#playwrightUnavailable = true;
         return null;
       }
+      this.#playwrightUnavailable = true;
+      return null;
     }
   }
 
   async render(
-    document: DesignDocument,
+    document: AnyDesignDocument,
     options: RenderOptions,
     assetDataUrl: (id: string) => string | null,
   ): Promise<RenderResult> {
-    const browser = await this.#ensureBrowser();
-    if (browser) {
-      try {
-        const rendered = renderHtml(document, options, assetDataUrl);
-        const page = await browser.newPage({ viewport: { width: rendered.width, height: rendered.height }, deviceScaleFactor: 1 });
-        try {
-          await page.setContent(rendered.html, { waitUntil: "load", timeout: 10_000 });
-          await page.evaluate(async () => globalThis.document.fonts.ready);
-          const png = await page.screenshot({ type: "png", animations: "disabled" });
-          return {
-            png,
-            width: rendered.width,
-            height: rendered.height,
-            renderer: "playwright",
-            warnings: this.#browserWarning ? [this.#browserWarning] : [],
-          };
-        } finally {
-          await page.close();
+    if (this.#remoteClient) {
+      const assets: Record<string, string | null> = {};
+      for (const node of Object.values(document.nodes)) {
+        if (node.type === "image" && node.asset_id && !(node.asset_id in assets)) {
+          assets[node.asset_id] = assetDataUrl(node.asset_id);
         }
-      } catch {
-        if (!browser.isConnected()) {
-          this.#browser = null;
-          this.#playwrightUnavailable = false;
-        }
-        const fallback = softwareRender(document, options);
-        fallback.warnings.unshift("Browser rendering failed for this document; returned a software preview.");
+      }
+      return this.#remoteClient.render(document, options, assets);
+    }
+    let compatibleDocument: DesignDocument;
+    try {
+      compatibleDocument = toV1CompatibleDesignDocument(document);
+    } catch (error) {
+      if (error instanceof V2CompatibilityError) {
+        throw new DomainError("UNSUPPORTED_DOCUMENT_FEATURE", error.message, 422, {
+          details: { issues: error.issues },
+        });
+      }
+      throw error;
+    }
+    const release = await this.#acquire();
+    let context: BrowserContext | null = null;
+    try {
+      const browser = await this.#ensureBrowser();
+      if (!browser) {
+        if (this.#allowSoftwareFallback) return softwareRender(compatibleDocument, options);
+        throw new DomainError("RENDER_FAILED", "Pinned Chromium is unavailable.", 503, { retryable: true });
+      }
+      const rendered = renderHtml(compatibleDocument, options, assetDataUrl);
+      if (rendered.width * rendered.height > this.#maxPixels) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", `Render exceeds the ${this.#maxPixels} pixel limit.`, 413, {
+          details: { width: rendered.width, height: rendered.height },
+        });
+      }
+      context = await browser.newContext({
+        viewport: { width: rendered.width, height: rendered.height },
+        deviceScaleFactor: 1,
+        locale: "en-US",
+        timezoneId: "UTC",
+        colorScheme: "light",
+        reducedMotion: "reduce",
+        serviceWorkers: "block",
+      });
+      context.setDefaultTimeout(this.#timeoutMs);
+      await context.route("**/*", async (route) => {
+        const protocol = new URL(route.request().url()).protocol;
+        if (protocol === "data:" || protocol === "blob:" || protocol === "about:") await route.continue();
+        else await route.abort("blockedbyclient");
+      });
+      const page = await context.newPage();
+      const renderJob = async (): Promise<RenderResult> => {
+        await page.setContent(rendered.html, { waitUntil: "load", timeout: this.#timeoutMs });
+        await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
+        await page.evaluate(async () => {
+          await globalThis.document.fonts.ready;
+          await Promise.all([...globalThis.document.images].map(async (image) => {
+            if (image.complete) return image.decode().catch(() => undefined);
+            await new Promise<void>((resolve) => {
+              image.addEventListener("load", () => resolve(), { once: true });
+              image.addEventListener("error", () => resolve(), { once: true });
+            });
+            await image.decode().catch(() => undefined);
+          }));
+          await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        });
+        const png = await page.screenshot({ type: "png", animations: "disabled", timeout: this.#timeoutMs });
+        return {
+          png,
+          width: rendered.width,
+          height: rendered.height,
+          renderer: "playwright",
+          warnings: this.#browserWarning ? [this.#browserWarning] : [],
+        };
+      };
+      return await Promise.race([
+        renderJob(),
+        new Promise<never>((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new DomainError("RENDER_TIMEOUT", `Render exceeded ${this.#timeoutMs}ms.`, 504, { retryable: true })), this.#timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      if (this.#browser && !this.#browser.isConnected()) {
+        this.#browser = null;
+        this.#playwrightUnavailable = false;
+      }
+      if (this.#allowSoftwareFallback) {
+        const fallback = softwareRender(compatibleDocument, options);
+        fallback.warnings.unshift("Browser rendering failed; development-only software fallback was used.");
         return fallback;
       }
+      throw new DomainError("RENDER_FAILED", "Chromium could not render the design.", 503, { retryable: true, cause: error });
+    } finally {
+      await context?.close().catch(() => undefined);
+      release();
     }
-    return softwareRender(document, options);
+  }
+
+  async normalizeRaster(data: Buffer, options: RasterNormalizationOptions): Promise<NormalizedImageAsset> {
+    if (this.#remoteClient) return this.#remoteClient.normalizeRaster(data, options);
+    if (data.length < 1) throw new DomainError("UNSUPPORTED_ASSET", "The uploaded asset is empty.", 422);
+    if (data.length > options.maxBytes) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", `Asset exceeds the ${options.maxBytes} byte limit.`, 413);
+    }
+    const sourcePixels = options.sourceWidth * options.sourceHeight;
+    const effectiveMaxPixels = Math.min(options.maxPixels, this.#maxPixels);
+    if (!Number.isSafeInteger(sourcePixels) || sourcePixels < 1 || sourcePixels > effectiveMaxPixels) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", `Image exceeds the ${effectiveMaxPixels} pixel limit.`, 413);
+    }
+
+    const release = await this.#acquire();
+    let context: BrowserContext | null = null;
+    try {
+      const browser = await this.#ensureBrowser();
+      if (!browser) {
+        throw new DomainError(
+          "TEMPORARILY_UNAVAILABLE",
+          "Pinned Chromium is unavailable for isolated raster normalization.",
+          503,
+          { retryable: true },
+        );
+      }
+      context = await browser.newContext({
+        viewport: { width: 1, height: 1 },
+        deviceScaleFactor: 1,
+        locale: "en-US",
+        timezoneId: "UTC",
+        colorScheme: "light",
+        reducedMotion: "reduce",
+        serviceWorkers: "block",
+      });
+      context.setDefaultTimeout(this.#timeoutMs);
+      await context.route("**/*", async (route) => {
+        const protocol = new URL(route.request().url()).protocol;
+        if (protocol === "data:" || protocol === "blob:" || protocol === "about:") await route.continue();
+        else await route.abort("blockedbyclient");
+      });
+      const page = await context.newPage();
+      const manualOrientation = options.sourceMimeType === "image/webp" ? webpExifOrientation(data) : 1;
+      const normalizeJob = page.evaluate(async ({ inputBase64, mimeType, maxPixels, orientation }) => {
+        const inputBinary = atob(inputBase64);
+        const input = new Uint8Array(inputBinary.length);
+        for (let index = 0; index < inputBinary.length; index += 1) input[index] = inputBinary.charCodeAt(index);
+        const blob = new Blob([input], { type: mimeType });
+        const bitmap = await createImageBitmap(blob, {
+          imageOrientation: "from-image",
+          premultiplyAlpha: "default",
+          colorSpaceConversion: "default",
+        });
+        try {
+          const swapsDimensions = orientation >= 5;
+          const width = swapsDimensions ? bitmap.height : bitmap.width;
+          const height = swapsDimensions ? bitmap.width : bitmap.height;
+          const pixels = width * height;
+          if (!Number.isSafeInteger(pixels) || pixels < 1 || pixels > maxPixels) {
+            throw new Error(`PIXEL_LIMIT:${width}:${height}`);
+          }
+          const canvas = new OffscreenCanvas(width, height);
+          const context2d = canvas.getContext("2d", { alpha: true, colorSpace: "srgb" });
+          if (!context2d) throw new Error("CANVAS_CONTEXT_UNAVAILABLE");
+          context2d.clearRect(0, 0, width, height);
+          if (orientation === 2) context2d.setTransform(-1, 0, 0, 1, width, 0);
+          else if (orientation === 3) context2d.setTransform(-1, 0, 0, -1, width, height);
+          else if (orientation === 4) context2d.setTransform(1, 0, 0, -1, 0, height);
+          else if (orientation === 5) context2d.setTransform(0, 1, 1, 0, 0, 0);
+          else if (orientation === 6) context2d.setTransform(0, 1, -1, 0, width, 0);
+          else if (orientation === 7) context2d.setTransform(0, -1, -1, 0, width, height);
+          else if (orientation === 8) context2d.setTransform(0, -1, 1, 0, 0, height);
+          context2d.drawImage(bitmap, 0, 0);
+          const output = await canvas.convertToBlob({ type: "image/png" });
+          const bytes = new Uint8Array(await output.arrayBuffer());
+          let binary = "";
+          const chunkSize = 32_768;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+          }
+          return { ok: true as const, width, height, pngBase64: btoa(binary) };
+        } finally {
+          bitmap.close();
+        }
+      }, {
+        inputBase64: data.toString("base64"),
+        mimeType: options.sourceMimeType,
+        maxPixels: effectiveMaxPixels,
+        orientation: manualOrientation,
+      }) as Promise<BrowserNormalizedRaster>;
+
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new DomainError(
+          "RENDER_TIMEOUT",
+          `Raster normalization exceeded ${this.#timeoutMs}ms.`,
+          504,
+          { retryable: true },
+        )), this.#timeoutMs);
+        timer.unref?.();
+      });
+      const normalized = await Promise.race([normalizeJob, timeout]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+      const png = Buffer.from(normalized.pngBase64, "base64");
+      if (png.length > options.maxBytes) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", `Normalized asset exceeds the ${options.maxBytes} byte limit.`, 413);
+      }
+      if (!png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        throw new DomainError("INTERNAL_ERROR", "Chromium returned an invalid normalized PNG.", 500);
+      }
+      return { data: png, mimeType: "image/png", width: normalized.width, height: normalized.height };
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      if (this.#browser && !this.#browser.isConnected()) {
+        this.#browser = null;
+        this.#playwrightUnavailable = false;
+      }
+      const message = error instanceof Error ? error.message : "";
+      if (message.includes("PIXEL_LIMIT:")) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", `Image exceeds the ${effectiveMaxPixels} pixel limit.`, 413);
+      }
+      throw new DomainError("UNSUPPORTED_ASSET", "Chromium could not fully decode the raster image.", 422, { cause: error });
+    } finally {
+      await context?.close().catch(() => undefined);
+      release();
+    }
+  }
+
+  async health(): Promise<RenderHealth> {
+    if (this.#remoteClient) return this.#remoteClient.health();
+    const browser = await this.#ensureBrowser();
+    if (browser) {
+      return {
+        ok: true,
+        mode: "in-process",
+        renderer: "playwright",
+        softwareFallback: false,
+        warnings: this.#browserWarning ? [this.#browserWarning] : [],
+      };
+    }
+    if (this.#allowSoftwareFallback) {
+      return {
+        ok: true,
+        mode: "in-process",
+        renderer: "software",
+        softwareFallback: true,
+        warnings: ["Development-only software renderer is active because Chromium is unavailable."],
+      };
+    }
+    throw new DomainError("RENDER_FAILED", "Pinned Chromium is unavailable.", 503, { retryable: true });
+  }
+
+  get remote(): boolean {
+    return this.#remoteClient !== null;
   }
 
   async close(): Promise<void> {

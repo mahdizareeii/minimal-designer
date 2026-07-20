@@ -1,23 +1,128 @@
 services:
+  renderer:
+    build:
+      context: .
+    image: formaspec/server:local
+    restart: unless-stopped
+    command: ["node", "apps/server/dist/renderer-worker.js"]
+    init: true
+    network_mode: none
+    shm_size: "1gb"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: "2.0"
+    environment:
+      FORMASPEC_RENDER_SOCKET: /run/formaspec/renderer.sock
+      FORMASPEC_RENDER_TIMEOUT_MS: ${FORMASPEC_RENDER_TIMEOUT_MS:-15000}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      DESIGNER_MAX_ASSET_PIXELS: ${DESIGNER_MAX_ASSET_PIXELS:-32000000}
+      FORMASPEC_RENDER_MAX_PIXELS: ${FORMASPEC_RENDER_MAX_PIXELS:-32000000}
+      FORMASPEC_RENDER_CONCURRENCY: ${FORMASPEC_RENDER_CONCURRENCY:-2}
+      FORMASPEC_RENDER_QUEUE_LIMIT: ${FORMASPEC_RENDER_QUEUE_LIMIT:-32}
+      FORMASPEC_RENDER_IPC_MAX_BYTES: ${FORMASPEC_RENDER_IPC_MAX_BYTES:-100663296}
+    volumes:
+      - renderer-socket:/run/formaspec
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "apps/server/dist/renderer-worker.js", "--health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
   designer:
     build:
       context: .
-    image: minimal-ai-designer:local
+    image: formaspec/server:local
     restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: "2.0"
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-4310}:4310"
-    shm_size: "1gb"
+    depends_on:
+      renderer:
+        condition: service_healthy
     environment:
+      APP_MODE: ${APP_MODE:-local}
       HOST: 0.0.0.0
       PORT: 4310
       DATA_DIR: /data
+      BACKUP_DIR: /backups
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4310}
       AUTH_MODE: ${AUTH_MODE:-none}
       DESIGNER_TOKEN: ${DESIGNER_TOKEN:-}
       TRUSTED_USER_HEADER: ${TRUSTED_USER_HEADER:-x-designer-user}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      DESIGNER_MAX_ASSET_PIXELS: ${DESIGNER_MAX_ASSET_PIXELS:-32000000}
+      FORMASPEC_CONTAINER_LOCAL: ${FORMASPEC_CONTAINER_LOCAL:-true}
+      FORMASPEC_ALLOWED_HOSTS: ${FORMASPEC_ALLOWED_HOSTS:-localhost:4310,127.0.0.1:4310}
+      FORMASPEC_TRUSTED_PROXIES: ${FORMASPEC_TRUSTED_PROXIES:-}
+      FORMASPEC_CSRF_HEADER: ${FORMASPEC_CSRF_HEADER:-x-formaspec-csrf}
+      FORMASPEC_RENDER_SOCKET: /run/formaspec/renderer.sock
+      FORMASPEC_RENDER_TIMEOUT_MS: ${FORMASPEC_RENDER_TIMEOUT_MS:-15000}
+      FORMASPEC_RENDER_MAX_PIXELS: ${FORMASPEC_RENDER_MAX_PIXELS:-32000000}
+      FORMASPEC_RENDER_IPC_MAX_BYTES: ${FORMASPEC_RENDER_IPC_MAX_BYTES:-100663296}
+      DESIGNER_CORS_ORIGINS: ${DESIGNER_CORS_ORIGINS:-http://127.0.0.1:4310,http://localhost:4310}
     volumes:
       - designer-data:/data
+      - designer-backups:/backups
+      - renderer-socket:/run/formaspec
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+
+  restore-worker:
+    profiles:
+      - operations
+    build:
+      context: .
+    image: formaspec/server:local
+    restart: "no"
+    command: ["node", "apps/server/dist/restore-worker.js"]
+    init: true
+    user: pwuser
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: "2.0"
+    environment:
+      DATA_DIR: /data
+      BACKUP_DIR: /backups
+      FORMASPEC_RENDER_SOCKET: /run/formaspec/renderer.sock
+      FORMASPEC_RENDER_TIMEOUT_MS: ${FORMASPEC_RENDER_TIMEOUT_MS:-15000}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      DESIGNER_MAX_ASSET_PIXELS: ${DESIGNER_MAX_ASSET_PIXELS:-32000000}
+      FORMASPEC_RENDER_MAX_PIXELS: ${FORMASPEC_RENDER_MAX_PIXELS:-32000000}
+      FORMASPEC_RENDER_IPC_MAX_BYTES: ${FORMASPEC_RENDER_IPC_MAX_BYTES:-100663296}
+      FORMASPEC_ALLOW_SYSTEM_CHROME: "false"
+      NODE_ENV: production
+    volumes:
+      - designer-data:/data
+      - designer-backups:/backups
+      - renderer-socket:/run/formaspec
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    healthcheck:
+      disable: true
 
 volumes:
   designer-data:
+  designer-backups:
+  renderer-socket:

@@ -1,11 +1,17 @@
 import {
+  AnyDesignDocumentSchema,
   DesignDocumentSchema,
   DesignOperationListSchema,
+  V2CompatibilityError,
   applyOperations as applyCoreOperations,
   createId as createCoreId,
   createStarterDocument,
   lintDesignDocument,
+  lintDesignDocumentV2,
+  mergeV1CompatibilityDocument,
+  toV1CompatibleDesignDocument,
   validateDesignDocument,
+  type AnyDesignDocument,
   type DesignDocument,
   type DesignOperation,
   type IdKind,
@@ -23,7 +29,7 @@ export interface Diagnostic {
 }
 
 export interface AppliedOperations {
-  document: DesignDocument;
+  document: AnyDesignDocument;
   createdIds: unknown;
   diagnostics: Diagnostic[];
 }
@@ -153,14 +159,33 @@ export function createDocument(id: string, name: string, now: string, preset: "w
   }
 }
 
-export function parseDocument(value: unknown): DesignDocument {
+function compatibilityError(error: V2CompatibilityError): DomainError {
+  return new DomainError(
+    "UNSUPPORTED_DOCUMENT_FEATURE",
+    error.message,
+    422,
+    { details: { issues: error.issues } },
+  );
+}
+
+export function parseDocument(value: unknown): AnyDesignDocument {
   try {
-    return DesignDocumentSchema.parse(value);
+    return AnyDesignDocumentSchema.parse(value);
   } catch (error) {
     throw new DomainError("VALIDATION_FAILED", "Stored design document is invalid.", 422, {
       details: { reason: error instanceof Error ? error.message : String(error) },
       cause: error,
     });
+  }
+}
+
+export function editorDocument(document: AnyDesignDocument): DesignDocument {
+  try {
+    return toV1CompatibleDesignDocument(document);
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    if (error instanceof V2CompatibilityError) throw compatibilityError(error);
+    throw error;
   }
 }
 
@@ -175,11 +200,22 @@ export function parseOperations(value: unknown): DesignOperation[] {
   }
 }
 
-export function collectDiagnostics(document: DesignDocument): Diagnostic[] {
-  const validation = normalizeDiagnostics(validateDesignDocument(document));
-  const lint = normalizeDiagnostics(lintDesignDocument(document));
+export function collectDiagnostics(document: AnyDesignDocument): Diagnostic[] {
+  const compatible = editorDocument(document);
+  const validation = normalizeDiagnostics(validateDesignDocument(compatible));
+  const lint = normalizeDiagnostics(lintDesignDocument(compatible));
+  const v2Lint = document.schema_version === 2
+    ? normalizeDiagnostics(lintDesignDocumentV2(document))
+    : [];
+  const compatibility: Diagnostic[] = document.schema_version === 2
+    ? [{
+      severity: "info" as const,
+      code: "V2_COMPATIBILITY_PROJECTION",
+      message: "The current editor and renderer use a V1 compatibility projection while the canonical snapshot remains strict V2.",
+    }]
+    : [];
   const seen = new Set<string>();
-  return [...validation, ...lint].filter((diagnostic) => {
+  return [...compatibility, ...validation, ...lint, ...v2Lint].filter((diagnostic) => {
     const key = `${diagnostic.severity}:${diagnostic.code}:${diagnostic.node_id ?? ""}:${diagnostic.path ?? ""}:${diagnostic.message}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -188,17 +224,21 @@ export function collectDiagnostics(document: DesignDocument): Diagnostic[] {
 }
 
 export function applyOperations(
-  document: DesignDocument,
+  document: AnyDesignDocument,
   operationsValue: unknown,
   options: { expectedRevision: number; now: string },
 ): AppliedOperations {
   const operations = parseOperations(operationsValue);
   try {
-    const result = applyCoreOperations(document, operations, {
+    const compatible = editorDocument(document);
+    const result = applyCoreOperations(compatible, operations, {
       expectedRevision: options.expectedRevision,
       now: options.now,
     });
-    const nextDocument = DesignDocumentSchema.parse(result.document);
+    const editedDocument = DesignDocumentSchema.parse(result.document);
+    const nextDocument = document.schema_version === 2
+      ? mergeV1CompatibilityDocument(document, editedDocument)
+      : editedDocument;
     const diagnostics = [
       ...normalizeDiagnostics(result.diagnostics),
       ...collectDiagnostics(nextDocument),
@@ -209,6 +249,8 @@ export function applyOperations(
       diagnostics,
     };
   } catch (error) {
+    if (error instanceof DomainError) throw error;
+    if (error instanceof V2CompatibilityError) throw compatibilityError(error);
     const candidate = error as { code?: unknown; message?: unknown; details?: unknown };
     if (candidate.code === "revision_conflict" || candidate.code === "REVISION_CONFLICT") {
       const details = typeof candidate.details === "object" && candidate.details !== null

@@ -19,6 +19,7 @@ import {
   Play,
   Redo2,
   Save,
+  ShieldAlert,
   Smartphone,
   Sparkles,
   Tablet,
@@ -31,11 +32,12 @@ import { useEffect, useRef, useState } from "react";
 
 import { navigate } from "../App";
 import { DEVICE_PRESETS, type DevicePreset } from "../domain";
-import { exportUrl, renderUrl, updateContext } from "../lib/api";
+import { exportUrl, portableExportUrl, previewRenderUrl, renderUrl, updateContext } from "../lib/api";
 import { useDesignerStore } from "../store/designer-store";
 import { Canvas, PrototypeCanvas } from "./Canvas";
 import { InspectorPanel } from "./InspectorPanel";
 import { LayersPanel } from "./LayersPanel";
+import { ProductBriefPanel } from "./ProductBriefPanel";
 
 const presetIcons = { web: Monitor, phone: Smartphone, tablet: Tablet } as const;
 
@@ -70,6 +72,7 @@ export function Editor({ designId }: { designId: string }) {
   const prototypeOpen = useDesignerStore((state) => state.prototypeOpen);
   const prototypePageId = useDesignerStore((state) => state.prototypePageId);
   const sidebarsHidden = useDesignerStore((state) => state.sidebarsHidden);
+  const archiveReview = useDesignerStore((state) => state.archiveReview);
   const openDesign = useDesignerStore((state) => state.openDesign);
   const closeDesign = useDesignerStore((state) => state.closeDesign);
   const connectEvents = useDesignerStore((state) => state.connectEvents);
@@ -83,13 +86,15 @@ export function Editor({ designId }: { designId: string }) {
   const addFrame = useDesignerStore((state) => state.addFrame);
   const duplicate = useDesignerStore((state) => state.duplicateSelection);
   const deleteSelection = useDesignerStore((state) => state.deleteSelection);
+  const approveArchiveReview = useDesignerStore((state) => state.approveArchiveReview);
+  const discardArchiveReview = useDesignerStore((state) => state.discardArchiveReview);
   const openPrototype = useDesignerStore((state) => state.openPrototype);
   const closePrototype = useDesignerStore((state) => state.closePrototype);
   const goToPrototypePage = useDesignerStore((state) => state.goToPrototypePage);
   const setNotice = useDesignerStore((state) => state.setNotice);
   const setSidebarsHidden = useDesignerStore((state) => state.setSidebarsHidden);
   const [frameMenu, setFrameMenu] = useState(false);
-  const [exporting, setExporting] = useState<"json" | "png" | null>(null);
+  const [exporting, setExporting] = useState<"json" | "png" | "bundle" | null>(null);
   const copiedNodeIds = useRef<typeof selectedIds>([]);
 
   useEffect(() => {
@@ -124,10 +129,10 @@ export function Editor({ designId }: { designId: string }) {
   }, [designId]);
 
   useEffect(() => {
-    if (pendingCount === 0 || saving || saveState === "error" || saveState === "conflict") return;
+    if (pendingCount === 0 || saving || archiveReview || saveState === "review" || saveState === "error" || saveState === "conflict") return;
     const timer = window.setTimeout(() => void save(), 950);
     return () => window.clearTimeout(timer);
-  }, [pendingCount, saving, save, saveState]);
+  }, [pendingCount, saving, save, saveState, archiveReview]);
 
   useEffect(() => {
     if (!notice) return;
@@ -178,7 +183,7 @@ export function Editor({ designId }: { designId: string }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [save, undo, redo, duplicate, deleteSelection, setTool, addNode, prototypeOpen, closePrototype, select, selectedIds, setNotice]);
 
-  const performExport = async (kind: "json" | "png") => {
+  const performExport = async (kind: "json" | "png" | "bundle") => {
     if (!document) return;
     setExporting(kind);
     try {
@@ -191,6 +196,11 @@ export function Editor({ designId }: { designId: string }) {
       }
       if (kind === "json") {
         await downloadFile(exportUrl(currentDocument.id, current.baseVersion), `${currentDocument.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-v${current.baseVersion}.json`);
+      } else if (kind === "bundle") {
+        await downloadFile(
+          portableExportUrl(currentDocument.id, current.baseVersion),
+          `${currentDocument.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-v${current.baseVersion}.formaspec.zip`,
+        );
       } else {
         const selectedFrame = selectedIds.find((id) => currentDocument.nodes[id]?.type === "frame");
         await downloadFile(
@@ -237,7 +247,13 @@ export function Editor({ designId }: { designId: string }) {
     );
   }
 
-  const saveIcon = saveState === "saving" ? <LoaderCircle size={12} className="spin" /> : saveState === "error" || saveState === "conflict" ? <CloudOff size={12} /> : <Check size={12} />;
+  const saveIcon = saveState === "saving"
+    ? <LoaderCircle size={12} className="spin" />
+    : saveState === "review"
+      ? <Eye size={12} />
+      : saveState === "error" || saveState === "conflict"
+        ? <CloudOff size={12} />
+        : <Check size={12} />;
   const page = document.pages.find((item) => item.id === prototypePageId);
 
   return (
@@ -270,13 +286,14 @@ export function Editor({ designId }: { designId: string }) {
           </div>
         </div>
         <div className="editor-topbar-right">
-          <div className={`save-status is-${saveState}`}>{saveIcon}{saveState === "saving" ? "Saving" : saveState === "dirty" ? "Unsaved" : saveState === "error" ? "Retry save" : saveState === "conflict" ? "Conflict" : "Saved"}</div>
+          <div className={`save-status is-${saveState}`}>{saveIcon}{saveState === "saving" ? "Saving" : saveState === "dirty" ? "Unsaved" : saveState === "review" ? "Review archive" : saveState === "error" ? "Retry save" : saveState === "conflict" ? "Conflict" : "Saved"}</div>
           {saveState === "conflict" && <button className="button button-secondary" style={{ minHeight: 30, padding: "0 9px", fontSize: 9 }} onClick={() => {
             if (window.confirm("Load the latest server revision and discard this conflicting local draft?")) void reloadConflict();
           }}>Reload latest</button>}
           <button className="tool-button" onClick={() => void save()} disabled={saving || pendingCount === 0 || saveState === "conflict"} title="Save now"><Save size={13} /></button>
           <button className="tool-button" onClick={() => void performExport("json")} disabled={Boolean(exporting) || saveState === "conflict"} title="Export JSON">{exporting === "json" ? <LoaderCircle size={13} /> : <FileJson size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("png")} disabled={Boolean(exporting) || saveState === "conflict"} title="Export PNG">{exporting === "png" ? <LoaderCircle size={13} /> : <ImageDown size={13} />}</button>
+          <button className="tool-button" onClick={() => void performExport("bundle")} disabled={Boolean(exporting) || saveState === "conflict"} title="Export portable FormaSpec bundle">{exporting === "bundle" ? <LoaderCircle size={13} /> : <Download size={13} />}</button>
           <button className="button button-secondary" style={{ minHeight: 30, padding: "0 10px", fontSize: 10 }} onClick={openPrototype}><Play size={12} /> Preview</button>
         </div>
       </header>
@@ -287,12 +304,51 @@ export function Editor({ designId }: { designId: string }) {
         <InspectorPanel />
       </main>
 
+      <ProductBriefPanel />
+
       <footer className="editor-statusbar">
         <div><span><MousePointer2 size={9} /> {selectedIds.length ? `${selectedIds.length} selected` : "Ready"}</span><span>Structured DOM canvas</span><span>Schema v{document.schema_version}</span></div>
         <div><span><kbd>⌘S</kbd> Save</span><span><kbd>⌘Z</kbd> Undo</span><span><Eye size={9} /> Codex context synced</span></div>
       </footer>
 
       {notice && <div className="toast"><Sparkles size={13} />{notice}<button className="icon-button" onClick={() => setNotice(null)}><X size={11} /></button></div>}
+
+      {archiveReview && (
+        <div className="archive-review-backdrop" role="presentation">
+          <section className="archive-review" role="dialog" aria-modal="true" aria-labelledby="archive-review-title">
+            <header>
+              <div className="archive-review-heading">
+                <span><ShieldAlert size={18} /></span>
+                <div>
+                  <h2 id="archive-review-title">Review destructive change</h2>
+                  <p>The preview is persisted but no revision has been created. Compare both versions before committing.</p>
+                </div>
+              </div>
+              <div className="archive-review-meta">
+                <span>Base v{archiveReview.baseVersion}</span>
+                <span>{archiveReview.changedNodeIds.length} changed layer{archiveReview.changedNodeIds.length === 1 ? "" : "s"}</span>
+              </div>
+            </header>
+            <div className="archive-review-grid">
+              <figure>
+                <figcaption><strong>Before</strong><span>Immutable base revision</span></figcaption>
+                <div><img src={renderUrl(document.id, { version: archiveReview.baseVersion, pageId: activePageId ?? undefined, maxSize: 1600 })} alt="Design before archival" /></div>
+              </figure>
+              <figure>
+                <figcaption><strong>After</strong><span>Exact archive preview</span></figcaption>
+                <div><img src={previewRenderUrl(document.id, archiveReview.previewId, 1600)} alt="Design after archival" /></div>
+              </figure>
+            </div>
+            <footer>
+              <p><ShieldAlert size={13} /> Archival is a soft deletion. Immutable history remains available for restore.</p>
+              <div>
+                <button className="button button-secondary" disabled={saving} onClick={discardArchiveReview}>Discard preview</button>
+                <button className="button button-danger" disabled={saving} onClick={() => void approveArchiveReview()}>{saving ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />} Commit archive</button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      )}
 
       {prototypeOpen && prototypePageId && (
         <div className="prototype-backdrop">

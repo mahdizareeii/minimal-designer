@@ -66,6 +66,7 @@ function LayerRow({ nodeId, depth, collapsed, toggleCollapsed }: {
     <>
       <div
         className={`layer-row ${isSelected ? "is-selected" : ""}`}
+        data-layer-node-id={node.id}
         style={{ paddingLeft: 4 + depth * 13 }}
         onClick={(event) => select([node.id], event.shiftKey || event.metaKey)}
       >
