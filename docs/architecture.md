@@ -75,6 +75,7 @@ end-to-end request-body streaming remains future hardening.
 | `previews` | Exact persisted snapshots, base/result hashes, engine versions, temporary-ID map, changed IDs, expiry, kind, and status | Complete fault injection and every engine-mismatch/already-committed case remain to be proven. |
 | `idempotency` | Organization/principal/scope/key response cache committed atomically with writes | Larger restart/concurrency matrices remain. |
 | `assets` | Fully decoded deterministic PNG/JPEG/WebP, content-addressed files, and verified legacy-BLOB quarantine fallback | Decode/normalization uses the isolated renderer worker; operator-approved legacy cleanup and broader malformed-image/load evidence are not implemented. |
+| `render_jobs` | Bounded request/output hashes and lifecycle metadata for render and raster-normalization jobs; owner leases protect rolling processes, and exact permit-based 30-day retention deletes one organization/internal scope per bounded batch. Raw documents, assets, paths, and PNG bytes are never stored. | Organization-configurable retention, dashboards, and packaged load evidence remain incomplete. |
 | `event_outbox` | Organization/project-scoped replayable SSE source with guarded retention of published rows and explicit replay gaps | Operational lag monitoring and high-load reconnect evidence remain. |
 | `audit_retention_previews` / `audit_retention_runs` | Exact expiring retention plans plus immutable SHA-256 chained execution evidence | Administration UI and long-running scheduled execution remain. |
 | `portable_imports` | Immutable organization-scoped source bundle/revision hash claims, target revision, canonical ID map, manifest, diagnostics, actor, and timestamp | The source revision hash is preserved as a provenance claim; it is not revalidated as a local revision chain. Per-entry inflation is streaming, but the request archive and extracted entry buffers remain memory-resident within configured limits. |
@@ -82,16 +83,17 @@ end-to-end request-body streaming remains future hardening.
 
 The `schema_migrations` ledger and database, document, command-engine,
 renderer, font, application, and export versions are explicit and synchronized
-between server and CLI at database schema version 10. Migration 8 is an
+between server and CLI at database schema version 11. Migration 8 is an
 expand-only correction that adds the previously missing design-system,
 repository-inventory, handoff, implementation-mapping, and Redesign Studio
 tables. Migration 9 adds bounded preview-first audit/outbox retention with
 temporary exact-delete permits and an immutable run hash chain. Migration 10
-adds immutable portable-import provenance. None of these migrations changes V1
-revisions or removes legacy columns.
+adds immutable portable-import provenance. Migration 11 adds bounded persistent
+render-job lifecycle records and strict transition/immutability constraints.
+None of these migrations changes V1 revisions or removes legacy columns.
 
 The migration ledger is necessary but not sufficient. Database startup and
-backup/restore verification validate the required migration-9/10 tables,
+backup/restore verification validate the required migration-9/10/11 tables,
 columns, indexes, trigger targets/SQL, and forbidden legacy triggers. A database
 that claims a ledger version without the required schema shape fails closed.
 
@@ -104,6 +106,13 @@ dropped, `no-new-privileges`, PID/CPU/memory limits, deterministic locale,
 timezone, and DPR, a new browser context per job, bounded queue/concurrency,
 and guaranteed cleanup. `/health/ready` and `/health/render` fail when the
 worker is unavailable; production has no silent software fallback.
+
+The API records each dispatched render or raster-normalization job as
+`queued`, `running`, and exactly one terminal `succeeded` or `failed` state.
+Only bounded hashes, versions, dimensions, warnings, and safe error metadata
+are persisted. The worker remains database-free. API owners renew short leases;
+startup and periodic maintenance mark only expired nonterminal rows failed and
+retryable, so a rolling second API process cannot invalidate live work.
 
 Windows named-pipe support, self-contained native worker packaging, and a
 continuous automated infrastructure-egress test remain incomplete.
