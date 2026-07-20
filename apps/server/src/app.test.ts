@@ -11,6 +11,7 @@ import { loadConfig } from "./config.js";
 import { DEFAULT_ORGANIZATION_POLICY } from "./organization-policy-model.js";
 
 const builtWebIndex = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist/index.html");
+const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
 
 interface RevisionEnvelope {
   version: number;
@@ -1096,12 +1097,17 @@ describe("designer server", () => {
       DESIGNER_TOKEN: "test-token-1234567890",
       TRUSTED_USER_HEADER: "x-company-user",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       DESIGNER_CORS_ORIGINS: "https://designer.example.test",
       DESIGNER_LOG_LEVEL: "silent",
     }));
     await secured.app.ready();
     try {
-      const missingUiIdentity = await secured.app.inject({ method: "GET", url: "/api/designs", headers: { host: "designer.example.test" } });
+      const missingUiIdentity = await secured.app.inject({
+        method: "GET",
+        url: "/api/designs",
+        headers: { host: "designer.example.test", "x-formaspec-proxy-secret": PROXY_SECRET },
+      });
       expect(missingUiIdentity.statusCode).toBe(401);
 
       const ui = await secured.app.inject({
@@ -1112,6 +1118,7 @@ describe("designer server", () => {
           origin: "https://designer.example.test",
           "x-formaspec-csrf": "1",
           "x-company-user": "alice@example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: { name: "Secure selection", preset: "web", idempotencyKey: "secure-create-0001" },
       });
@@ -1127,6 +1134,7 @@ describe("designer server", () => {
           origin: "https://designer.example.test",
           "x-formaspec-csrf": "1",
           "x-company-user": "alice@example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: {
           designId: uiDesign.document.id,
@@ -1139,7 +1147,13 @@ describe("designer server", () => {
       const mcpWithoutToken = await secured.app.inject({
         method: "POST",
         url: "/mcp",
-        headers: { host: "designer.example.test", accept: "application/json, text/event-stream", "content-type": "application/json", "x-company-user": "alice@example.test" },
+        headers: {
+          host: "designer.example.test",
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "x-company-user": "alice@example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
+        },
         payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
       });
       expect(mcpWithoutToken.statusCode).toBe(401);
@@ -1152,6 +1166,7 @@ describe("designer server", () => {
           "content-type": "application/json",
           host: "designer.example.test",
           authorization: "Bearer test-token-1234567890",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
       });
@@ -1166,6 +1181,7 @@ describe("designer server", () => {
           "content-type": "application/json",
           host: "designer.example.test",
           authorization: "Bearer test-token-1234567890",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "context_get", arguments: {} } },
       });
@@ -1187,6 +1203,7 @@ describe("designer server", () => {
           origin: "https://designer.example.test",
           "x-formaspec-csrf": "1",
           "x-company-user": "bob@example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: {
           designId: uiDesign.document.id,
@@ -1204,6 +1221,7 @@ describe("designer server", () => {
           "content-type": "application/json",
           host: "designer.example.test",
           authorization: "Bearer test-token-1234567890",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "context_get", arguments: {} } },
       });
@@ -1221,6 +1239,7 @@ describe("designer server", () => {
           "content-type": "application/json",
           host: "designer.example.test",
           authorization: "Bearer test-token-1234567890",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: {
           jsonrpc: "2.0",
@@ -1252,6 +1271,7 @@ describe("designer server", () => {
       DESIGNER_TOKEN: "policy-http-token-1234567890",
       TRUSTED_USER_HEADER: "x-company-user",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       DESIGNER_CORS_ORIGINS: "https://designer.example.test",
       DESIGNER_LOG_LEVEL: "silent",
     }));
@@ -1262,6 +1282,7 @@ describe("designer server", () => {
         origin: "https://designer.example.test",
         "x-formaspec-csrf": "1",
         "x-company-user": "admin@example.test",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
       };
       const bootstrap = await secured.app.inject({ method: "GET", url: "/api/organization/policy", headers: adminHeaders });
       expect(bootstrap.statusCode).toBe(200);
@@ -1285,6 +1306,7 @@ describe("designer server", () => {
           origin: "https://designer.example.test",
           "x-formaspec-csrf": "1",
           "x-company-user": "viewer@example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: { name: "Forbidden viewer project", preset: "web", idempotencyKey: "viewer-policy-create-0001" },
       });
@@ -1298,6 +1320,7 @@ describe("designer server", () => {
           authorization: "Bearer policy-http-token-1234567890",
           "content-type": "application/json",
           host: "designer.example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
       });
@@ -1319,6 +1342,7 @@ describe("designer server", () => {
           authorization: "Bearer policy-http-token-1234567890",
           "content-type": "application/json",
           host: "designer.example.test",
+          "x-formaspec-proxy-secret": PROXY_SECRET,
         },
         payload: {
           jsonrpc: "2.0",

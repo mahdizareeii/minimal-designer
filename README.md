@@ -141,18 +141,20 @@ Currently implemented `formaspecctl` workflows are:
 | `backup prune preview\|execute` | Produces an exact expiring plan, permanently exempts manual backups, and requires plan hash plus explicit `--yes` before revalidated deletion. |
 | `backup verify` | Independently verifies an existing bounded `formaspec-backup` bundle. |
 | `backup restore <bundle>` | With explicit `--yes`, verifies and atomically restores source-local `./data`, creates a stopped-service safety copy, rolls back on health failure, and refuses Docker/server modes. |
-| `backup restore --backup-id <id>` | Externally supervises restore for the launcher-recorded local Docker runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. |
+| `backup restore --backup-id <id>` | Externally supervises a `HEALTHY_PLANNED_RESTORE_ONLY` operation for the launcher-recorded local Docker/server runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. The current API/database must be healthy for backup-ID resolution and preflight; offline disaster recovery is not implemented. |
 | `backup restore status\|resume\|rollback\|abort\|clear-stale-lock` | Inspects or safely recovers the exact durable Docker restore operation. Abort requires no operation/journal/worker evidence; stale-lock clearing requires proof that the pinned worker container is absent. |
 | `agent connect codex` | Starts/authorizes the bridge, configures MCP, installs the managed skill/plugin, and verifies the connection. |
 | `agent config generic` | Prints validated token-free loopback JSON/TOML and verification guidance without reading or modifying an unknown client. |
 | `support-bundle preview\|create` | Previews or explicitly creates a deterministic bounded diagnostic archive with aggressive redaction and no database, assets, backups, environment values, source, or credentials. |
 
-Server-mode restore, automatic supervisor installation/alerting, native package
-installation, autostart, and full upgrade/uninstall workflows are not complete
-CLI features yet. Launcher-local Docker restore is implemented and externally
-supervised; backup create/list/schedule/prune still require the local loopback
-service, while offline verification, source-local restore, and support-bundle
-creation remain separate.
+Automatic supervisor installation/alerting, native package installation,
+autostart, and full upgrade/uninstall workflows are not complete CLI features
+yet. Launcher-pinned Docker/server restore is implemented only as
+`HEALTHY_PLANNED_RESTORE_ONLY`: it requires the current API and database to be
+healthy before maintenance and is not an offline disaster-recovery path.
+Backup create/list/schedule/prune still require the local loopback service,
+while offline verification, source-local restore, and support-bundle creation
+remain separate.
 
 ## What is implemented
 
@@ -182,12 +184,25 @@ creation remain separate.
 - A separate bounded Unix-socket Playwright renderer service in Docker with a
   non-root user, no network, read-only root, dropped capabilities, deterministic
   contexts, resource limits, and fail-closed health.
+- Schema 11 persistent render-job records for rendering and raster
+  normalization. The API owns the database lifecycle (`queued` → `running` →
+  terminal), uses owner leases and heartbeats for rolling-process recovery,
+  retains only bounded hashes/versions/dimensions/warnings/safe errors, and
+  performs permit-guarded 30-day terminal-record retention. The renderer worker
+  remains database-free and output image bytes are not stored in the job row.
 - PNG/JPEG/WebP decode and deterministic normalization with byte/pixel limits,
   generated content-addressed files, integrity verification, and legacy-BLOB
   fallback.
 - A read-only Workspace Bridge foundation with explicit expiring/revocable
   repository grants, secret/symlink/generated-file exclusion, supported-platform
   detection, bounded inventories, and path-free upload mappings.
+- Approval-gated selected-workspace Codex launch. A grant is bound to the exact
+  central inventory, the handoff must be approved/implementing, Codex starts
+  with the selected repository as its exact working directory, one secret-free
+  task argument, `shell: false`, and a minimal environment. POSIX process-group
+  monitoring terminates the launch after revocation, expiry, policy withdrawal,
+  handoff closure, or inventory change; packaged Windows descendant containment
+  still requires a Job Object or equivalent.
 - Persisted organization design systems with append-only token/component
   versions, immutable releases, project pins, exact upgrade previews, REST/MCP
   interfaces, and initial Administration UI.
@@ -218,10 +233,10 @@ These foundations do not close the release gates listed below.
 
 ## Important current limitations
 
-- Windows renderer named pipes/native packaging and continuous
+- Windows renderer named pipes, native lifecycle proof, and continuous
   egress/failure/load proof remain unfinished beyond the verified Docker
-  network-denied worker. Render and raster-normalization jobs now persist a
-  bounded hash-only, owner-leased lifecycle with exact 30-day retention, but
+  network-denied worker. Render and raster-normalization jobs persist a bounded
+  hash-only, owner-leased lifecycle with exact 30-day retention, but
   organization-configurable retention dashboards and packaged load evidence
   remain open.
 - The local 20-step browser E2E, seven visual baselines, selection alignment,
@@ -236,29 +251,33 @@ These foundations do not close the release gates listed below.
   caps, so lower-peak end-to-end request streaming and broader stress evidence
   remain.
 - Verified backup creation/list/verification/download and portable validation/
-  import are exposed in `/administration`; source-local restore, supervisor-callable
-  schedule/prune, and launcher-local Docker restore exist. Server-mode restore,
-  installed supervision/alerting, signed provenance, and broader
-  failure-recovery evidence remain unfinished.
-- One fresh self-contained unsigned macOS ARM64 PKG candidate and its offline
-  artifact-specific integrity/SBOM evidence match the current schema-10
-  workspace. The verifier requires
+  import are exposed in `/administration`; source-local restore,
+  supervisor-callable schedule/prune, and launcher-pinned Docker/server planned
+  restore exist. The planned path requires a healthy current API/database and
+  is explicitly not offline disaster recovery. Installed supervision/alerting,
+  signed provenance, and broader failure-recovery evidence remain unfinished.
+- The previous self-contained unsigned macOS ARM64 PKG candidate and its offline
+  artifact-specific integrity/SBOM evidence match the earlier schema-10
+  checkpoint, not the current schema-11 source tree. The verifier requires
   exact path/type/content-hash equality for every packaged workspace `dist`
   tree and managed CLI asset, so stale compiled output fails. The package is
   still **NO-GO** for release: Chromium LGPL-notice review,
   signing/notarization, reproducibility, vulnerability scans, and clean
-  lifecycle proof remain open. Windows MSI, Linux DEB/RPM, and container
-  artifact evidence are not complete. See
+  lifecycle proof remain open. Deterministic Linux DEB/RPM builders and a
+  Windows WiX v4 unsigned-MSI foundation now exist in source, but no current
+  native artifact/lifecycle evidence qualifies them for release. See
   [macOS PKG evidence](docs/MACOS_PKG_EVIDENCE.md).
 - New server initializer output includes the strict server-mode, proxy,
   allowlist, CORS, and container-boundary contract, and the CLI/server migration
-  readers both recognize version 10. Migration 9 adds bounded, preview-first
+  readers both recognize version 11. Migration 9 adds bounded, preview-first
   audit/published-outbox retention with immutable hash-chained execution
-  evidence; migration 10 adds immutable portable-import provenance. A copied
+  evidence; migration 10 adds immutable portable-import provenance; migration
+  11 adds persistent bounded render-job lifecycle records. A copied
   version-7 fixture is verified to
   upgrade without changing V1 revision bytes or hashes; clean reverse-proxy
-  deployment, server restore, and real customer backup/restore fixtures remain
-  unproven.
+  deployment, offline disaster recovery, and real customer backup/restore
+  fixtures remain unproven. Server proxy-origin authentication hardening is
+  still under verification in the current working tree.
 
 The recorded local-Docker evidence used an isolated Compose project on port
 `4397`: backup `backup_0dda1a60c54c5805557426a428739e505e089425` restored
@@ -301,6 +320,8 @@ pnpm test:performance
 pnpm test:release-evidence
 pnpm test:macos-pkg-evidence
 pnpm release:evidence:macos:verify
+pnpm package:linux:deb
+pnpm package:linux:rpm
 docker compose config --quiet
 ```
 
@@ -308,12 +329,12 @@ docker compose config --quiet
 gate. The last recorded checkpoint passed with 342 third-party components and
 zero policy violations after Sharp/libvips was removed. The exact unsigned
 macOS ARM64 PKG also passed offline artifact verification and exact linkage for
-seven workspace trees at that checkpoint, while
+seven workspace trees at that earlier checkpoint, while
 `pnpm release:evidence:macos:gate` intentionally failed on the five recorded
-release blockers. Migrations 9/10 and later import/inspect changes now require a
-fresh source-evidence run plus a rebuilt package before current-workspace parity
-can be claimed. Container, Windows, and Linux artifacts still require their own
-target-specific evidence.
+release blockers. Migration 11 and later source changes require a fresh
+schema-11 source-evidence run plus a rebuilt package before current-workspace
+parity can be claimed. Container, Windows, and Linux artifacts still require
+their own target-specific evidence.
 
 Passing unit/build checks alone does not establish production readiness. The
 browser, security, performance, backup/restore, installer, and release-evidence

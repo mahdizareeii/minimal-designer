@@ -14,6 +14,7 @@ import {
 } from "./renderer-contract.js";
 
 const applications: DesignerApplication[] = [];
+const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
 
 afterEach(async () => {
   await Promise.all(applications.splice(0).map((application) => application.app.close()));
@@ -97,6 +98,7 @@ describe("FormaSpec application modes", () => {
       AUTH_MODE: "trusted-header",
       DESIGNER_TOKEN: "0123456789abcdef",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     })).toThrow(/development-only/);
 
@@ -120,6 +122,62 @@ describe("FormaSpec application modes", () => {
       PUBLIC_BASE_URL: "http://127.0.0.1:4310",
       FORMASPEC_RENDER_SOCKET: "C:\\temp\\renderer.sock",
     }, "win32")).toThrow(/Windows named pipe/);
+
+    const secureServerEnvironment = {
+      APP_MODE: "server",
+      HOST: "0.0.0.0",
+      PUBLIC_BASE_URL: "https://design.example.com",
+      AUTH_MODE: "trusted-header",
+      DESIGNER_TOKEN: "0123456789abcdef",
+      FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
+    } as const;
+    for (const reservedHeader of [
+      "host",
+      "origin",
+      "authorization",
+      "forwarded",
+      "x-forwarded-for",
+      "x-real-ip",
+      "x-auth-user",
+      "x-formaspec-csrf",
+      "x-formaspec-proxy-secret",
+      "x-request-id",
+    ]) {
+      expect(() => loadConfig({
+        ...secureServerEnvironment,
+        TRUSTED_USER_HEADER: reservedHeader,
+      })).toThrow(/dedicated x-\* identity header/);
+    }
+    expect(() => loadConfig({
+      ...secureServerEnvironment,
+      TRUSTED_USER_HEADER: "x-company-identity",
+      FORMASPEC_CSRF_HEADER: "x-company-identity",
+    })).toThrow(/dedicated x-\* identity header/);
+    expect(() => loadConfig({
+      ...secureServerEnvironment,
+      FORMASPEC_TRUSTED_PROXIES: "loopback",
+    })).toThrow(/invalid IP address or CIDR/);
+    expect(() => loadConfig({
+      ...secureServerEnvironment,
+      FORMASPEC_TRUSTED_PROXIES: "192.0.2.0\/33",
+    })).toThrow(/invalid IP address or CIDR/);
+    expect(() => loadConfig({
+      ...secureServerEnvironment,
+      FORMASPEC_PROXY_SECRET: "",
+    })).toThrow(/FORMASPEC_PROXY_SECRET/);
+    expect(() => loadConfig({
+      ...secureServerEnvironment,
+      FORMASPEC_PROXY_SECRET: "too-short",
+    })).toThrow(/32 to 256/);
+    expect(() => loadConfig({
+      ...secureServerEnvironment,
+      FORMASPEC_PROXY_SECRET: secureServerEnvironment.DESIGNER_TOKEN,
+    })).toThrow(/separate from DESIGNER_TOKEN/);
+    expect(() => loadConfig({
+      APP_MODE: "local",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
+    })).toThrow(/server-only/);
   });
 
   it("allows an explicit loopback-published container boundary without weakening ordinary local mode", () => {
@@ -212,6 +270,7 @@ describe("FormaSpec application modes", () => {
       AUTH_MODE: "trusted-header",
       DESIGNER_TOKEN: "0123456789abcdef",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       DESIGNER_CORS_ORIGINS: "https://design.example.com",
       DESIGNER_LOG_LEVEL: "silent",
     }));
@@ -224,6 +283,35 @@ describe("FormaSpec application modes", () => {
       payload: { name: "Rejected", preset: "web", idempotencyKey: "server-mode-key-0001" },
     });
     expect(rejected.statusCode).toBe(403);
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM principals WHERE external_id = 'trusted:alice'",
+    ).get()).toEqual({ count: 0 });
+
+    const wrongProxySecret = await application.app.inject({
+      method: "GET",
+      url: "/api/designs",
+      headers: {
+        host: "design.example.com",
+        "x-designer-user": "mallory",
+        "x-formaspec-proxy-secret": `${PROXY_SECRET}-wrong`,
+      },
+    });
+    expect(wrongProxySecret.statusCode).toBe(403);
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM principals WHERE external_id = 'trusted:mallory'",
+    ).get()).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM memberships m
+       JOIN principals p ON p.id = m.principal_id
+       WHERE p.external_id IN ('trusted:alice', 'trusted:mallory')`,
+    ).get()).toEqual({ count: 0 });
+
+    const health = await application.app.inject({
+      method: "GET",
+      url: "/health/ready",
+      headers: { host: "design.example.com" },
+    });
+    expect(health.statusCode).toBe(200);
 
     const accepted = await application.app.inject({
       method: "POST",
@@ -233,12 +321,61 @@ describe("FormaSpec application modes", () => {
         origin: "https://design.example.com",
         "x-formaspec-csrf": "1",
         "x-designer-user": "alice",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
       },
       payload: { name: "Accepted", preset: "web", idempotencyKey: "server-mode-key-0002" },
     });
     expect(accepted.statusCode).toBe(201);
     expect(accepted.headers["content-security-policy"]).toContain("default-src 'self'");
     expect(accepted.headers["strict-transport-security"]).toContain("max-age=31536000");
+  });
+
+  it("rejects trusted identity from an untrusted raw socket peer before principal bootstrap", async () => {
+    const application = await buildApplication(loadConfig({
+      APP_MODE: "server",
+      HOST: "0.0.0.0",
+      PORT: "4310",
+      DATA_DIR: "/tmp/formaspec-config-tests",
+      DESIGNER_DATABASE_PATH: ":memory:",
+      PUBLIC_BASE_URL: "https://design.example.com",
+      AUTH_MODE: "trusted-header",
+      DESIGNER_TOKEN: "0123456789abcdef",
+      TRUSTED_USER_HEADER: "x-company-identity",
+      FORMASPEC_TRUSTED_PROXIES: "127.0.0.1,172.16.0.0/12",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
+      DESIGNER_CORS_ORIGINS: "https://design.example.com",
+      DESIGNER_LOG_LEVEL: "silent",
+    }));
+    applications.push(application);
+
+    const before = application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM principals WHERE external_id = ?",
+    ).get("trusted:mallory@example.test") as { count: number };
+    expect(before.count).toBe(0);
+
+    const response = await application.app.inject({
+      method: "GET",
+      url: "/api/designs",
+      remoteAddress: "203.0.113.19",
+      headers: {
+        host: "design.example.com",
+        "x-company-identity": "mallory@example.test",
+        "x-forwarded-for": "127.0.0.1",
+      },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json<{ error: { code: string } }>().error.code).toBe("FORBIDDEN");
+
+    const after = application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM principals WHERE external_id = ?",
+    ).get("trusted:mallory@example.test") as { count: number };
+    expect(after.count).toBe(0);
+    const membership = application.database.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM memberships m
+       JOIN principals p ON p.id = m.principal_id
+       WHERE p.external_id = ?`,
+    ).get("trusted:mallory@example.test") as { count: number };
+    expect(membership.count).toBe(0);
   });
 
   it("authenticates MCP with hashed, expiring, revocable scoped grants", async () => {
@@ -252,6 +389,7 @@ describe("FormaSpec application modes", () => {
       AUTH_MODE: "trusted-header",
       DESIGNER_TOKEN: "legacy-bootstrap-token-0001",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       DESIGNER_CORS_ORIGINS: "https://design.example.com",
       DESIGNER_LOG_LEVEL: "silent",
     }));
@@ -293,6 +431,7 @@ describe("FormaSpec application modes", () => {
         authorization: `Bearer ${token}`,
         accept: "application/json, text/event-stream",
         "content-type": "application/json",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
       },
       payload: {
         jsonrpc: "2.0",

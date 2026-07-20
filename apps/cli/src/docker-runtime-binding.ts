@@ -12,6 +12,7 @@ const COMPOSE_PROJECT = "minimalappdesigner";
 const CONTAINER_PORT = 4310;
 const MAX_BINDING_BYTES = 16 * 1024;
 const MAX_DOCKER_OUTPUT_BYTES = 256 * 1024;
+const MAX_VOLUME_MOUNTPOINT_BYTES = 4096;
 const INSPECT_FORMAT = [
   "{{json .Id}}",
   "{{json .Image}}",
@@ -32,11 +33,39 @@ const containerNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const composeVersionPattern = /^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
 const trustedHeaderPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
 const bearerTokenPattern = /^[A-Za-z0-9._-]{16,4096}$/;
+const proxySecretPattern = /^[A-Za-z0-9._-]{32,256}$/;
 
 type BoundService = "designer" | "renderer";
 type LoopbackHost = "127.0.0.1" | "::1";
 type RecordedRuntimeMode = "docker" | "server";
 type ServerAccess = "none" | "ssh" | "proxy";
+
+function isSafeTrustedIdentityHeader(value: string, csrfHeader = "x-formaspec-csrf"): boolean {
+  const normalized = value.toLowerCase();
+  const normalizedCsrf = csrfHeader.toLowerCase();
+  return trustedHeaderPattern.test(value)
+    && /^x-[a-z0-9][a-z0-9-]{0,125}$/.test(normalized)
+    && normalized !== normalizedCsrf
+    && !new Set([
+      "x-api-key",
+      "x-correlation-id",
+      "x-forwarded-client-cert",
+      "x-http-method-override",
+      "x-real-ip",
+      "x-request-id",
+      "x-formaspec-csrf",
+      "x-formaspec-proxy-secret",
+    ]).has(normalized)
+    && ![
+      "x-auth",
+      "x-csrf",
+      "x-forwarded-",
+      "x-original-",
+      "x-proxy-",
+      "x-rewrite-",
+      "x-xsrf",
+    ].some((prefix) => normalized.startsWith(prefix));
+}
 
 export interface DockerComposeBindingLabels {
   project: typeof COMPOSE_PROJECT;
@@ -140,6 +169,11 @@ interface ContainerInspection {
   mounts: RawMount[];
   networkMode: string;
   portBindings: Record<string, unknown>;
+}
+
+interface VolumeInspection {
+  name: string;
+  mountpointIdentity: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -525,7 +559,8 @@ function readRecordedDockerEnvironment(projectRoot: string): RecordedDockerEnvir
 
   if (mode === "docker") {
     if (values.get("APP_MODE") !== "local" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "true"
-      || values.get("AUTH_MODE") !== "none" || (values.get("DESIGNER_TOKEN") ?? "") !== "") {
+      || values.get("AUTH_MODE") !== "none" || (values.get("DESIGNER_TOKEN") ?? "") !== ""
+      || (values.get("FORMASPEC_PROXY_SECRET") ?? "") !== "") {
       throw new Error("Managed Docker environment is not an unauthenticated loopback-local configuration.");
     }
     if (values.get("PUBLIC_BASE_URL") !== origin) {
@@ -548,12 +583,14 @@ function readRecordedDockerEnvironment(projectRoot: string): RecordedDockerEnvir
     throw new Error("Managed server environment has an invalid access mode.");
   }
   const trustedHeader = values.get("TRUSTED_USER_HEADER");
-  if (typeof trustedHeader !== "string" || !trustedHeaderPattern.test(trustedHeader)) {
+  if (typeof trustedHeader !== "string"
+    || !isSafeTrustedIdentityHeader(trustedHeader, values.get("FORMASPEC_CSRF_HEADER"))) {
     throw new Error("Managed server environment has an invalid trusted identity header.");
   }
   if (serverAccess === "ssh") {
     if (values.get("APP_MODE") !== "local" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "true"
       || values.get("AUTH_MODE") !== "none" || (values.get("DESIGNER_TOKEN") ?? "") !== ""
+      || (values.get("FORMASPEC_PROXY_SECRET") ?? "") !== ""
       || values.get("PUBLIC_BASE_URL") !== origin || recordedUrl !== origin) {
       throw new Error("Managed SSH-only server environment is not a loopback-local configuration.");
     }
@@ -568,9 +605,13 @@ function readRecordedDockerEnvironment(projectRoot: string): RecordedDockerEnvir
     };
   }
 
+  const bearerToken = values.get("DESIGNER_TOKEN") ?? "";
+  const proxySecret = values.get("FORMASPEC_PROXY_SECRET") ?? "";
   if (values.get("APP_MODE") !== "server" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "false"
     || values.get("AUTH_MODE") !== "trusted-header"
-    || !bearerTokenPattern.test(values.get("DESIGNER_TOKEN") ?? "")) {
+    || !bearerTokenPattern.test(bearerToken)
+    || !proxySecretPattern.test(proxySecret)
+    || proxySecret === bearerToken) {
     throw new Error("Managed trusted-proxy server environment is incomplete or unsafe.");
   }
   const publicBaseUrl = values.get("PUBLIC_BASE_URL");
@@ -719,6 +760,55 @@ function parseJson(value: string, label: string): unknown {
   }
 }
 
+function canonicalVolumeMountpoint(value: unknown, label: string): string {
+  if (typeof value !== "string" || Buffer.byteLength(value) < 2
+    || Buffer.byteLength(value) > MAX_VOLUME_MOUNTPOINT_BYTES || /[\0\r\n]/.test(value)) {
+    throw new Error(`${label} is invalid.`);
+  }
+  if (path.posix.isAbsolute(value)) {
+    const normalized = path.posix.normalize(value);
+    if (normalized !== value || normalized === "/") throw new Error(`${label} is invalid.`);
+    return `posix:${normalized}`;
+  }
+  if (path.win32.isAbsolute(value)) {
+    const normalized = path.win32.normalize(value);
+    if (normalized !== value || /^[A-Za-z]:\\$/.test(normalized) || normalized === "\\\\") {
+      throw new Error(`${label} is invalid.`);
+    }
+    return `win32:${normalized.toLowerCase()}`;
+  }
+  throw new Error(`${label} must be an absolute path.`);
+}
+
+async function inspectVolume(
+  runner: CommandRunner,
+  executable: string,
+  context: string,
+  expectedName: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<VolumeInspection> {
+  const output = await runDocker(runner, executable, [
+    "--context", context, "volume", "inspect", "--format", "{{json .}}", expectedName,
+  ], environment, `Docker volume ${expectedName} inspection`);
+  const value = parseJson(output, `Docker volume ${expectedName} inspection`);
+  if (!isRecord(value) || value.Name !== expectedName) {
+    throw new Error(`Docker volume ${expectedName} inspection changed identity.`);
+  }
+  if (value.Driver !== "local" || value.Scope !== "local") {
+    throw new Error(`Docker volume ${expectedName} must use the local driver and local scope.`);
+  }
+  if (value.Options !== null && (!isRecord(value.Options) || Object.keys(value.Options).length !== 0)) {
+    throw new Error(`Docker volume ${expectedName} must not use driver options.`);
+  }
+  return {
+    name: expectedName,
+    mountpointIdentity: canonicalVolumeMountpoint(
+      value.Mountpoint,
+      `Docker volume ${expectedName} mountpoint`,
+    ),
+  };
+}
+
 async function inspectContainer(
   runner: CommandRunner,
   executable: string,
@@ -840,6 +930,12 @@ async function captureWithContext(
   const rendererSocket = exactNamedVolume(renderer, "/run/formaspec", "renderer");
   if (designerSocket !== rendererSocket) throw new Error("Docker designer and renderer do not share the same renderer socket volume.");
   if (new Set([data, backups, rendererSocket]).size !== 3) throw new Error("Docker runtime volumes must be distinct.");
+  const inspectedVolumes = await Promise.all([data, backups, rendererSocket].map((volume) => (
+    inspectVolume(runner, executable, context, volume, environment)
+  )));
+  if (new Set(inspectedVolumes.map((volume) => volume.mountpointIdentity)).size !== inspectedVolumes.length) {
+    throw new Error("Docker runtime volume backing mountpoints must be distinct.");
+  }
   verifyDesignerPortBinding(designer, recorded);
   return parseBinding({
     format: BINDING_FORMAT,

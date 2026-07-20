@@ -14,6 +14,7 @@ import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
 const restoreOperationId = "restore_maintenance_test001";
+const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
 
 afterEach(async () => {
   await Promise.all(applications.splice(0).map((application) => application.app.close()));
@@ -412,6 +413,7 @@ describe("maintenance HTTP gate", () => {
       AUTH_MODE: "trusted-header",
       DESIGNER_TOKEN: "0123456789abcdef",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       DESIGNER_CORS_ORIGINS: "https://design.example.com",
       DESIGNER_LOG_LEVEL: "silent",
     }));
@@ -422,7 +424,7 @@ describe("maintenance HTTP gate", () => {
     const unauthorized = await application.app.inject({
       method: "GET",
       url: "/api/maintenance/status",
-      headers: { host: "design.example.com" },
+      headers: { host: "design.example.com", "x-formaspec-proxy-secret": PROXY_SECRET },
     });
     expect(unauthorized.statusCode).toBe(401);
     expect(unauthorized.json<{ error: { code: string } }>().error.code).toBe("AUTH_REQUIRED");
@@ -430,7 +432,11 @@ describe("maintenance HTTP gate", () => {
     const authorized = await application.app.inject({
       method: "GET",
       url: "/api/maintenance/status",
-      headers: { host: "design.example.com", "x-designer-user": "operator@example.com" },
+      headers: {
+        host: "design.example.com",
+        "x-designer-user": "operator@example.com",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
+      },
     });
     expect(authorized.statusCode).toBe(200);
     expect(authorized.json()).toMatchObject({ active: true, phase: "verification", markerValid: true });

@@ -14,6 +14,7 @@ import { createPortableProjectBundle, readPortableProjectBundle } from "./portab
 
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
+const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
 
 afterEach(async () => {
   await Promise.all(applications.splice(0).map((application) => application.app.close()));
@@ -59,6 +60,7 @@ async function serverApplication(label: string): Promise<DesignerApplication> {
     AUTH_MODE: "trusted-header",
     DESIGNER_TOKEN: "security-bootstrap-token-0001",
     FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+    FORMASPEC_PROXY_SECRET: PROXY_SECRET,
     DESIGNER_CORS_ORIGINS: "https://design.example.com",
     DESIGNER_LOG_LEVEL: "silent",
   }));
@@ -302,6 +304,7 @@ describe("public security boundaries", () => {
       origin: "https://design.example.com",
       "x-formaspec-csrf": "1",
       "x-designer-user": "admin@example.com",
+      "x-formaspec-proxy-secret": PROXY_SECRET,
     };
 
     const rejectedHeaders = [

@@ -31,6 +31,7 @@ describe("container healthcheck", () => {
       PUBLIC_BASE_URL: "https://designer.company.example:8443",
       AUTH_MODE: "trusted-header",
       DESIGNER_TOKEN: "healthcheck-server-token-0001",
+      FORMASPEC_PROXY_SECRET: "proxy-secret-0123456789abcdef0123456789abcdef",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
       FORMASPEC_CONTAINER_LOCAL: "false",
     };
@@ -63,6 +64,7 @@ describe("container healthcheck", () => {
     });
     expect(request.headers).not.toHaveProperty("authorization");
     expect(request.headers).not.toHaveProperty("cookie");
+    expect(request.headers).not.toHaveProperty("x-formaspec-proxy-secret");
   });
 
   it("fails closed for invalid server-mode healthcheck configuration", () => {

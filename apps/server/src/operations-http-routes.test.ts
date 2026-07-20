@@ -21,6 +21,7 @@ import { createPortableProjectBundle, readPortableProjectBundle } from "./portab
 
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
+const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
 
 afterEach(async () => {
   await Promise.all(applications.splice(0).map((application) => application.app.close()));
@@ -1328,6 +1329,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
       AUTH_MODE: "trusted-header",
       DESIGNER_TOKEN: "operations-bootstrap-token",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
       DESIGNER_CORS_ORIGINS: "https://design.example.com",
       DESIGNER_LOG_LEVEL: "silent",
     }));
@@ -1336,7 +1338,11 @@ describe("operational backup and portable bundle HTTP routes", () => {
     const bootstrap = await application.app.inject({
       method: "GET",
       url: "/api/organization/policy",
-      headers: { host: "design.example.com", "x-designer-user": "admin@example.com" },
+      headers: {
+        host: "design.example.com",
+        "x-designer-user": "admin@example.com",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
+      },
     });
     expect(bootstrap.statusCode).toBe(200);
     const current = application.policies.read("trusted:admin@example.com");
@@ -1353,7 +1359,11 @@ describe("operational backup and portable bundle HTTP routes", () => {
     const response = await application.app.inject({
       method: "GET",
       url: "/api/backups",
-      headers: { host: "design.example.com", "x-designer-user": "viewer@example.com" },
+      headers: {
+        host: "design.example.com",
+        "x-designer-user": "viewer@example.com",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
+      },
     });
     expect(response.statusCode).toBe(403);
     expect(response.json<{ error: { code: string } }>().error.code).toBe("FORBIDDEN");
@@ -1367,6 +1377,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
         origin: "https://design.example.com",
         "x-formaspec-csrf": "1",
         "x-designer-user": "viewer@example.com",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
         "idempotency-key": "portable-viewer-forbidden-0001",
         "content-type": `multipart/form-data; boundary=${upload.boundary}`,
       },

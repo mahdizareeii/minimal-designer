@@ -294,10 +294,12 @@ function renderDirectoryNode(
 }
 
 function permanentProgramDataComponent(id: string, directory: string, name: string, architecture: WindowsPackageArchitecture): string {
-  return `      <Component Id="${id}" Directory="${directory}" Guid="${deterministicGuid(COMPONENT_NAMESPACE, `${architecture}:programdata:${name}`)}" Bitness="always64" Permanent="yes" NeverOverwrite="yes">
+  return `    <DirectoryRef Id="${directory}">
+      <Component Id="${id}" Guid="${deterministicGuid(COMPONENT_NAMESPACE, `${architecture}:programdata:${name}`)}" Bitness="always64" Permanent="yes" NeverOverwrite="yes">
         <CreateFolder />
         <RegistryValue Root="HKLM" Key="Software\\FormaSpec\\Installer" Name="${name}" Type="integer" Value="1" KeyPath="yes" />
-      </Component>`;
+      </Component>
+    </DirectoryRef>`;
 }
 
 export function windowsWixSource(options: WindowsWixSourceOptions): string {
@@ -368,11 +370,13 @@ ${permanentProgramDataComponent("ProgramDataRootComponent", "FORMASPECPROGRAMDAT
 ${permanentProgramDataComponent("ProgramDataDataComponent", "FORMASPECDATA", "DataDirectory", architecture)}
 ${permanentProgramDataComponent("ProgramDataBackupsComponent", "FORMASPECBACKUPS", "BackupsDirectory", architecture)}
 ${permanentProgramDataComponent("ProgramDataConfigComponent", "FORMASPECCONFIG", "ConfigDirectory", architecture)}
-    <Component Id="StartMenuComponent" Directory="FORMASPECPROGRAMMENU" Guid="${deterministicGuid(COMPONENT_NAMESPACE, `${architecture}:start-menu`)}" Bitness="always64">
-      <Shortcut Id="FormaSpecStartMenuShortcut" Name="FormaSpec" Description="Open the FormaSpec editor" Target="[INSTALLFOLDER]service\\FormaSpec.ServiceHost.exe" Arguments="--open-editor" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
-      <RemoveFolder Id="RemoveFormaSpecProgramMenu" Directory="FORMASPECPROGRAMMENU" On="uninstall" />
-      <RegistryValue Root="HKLM" Key="Software\\FormaSpec\\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
-    </Component>
+    <DirectoryRef Id="FORMASPECPROGRAMMENU">
+      <Component Id="StartMenuComponent" Guid="${deterministicGuid(COMPONENT_NAMESPACE, `${architecture}:start-menu`)}" Bitness="always64">
+        <Shortcut Id="FormaSpecStartMenuShortcut" Name="FormaSpec" Description="Open the FormaSpec editor" Target="[INSTALLFOLDER]service\\FormaSpec.ServiceHost.exe" Arguments="--open-editor" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+        <RemoveFolder Id="RemoveFormaSpecProgramMenu" Directory="FORMASPECPROGRAMMENU" On="uninstall" />
+        <RegistryValue Root="HKLM" Key="Software\\FormaSpec\\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
   </Fragment>
 </Wix>
 `;

@@ -17,6 +17,8 @@ const backupIdPattern = /^backup_[a-f0-9]{40}$/;
 const operationIdPattern = /^restore_[A-Za-z0-9][A-Za-z0-9_-]{7,111}$/;
 const MAX_HEALTH_RESPONSE_BYTES = 64 * 1024;
 
+export const DOCKER_RESTORE_CAPABILITY = "HEALTHY_PLANNED_RESTORE_ONLY" as const;
+
 export interface RestoreHealthRequest {
   connectHost: "127.0.0.1" | "::1";
   port: number;
@@ -508,12 +510,13 @@ class DockerRestoreSupervisor {
     let lastStatus = 0;
     while (Date.now() < deadline) {
       try {
+        const remainingMs = Math.max(1, deadline - Date.now());
         const request = {
           connectHost: binding.publicBinding.host,
           port: binding.publicBinding.port,
           hostHeader: binding.runtime.healthHostHeader,
           pathname,
-          timeoutMs: Math.min(5_000, this.#healthTimeoutMs),
+          timeoutMs: Math.min(5_000, remainingMs),
         } as const;
         const response = await withAbsoluteDeadline(
           this.#healthRequester(request),
@@ -524,7 +527,9 @@ class DockerRestoreSupervisor {
       } catch {
         // The supervised API may still be starting.
       }
-      await new Promise((resolve) => setTimeout(resolve, this.#healthPollIntervalMs));
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(this.#healthPollIntervalMs, remainingMs)));
     }
     throw new Error(`FormaSpec health verification timed out at ${pathname} (last HTTP status ${lastStatus || "unavailable"}).`);
   }
@@ -710,8 +715,15 @@ export async function restoreDockerBackup(
       dependencies.createOperationId?.() ?? `restore_${randomUUID().replaceAll("-", "")}`,
     );
     await supervisor.ensureRenderer();
-    await supervisor.verifyReady();
-    await supervisor.preflight(backupId);
+    try {
+      await supervisor.verifyReady();
+      await supervisor.preflight(backupId);
+    } catch (error) {
+      throw new Error(
+        `${DOCKER_RESTORE_CAPABILITY}: supervised Docker/server restore requires a healthy current API and database for backup resolution and preflight; offline disaster recovery is not implemented.`,
+        { cause: error },
+      );
+    }
     io.stdout(`Restore operation: ${operationId}`);
     let fenced = false;
     try {

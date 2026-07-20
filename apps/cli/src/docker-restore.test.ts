@@ -59,6 +59,7 @@ function projectFixture(mode = "docker"): string {
     `PUBLIC_BASE_URL=${publicUrl}`,
     "AUTH_MODE=trusted-header",
     "DESIGNER_TOKEN=server-secret-token-0123456789abcdef",
+    "FORMASPEC_PROXY_SECRET=proxy-secret-0123456789abcdef0123456789abcdef",
     "TRUSTED_USER_HEADER=x-designer-user",
     "FORMASPEC_ALLOWED_HOSTS=designer.example.test",
     "FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12",
@@ -181,6 +182,20 @@ function dockerIdentityResponse(args: readonly string[], root: string): { exitCo
     if (serviceFilter === "label=com.docker.compose.service=renderer") {
       return { exitCode: 0, stdout: `${rendererContainerId}\n`, stderr: "" };
     }
+  }
+  if (args.includes("volume") && args.includes("inspect")) {
+    const name = args.at(-1)!;
+    return {
+      exitCode: 0,
+      stdout: `${JSON.stringify({
+        Name: name,
+        Driver: "local",
+        Scope: "local",
+        Options: null,
+        Mountpoint: `/var/lib/docker/volumes/${name}/_data`,
+      })}\n`,
+      stderr: "",
+    };
   }
   const formatIndex = args.indexOf("--format");
   if (args.includes("inspect") && formatIndex >= 0 && args[formatIndex + 1]?.includes(".State.Running")) {
@@ -309,6 +324,62 @@ describe("Docker restore supervision", () => {
       agent: false,
       headers: { host: "designer.example.test" },
     });
+  });
+
+  it("enforces an absolute wall-clock deadline when a health requester never settles", async () => {
+    const root = projectFixture();
+    const runner: CommandRunner = async (_executable, args) => {
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      if (args.includes("apps/server/dist/restore-control.js")) {
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({ ok: true, status: terminalStatus(false) })}\n`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+    const startedAt = Date.now();
+    await expect(resumeDockerRestore(root, undefined, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      healthRequester: () => new Promise(() => undefined),
+      healthTimeoutMs: 25,
+      healthPollIntervalMs: 1,
+    })).rejects.toThrow(/health verification timed out at \/health\/live/);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("classifies the supervised path as healthy planned restore rather than offline disaster recovery", async () => {
+    const root = projectFixture();
+    const runner: CommandRunner = async (_executable, args) => (
+      dockerIdentityResponse(args, root) ?? { exitCode: 1, stdout: "", stderr: "unexpected command" }
+    );
+    await expect(restoreDockerBackup(root, backupId, { stdout: () => undefined }, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      healthRequester: async () => ({ status: 503, body: { ok: false, database: "unavailable" } }),
+      healthTimeoutMs: 5,
+      healthPollIntervalMs: 1,
+      createOperationId: () => operationId,
+    })).rejects.toThrow(/HEALTHY_PLANNED_RESTORE_ONLY.*offline disaster recovery is not implemented/);
+  });
+
+  it("refuses a symlinked runtime lock path without deleting its external target", async () => {
+    if (process.platform === "win32") return;
+    const root = projectFixture();
+    const external = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-external-run-"));
+    temporaryDirectories.push(external);
+    const marker = path.join(external, "must-survive");
+    fs.writeFileSync(marker, "preserve\n");
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.rmSync(runDirectory, { recursive: true });
+    fs.symlinkSync(external, runDirectory, "dir");
+
+    await expect(abortDockerRestore(root)).rejects.toThrow(/runtime state directory must be a real directory/);
+    expect(fs.readFileSync(marker, "utf8")).toBe("preserve\n");
+    expect(fs.lstatSync(runDirectory).isSymbolicLink()).toBe(true);
   });
 
   it("fences, stops only the API, runs the one-shot worker, verifies, and clears maintenance", async () => {
@@ -484,6 +555,195 @@ describe("Docker restore supervision", () => {
     })).rejects.toThrow(/Restore worker failed/);
     expect(maintenance).toBe(false);
     expect(commands.some((args) => args.includes("start") && args.includes(designerContainerId))).toBe(true);
+    expect(fs.existsSync(path.join(root, ".designer", "run", "launcher.lock"))).toBe(false);
+  });
+
+  it("restarts and verifies the unchanged API when a resumed pre-cutover worker fails", async () => {
+    const root = projectFixture();
+    let maintenance = true;
+    let apiStarts = 0;
+    const runner: CommandRunner = async (_executable, args) => {
+      if (args.includes("start") && args.at(-1) === designerContainerId) apiStarts += 1;
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        if (args[controlIndex + 1] === "abort") maintenance = false;
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: "restore",
+                  operationId,
+                  startedAt: "2026-07-19T12:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation: null,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      if (args.includes("apps/server/dist/restore-worker.js")) {
+        const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+        if (args[workerIndex + 1] === "preflight") {
+          return {
+            exitCode: 0,
+            stdout: `${JSON.stringify({ ok: true, preflight: { status: "verified", backupId } })}\n`,
+            stderr: "",
+          };
+        }
+        return { exitCode: 1, stdout: "", stderr: "resume worker failed" };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    await expect(resumeDockerRestore(root, backupId, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: healthyFetch(),
+    })).rejects.toThrow(/Restore worker failed/);
+    expect(maintenance).toBe(false);
+    expect(apiStarts).toBe(1);
+    expect(runtimeStates.get(root)?.designerRunning).toBe(true);
+  });
+
+  it("restarts and verifies the unchanged API when a rollback worker fails before cutover", async () => {
+    const root = projectFixture();
+    let maintenance = false;
+    let operation: DockerRestoreOperationStatus["operation"] = terminalStatus(false).operation;
+    let apiStarts = 0;
+    const rollbackOperationId = "restore_dddddddddddddddddddddddddddddddd";
+    const runner: CommandRunner = async (_executable, args) => {
+      if (args.includes("start") && args.at(-1) === designerContainerId) apiStarts += 1;
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        const command = args[controlIndex + 1];
+        if (command === "set") {
+          maintenance = true;
+          operation = null;
+        }
+        if (command === "abort") maintenance = false;
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: "restore",
+                  operationId: rollbackOperationId,
+                  startedAt: "2026-07-19T12:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      if (args.includes("apps/server/dist/restore-worker.js")) {
+        const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+        if (args[workerIndex + 1] === "preflight") {
+          return {
+            exitCode: 0,
+            stdout: `${JSON.stringify({ ok: true, preflight: { status: "verified", backupId: safetyBackupId } })}\n`,
+            stderr: "",
+          };
+        }
+        return { exitCode: 1, stdout: "", stderr: "rollback worker failed" };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    await expect(rollbackDockerRestore(root, { stdout: () => undefined }, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: healthyFetch(),
+      createOperationId: () => rollbackOperationId,
+    })).rejects.toThrow(/Restore worker failed/);
+    expect(maintenance).toBe(false);
+    expect(apiStarts).toBe(1);
+    expect(runtimeStates.get(root)?.designerRunning).toBe(true);
+  });
+
+  it("returns an AggregateError when pre-cutover abort succeeds but the unchanged API cannot restart", async () => {
+    const root = projectFixture();
+    let maintenance = false;
+    const runner: CommandRunner = async (_executable, args) => {
+      if (args.includes("start") && args.at(-1) === designerContainerId) {
+        return { exitCode: 1, stdout: "", stderr: "start failed" };
+      }
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        const command = args[controlIndex + 1];
+        if (command === "set") maintenance = true;
+        if (command === "abort") maintenance = false;
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: "restore",
+                  operationId,
+                  startedAt: "2026-07-19T12:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation: null,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      if (args.includes("apps/server/dist/restore-worker.js")) {
+        const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+        if (args[workerIndex + 1] === "preflight") {
+          return {
+            exitCode: 0,
+            stdout: `${JSON.stringify({ ok: true, preflight: { status: "verified", backupId } })}\n`,
+            stderr: "",
+          };
+        }
+        return { exitCode: 1, stdout: "", stderr: "restore worker failed" };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    let caught: unknown;
+    try {
+      await restoreDockerBackup(root, backupId, { stdout: () => undefined }, {
+        commandRunner: runner,
+        dockerExecutable: "/usr/bin/docker",
+        fetch: healthyFetch(),
+        createOperationId: () => operationId,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect(caught).toMatchObject({
+      message: "Restore was safely aborted before cutover, but the unchanged FormaSpec API did not restart cleanly.",
+    });
+    expect((caught as AggregateError).errors).toHaveLength(2);
+    expect(maintenance).toBe(false);
     expect(fs.existsSync(path.join(root, ".designer", "run", "launcher.lock"))).toBe(false);
   });
 

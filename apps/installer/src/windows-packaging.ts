@@ -25,7 +25,7 @@ import {
 
 const MAX_WINDOWS_PAYLOAD_FILES = 100_000;
 const MAX_WINDOWS_PAYLOAD_FILE_BYTES = 1024 * 1024 * 1024;
-const MAX_WINDOWS_PAYLOAD_BYTES = 8 * 1024 * 1024 * 1024;
+const MAX_WINDOWS_PAYLOAD_BYTES = 1_800_000_000;
 const MAX_PROVENANCE_BYTES = 64 * 1024;
 const MAX_LICENSE_BYTES = 2 * 1024 * 1024;
 const MIN_WINDOWS_SOURCE_DATE_EPOCH = 315_532_800;
@@ -375,6 +375,7 @@ export function normalizeWindowsSourceDateEpoch(value: number | string | undefin
 }
 
 function copyRegularTree(sourceRoot: string, destinationRoot: string): void {
+  const foldedPaths = new Set<string>();
   const visit = (source: string, destination: string, relative: string): void => {
     const stat = fs.lstatSync(source);
     if (stat.isSymbolicLink()) throw new Error(`Windows payload cannot contain symlinks or junction-like links: ${relative || "."}`);
@@ -383,6 +384,9 @@ function copyRegularTree(sourceRoot: string, destinationRoot: string): void {
       for (const entry of fs.readdirSync(source).sort(compareText)) {
         const childRelative = relative ? `${relative}/${entry}` : entry;
         assertWindowsRelativePath(childRelative);
+        const folded = childRelative.toLowerCase();
+        if (foldedPaths.has(folded)) throw new Error(`Windows payload contains a case-insensitive path collision: ${childRelative}`);
+        foldedPaths.add(folded);
         visit(path.join(source, entry), path.join(destination, entry), childRelative);
       }
       return;
@@ -405,6 +409,9 @@ function collectWindowsPayloadFiles(root: string, excluded = new Set<string>()):
       assertWindowsRelativePath(relativePath);
       const absolute = path.join(directory, entry);
       const stat = fs.lstatSync(absolute);
+      const folded = relativePath.toLowerCase();
+      if (foldedPaths.has(folded)) throw new Error(`Windows payload contains a case-insensitive path collision: ${relativePath}`);
+      foldedPaths.add(folded);
       if (stat.isSymbolicLink()) throw new Error(`Windows payload cannot contain symlinks or junction-like links: ${relativePath}`);
       if (stat.isDirectory()) {
         visit(absolute, relativePath);
@@ -412,9 +419,6 @@ function collectWindowsPayloadFiles(root: string, excluded = new Set<string>()):
       }
       if (!stat.isFile()) throw new Error(`Windows payload contains an unsupported filesystem entry: ${relativePath}`);
       if (excluded.has(relativePath)) continue;
-      const folded = relativePath.toLowerCase();
-      if (foldedPaths.has(folded)) throw new Error(`Windows payload contains a case-insensitive path collision: ${relativePath}`);
-      foldedPaths.add(folded);
       if (stat.size > MAX_WINDOWS_PAYLOAD_FILE_BYTES) throw new Error(`Windows payload file exceeds the per-file limit: ${relativePath}`);
       totalBytes += stat.size;
       if (files.length + 1 > MAX_WINDOWS_PAYLOAD_FILES || totalBytes > MAX_WINDOWS_PAYLOAD_BYTES) {
@@ -508,9 +512,10 @@ export function stageWindowsPayload(options: StageWindowsPayloadOptions): Window
   const payloadRoot = requireAbsolutePath(options.payloadRoot, "Windows staging payload root");
   requireDirectory(applicationRoot, "Prepared Windows application payload");
   if (fs.existsSync(payloadRoot)) throw new Error(`Windows staging payload root already exists: ${payloadRoot}`);
-  for (const reserved of RESERVED_STAGING_PATHS) {
-    if (fs.existsSync(path.join(applicationRoot, ...reserved.split("/")))) {
-      throw new Error(`Prepared Windows application payload uses installer-reserved path: ${reserved}`);
+  const reserved = new Set(RESERVED_STAGING_PATHS.map((value) => value.toLowerCase()));
+  for (const entry of fs.readdirSync(applicationRoot)) {
+    if (reserved.has(entry.toLowerCase())) {
+      throw new Error(`Prepared Windows application payload uses installer-reserved path: ${entry}`);
     }
   }
   const verifiedServiceHost = verifyWindowsServiceHost(options.serviceHost, architecture);

@@ -13,6 +13,13 @@ import {
   validateRendererLimitParity,
 } from "./renderer-contract.js";
 import { validateRendererEndpoint } from "./renderer-endpoint.js";
+import {
+  compileTrustedProxyMatcher,
+  INTERNAL_PROXY_SECRET_HEADER,
+  type TrustedProxyMatcher,
+  validateInternalProxySecret,
+  validateTrustedIdentityHeader,
+} from "./trusted-proxy.js";
 
 const booleanValue = z
   .enum(["true", "false", "1", "0"])
@@ -53,6 +60,7 @@ const envSchema = z.object({
   DESIGNER_LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   FORMASPEC_ALLOWED_HOSTS: z.string().optional(),
   FORMASPEC_TRUSTED_PROXIES: z.string().optional(),
+  FORMASPEC_PROXY_SECRET: optionalNonEmptyString,
   FORMASPEC_CSRF_HEADER: z.string().regex(/^[A-Za-z0-9-]+$/).default("x-formaspec-csrf"),
   FORMASPEC_RENDER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(15_000),
   FORMASPEC_RENDER_MAX_PIXELS: z.coerce.number().int().positive().max(MAX_RASTER_NORMALIZATION_PIXELS)
@@ -86,6 +94,8 @@ export interface ServerConfig {
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   allowedHosts: string[];
   trustedProxies: string[];
+  isTrustedProxyAddress: TrustedProxyMatcher;
+  proxySecret?: string;
   csrfHeader: string;
   renderTimeoutMs: number;
   renderMaxPixels: number;
@@ -135,6 +145,9 @@ export function loadConfig(
   }
 
   if (parsed.APP_MODE === "local") {
+    if (parsed.FORMASPEC_PROXY_SECRET !== undefined) {
+      throw new Error("FORMASPEC_PROXY_SECRET is server-only and must not be configured in APP_MODE=local");
+    }
     const containerHost = parsed.FORMASPEC_CONTAINER_LOCAL
       && ["0.0.0.0", "::"].includes(parsed.HOST.trim().toLowerCase().replace(/^\[|\]$/g, ""));
     if ((!isLoopbackHost(parsed.HOST) && !containerHost) || !isLoopbackHost(publicUrl.hostname)) {
@@ -166,6 +179,20 @@ export function loadConfig(
   if (parsed.APP_MODE === "server" && trustedProxies.length === 0) {
     throw new Error("APP_MODE=server requires FORMASPEC_TRUSTED_PROXIES");
   }
+  const proxySecret = parsed.APP_MODE === "server"
+    ? validateInternalProxySecret(parsed.FORMASPEC_PROXY_SECRET)
+    : undefined;
+  if (proxySecret !== undefined && proxySecret === authToken) {
+    throw new Error("FORMASPEC_PROXY_SECRET must be separate from DESIGNER_TOKEN");
+  }
+  const isTrustedProxyAddress = compileTrustedProxyMatcher(trustedProxies);
+  const trustedUserHeader = validateTrustedIdentityHeader(
+    parsed.TRUSTED_USER_HEADER,
+    parsed.FORMASPEC_CSRF_HEADER,
+  );
+  if (trustedUserHeader === INTERNAL_PROXY_SECRET_HEADER) {
+    throw new Error("TRUSTED_USER_HEADER must not use the reserved internal proxy credential header");
+  }
   if (parsed.FORMASPEC_RENDER_SOCKET) validateRendererEndpoint(parsed.FORMASPEC_RENDER_SOCKET, platform);
   if ((parsed.APP_MODE === "server" || parsed.FORMASPEC_RENDER_SOCKET) && parsed.FORMASPEC_ALLOW_SOFTWARE_RENDERER) {
     throw new Error("Software rendering is development-only and cannot be enabled in server or renderer-worker mode");
@@ -181,7 +208,7 @@ export function loadConfig(
     publicBaseUrl,
     authMode,
     ...(authToken ? { authToken } : {}),
-    trustedUserHeader: parsed.TRUSTED_USER_HEADER.toLowerCase(),
+    trustedUserHeader,
     corsOrigins: [...corsOrigins],
     maxAssetBytes,
     maxAssetPixels,
@@ -189,6 +216,8 @@ export function loadConfig(
     logLevel: parsed.DESIGNER_LOG_LEVEL,
     allowedHosts: [...allowedHosts],
     trustedProxies,
+    isTrustedProxyAddress,
+    ...(proxySecret ? { proxySecret } : {}),
     csrfHeader: parsed.FORMASPEC_CSRF_HEADER.toLowerCase(),
     renderTimeoutMs: parsed.FORMASPEC_RENDER_TIMEOUT_MS,
     renderMaxPixels: parsed.FORMASPEC_RENDER_MAX_PIXELS,

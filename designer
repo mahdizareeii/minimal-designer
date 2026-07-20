@@ -28,6 +28,7 @@ PNPM_VERSION=11.9.0
 DEFAULT_API_PORT=4310
 DEFAULT_WEB_PORT=4311
 VERSION=1.0.0
+PROXY_SECRET_HEADER="x-formaspec-proxy-secret"
 
 DRY_RUN="${DESIGNER_DRY_RUN:-0}"
 ASSUME_YES="${DESIGNER_ASSUME_YES:-0}"
@@ -500,19 +501,19 @@ compose() {
     cd "$PROJECT_ROOT"
     if [ "$access" = "proxy" ]; then
       env -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
-        -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES \
+        -u TRUSTED_USER_HEADER -u FORMASPEC_PROXY_SECRET -u MAX_UPLOAD_BYTES \
         APP_MODE=server FORMASPEC_CONTAINER_LOCAL=false FORMASPEC_ALLOWED_HOSTS="$allowed_host" \
         FORMASPEC_TRUSTED_PROXIES="127.0.0.1,::1,172.16.0.0/12" DESIGNER_CORS_ORIGINS="$public_url" \
         docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
     elif [ "$access" = "ssh" ]; then
       env -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
-        -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES -u FORMASPEC_ALLOWED_HOSTS \
+        -u TRUSTED_USER_HEADER -u FORMASPEC_PROXY_SECRET -u MAX_UPLOAD_BYTES -u FORMASPEC_ALLOWED_HOSTS \
         -u FORMASPEC_TRUSTED_PROXIES -u DESIGNER_CORS_ORIGINS \
         APP_MODE=local FORMASPEC_CONTAINER_LOCAL=true \
         docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
     else
       env -u APP_MODE -u BIND_ADDRESS -u PORT -u PUBLIC_BASE_URL -u AUTH_MODE -u DESIGNER_TOKEN \
-        -u TRUSTED_USER_HEADER -u MAX_UPLOAD_BYTES -u FORMASPEC_CONTAINER_LOCAL \
+        -u TRUSTED_USER_HEADER -u FORMASPEC_PROXY_SECRET -u MAX_UPLOAD_BYTES -u FORMASPEC_CONTAINER_LOCAL \
         -u FORMASPEC_ALLOWED_HOSTS -u FORMASPEC_TRUSTED_PROXIES -u DESIGNER_CORS_ORIGINS \
         docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" -f "$PROJECT_ROOT/docker-compose.yml" "$@"
     fi
@@ -589,6 +590,11 @@ validate_token() {
   case "$1" in *[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
 }
 
+validate_proxy_secret() {
+  [ "${#1}" -ge 32 ] && [ "${#1}" -le 256 ] || return 1
+  case "$1" in *[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+}
+
 generate_token() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
   else od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; fi
@@ -639,7 +645,19 @@ validate_public_url() {
 }
 
 validate_header() {
-  case "$1" in ''|*[!A-Za-z0-9-]*) return 1 ;; *) return 0 ;; esac
+  local normalized
+  case "$1" in
+    [Xx]-[A-Za-z0-9][A-Za-z0-9-]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in *[!A-Za-z0-9-]*) return 1 ;; esac
+  if [ "${#1}" -gt 128 ]; then return 1; fi
+  normalized="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$normalized" in
+    x-api-key|x-correlation-id|x-forwarded-client-cert|x-http-method-override|x-real-ip|x-request-id|x-formaspec-csrf|x-formaspec-proxy-secret) return 1 ;;
+    x-auth*|x-csrf*|x-forwarded-*|x-original-*|x-proxy-*|x-rewrite-*|x-xsrf*) return 1 ;;
+  esac
+  return 0
 }
 
 server_env_mode() {
@@ -654,7 +672,7 @@ server_env_mode() {
 }
 
 validate_server_env_file() {
-  local file="$1" access app_mode container_local bind port public_url auth_mode token header mode trusted_proxies allowed_hosts cors_origins
+  local file="$1" access app_mode container_local bind port public_url auth_mode token proxy_secret header mode trusted_proxies allowed_hosts cors_origins
   SERVER_ENV_ERROR=""
   if [ ! -f "$file" ]; then SERVER_ENV_ERROR="Server configuration is missing: $file"; return 1; fi
   mode="$(server_env_mode "$file")"
@@ -670,6 +688,7 @@ validate_server_env_file() {
   public_url="$(env_value "$file" PUBLIC_BASE_URL || true)"
   auth_mode="$(env_value "$file" AUTH_MODE || true)"
   token="$(env_value "$file" DESIGNER_TOKEN || true)"
+  proxy_secret="$(env_value "$file" FORMASPEC_PROXY_SECRET || true)"
   header="$(env_value "$file" TRUSTED_USER_HEADER || true)"
   trusted_proxies="$(env_value "$file" FORMASPEC_TRUSTED_PROXIES || true)"
   allowed_hosts="$(env_value "$file" FORMASPEC_ALLOWED_HOSTS || true)"
@@ -683,12 +702,15 @@ validate_server_env_file() {
     if [ "$auth_mode" != "trusted-header" ]; then SERVER_ENV_ERROR="Proxy mode requires AUTH_MODE=trusted-header."; return 1; fi
     if ! validate_public_url "$public_url"; then SERVER_ENV_ERROR="Proxy mode requires PUBLIC_BASE_URL to be a valid HTTPS origin."; return 1; fi
     if ! validate_token "$token"; then SERVER_ENV_ERROR="Proxy mode requires a valid bearer token of at least 16 safe characters."; return 1; fi
+    if ! validate_proxy_secret "$proxy_secret"; then SERVER_ENV_ERROR="Proxy mode requires a separate FORMASPEC_PROXY_SECRET with 32 to 256 safe characters. Re-run server init with --force."; return 1; fi
+    if [ "$proxy_secret" = "$token" ]; then SERVER_ENV_ERROR="FORMASPEC_PROXY_SECRET must not reuse DESIGNER_TOKEN."; return 1; fi
     if [ -n "$trusted_proxies$allowed_hosts$cors_origins" ] && { [ -z "$trusted_proxies" ] || [ -z "$allowed_hosts" ] || [ "$cors_origins" != "$public_url" ]; }; then SERVER_ENV_ERROR="Proxy mode requires explicit trusted proxies, allowed hosts, and matching CORS origin."; return 1; fi
   else
     if { [ -n "$app_mode" ] && [ "$app_mode" != "local" ]; } || { [ -n "$container_local" ] && [ "$container_local" != "true" ]; }; then SERVER_ENV_ERROR="SSH-only mode requires APP_MODE=local and FORMASPEC_CONTAINER_LOCAL=true."; return 1; fi
     if [ "$auth_mode" != "none" ]; then SERVER_ENV_ERROR="SSH-only mode requires AUTH_MODE=none."; return 1; fi
     if [ "$public_url" != "http://127.0.0.1:$port" ]; then SERVER_ENV_ERROR="SSH-only mode requires PUBLIC_BASE_URL=http://127.0.0.1:$port."; return 1; fi
     if [ -n "$token" ]; then SERVER_ENV_ERROR="SSH-only mode must not contain a bearer token."; return 1; fi
+    if [ -n "$proxy_secret" ]; then SERVER_ENV_ERROR="SSH-only mode must not contain FORMASPEC_PROXY_SECRET."; return 1; fi
   fi
   return 0
 }
@@ -715,12 +737,14 @@ write_docker_env() {
 }
 
 write_server_env() {
-  local access="$1" port="$2" public_url="$3" token="$4" header="$5" force="$6"
+  local access="$1" port="$2" public_url="$3" token="$4" proxy_secret="$5" header="$6" force="$7"
   validate_port "$port" || die "Invalid port: $port"
   validate_header "$header" || die "Invalid trusted identity header: $header"
   if [ "$access" = "proxy" ]; then
     validate_public_url "$public_url" || die "Public server URL must be a true HTTPS origin without userinfo, path, query, or fragment. Example: https://designer.company.example"
     validate_token "$token" || die "Server token must be at least 16 characters and contain only letters, digits, dot, underscore, or hyphen."
+    validate_proxy_secret "$proxy_secret" || die "Internal proxy secret must contain 32 to 256 safe characters."
+    [ "$proxy_secret" != "$token" ] || die "The internal proxy secret must be separate from the MCP bearer token."
   fi
   if [ "$DRY_RUN" = "1" ]; then
     info "Would write a mode-0600 $access server configuration to $SERVER_ENV (secret redacted)."
@@ -741,6 +765,7 @@ write_server_env() {
       printf 'PUBLIC_BASE_URL=%s\n' "$public_url"
       printf 'AUTH_MODE=trusted-header\n'
       printf 'DESIGNER_TOKEN=%s\n' "$token"
+      printf 'FORMASPEC_PROXY_SECRET=%s\n' "$proxy_secret"
       printf 'FORMASPEC_ALLOWED_HOSTS=%s\n' "${public_url#https://}"
       printf 'FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12\n'
       printf 'DESIGNER_CORS_ORIGINS=%s\n' "$public_url"
@@ -769,6 +794,7 @@ native_environment() {
   export PUBLIC_BASE_URL="http://127.0.0.1:$api_port"
   export AUTH_MODE=none
   export DESIGNER_TOKEN=""
+  unset FORMASPEC_PROXY_SECRET
   export DESIGNER_API_URL="http://127.0.0.1:$api_port"
   export DESIGNER_WEB_HOST=127.0.0.1
   export DESIGNER_WEB_PORT="$web_port"
@@ -945,7 +971,7 @@ start_docker_local() {
 }
 
 server_init() {
-  local public_url="" port="$DEFAULT_API_PORT" token="" header="x-designer-user" force=0 ssh_only=0 public_url_set=0
+  local public_url="" port="$DEFAULT_API_PORT" token="" proxy_secret="" header="x-designer-user" force=0 ssh_only=0 public_url_set=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --public-url) [ "$#" -ge 2 ] || usage_error "--public-url needs a value"; public_url="$2"; public_url_set=1; shift 2 ;;
@@ -967,7 +993,7 @@ server_init() {
     usage_error "--token requires trusted-proxy mode with --public-url"
   fi
   if [ "$ssh_only" = "1" ] || [ -z "$public_url" ]; then
-    write_server_env "ssh" "$port" "" "" "$header" "$force"
+    write_server_env "ssh" "$port" "" "" "" "$header" "$force"
     say
     say "SSH-only server mode keeps the app on loopback with no public exposure."
     say "After starting it, connect from your computer with:"
@@ -979,7 +1005,12 @@ server_init() {
       else token="$(generate_token)"
       fi
     fi
-    write_server_env "proxy" "$port" "$public_url" "$token" "$header" "$force"
+    if [ "$DRY_RUN" = "1" ]; then proxy_secret="dry-run-proxy-secret-placeholder-00000000"
+    else
+      proxy_secret="$(generate_token)"
+      while [ "$proxy_secret" = "$token" ]; do proxy_secret="$(generate_token)"; done
+    fi
+    write_server_env "proxy" "$port" "$public_url" "$token" "$proxy_secret" "$header" "$force"
     say
     say "The app port remains loopback-only. Configure your HTTPS/SSO reverse proxy using docs/deployment.md."
     say "The MCP bearer secret is stored with mode 0600; run '$SCRIPT_PATH token' when configuring Codex."
@@ -990,11 +1021,12 @@ start_server() {
   local no_build="$1"
   [ -f "$SERVER_ENV" ] || die "Server configuration is missing. Run '$SCRIPT_PATH server init --ssh-only' or '$SCRIPT_PATH server init --public-url https://designer.company.example'."
   validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
-  local port access public_url header health_host=""
+  local port access public_url header proxy_secret="" health_host=""
   port="$(env_value "$SERVER_ENV" PORT)"
   access="$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)"
   public_url="$(env_value "$SERVER_ENV" PUBLIC_BASE_URL)"
   header="$(env_value "$SERVER_ENV" TRUSTED_USER_HEADER)"
+  proxy_secret="$(env_value "$SERVER_ENV" FORMASPEC_PROXY_SECRET || true)"
   if [ "$access" = "proxy" ]; then
     health_host="${public_url#https://}"
     health_host="${health_host%/}"
@@ -1018,7 +1050,8 @@ start_server() {
     die "Server container did not become ready."
   }
   if [ "$access" = "proxy" ]; then
-    if ! curl -fsS --max-time 5 -H "Host: $health_host" -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
+    if ! printf 'header = "%s: %s"\n' "$PROXY_SECRET_HEADER" "$proxy_secret" \
+      | curl -fsS --max-time 5 --config - -H "Host: $health_host" -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
       compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
       compose "$SERVER_ENV" down >/dev/null 2>&1 || true
       clear_runtime_state
@@ -1237,6 +1270,16 @@ show_token() {
   printf '%s\n' "$token"
 }
 
+show_proxy_secret() {
+  [ -f "$SERVER_ENV" ] || die "Server configuration is missing."
+  validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
+  [ "$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)" = "proxy" ] || die "SSH-only server mode has no internal proxy secret."
+  local proxy_secret
+  proxy_secret="$(env_value "$SERVER_ENV" FORMASPEC_PROXY_SECRET)"
+  validate_proxy_secret "$proxy_secret" || die "This server configuration has no valid internal proxy secret."
+  printf '%s\n' "$proxy_secret"
+}
+
 backup_data() {
   local destination="${1:-$BACKUP_DIR/$(date +%Y%m%d-%H%M%S)}"
   if [ "$DRY_RUN" = "1" ]; then info "Would back up all SQLite/WAL/asset data to $destination"; return 0; fi
@@ -1380,6 +1423,7 @@ Usage:
   ./designer --yes support-bundle create [OUTPUT.tar]
   ./designer codex-config [local|server]
   ./designer token                    Print the stored server MCP token
+  ./designer proxy-secret             Print the internal reverse-proxy secret for operator configuration
   ./designer backup [DESTINATION]     Legacy compatibility backup
   ./designer version
 
@@ -1566,6 +1610,10 @@ main() {
     token)
       [ "$#" -eq 0 ] || usage_error "Unexpected token argument: $1"
       show_token
+      ;;
+    proxy-secret)
+      [ "$#" -eq 0 ] || usage_error "Unexpected proxy-secret argument: $1"
+      show_proxy_secret
       ;;
     backup)
       local destination="${1:-}"

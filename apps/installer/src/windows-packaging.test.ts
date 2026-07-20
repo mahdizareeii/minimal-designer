@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { buildUnsignedWindowsMsiFromApplication } from "./build-windows-msi.js";
 import {
   assertWindowsMsiVersion,
   assertWindowsPackageArchitecture,
@@ -309,6 +310,17 @@ describe("deterministic Windows payload and WiX v4 layout", () => {
     expect(() => assertWindowsPayloadPathSet(["app/Collision.txt", "app/collision.txt"]))
       .toThrow(/case-insensitive path collision/);
 
+    const reservedRoot = temporaryRoot();
+    const reservedApplication = applicationPayloadFixture(reservedRoot);
+    writeFixture(reservedApplication, "Service/operator-owned.txt", "do not overwrite");
+    expect(() => stageWindowsPayload({
+      applicationPayloadRoot: reservedApplication,
+      payloadRoot: path.join(reservedRoot, "out"),
+      serviceHost: serviceHostFixture(reservedRoot),
+      version: "1.2.3",
+      architecture: "x64",
+    })).toThrow(/installer-reserved path/);
+
     const browserRoot = temporaryRoot();
     const browserApplication = applicationPayloadFixture(browserRoot);
     writeFixture(browserApplication, "runtime/ms-playwright/ffmpeg-123/ffmpeg.exe", peBytes("x64"));
@@ -439,6 +451,41 @@ describe("Windows-only WiX command boundary", () => {
     })).toThrow(/compound-file header/);
     expect(fs.existsSync(expectedOutput)).toBe(false);
     expect(fs.existsSync(`${expectedOutput}.sha256`)).toBe(false);
+  });
+
+  it("stages, builds, and removes temporary payload state through the standalone Windows entry point", () => {
+    const root = temporaryRoot();
+    const applicationPayloadRoot = applicationPayloadFixture(root);
+    const serviceHost = serviceHostFixture(root);
+    const wix = wixFixture(root);
+    let transientPayload = "";
+    const runner: PackageCommandRunner = {
+      run(_command, arguments_) {
+        if (arguments_[0] === "--version") return { status: 0, stdout: `${wix.version}\n`, stderr: "" };
+        transientPayload = arguments_[arguments_.indexOf("-bindpath") + 1]!;
+        const output = arguments_[arguments_.indexOf("-out") + 1]!;
+        fs.writeFileSync(output, Buffer.concat([
+          Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+          Buffer.from("integrated-msi-fixture"),
+        ]));
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    };
+    const output = buildUnsignedWindowsMsiFromApplication({
+      applicationPayloadRoot,
+      serviceHost,
+      outputDirectory: path.join(root, "integrated-output"),
+      version: "1.2.3",
+      architecture: "x64",
+      sourceDateEpoch: 1_700_000_000,
+      wixExecutable: wix.executable,
+      wixProvenance: wix.provenance,
+      commandRunner: runner,
+      platform: "win32",
+    });
+    expect(fs.existsSync(output)).toBe(true);
+    expect(transientPayload).toContain("formaspec-windows-msi-");
+    expect(fs.existsSync(transientPayload)).toBe(false);
   });
 
   it("states the remaining native-host, WiX, signing, and Windows lifecycle prerequisites explicitly", () => {

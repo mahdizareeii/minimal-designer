@@ -17,8 +17,11 @@ Workspace Bridge workflows.
 It is **not production-ready**. The current supported use is local development
 and controlled evaluation. Docker separates API and renderer and now includes
 an externally supervised one-shot restore-worker foundation for the exact
-launcher-recorded local-Docker or server runtime. Native installers, clean
-server-mode restore evidence, signed provenance, security/browser/performance
+launcher-recorded local-Docker or server runtime. That command is explicitly
+`HEALTHY_PLANNED_RESTORE_ONLY`: the current API/database must be healthy for
+backup-ID resolution and preflight, so offline disaster recovery is not
+implemented. Release-qualified native installers, clean server-mode planned-
+restore evidence, signed provenance, security/browser/performance
 matrices, and complete release evidence remain unfinished. A disposable
 local-Docker A/B restore exercise has passed, but it does not qualify the server
 path or close the broader recovery gate. See
@@ -48,10 +51,13 @@ authorization without further prompts.
 
 The source installer currently needs Node.js 24 or newer and pnpm 11.9 even
 when the selected application runtime is Docker, because `formaspecctl` and the
-host-side local bridge are built from this checkout. The planned native
-packages will bundle their runtime. An exact unsigned macOS ARM64 PKG now exists
-for engineering evidence, but it is not release-approved or a substitute for
-the source installer; Windows MSI and Linux DEB/RPM artifacts remain absent.
+host-side local bridge are built from this checkout. Native packages are
+designed to bundle their runtime. The exact unsigned macOS ARM64 PKG is stale
+schema-10 engineering evidence, not a current release artifact. Linux DEB/RPM
+and Windows WiX v4 builder foundations exist in source, but no current Linux or
+Windows artifact/lifecycle evidence qualifies them for release. See
+[Linux packaging](./LINUX_PACKAGING.md) and
+[Windows packaging](./WINDOWS_PACKAGING.md).
 
 The launcher supports macOS, Linux, and WSL2. Native Windows shells are not
 supported by the source launcher. Docker Desktop/Engine and Compose v2 must
@@ -114,7 +120,7 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl backup prune execute --preview-id <id> --plan-hash <sha256> --yes [--json]` | Revalidates and commits only the reviewed 7-daily/4-weekly/12-monthly prune plan. |
 | `pnpm formaspecctl backup verify <formaspec-backup.tar> [--json]` | Safely extracts and verifies exact archive/checksum coverage, SQLite/foreign-key/migration integrity, assets and legacy BLOB fallback, canonical snapshots, revision hash chains, and project heads. |
 | `pnpm formaspecctl backup restore <formaspec-backup.tar> --yes [--json]` | Stops a recorded source-local runtime, creates a safety copy when local data exists, and invokes the atomic verified restore engine for `./data`. It refuses Docker volumes and server runtimes and leaves the app stopped. |
-| `pnpm formaspecctl backup restore --backup-id <id> --yes [--json]` | Externally supervises a managed restore for the exact launcher-recorded local-Docker or server runtime. It fences traffic, stops only the pinned API container, runs the network-disabled one-shot worker, creates a verified safety backup, verifies exact schema/readiness/renderer state with the configured Host, revokes restored agent credentials, restarts under maintenance, and clears maintenance only after readiness succeeds. |
+| `pnpm formaspecctl backup restore --backup-id <id> --yes [--json]` | Externally supervises `HEALTHY_PLANNED_RESTORE_ONLY` for the exact launcher-recorded local-Docker or server runtime. It fences traffic, stops only the pinned API container, runs the network-disabled one-shot worker, creates a verified safety backup, verifies exact schema/readiness/renderer state with the configured Host, revokes restored agent credentials, restarts under maintenance, and clears maintenance only after readiness succeeds. The current API/database must be healthy for backup-ID resolution and preflight; this is not offline disaster recovery. |
 | `pnpm formaspecctl backup restore status [--json]` | Reads the path-free maintenance marker and durable restore-operation state through a one-shot control process; it does not clear or mutate recovery state. |
 | `pnpm formaspecctl backup restore resume [--backup-id <id>] --yes [--json]` | Resumes the exact active pinned Docker/server operation. `--backup-id` is required only when interruption preceded creation of the durable operation record. |
 | `pnpm formaspecctl backup restore rollback --yes [--json]` | Restores the verified safety backup as a separately supervised operation when the previous operation is in an eligible conclusive state; an inconclusive interruption must be resumed first. |
@@ -142,9 +148,10 @@ custom volumes, and orchestrators still require deployment-specific procedures. 
 supervisor installation/alerting, application autostart, native package
 install/upgrade/uninstall, approved backup signing/provenance, and a migration
 execution/rollback command are not implemented. The migration-status
-reader is synchronized at version 10. Migration 9 adds the preview/run ledger
+reader is synchronized at version 11. Migration 9 adds the preview/run ledger
 and guarded exact-delete contract; migration 10 adds immutable portable-import
-provenance. Neither changes stored V1 revisions. The
+provenance; migration 11 adds persistent bounded render-job lifecycle records.
+None changes stored V1 revisions. The
 copied version-7-to-8 migration
 fixture preserves V1 revision bytes and hashes. A disposable local-Docker
 restore exercise now passes; real customer fixtures, broader data verification,
@@ -490,12 +497,19 @@ applies pending numbered migrations during database startup in an immediate
 transaction. It refuses a database whose newest migration is newer than the
 application or whose ledger is not a recognized prefix.
 
-For migrations 9 and 10, FormaSpec also validates the required tables,
-columns, indexes, trigger targets and normalized trigger SQL, plus removal of
+For migrations 9 through 11, FormaSpec also validates the required tables,
+columns, indexes, trigger targets, normalized table/trigger SQL, and removal of
 forbidden legacy triggers. Startup validates before and after applying each
 migration. Backup verification, restore preflight/control, and staged restore
 validation use the same fail-closed schema-shape contract, so ledger-only
 tampering is not accepted.
+
+Migration 11 persists API-side render and raster-normalization job metadata.
+Jobs move through `queued`, `running`, and terminal states with owner leases,
+heartbeats, and expired-owner recovery. Stored rows contain bounded hashes,
+versions, dimensions, warnings, and safe errors only—not documents, image/PNG
+bytes, filesystem paths, or filenames. The renderer worker remains database-
+free. Exact 30-day terminal retention is guarded by bounded delete permits.
 
 `formaspecctl migrate status` is read-only and currently checks only the source
 database at `./data/designer.sqlite`. Docker-volume inspection, migration
@@ -549,10 +563,20 @@ Two different mechanisms currently exist:
 The managed path accepts only an opaque ID from the recorded backup catalog and
 the exact runtime binding captured after current `formaspecctl` local-Docker or
 server startup. It refuses unknown/direct Compose projects, custom project
-names, bind-mounted data, guessed volumes, stale secure environments, and
-unrecognized orchestrators. Server automation/alerting and clean recovery
+names, guessed volumes, stale secure environments, and unrecognized
+orchestrators. Every binding capture and verification inspects the named data,
+backup, and renderer-socket volumes and requires the Docker `local` driver and
+scope, no driver options, bounded absolute mountpoints, and three distinct
+backing identities. Plugin, NFS, bind-backed, or aliased volumes fail closed.
+Server automation/alerting and clean planned-recovery
 evidence remain operator/release work even though the supervised command path
 is implemented.
+
+The current Docker/server path is `HEALTHY_PLANNED_RESTORE_ONLY`. It resolves
+the opaque backup ID and performs target preflight through the healthy current
+API/database before entering maintenance. A stopped or corrupt API/database
+cannot use this path even when a valid bundle exists. Offline disaster recovery
+requires a separately designed and authorized operator workflow.
 
 On 2026-07-20, an isolated Compose project on port `4397` restored
 `backup_0dda1a60c54c5805557426a428739e505e089425` in operation
@@ -591,19 +615,28 @@ at `.designer/run/docker-runtime-binding.json`. Restore refuses to proceed if
 that binding is absent or does not match the Docker context/daemon, image
 digest, container and Compose identities, project path, named volumes, renderer
 isolation, loopback-published port, recorded mode, secret-redacted environment identity SHA-256,
-or required health `Host`. Binding format 2 contains no bearer token; v1 local
+or required health `Host`. Live volume inspection also revalidates the local
+driver/scope, empty options, bounded absolute mountpoints, and distinct backing
+identities for data, backup, and renderer-socket volumes. Binding format 2
+contains no bearer token; v1 local
 bindings remain readable and are upgraded in memory. This prevents restore from
 drifting to an ambient Compose project, stale server configuration, or guessed
 volume.
 
-The supervisor starts/verifies the pinned renderer and performs a read-only
+The supervisor requires a healthy current API/database, starts/verifies the
+pinned renderer, and performs a read-only
 target preflight before creating maintenance, including a conservative
 whole-workflow capacity forecast for the safety backup, source pin,
 verification extraction, and candidate data. Each later copy/extraction step
 rechecks capacity. After fencing and stopping only
 the API, it launches the worker with hardened direct `docker run` against the
 exact pinned image and volumes; it does not delegate recovery to ambient
-Compose discovery.
+Compose discovery. Each health request has its own absolute wall-clock deadline.
+The launcher lock refuses symlinks or unexpected state without recursively
+removing an unvalidated path. If a pre-cutover resume or rollback worker fails
+after maintenance aborts, the supervisor restarts and verifies the unchanged
+API; a simultaneous restart failure is reported as an aggregate failure rather
+than hiding either cause.
 
 Maintenance is fail-closed and has no automatic expiry. While active,
 `/api/*`, `/mcp`, and replayable event endpoints return retryable
@@ -750,12 +783,13 @@ from later event IDs.
 Production readiness remains **NO-GO** until all of the following are resolved
 and evidenced:
 
-- add Windows named-pipe/native renderer packaging, persisted render jobs, and
-  continuous egress/crash/saturation/load evidence beyond the verified local
+- add real Windows named-pipe/native renderer/service-host/ACL/process-tree
+  packaging and continuous egress/crash/saturation/load evidence beyond the verified local
   network-denied Docker worker;
 - finish and verify strict server-mode reverse-proxy, direct-port denial,
-  supervised restore/rollback, upgrade, alerting, and long-running Compose
-  evidence; the command path exists but has not passed that release matrix;
+  `HEALTHY_PLANNED_RESTORE_ONLY`/rollback, upgrade, alerting, and long-running
+  Compose evidence; add a separately authorized offline disaster-recovery path;
+  the planned command path exists but has not passed that release matrix;
 - extend browser and visual-regression coverage beyond the passing 20-step
   local scenario and zoom/pan/DPR/RTL alignment foundations to the full
   invalidation, auto-layout, fractional-group, and cross-platform matrix;
@@ -773,14 +807,15 @@ and evidenced:
   streaming multipart bodies and avoiding simultaneous retention of all
   extracted entries; retain larger adversarial/concurrent-import and packaged
   cross-platform evidence;
-- promote the fresh integrity-verified unsigned macOS candidate only after its
+- rebuild the stale schema-10 unsigned macOS candidate and promote it only after its
   five recorded blockers are resolved, then ship and test release-ready macOS
   PKG, Windows MSI, Linux DEB/RPM, autostart, upgrade, uninstall, reinstall,
-  signing, and notarization paths;
+  signing, and notarization paths. Linux and Windows source builders exist, but
+  real artifacts/lifecycles remain unproven;
 - verify Windows DPAPI in the packaged service lifecycle on clean hosts;
-- complete framework-aware Workspace Bridge mappings, automatic mapping upload,
-  selected-workspace Codex launch, and the approval-gated handoff implementation
-  flow; connected grants now persist path-free inventories automatically;
+- complete framework-aware Workspace Bridge mappings and the broader approved
+  plan/diff/validation/commit/PR flow around the implemented selected-workspace
+  Codex launch; connected grants now persist path-free inventories automatically;
 - complete the seven-stage Redesign Studio and the broad product-spec/planning/
   task UI;
 - produce the comprehensive authorization, CSRF, Host/Origin, asset,

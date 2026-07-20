@@ -13,13 +13,17 @@ volumes. The product remains usable for local evaluation and continued
 development, including automatic Codex connection through the Minimal UI
 alias.
 
-Production readiness is intentionally not declared. An exact self-contained
+Production readiness is intentionally not declared. The exact self-contained
 unsigned macOS ARM64 PKG and its offline artifact-specific integrity/SBOM
-evidence now exist, but that artifact is not release-approved. Windows/Linux
-installers, macOS signing/notarization and lifecycle proof, server-mode restore
-supervision, signed backup provenance, the comprehensive security/cross-
-platform browser matrices, vulnerability scanning and reproducibility, and
-several advanced product/design-system workflows remain release blockers. The
+evidence belong to the earlier schema-10 checkpoint; that artifact is stale
+relative to the current schema-11 source and is not release-approved. Linux
+DEB/RPM and Windows WiX v4 source-builder foundations now exist, but no current
+Linux/Windows artifact or native lifecycle evidence does. macOS signing/
+notarization, a real Windows service host and ACL/process-tree/runtime proof,
+real Linux lifecycle proof, offline disaster recovery, signed backup
+provenance, the comprehensive security/cross-platform browser matrices,
+vulnerability/license scanning and reproducibility, and several advanced
+product/design-system workflows remain release blockers. The
 source-workspace permissive-only license gate now passes.
 
 ## Implemented foundation
@@ -51,9 +55,14 @@ source-workspace permissive-only license gate now passes.
   output, and versioned API/worker limit parity.
 - Added content-addressed Brotli snapshots, revision hash chains, exact
   persisted previews, atomic CAS commits, durable idempotency, and numbered
-  schema migrations through version 10. Startup and backup/restore validation
-  now fail closed when migration-9/10 ledger rows exist without the required
-  tables, columns, indexes, triggers, trigger SQL, or forbidden-trigger removal.
+  schema migrations through version 11. Migration 11 adds API-owned persistent
+  render/raster-normalization job state with owner leases, heartbeats,
+  expired-owner recovery, bounded hash/version/dimension/warning/error metadata,
+  organization/internal scope separation, and permit-guarded exact 30-day
+  terminal-record retention. The renderer remains database-free and job rows
+  contain no document/image bytes or paths. Startup and backup/restore
+  validation fail closed when migration-9/10/11 ledger rows exist without the
+  required schema objects, normalized SQL, or forbidden-trigger removal.
 - Added mutating portable project import behind an Organization Administrator
   boundary. Validation remains read-only; commit requires an idempotency key and
   supports preserve-ID conflict failure or deterministic clone remapping. V1/V2
@@ -92,11 +101,22 @@ source-workspace permissive-only license gate now passes.
 - Connected Workspace Bridge grants now load enforced repository exclusions,
   keep `generic-git` as a fallback detector, and automatically persist bounded
   path-free inventories through REST or the authorized local MCP bridge.
+- Added approval-gated selected-workspace Codex launch: grants bind to the exact
+  central inventory, handoffs must be approved/implementing, process creation
+  uses the selected repository as exact `cwd`, `shell: false`, one secret-free
+  task argument, and a minimal environment. POSIX process-group monitoring
+  reacts to revocation, expiry, policy withdrawal, handoff closure, and
+  inventory changes. Windows Job Object/equivalent containment remains open.
 - Added verified backups, 7/4/12 retention, preview-first pruning, support
-  bundles, external launcher-local Docker restore supervision, safety backups,
-  maintenance/lock fencing, crash journals, whole-workflow capacity preflight,
-  descriptor-pinned verify/download/restore bytes, and final credential
-  revocation checks.
+  bundles, external launcher-pinned Docker/server planned-restore supervision,
+  safety backups, maintenance/lock fencing, crash journals, whole-workflow
+  capacity preflight, descriptor-pinned verify/download/restore bytes, and final
+  credential revocation checks. Runtime verification rejects plugin, NFS,
+  bind-backed, or aliased Docker volumes by inspecting driver/scope/options and
+  distinct bounded absolute backing mountpoints. Health probes have absolute
+  deadlines; unsafe launcher-lock paths fail closed; and pre-cutover resume/
+  rollback worker failures restart and re-verify the unchanged API. This path
+  is `HEALTHY_PLANNED_RESTORE_ONLY`, not offline disaster recovery.
 - Hardened the single Docker image into separate API and renderer services. The
   renderer is non-root, read-only, capability-free, network-disabled, bounded,
   and fails startup if production `/data` or `/backups` mounts are present.
@@ -115,24 +135,30 @@ source-workspace permissive-only license gate now passes.
   every packaged `dist` tree and managed CLI asset. Missing, extra, tampered,
   or stale compiled files fail integrity without claiming signature,
   notarization, scanning, or reproducibility.
+- Added deterministic unsigned Linux DEB/RPM source builders with pinned
+  runtimes, hardened systemd API/renderer services, strict secret-free protocol
+  registration, and data-preserving lifecycle scripts. Added a native-Windows-
+  only WiX v4 MSI builder foundation that requires an externally supplied real
+  service host and exact service-host/WiX provenance. Neither platform has
+  release-qualified artifact or lifecycle evidence.
 
 ## Verification evidence
 
 | Gate | Result |
 | --- | --- |
-| Workspace tests | 393 passed: 40 core, 230 server, 30 web, 49 CLI, 12 local bridge, 9 Workspace Bridge, and 23 installer |
+| Focused package checkpoints | Core 40/40, server 235/235 with Chromium and Unix sockets, web 30/30, CLI 52/52 before the latest restore regressions, Workspace Bridge 23/23, and installer 41/41 through Linux packaging. The consolidated current-tree run remains pending. |
 | Typecheck | All seven buildable workspace packages passed |
 | Production build | Core, server, web, CLI, local bridge, Workspace Bridge, and installer passed |
-| Launcher | 164/164 passed |
+| Launcher | 165/165 passed at the recorded checkpoint |
 | Selection alignment, auto-layout, and inspect | 6/6 Playwright tests passed, including DPR 1/2 alignment, reorder, cross-container reparent, constraint resize, canonical geometry preservation, and immutable revision inspection after head change |
 | Visual regression | 7/7 baselines passed: desktop, phone, tablet, Persian RTL, typography, clipping, image |
 | 1,000-node foundation | Validation 17.71 ms p95; 25 updates 36.18 ms p95; preview persistence 132.17 ms p95; 512×320 Playwright render 118.12 ms p95 |
 | 1,000-node browser gate | All budgets passed over the final 20-sample run: 232.8 ms p95 load; 20.8 ms p95 selection; 16.7 ms gesture p95 and maximum; 261.9 ms p95 commit/autosave; 19.0 ms p95 history; 216.65 ms p95 preview validation; 199.22 ms p95 1440×900 pinned-Chromium render |
 | Integrated release scenario | 1/1 Playwright project passed the complete 20-step PM→MCP→human correction→history→export→backup/restore/restart scenario |
 | Release evidence | 8/8 focused tests passed; deterministic CycloneDX/license/checksum generation is byte-identical; 342 installed third-party components pass with zero policy violations |
-| Unsigned macOS PKG evidence | Integrity verification passed for `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`, SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`, size 184,835,514 bytes. All 349 packaged components link; exactly seven workspace trees and two bundled runtimes are inventoried. Release remains `NO-GO` on the same five blocker codes. |
+| Unsigned macOS PKG evidence | Checkpoint integrity verification passed for `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`, SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`, size 184,835,514 bytes. It belongs to the earlier schema-10 tree and must not be presented as the current artifact. Release remains `NO-GO`. |
 | Compose | `docker compose config --quiet` passed |
-| Fresh Docker smoke | A disposable schema-10 project reached healthy Playwright-worker readiness with no fallback, processed a real 1,303-byte PNG, and preserved a project across API restart. Both services ran as `pwuser` with read-only roots, dropped capabilities, and resource bounds; renderer networking was disabled; the base image was digest-pinned; cleanup completed. |
+| Fresh Docker smoke | The last disposable schema-10 project reached healthy Playwright-worker readiness with no fallback, processed a real 1,303-byte PNG, and preserved a project across API restart. Both services ran as `pwuser` with read-only roots, dropped capabilities, and resource bounds; renderer networking was disabled; the base image was digest-pinned; cleanup completed. A fresh schema-11 rebuild/smoke is required. |
 | Restore control | Maintenance inactive; no operation; no worker lock |
 | Repository hygiene | `git diff --check` passed |
 
@@ -142,7 +168,7 @@ platform release CI image and retained artifact history are still needed.
 
 ## Runtime and data-preservation evidence
 
-The current disposable Docker smoke verified schema 10, Playwright rendering
+The last disposable Docker smoke verified schema 10, Playwright rendering
 without fallback, a real PNG path, and project persistence across API restart.
 It also verified the two-service user/filesystem/capability/resource boundaries,
 renderer network denial, base-image digest pinning, and complete disposable
@@ -161,8 +187,9 @@ Codex configuration.
 
 ## Current macOS artifact blockers
 
-The fresh PKG candidate has integrity status `PASS` for its exact current-tree
-bytes. Its release gate remains **NO-GO** with these five blocker codes:
+The old PKG candidate has integrity status `PASS` for its exact schema-10
+checkpoint bytes. It is stale relative to the current tree and its release gate
+remains **NO-GO** with these five blocker codes:
 
 1. Chromium headless shell's LGPL notices need an explicit allowlist/legal
    policy decision.
@@ -174,11 +201,16 @@ bytes. Its release gate remains **NO-GO** with these five blocker codes:
 
 ## Additional enterprise evidence still required
 
-- Prove clean macOS install/autostart/protocol/upgrade/uninstall/reinstall and
-  produce/test Windows WiX MSI and Linux DEB/RPM packages, including packaged
-  Windows DPAPI/ACL/runtime behavior.
-- Implement deployment-specific server-mode external restore supervision,
-  alerting, off-host policy, and long-duration recovery; approve a signing and
+- Rebuild and prove clean macOS install/autostart/protocol/upgrade/uninstall/
+  reinstall. Build and test Linux DEB/RPM artifacts on real targets. Supply and
+  qualify the Windows service host, then produce/test the WiX MSI including SCM,
+  DPAPI/ACL, named-pipe/Chromium, Job Object/equivalent process-tree, protocol,
+  signing, and clean lifecycle behavior.
+- Qualify deployment-specific server-mode external planned-restore supervision,
+  alerting, off-host policy, and long-duration recovery; implement a separately
+  authorized offline disaster-recovery path. The current Docker/server command
+  is `HEALTHY_PLANNED_RESTORE_ONLY` and requires a healthy current API/database
+  for backup-ID resolution and preflight. Approve a signing and
   key-management design because backup hashes prove consistency, not authorship.
 - Complete the cross-platform browser/visual, authorization/security,
   prompt-data, renderer-egress, decompression, and secret-exclusion matrices;
@@ -189,8 +221,9 @@ bytes. Its release gate remains **NO-GO** with these five blocker codes:
   still retained within the configured caps. Add larger adversarial,
   concurrent-import, and packaged cross-platform evidence.
 - Complete editor pinning/upgrade comparison and V2-head synchronization for
-  authored components, richer Workspace Bridge mappings and selected-workspace
-  Codex implementation launch, plus stage-specific Redesign Studio artifacts.
+  authored components, richer Workspace Bridge mappings and the broader
+  approved plan/diff/validation/commit/PR workflow around the implemented
+  selected-workspace Codex launch, plus stage-specific Redesign Studio artifacts.
   Path-free inventory persistence itself is automatic when the bridge has a
   compatible REST identity or uses the authorized local MCP bridge.
 - Produce artifact-specific container/Windows/Linux SBOMs and retained release

@@ -18,6 +18,7 @@ CAPTURE_INDEX=0
 CAPTURE_STATUS=0
 CAPTURE_OUTPUT=""
 SENSITIVE_TOKEN="designer-test-secret-0123456789"
+SENSITIVE_PROXY_SECRET="proxy-test-secret-0123456789abcdef0123456789abcdef"
 
 # These tests exercise the Bash compatibility implementation itself. The
 # separately tested formaspecctl wrapper normally delegates supported commands
@@ -221,6 +222,20 @@ EOF
 #!/usr/bin/env bash
 if [ -n "${DESIGNER_TEST_CURL_LOG:-}" ]; then
   printf '%s\n' "$*" >>"$DESIGNER_TEST_CURL_LOG"
+fi
+if [ -n "${DESIGNER_TEST_EXPECT_PROXY_SECRET:-}" ]; then
+  expects_config=0
+  for argument in "$@"; do
+    if [ "$expects_config" = "1" ] && [ "$argument" = "-" ]; then
+      config_data="$(cat)"
+      case "$config_data" in
+        *"x-formaspec-proxy-secret: ${DESIGNER_TEST_EXPECT_PROXY_SECRET}"*) ;;
+        *) exit 1 ;;
+      esac
+      break
+    fi
+    if [ "$argument" = "--config" ]; then expects_config=1; else expects_config=0; fi
+  done
 fi
 if [ "${DESIGNER_TEST_CURL_OK:-0}" = "1" ]; then
   exit 0
@@ -475,6 +490,74 @@ run_server_security_tests() {
   expect_not_contains "$SENSITIVE_TOKEN" "invalid server configuration never echoes the bearer token"
   expect_absent "$runtime" "rejected server initialization creates no runtime state"
 
+  local invalid_header invalid_header_index=0
+  for invalid_header in \
+    host \
+    origin \
+    authorization \
+    x-forwarded-user \
+    x-auth-user \
+    x-formaspec-csrf \
+    x-formaspec-proxy-secret \
+    x-request-id
+  do
+    invalid_header_index=$((invalid_header_index + 1))
+    runtime="$TMP_ROOT/invalid-identity-header-$invalid_header_index-must-not-exist"
+    capture env \
+      DESIGNER_RUNTIME_DIR="$runtime" \
+      DESIGNER_NO_OPEN=1 \
+      bash "$LAUNCHER" server init \
+        --public-url https://designer.example.test \
+        --token "$SENSITIVE_TOKEN" \
+        --identity-header "$invalid_header" \
+        --force
+    expect_status 1 "server init rejects reserved identity header $invalid_header"
+    expect_contains "Invalid trusted identity header" "reserved identity header $invalid_header has an actionable error"
+    expect_not_contains "$SENSITIVE_TOKEN" "reserved identity header $invalid_header never echoes the bearer token"
+    expect_absent "$runtime" "reserved identity header $invalid_header fails before runtime state is written"
+  done
+
+  local generated_runtime="$TMP_ROOT/generated-server-runtime"
+  local generated_env="$generated_runtime/env/server.env"
+  local generated_proxy_secret generated_token generated_mode
+  capture env \
+    DESIGNER_RUNTIME_DIR="$generated_runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" server init \
+      --public-url https://generated.example.test \
+      --token "$SENSITIVE_TOKEN" \
+      --force
+  expect_status 0 "server init generates a separate internal proxy secret"
+  generated_proxy_secret="$(awk -F= '$1 == "FORMASPEC_PROXY_SECRET" { print substr($0, index($0, "=") + 1) }' "$generated_env")"
+  generated_token="$(awk -F= '$1 == "DESIGNER_TOKEN" { print substr($0, index($0, "=") + 1) }' "$generated_env")"
+  generated_mode="$(stat -c '%a' "$generated_env" 2>/dev/null || stat -f '%Lp' "$generated_env" 2>/dev/null || true)"
+  case "$generated_proxy_secret" in
+    ''|*[!A-Za-z0-9._-]*) fail_test "generated proxy secret is bounded and header-safe" ;;
+    *)
+      if [ "${#generated_proxy_secret}" -ge 32 ] && [ "${#generated_proxy_secret}" -le 256 ]; then
+        pass_test "generated proxy secret is bounded and header-safe"
+      else
+        fail_test "generated proxy secret is bounded and header-safe"
+      fi
+      ;;
+  esac
+  if [ "$generated_proxy_secret" != "$generated_token" ]; then
+    pass_test "generated proxy secret never reuses DESIGNER_TOKEN"
+  else
+    fail_test "generated proxy secret never reuses DESIGNER_TOKEN"
+  fi
+  expect_equal "600" "$generated_mode" "generated server.env remains mode 0600"
+  expect_not_contains "$generated_proxy_secret" "normal server init output never prints the generated proxy secret"
+
+  capture env DESIGNER_RUNTIME_DIR="$generated_runtime" bash "$LAUNCHER" proxy-secret
+  expect_status 0 "explicit operator proxy-secret retrieval succeeds"
+  expect_equal "$generated_proxy_secret" "$CAPTURE_OUTPUT" "proxy-secret prints only the stored operator credential"
+
+  local ssh_runtime="$TMP_ROOT/generated-ssh-runtime"
+  capture env DESIGNER_RUNTIME_DIR="$ssh_runtime" DESIGNER_NO_OPEN=1 bash "$LAUNCHER" server init --ssh-only --force
+  expect_status 0 "SSH-only initialization succeeds without an internal proxy credential"
+  expect_file_not_contains "$ssh_runtime/env/server.env" "FORMASPEC_PROXY_SECRET" "SSH-only server.env does not claim a proxy secret"
+
   local invalid_url invalid_slug invalid_index=0
   for invalid_url in \
     "https://designer.example.test/path" \
@@ -523,6 +606,7 @@ run_server_security_tests() {
     printf 'PUBLIC_BASE_URL=https://designer.example.test\n'
     printf 'AUTH_MODE=trusted-header\n'
     printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'FORMASPEC_PROXY_SECRET=%s\n' "$SENSITIVE_PROXY_SECRET"
     printf 'TRUSTED_USER_HEADER=x-designer-user\n'
     printf 'MAX_UPLOAD_BYTES=5242880\n'
   } >"$server_env"
@@ -536,6 +620,7 @@ run_server_security_tests() {
   expect_status 0 "server Codex configuration exits successfully"
   expect_contains "bearer_token_env_var" "server Codex configuration references an environment variable"
   expect_not_contains "$SENSITIVE_TOKEN" "server Codex configuration does not print the stored token"
+  expect_not_contains "$SENSITIVE_PROXY_SECRET" "server Codex configuration does not print the internal proxy secret"
 
   capture env \
     PATH="$MOCK_PATH" \
@@ -559,6 +644,7 @@ run_server_security_tests() {
     DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
     DESIGNER_TEST_CURL_LOG="$curl_log" \
     DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_TEST_EXPECT_PROXY_SECRET="$SENSITIVE_PROXY_SECRET" \
     DESIGNER_TEST_DOCKER_DAEMON=ready \
     DESIGNER_NO_OPEN=1 \
     bash "$LAUNCHER" --yes start server --no-build
@@ -567,8 +653,10 @@ run_server_security_tests() {
     "-H Host: designer.example.test http://127.0.0.1:54325/health/ready" \
     "strict server readiness uses /health/ready with the public Host header"
   expect_file_contains "$curl_log" \
-    "-H Host: designer.example.test -H x-designer-user: launcher-health-check http://127.0.0.1:54325/api/designs" \
-    "strict server API verification preserves the public Host header"
+    "--config - -H Host: designer.example.test -H x-designer-user: launcher-health-check http://127.0.0.1:54325/api/designs" \
+    "strict server API verification preserves the public Host header and injects the secret through stdin"
+  expect_file_not_contains "$curl_log" "$SENSITIVE_PROXY_SECRET" \
+    "strict server API verification never exposes the proxy secret in process arguments or logs"
   expect_file_not_contains "$curl_log" "http://127.0.0.1:54325/ready" \
     "strict server startup never polls the legacy readiness endpoint"
 }
@@ -591,6 +679,7 @@ run_codex_config_state_tests() {
     printf 'PUBLIC_BASE_URL=%s/\n' "$server_url"
     printf 'AUTH_MODE=trusted-header\n'
     printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'FORMASPEC_PROXY_SECRET=%s\n' "$SENSITIVE_PROXY_SECRET"
     printf 'TRUSTED_USER_HEADER=x-designer-user\n'
     printf 'MAX_UPLOAD_BYTES=5242880\n'
   } >"$server_env"
@@ -727,6 +816,7 @@ EOF
     printf 'PUBLIC_BASE_URL=%s\n' "$server_url"
     printf 'AUTH_MODE=trusted-header\n'
     printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'FORMASPEC_PROXY_SECRET=%s\n' "$SENSITIVE_PROXY_SECRET"
     printf 'TRUSTED_USER_HEADER=x-designer-user\n'
     printf 'MAX_UPLOAD_BYTES=5242880\n'
   } >"$server_env"
@@ -789,6 +879,7 @@ run_restart_regression_test() {
     printf 'PUBLIC_BASE_URL=https://wrong-env.example.test\n'
     printf 'AUTH_MODE=trusted-header\n'
     printf 'DESIGNER_TOKEN=%s\n' "$SENSITIVE_TOKEN"
+    printf 'FORMASPEC_PROXY_SECRET=%s\n' "$SENSITIVE_PROXY_SECRET"
     printf 'TRUSTED_USER_HEADER=x-designer-user\n'
     printf 'MAX_UPLOAD_BYTES=5242880\n'
   } >"$server_env"

@@ -37,6 +37,19 @@ import { RestoreOperationStore } from "./restore-operation-store.js";
 import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
 import { DesignerService } from "./service.js";
 import { WorkspaceHandoffService } from "./workspace-handoff-service.js";
+import {
+  INTERNAL_PROXY_SECRET_HEADER,
+  internalProxySecretMatches,
+} from "./trusted-proxy.js";
+
+function isMinimalHealthRequest(url: string): boolean {
+  const pathOnly = url.split("?", 1)[0];
+  return pathOnly === "/health"
+    || pathOnly === "/ready"
+    || pathOnly === "/health/live"
+    || pathOnly === "/health/ready"
+    || pathOnly === "/health/render";
+}
 
 export interface DesignerApplication {
   app: FastifyInstance;
@@ -198,6 +211,25 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
         throw new DomainError("FORBIDDEN", "Local mode accepts loopback requests only.", 403);
       }
       return;
+    }
+
+    const rawPeerAddress = request.raw.socket.remoteAddress;
+    if (!config.isTrustedProxyAddress(rawPeerAddress)) {
+      throw new DomainError(
+        "FORBIDDEN",
+        "Server mode accepts requests only from a configured trusted raw socket peer or reverse proxy.",
+        403,
+      );
+    }
+
+    if (!isMinimalHealthRequest(request.url)
+      && (!config.proxySecret
+        || !internalProxySecretMatches(config.proxySecret, request.headers[INTERNAL_PROXY_SECRET_HEADER]))) {
+      throw new DomainError(
+        "FORBIDDEN",
+        "Server request did not originate through the authorized internal reverse-proxy hop.",
+        403,
+      );
     }
 
     const host = request.headers.host?.trim().toLowerCase();

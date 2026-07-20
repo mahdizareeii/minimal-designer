@@ -83,6 +83,7 @@ function serverProjectFixture(
     `PUBLIC_BASE_URL=${publicUrl}`,
     "AUTH_MODE=trusted-header",
     `DESIGNER_TOKEN=${token}`,
+    "FORMASPEC_PROXY_SECRET=proxy-secret-0123456789abcdef0123456789abcdef",
     "TRUSTED_USER_HEADER=x-designer-user",
     `FORMASPEC_ALLOWED_HOSTS=${publicHost}`,
     "FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12",
@@ -176,6 +177,20 @@ function inspectionOutput(service: "designer" | "renderer", state: RuntimeFixtur
   ].join("\n");
 }
 
+function volumeInspectionOutput(
+  name: string,
+  overrides: Partial<Record<"Name" | "Driver" | "Scope" | "Options" | "Mountpoint", unknown>> = {},
+): string {
+  return `${JSON.stringify({
+    Name: name,
+    Driver: "local",
+    Scope: "local",
+    Options: null,
+    Mountpoint: `/var/lib/docker/volumes/${name}/_data`,
+    ...overrides,
+  })}\n`;
+}
+
 function fixtureRunner(state: RuntimeFixtureState, calls: string[][], projectRoot: string): CommandRunner {
   return async (_executable, args, options) => {
     calls.push([...args]);
@@ -197,6 +212,10 @@ function fixtureRunner(state: RuntimeFixtureState, calls: string[][], projectRoo
       const renderer = args.includes("label=com.docker.compose.service=renderer");
       if (designer === renderer) return { exitCode: 1, stdout: "", stderr: "invalid service filter" };
       return { exitCode: 0, stdout: `${designer ? state.designerId : state.rendererId}\n`, stderr: "" };
+    }
+    if (args[2] === "volume" && args[3] === "inspect") {
+      const name = args.at(-1)!;
+      return { exitCode: 0, stdout: volumeInspectionOutput(name), stderr: "" };
     }
     if (args[2] === "inspect") {
       const id = args.at(-1);
@@ -258,6 +277,7 @@ describe("Docker runtime binding", () => {
 
   it("pins a trusted-proxy server runtime without persisting or forwarding its bearer token", async () => {
     const secret = "server-secret-token-0123456789abcdef";
+    const proxySecret = "proxy-secret-0123456789abcdef0123456789abcdef";
     const root = serverProjectFixture(4322, "https://designer.example.test", secret);
     const binding = await captureDockerRuntimeBinding(root, {
       commandRunner: fixtureRunner(defaultState(4322), [], root),
@@ -279,7 +299,9 @@ describe("Docker runtime binding", () => {
     expect(binding.runtime.environmentIdentitySha256).toMatch(/^[a-f0-9]{64}$/);
     const filename = persistDockerRuntimeBinding(root, binding);
     expect(fs.readFileSync(filename, "utf8")).not.toContain(secret);
+    expect(fs.readFileSync(filename, "utf8")).not.toContain(proxySecret);
     expect(JSON.stringify(sanitizedPublicDockerBinding(binding))).not.toContain(secret);
+    expect(JSON.stringify(sanitizedPublicDockerBinding(binding))).not.toContain(proxySecret);
 
     const trailingSlashRoot = serverProjectFixture(4324, "https://designer.example.test/", secret);
     await expect(captureDockerRuntimeBinding(trailingSlashRoot, {
@@ -289,6 +311,78 @@ describe("Docker runtime binding", () => {
     })).resolves.toMatchObject({
       runtime: { mode: "server", serverAccess: "proxy", healthHostHeader: "designer.example.test" },
     });
+  });
+
+  it("rejects unsafe trusted identity header names before persisting a runtime binding", async () => {
+    for (const header of [
+      "host",
+      "authorization",
+      "x-forwarded-user",
+      "x-auth-user",
+      "x-formaspec-csrf",
+      "x-formaspec-proxy-secret",
+      "x-request-id",
+    ]) {
+      const root = serverProjectFixture();
+      const environmentFile = path.join(root, ".designer", "env", "server.env");
+      const original = fs.readFileSync(environmentFile, "utf8");
+      fs.writeFileSync(
+        environmentFile,
+        original.replace("TRUSTED_USER_HEADER=x-designer-user", `TRUSTED_USER_HEADER=${header}`),
+        { mode: 0o600 },
+      );
+      await expect(captureDockerRuntimeBinding(root, {
+        commandRunner: fixtureRunner(defaultState(), [], root),
+        dockerExecutable: "/usr/bin/docker",
+        context,
+      })).rejects.toThrow(/invalid trusted identity header/);
+      expect(fs.existsSync(dockerRuntimeBindingPath(root))).toBe(false);
+    }
+  });
+
+  it("requires a separate bounded proxy secret only for trusted-proxy server bindings", async () => {
+    const cases = [
+      {
+        label: "missing proxy secret",
+        mutate: (contents: string) => contents.replace(
+          "FORMASPEC_PROXY_SECRET=proxy-secret-0123456789abcdef0123456789abcdef\n",
+          "",
+        ),
+      },
+      {
+        label: "reused bearer token",
+        mutate: (contents: string) => contents.replace(
+          "FORMASPEC_PROXY_SECRET=proxy-secret-0123456789abcdef0123456789abcdef",
+          "FORMASPEC_PROXY_SECRET=server-secret-token-0123456789abcdef",
+        ),
+      },
+      {
+        label: "unsafe proxy secret",
+        mutate: (contents: string) => contents.replace(
+          "FORMASPEC_PROXY_SECRET=proxy-secret-0123456789abcdef0123456789abcdef",
+          "FORMASPEC_PROXY_SECRET=contains unsafe spaces and is not a credential",
+        ),
+      },
+    ];
+    for (const testCase of cases) {
+      const root = serverProjectFixture();
+      const environmentFile = path.join(root, ".designer", "env", "server.env");
+      fs.writeFileSync(environmentFile, testCase.mutate(fs.readFileSync(environmentFile, "utf8")), { mode: 0o600 });
+      await expect(captureDockerRuntimeBinding(root, {
+        commandRunner: fixtureRunner(defaultState(), [], root),
+        dockerExecutable: "/usr/bin/docker",
+        context,
+      }), testCase.label).rejects.toThrow(/incomplete or unsafe/);
+    }
+
+    const localRoot = projectFixture();
+    const localEnvironment = path.join(localRoot, ".designer", "env", "docker.env");
+    fs.appendFileSync(localEnvironment, "FORMASPEC_PROXY_SECRET=proxy-secret-0123456789abcdef0123456789abcdef\n");
+    await expect(captureDockerRuntimeBinding(localRoot, {
+      commandRunner: fixtureRunner(defaultState(), [], localRoot),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+    })).rejects.toThrow(/not an unauthenticated loopback-local configuration/);
   });
 
   it("fails closed when a server Host configuration or pinned secure environment becomes stale", async () => {
@@ -381,12 +475,68 @@ describe("Docker runtime binding", () => {
     })).rejects.toThrow(/runtime identity drifted/);
     expect(verificationCalls.length).toBeGreaterThan(0);
     expect(verificationCalls.every((args) => args[0] === "--context" && args[1] === context)).toBe(true);
+    expect(verificationCalls.filter((args) => args[2] === "volume" && args[3] === "inspect")).toHaveLength(3);
 
     await expect(verifyDockerRuntimeBinding(root, {
       commandRunner: fixtureRunner(initial, [], root),
       dockerExecutable: "/usr/bin/docker",
       context: "another-context",
     })).rejects.toThrow(/does not match the persisted runtime binding/);
+  });
+
+  it("rejects plugin, NFS, bind-backed, and aliased Docker volume identities", async () => {
+    const cases: Array<{
+      label: string;
+      volume: string;
+      overrides: Partial<Record<"Driver" | "Scope" | "Options" | "Mountpoint", unknown>>;
+      error: RegExp;
+    }> = [
+      {
+        label: "plugin driver",
+        volume: dataVolume,
+        overrides: { Driver: "example/plugin:latest" },
+        error: /local driver and local scope/,
+      },
+      {
+        label: "NFS options",
+        volume: backupVolume,
+        overrides: { Options: { type: "nfs", o: "addr=192.0.2.10", device: ":/exports/backups" } },
+        error: /must not use driver options/,
+      },
+      {
+        label: "bind options",
+        volume: dataVolume,
+        overrides: { Options: { type: "none", o: "bind", device: "/srv/formaspec-data" } },
+        error: /must not use driver options/,
+      },
+      {
+        label: "aliased mountpoint",
+        volume: backupVolume,
+        overrides: { Mountpoint: `/var/lib/docker/volumes/${dataVolume}/_data` },
+        error: /backing mountpoints must be distinct/,
+      },
+    ];
+
+    for (const fixture of cases) {
+      const root = projectFixture();
+      const calls: string[][] = [];
+      const baseRunner = fixtureRunner(defaultState(), calls, root);
+      const runner: CommandRunner = async (executable, args, options) => {
+        if (args[2] === "volume" && args[3] === "inspect" && args.at(-1) === fixture.volume) {
+          return {
+            exitCode: 0,
+            stdout: volumeInspectionOutput(fixture.volume, fixture.overrides),
+            stderr: "",
+          };
+        }
+        return baseRunner(executable, args, options);
+      };
+      await expect(captureDockerRuntimeBinding(root, {
+        commandRunner: runner,
+        dockerExecutable: "/usr/bin/docker",
+        context,
+      }), fixture.label).rejects.toThrow(fixture.error);
+    }
   });
 
   it("rejects ambiguous endpoint routing, non-loopback publication, unsafe renderer networking, and mismatched images", async () => {

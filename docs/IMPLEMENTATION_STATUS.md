@@ -35,22 +35,24 @@ That baseline was captured before broad enterprise changes. The current
 working tree contains the in-progress upgrade and must not be described as
 clean or release-ready.
 
-Current source verification on 2026-07-20:
+Recorded source verification on 2026-07-20 (the working tree has additional
+in-progress hardening changes, so these are checkpoint results rather than a
+single final-tree release run):
 
 | Check | Recorded result |
 | --- | --- |
-| Vitest workspace suite | 393 tests passed: 40 core, 230 server, 30 web, 49 CLI, 12 local bridge, 9 Workspace Bridge, and 23 installer. Loopback/Unix-socket/Chromium suites were rerun with the required local binding permission. |
+| Focused package gates | Core 40/40, server 235/235 with Chromium and Unix sockets, web 30/30, CLI 52/52 before the latest restore-hardening regressions, Workspace Bridge 23/23, and installer 41/41 through the Linux packaging checkpoint. Windows packaging and current proxy/restore changes require the final consolidated rerun. |
 | Typecheck | All seven workspace packages passed: core, server, web, CLI, local bridge, Workspace Bridge, and installer |
 | Production build | All seven workspace packages passed: core, server, web, CLI, local bridge, Workspace Bridge, and installer |
-| Launcher suite | 164 tests passed |
+| Launcher suite | 165/165 passed at the recorded checkpoint |
 | Browser alignment, auto-layout, and revision inspect | Playwright Chrome passed 6/6 tests: selection alignment across DPR 1/2, 25/100/150/200% zoom, fractional pan, LTR/RTL singles, and multi-selection stayed within 0.75 CSS px; auto-layout reorder/reparent/constraint resize preserved canonical geometry; revision-pinned inspect remained immutable after the head changed |
 | Visual regression foundation | Playwright Chrome DPR 1 passed 7/7 approved native-size prototype baselines twice: desktop, phone, tablet, Persian RTL, typography, clipping, and normalized uploaded image |
 | 1,000-node foundation | Deterministic harness passed; final rerun p95 was 17.71 ms validation, 36.18 ms apply, 132.17 ms service preview persistence, and 118.12 ms for a 512×320 Playwright render. This remains a coarse service/core gate rather than browser-interaction evidence. |
 | 1,000-node browser budgets | Pinned Playwright Chromium passed the final 20-sample gate: 232.8 ms p95 cold interactive load, 20.8 ms p95 selection, 16.7 ms cadence-normalized gesture p95 with a 16.7 ms maximum, 261.9 ms p95 commit/autosave, 19.0 ms p95 history, 216.65 ms p95 preview validation excluding render, and 199.22 ms p95 for a 1440×900 Chromium PNG with no fallback or warnings. |
 | Integrated PM-to-restore E2E | The isolated Playwright release project passed 1/1, covering all 20 browser/MCP/persistence steps: dashboard creation, backup-gated V1→V2 migration, product specification, all 22 interview sections, scoped agent pairing/task claim, multi-screen preview/lint/render/commit, human correction, selection refinement, immutable history restore, JSON/portable export, verified backup, stopped-database restore, restart, exact hash/state recovery, and PNG smoke. |
-| Compose/runtime | `docker compose config --quiet` passed. A fresh disposable two-service project reached healthy schema-10 readiness with the Playwright worker and no software fallback, processed a real 1,303-byte PNG, and preserved a project across API restart. Both services ran as `pwuser` with read-only roots, dropped capabilities, and resource bounds; the renderer used `network_mode: none`; and the Docker base image was digest-pinned. The disposable project and volumes were removed. |
+| Compose/runtime | `docker compose config --quiet` passed. The last fresh disposable two-service smoke reached healthy schema-10 readiness with the Playwright worker and no software fallback, processed a real 1,303-byte PNG, and preserved a project across API restart. Both services ran as `pwuser` with read-only roots, dropped capabilities, and resource bounds; the renderer used `network_mode: none`; and the Docker base image was digest-pinned. A fresh schema-11 rebuild/smoke remains required. |
 | Codex connection | `./designer --yes start docker --no-build --no-open` refreshed the mode-`0600` runtime binding, started the loopback bridge, verified MCP `formaspec`, installed the managed Minimal UI skill/plugin, and exposed `[@Minimal UI](plugin://minimal-ui@formaspec)`. The generated Codex configuration remains token-free and uses write approval mode. Automatic authorization now intersects Codex scopes with organization policy, clamps expiry, and supplies project restrictions when required. |
-| Source/release hygiene | `docker compose config --quiet` and `git diff --check` passed; source evidence reports 342 third-party components and zero license-policy violations. The fresh unsigned macOS candidate at `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` is 184,835,514 bytes with SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`; integrity is `PASS`, release is `NO-GO`, 349 components link, and exactly seven workspace trees plus two runtimes are inventoried. |
+| Source/release hygiene | The earlier schema-10 source evidence reports 342 third-party components and zero license-policy violations. The stale unsigned macOS candidate at `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` is 184,835,514 bytes with SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`; its checkpoint integrity was `PASS`, but it does not represent the current schema-11 source and remains `NO-GO`. A fresh consolidated `git diff --check`, source-evidence run, and current artifact rebuild are required after the working tree stabilizes. |
 
 The integrated local browser scenario and 1,000-node Chromium performance gate
 pass on the current tree. There is still no comprehensive cross-platform editor/visual matrix,
@@ -73,18 +75,21 @@ The server now owns an ordered SQLite migration ledger:
 | 8 | `enterprise_domain_models` |
 | 9 | `audit_retention_execution` |
 | 10 | `portable_import_provenance` |
+| 11 | `render_job_persistence` |
 
 The migrations preserve the legacy V1 columns while adding content-addressed
 snapshots, integrity metadata, organization/agent workflow tables, preview
 retention, scoped outbox state, backup metadata, schedules, operational locks,
 design systems, repository inventories, implementation mappings, handoffs, and
 Redesign Studio assessment history, bounded audit/outbox retention evidence,
-and immutable portable-import provenance.
+immutable portable-import provenance, and bounded persistent render-job
+lifecycle metadata.
 
-`apps/cli/src/migrations.ts` recognizes the same version-10 ledger as the server.
+`apps/cli/src/migrations.ts` recognizes the same version-11 ledger as the server.
 A ledger prefix alone is not accepted as proof of migration completion: startup,
 backup verification, restore preflight, and restore control validate the
-required migration-9/10 tables, columns, indexes, triggers, trigger SQL, and
+required migration-9/10/11 tables, columns, indexes, triggers, normalized
+schema SQL, and
 forbidden legacy triggers and fail closed on schema-shape drift.
 A copied version-7 database fixture now proves migration 8 preserves stored V1
 revision bytes, snapshot hashes, revision hashes, and project heads. Real
@@ -170,12 +175,13 @@ health-checked retry.
 | Archive-only destructive path | **Implemented foundation** | Ordinary commit paths reject `archive_nodes`; dedicated archive preview/commit REST and MCP paths exist | Complete approval-annotation and bypass coverage across every client surface |
 | Replayable organization-scoped SSE | **Implemented foundation** | Persisted monotonic outbox IDs, `Last-Event-ID` replay, scope filtering, and gap signals exist. Active streams re-resolve authorization before every event and heartbeat, closing after revocation or policy denial. | Load/reconnect testing and operational lag/retention monitoring |
 | Raster normalization | **Implemented foundation** | PNG/JPEG/WebP are fully decoded in the pinned Chromium renderer worker; APNG, animated WebP, MPO, malformed bytes, SVG, and MIME mismatches are rejected; JPEG and WebP EXIF orientation is applied; metadata is stripped by a deterministic canvas-to-PNG round trip; byte/pixel/output/IPC limits are versioned and matched between API and worker. Worker-backed decode now covers API upload, backup creation/verification, restore preflight, safety-backup verification, and final cutover; normalized bytes use generated SHA-256 paths with atomic dedup, read verification, and verified legacy-BLOB fallback. Sharp/libvips is absent from source, lockfile, and the rebuilt image. | Add operator-approved legacy quarantine cleanup, a larger malformed-image corpus, upload-storm/queue evidence, and real packaged cross-platform worker proof. |
-| Bounded deterministic rendering | **Implemented foundation** | Versioned bounded IPC validates Unix-socket and Windows named-pipe endpoints and lifecycle behavior. Docker runs separate API/renderer services over the Unix socket with a new deterministic context per job, cleanup, queue/resource limits, non-root `pwuser`, read-only root, dropped capabilities, `network_mode: none`, no-new-privileges, fail-closed readiness, and no production fallback. Linux mount-table validation fails startup if `/data`, `/backups`, or descendants are mounted into the renderer; the rebuilt container exposes only `/run/formaspec`. | Self-contained native worker packaging, real Windows named-pipe/ACL/runtime proof, continuous infrastructure-egress tests, render-job persistence, and release load evidence remain. |
-| Verified backup/restore primitives | **Partial** | Online SQLite backup, semantic bundle verification, descriptor-pinned verification/download streams, authenticated records/downloads, policy-controlled enablement/schedule/retention, explicit CLI restore, and versioned checkpoints exist. Format-2 bundles generate secret-free policy configuration from the staged database and verify it exactly against that database; historical format-1 bundles remain accepted. Backup creation copies only database-referenced CAS assets, excluding unreferenced filesystem orphans from the bundle while preserving them locally. Launcher-pinned Docker/server restore has a backward-readable format-2 runtime binding, strict Host/schema/readiness/renderer checks, maintenance/worker-lock fencing, whole-workflow plus per-step capacity checks, crash-resumable journal states, operation-aware orphan cleanup, verified safety backup, V1/V2 database/render checks, audit/outbox reconciliation, final post-trigger credential-revocation checks, and safe status/resume/rollback/abort/stale-lock recovery. The recorded isolated A/B restore/safety-restore exercise covers local Docker. | Server mode still needs a clean proxy/restore/rollback/failure-injection release exercise and installed supervision/alerting. Bundles are unsigned, rename-without-replacement cannot yet use an OS-native no-replace primitive through Node, and off-host policy, broader recovery fixtures, and cross-platform release E2E remain incomplete. |
+| Bounded deterministic rendering | **Implemented foundation** | Versioned bounded IPC validates Unix-socket and Windows named-pipe endpoints and lifecycle behavior. Docker runs separate API/renderer services over the Unix socket with a new deterministic context per job, cleanup, queue/resource limits, non-root `pwuser`, read-only root, dropped capabilities, `network_mode: none`, no-new-privileges, fail-closed readiness, and no production fallback. Linux mount-table validation fails startup if `/data`, `/backups`, or descendants are mounted into the renderer; the rebuilt container exposes only `/run/formaspec`. Migration 11 persists API-owned, database-free-worker job state with `queued`/`running`/terminal transitions, owner leases, heartbeats, expired-owner recovery, organization/internal scope separation, bounded hash/version/dimension/warning/error metadata, and permit-guarded exact 30-day retention. | Self-contained native worker packaging, real Windows named-pipe/ACL/runtime proof, continuous infrastructure-egress tests, configurable retention operations/UI, and release load evidence remain. |
+| Verified backup/restore primitives | **Partial** | Online SQLite backup, semantic bundle verification, descriptor-pinned verification/download streams, authenticated records/downloads, policy-controlled enablement/schedule/retention, explicit CLI restore, and versioned checkpoints exist. Format-2 bundles generate secret-free policy configuration from the staged database and verify it exactly against that database; historical format-1 bundles remain accepted. Backup creation copies only database-referenced CAS assets, excluding unreferenced filesystem orphans from the bundle while preserving them locally. Launcher-pinned Docker/server restore has a backward-readable format-2 runtime binding, strict Host/schema/readiness/renderer checks, maintenance/worker-lock fencing, whole-workflow plus per-step capacity checks, crash-resumable journal states, operation-aware orphan cleanup, verified safety backup, V1/V2 database/render checks, audit/outbox reconciliation, final post-trigger credential-revocation checks, and safe status/resume/rollback/abort/stale-lock recovery. Runtime binding capture and every verification inspect all three Docker volumes, requiring local driver/scope, no options, bounded absolute mountpoints, and distinct backing identities; plugin, NFS, bind-backed, or aliased volumes fail closed. Health requests have absolute deadlines, unsafe launcher-lock paths fail closed without recursive removal, and pre-cutover resume/rollback worker failures restart and re-verify the unchanged API. The recorded isolated A/B restore/safety-restore exercise covers local Docker. | The Docker/server capability is explicitly `HEALTHY_PLANNED_RESTORE_ONLY`: it requires a healthy current API/database for backup-ID resolution and preflight and is not offline disaster recovery. Server mode still needs a clean proxy/restore/rollback/failure-injection release exercise and installed supervision/alerting. Bundles are unsigned, rename-without-replacement cannot yet use an OS-native no-replace primitive through Node, and off-host policy, broader recovery fixtures, and cross-platform release E2E remain incomplete. |
 | Health contract | **Implemented foundation** | `/health/live`, `/health/ready`, and `/health/render` exist; Docker readiness proves migration version, worker mode, Playwright, and software-fallback state | Add deeper storage/outbox capacity indicators, alerting, and long-running failure/recovery evidence |
 
 Phase 1 is not closed because the complete cross-browser interaction matrix,
-authorization and security matrix, server-mode restore evidence, broader recovery
+authorization and security matrix, clean server-mode planned-restore evidence,
+offline disaster recovery, broader recovery
 matrix, continuous egress testing, and full deployment gates have not all
 passed.
 
@@ -249,10 +255,10 @@ Known integration gaps prevent calling this phase complete:
 | Requirement | Status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | Organization administration and policy-as-code | **Implemented foundation** | A strict schema-version-1 policy has REST, MCP tool/resource, Administration JSON editing, optimistic configuration hashes, secret-free YAML export, backup integrity binding, and enforcement across agents, trusted-role mapping, repositories, assets, backups, and portable bundle export/import. Corrupt post-policy configuration fails closed; unproven legacy free-form configuration is quarantined. Organization-admin audit retention now has exact 15-minute previews, a 30-day minimum, per-kind 2,000-row/8-MiB bounds with conservative and exact byte checks, policy/CAS revalidation, restart-safe idempotency, atomic guarded deletion, SSE replay gaps, permanent governance/recovery evidence, and an immutable SHA-256 run chain exposed through REST and `formaspecctl`. | Complete form-based administration, scheduled retention supervision/alerting, policy rollout/version migration, delegated administration, and the exhaustive HTTP/MCP/browser matrix |
-| `formaspecctl` operator coverage | **Partial** | Install, doctor, status, start/stop/restart, migrate status, backup create/list/verify, schedule show/enable/disable/run, preview-first exact prune, source-local restore, launcher-pinned Docker/server restore/status/resume/rollback/abort/stale-lock recovery, bounded support-bundle preview/create, generic MCP output, and Codex connect exist | Clean server recovery evidence, service-supervisor installation/alerting, full migrate lifecycle, upgrade/uninstall, and packaged cross-platform delivery |
-| Native installers and automatic startup | **Partial** | A fresh self-contained unsigned macOS ARM64 PKG candidate exists at `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` with SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49` and size 184,835,514 bytes. Offline integrity is `PASS`; all 349 packaged components link; exactly seven workspace trees and two bundled runtimes are inventoried; release remains `NO-GO`. | Resolve the same five blockers: Chromium LGPL-notice policy, Developer ID signature, notarization, independent reproducibility, and vulnerability scans. Add clean lifecycle proof for macOS and implement/test Windows WiX MSI, Linux DEB/RPM, protocol registration, service supervision, setup wizard, ACLs, and health verification. |
+| `formaspecctl` operator coverage | **Partial** | Install, doctor, status, start/stop/restart, migrate status, backup create/list/verify, schedule show/enable/disable/run, preview-first exact prune, source-local restore, launcher-pinned Docker/server planned restore/status/resume/rollback/abort/stale-lock recovery, bounded support-bundle preview/create, generic MCP output, Codex connect, and selected-workspace Codex plan/dry-run/launch exist | Offline disaster recovery, clean server planned-recovery evidence, service-supervisor installation/alerting, full migrate lifecycle, upgrade/uninstall, and packaged cross-platform delivery |
+| Native installers and automatic startup | **Partial** | The previous self-contained unsigned macOS ARM64 PKG at `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` has checkpoint integrity evidence and SHA-256 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`, but it is stale relative to schema 11. Source-level deterministic unsigned Linux DEB/RPM builders include pinned runtimes, hardened systemd API/renderer units, data-preserving lifecycle scripts, and strict protocol registration. A native-Windows-only WiX v4 unsigned-MSI builder validates a caller-supplied real service host and exact provenance. No current Linux or Windows artifact/lifecycle evidence exists. | Resolve Chromium LGPL/legal policy, macOS Developer ID signature and notarization, independent reproducibility, and vulnerability/license scanning. Build and test real Linux artifacts/lifecycles. On Windows, supply and qualify the native service host, ACLs, SCM lifecycle, Job Object/equivalent containment, named-pipe Chromium runtime, protocol registration, signing, and clean lifecycle evidence. Rebuild the macOS candidate from the stabilized schema-11 tree. |
 | Hardened Docker topology | **Implemented foundation** | One image runs separate API and renderer services with Unix-socket IPC, non-root worker, read-only roots, dropped capabilities, no-new-privileges, renderer network denial, tmpfs, resource limits, persistent `/data` and `/backups`, readiness, init, verified fresh startup/restart persistence, a host-supervised pinned server restore path, and an isolated launcher-local restore/safety-restore exercise | Add server-mode reverse-proxy/restore release evidence, broader backup-volume fixtures, automated egress/load/failure tests, image scanning, alerting, and stricter API networking where deployable |
-| Release CI and evidence | **Partial** | The current tree passes 393 workspace tests, all seven typechecks/builds, 164 launcher tests, 6/6 alignment/auto-layout/inspect tests, 7/7 visual baselines, the 1/1 20-step release E2E, and the 1/1 1,000-node browser budget. Provider-neutral offline source-workspace SBOM/license evidence reports 342 third-party components with zero violations. The fresh unsigned macOS PKG candidate passes integrity with 349 linked components, seven exact workspace trees, and two runtimes. | Keep the macOS gate closed on the same five blockers: Chromium LGPL-notice policy, signing, notarization, independent reproducibility, and vulnerability scanning. Pin cross-platform CI images; generate container/Windows/Linux artifact evidence; add complete security/deployment suites, provenance, native lifecycle evidence, and artifact retention. |
+| Release CI and evidence | **Partial** | Recorded gates include core 40/40, server 235/235, web 30/30, CLI 52/52 before the newest restore regressions, Workspace Bridge 23/23, installer 41/41 through Linux packaging, launcher 165/165, 6/6 alignment/auto-layout/inspect, 7/7 visual baselines, the 1/1 20-step release E2E, and the 1/1 1,000-node browser budget. The earlier schema-10 source-workspace SBOM/license evidence reports 342 third-party components with zero violations; the old macOS PKG evidence is not current-tree evidence. | Run the consolidated current-tree package/typecheck/build/launcher/Compose gates, fresh schema-11 Docker smoke, and new source evidence. Keep release closed on Chromium LGPL/legal policy, signing/notarization, independent reproducibility, vulnerability/license scanning, platform artifact/lifecycle proof, complete security/deployment suites, provenance, and retained evidence. |
 | Signing/notarization/OAuth/GPG | **Blocked externally** | No credentials are fabricated | Produce reproducible unsigned artifacts and exact operator instructions until real credentials are supplied |
 
 ## Release-blocking gaps
@@ -260,8 +266,8 @@ Known integration gaps prevent calling this phase complete:
 Production readiness remains **NO-GO** until all of the following are resolved
 and evidenced:
 
-- Real packaged Windows named-pipe/ACL/runtime proof, persisted render jobs,
-  and continuous infrastructure-egress/failure/load evidence beyond the
+- Real packaged Windows named-pipe/ACL/runtime/process-tree proof and continuous
+  infrastructure-egress/failure/load evidence beyond the
   endpoint/lifecycle tests and verified Docker `network_mode: none` topology.
 - Clean server-mode reverse-proxy startup, restore, upgrade, and long-duration
   evidence beyond the verified fresh local two-service startup/restart test.
@@ -277,7 +283,8 @@ and evidenced:
   streaming inflater: multipart bodies and extracted entries remain buffered
   within the configured caps. Retain larger adversarial, concurrent-import, and
   packaged cross-platform evidence.
-- Server-mode external-supervisor restore, off-host policy, packaged
+- Clean server-mode `HEALTHY_PLANNED_RESTORE_ONLY` evidence, a separately
+  authorized offline disaster-recovery path, off-host policy, packaged
   supervision/alerting, and long-running retention/prune failure-recovery
   evidence beyond the launcher-local foundation and tested 7/4/12 schedule.
 - Broader disposable recovery evidence covering the verified schema-7
@@ -301,14 +308,15 @@ and evidenced:
 - Complete stage-specific Redesign Studio artifacts and the full independent
   permission/E2E matrix; the seven-stage state machine and browser foundation
   now exist.
-- A release-ready native installer set. One fresh exact unsigned macOS ARM64 PKG
-  candidate and its offline integrity/SBOM evidence exist for the current tree.
-  Its artifact gate remains
+- A release-ready native installer set. The exact unsigned macOS ARM64 PKG
+  candidate and its offline integrity/SBOM evidence belong to the earlier
+  schema-10 checkpoint, not the current tree. Its artifact gate remains
   closed on exactly five recorded blockers: the Chromium LGPL-notice allowlist
   decision, signing, notarization, independent reproducibility, and
   vulnerability scanning. Clean lifecycle proof is additional enterprise
-  delivery evidence; Windows MSI, Linux DEB/RPM, protocol registration, and
-  real Windows DPAPI/ACL/runtime verification remain unimplemented.
+  delivery evidence. Linux DEB/RPM and Windows WiX source builders exist, but
+  real Linux artifacts/lifecycles and a qualified Windows service host,
+  DPAPI/ACL/SCM/process-tree/runtime/protocol/signing lifecycle remain unproven.
 - Artifact-specific container, Windows, and Linux SBOMs; dependency/image/OS
   scans; reproducibility; signing/provenance; retained CI evidence; and final
   release artifacts remain missing even though the Sharp-free source-workspace
