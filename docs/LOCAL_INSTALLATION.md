@@ -23,7 +23,11 @@ exact Node and Chromium headless-shell runtimes, so an installed user would not
 need Node.js, pnpm, Playwright, or Chromium. It is **not release-approved** and
 must not be treated as a production installer until its recorded license,
 signing/notarization, scan, reproducibility, and clean lifecycle gates pass.
-Windows MSI and Linux DEB/RPM packages are not implemented yet.
+Windows MSI packaging is not implemented yet. Linux DEB/RPM source builders,
+deterministic payload layout, systemd units, lifecycle scripts, and
+macOS-runnable unit tests now exist, but no release-qualified Linux artifact or
+real Linux lifecycle evidence exists. See
+[Native Linux packaging](./LINUX_PACKAGING.md).
 
 ## What installation changes
 

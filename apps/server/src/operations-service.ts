@@ -830,6 +830,11 @@ export class OperationsService {
           maxPixels: Math.min(assetPolicy.maximumPixels, rasterVerifier!.limits.maxPixels),
         },
         rasterVerifier!.engine,
+        {
+          scope: "organization",
+          organizationId: access.organizationId,
+          operation: "portable_import",
+        },
       );
       const normalizedSha256 = sha256(normalized.data);
       if (sourceAsset.mime_type !== normalized.mimeType

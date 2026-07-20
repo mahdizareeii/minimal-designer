@@ -218,9 +218,12 @@ These foundations do not close the release gates listed below.
 
 ## Important current limitations
 
-- Windows renderer named pipes/native packaging, persisted render jobs, and
-  continuous egress/failure/load proof remain unfinished beyond the verified
-  Docker network-denied worker.
+- Windows renderer named pipes/native packaging and continuous
+  egress/failure/load proof remain unfinished beyond the verified Docker
+  network-denied worker. Render and raster-normalization jobs now persist a
+  bounded hash-only, owner-leased lifecycle with exact 30-day retention, but
+  organization-configurable retention dashboards and packaged load evidence
+  remain open.
 - The local 20-step browser E2E, seven visual baselines, selection alignment,
   and 1,000-node interaction budgets pass. Cross-platform browser/visual,
   comprehensive security, and server-deployment matrices remain incomplete.

@@ -5,6 +5,9 @@ import type {
 } from "./inventory.js";
 import { inventoryForUpload, normalizeExcludedPatterns } from "./inventory.js";
 
+export const REPOSITORY_CONNECTION_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const REPOSITORY_CONNECTION_TIMEOUT_MS = 10_000;
+
 const REPOSITORY_PLATFORMS = new Set<RepositoryPlatform>([
   "web", "android", "ios", "flutter", "react-native", "generic-git",
 ]);
@@ -37,7 +40,38 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function validateApiOrigin(value: string): URL {
+export async function readBoundedResponseObject(response: Response, label: string): Promise<Record<string, unknown>> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > REPOSITORY_CONNECTION_MAX_RESPONSE_BYTES) {
+      throw new Error(`${label} exceeded the bounded response limit.`);
+    }
+  }
+  if (response.body === null) throw new Error(`${label} returned an empty response.`);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    total += chunk.value.byteLength;
+    if (total > REPOSITORY_CONNECTION_MAX_RESPONSE_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`${label} exceeded the bounded response limit.`);
+    }
+    chunks.push(Buffer.from(chunk.value));
+  }
+  try {
+    const value = recordValue(JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown);
+    if (value === null) throw new Error("not an object");
+    return value;
+  } catch (error) {
+    throw new Error(`${label} returned malformed JSON.`, { cause: error });
+  }
+}
+
+export function validateApiOrigin(value: string): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -55,7 +89,7 @@ function validateApiOrigin(value: string): URL {
   return new URL(url.origin);
 }
 
-function validateMcpUrl(value: string): URL {
+export function validateMcpUrl(value: string): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -120,9 +154,10 @@ export async function readRepositoryScanPolicy(
         params: { name: "organization_policy_read", arguments: { format: "json" } },
       }),
       redirect: "error",
+      signal: AbortSignal.timeout(REPOSITORY_CONNECTION_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`FormaSpec organization policy request failed with HTTP ${response.status}.`);
-    const body = recordValue(await response.json());
+    const body = await readBoundedResponseObject(response, "FormaSpec organization policy");
     const result = recordValue(body?.result);
     const structured = recordValue(result?.structuredContent);
     if (structured?.ok !== true) throw new Error("FormaSpec MCP organization-policy tool returned an error.");
@@ -133,9 +168,10 @@ export async function readRepositoryScanPolicy(
       method: "GET",
       headers,
       redirect: "error",
+      signal: AbortSignal.timeout(REPOSITORY_CONNECTION_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`FormaSpec organization policy request failed with HTTP ${response.status}.`);
-    const body = recordValue(await response.json());
+    const body = await readBoundedResponseObject(response, "FormaSpec organization policy");
     organizationPolicy = recordValue(body?.organizationPolicy);
   }
   const policy = recordValue(organizationPolicy?.policy);
@@ -195,9 +231,10 @@ export async function persistRepositoryInventory(
         params: { name: "repository_inventory_persist", arguments: { inventory } },
       }),
       redirect: "error",
+      signal: AbortSignal.timeout(REPOSITORY_CONNECTION_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`FormaSpec repository inventory upload failed with HTTP ${response.status}.`);
-    const body = recordValue(await response.json());
+    const body = await readBoundedResponseObject(response, "FormaSpec repository inventory persistence");
     const result = recordValue(body?.result);
     const structured = recordValue(result?.structuredContent);
     if (structured?.ok !== true) throw new Error("FormaSpec MCP repository-inventory tool returned an error.");
@@ -205,10 +242,16 @@ export async function persistRepositoryInventory(
   } else {
     response = await (options.fetchImplementation ?? fetch)(
       new URL("/api/repository-inventories", validateApiOrigin(connection.apiUrl as string)),
-      { method: "POST", headers, body: JSON.stringify(inventory), redirect: "error" },
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(inventory),
+        redirect: "error",
+        signal: AbortSignal.timeout(REPOSITORY_CONNECTION_TIMEOUT_MS),
+      },
     );
     if (!response.ok) throw new Error(`FormaSpec repository inventory upload failed with HTTP ${response.status}.`);
-    const body = recordValue(await response.json());
+    const body = await readBoundedResponseObject(response, "FormaSpec repository inventory persistence");
     persisted = recordValue(body?.inventory);
   }
   if (persisted === null

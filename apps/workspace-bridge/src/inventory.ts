@@ -10,6 +10,7 @@ export interface InventoryLimits {
   maximumTotalBytesRead: number;
   maximumFileBytes: number;
   maximumEntities: number;
+  maximumFingerprintBytes: number;
 }
 
 export interface LocalInventoryEntity {
@@ -46,6 +47,7 @@ const DEFAULT_LIMITS: InventoryLimits = {
   maximumTotalBytesRead: 32 * 1024 * 1024,
   maximumFileBytes: 512 * 1024,
   maximumEntities: 50_000,
+  maximumFingerprintBytes: 512 * 1024 * 1024,
 };
 
 const GENERATED_DIRECTORIES = new Set([
@@ -64,9 +66,129 @@ const SOURCE_EXTENSIONS = new Set([".css", ".dart", ".gradle", ".html", ".java",
 const ASSET_EXTENSIONS = new Set([".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"]);
 const MAXIMUM_EXCLUDED_PATTERNS = 100;
 const MAXIMUM_EXCLUDED_PATTERN_LENGTH = 240;
+const MAXIMUM_PACKAGE_JSON_BYTES = 1024 * 1024;
+const MAXIMUM_GIT_POINTER_BYTES = 16 * 1024;
+const MAXIMUM_PACKED_REFS_BYTES = 4 * 1024 * 1024;
 
 function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function sha256File(filename: string, expected: fs.Stats): Promise<string> {
+  const noFollow = process.platform === "win32" ? 0 : fs.constants.O_NOFOLLOW;
+  const handle = await fs.promises.open(filename, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()
+      || opened.dev !== expected.dev
+      || opened.ino !== expected.ino
+      || opened.size !== expected.size
+      || opened.mtimeMs !== expected.mtimeMs
+      || opened.ctimeMs !== expected.ctimeMs) {
+      throw new Error("Repository contents changed while the inventory fingerprint was being computed; retry authorization.");
+    }
+    const hash = createHash("sha256");
+    const stream = handle.createReadStream({ autoClose: false, highWaterMark: 64 * 1024 });
+    for await (const chunk of stream) hash.update(chunk as Buffer);
+    const afterRead = await handle.stat();
+    const current = await fs.promises.lstat(filename);
+    if (!current.isFile() || current.isSymbolicLink()
+      || afterRead.dev !== opened.dev || afterRead.ino !== opened.ino
+      || afterRead.size !== opened.size || afterRead.mtimeMs !== opened.mtimeMs || afterRead.ctimeMs !== opened.ctimeMs
+      || current.dev !== opened.dev || current.ino !== opened.ino
+      || current.size !== opened.size || current.mtimeMs !== opened.mtimeMs || current.ctimeMs !== opened.ctimeMs) {
+      throw new Error("Repository contents changed while the inventory fingerprint was being computed; retry authorization.");
+    }
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readVerifiedSourceFile(filename: string, expected: fs.Stats, expectedHash: string): Promise<Buffer> {
+  const noFollow = process.platform === "win32" ? 0 : fs.constants.O_NOFOLLOW;
+  const handle = await fs.promises.open(filename, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino || opened.size !== expected.size) {
+      throw new Error("Repository contents changed while source symbols were being inspected; retry authorization.");
+    }
+    const contents = await handle.readFile();
+    const afterRead = await handle.stat();
+    const current = await fs.promises.lstat(filename);
+    if (sha256(contents) !== expectedHash
+      || afterRead.dev !== opened.dev || afterRead.ino !== opened.ino
+      || afterRead.size !== opened.size || afterRead.mtimeMs !== opened.mtimeMs || afterRead.ctimeMs !== opened.ctimeMs
+      || !current.isFile() || current.isSymbolicLink()
+      || current.dev !== opened.dev || current.ino !== opened.ino
+      || current.size !== opened.size || current.mtimeMs !== opened.mtimeMs || current.ctimeMs !== opened.ctimeMs) {
+      throw new Error("Repository contents changed while source symbols were being inspected; retry authorization.");
+    }
+    return contents;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readBoundedMetadataFile(filename: string, maximumBytes: number, label: string): Promise<string | null> {
+  let expected: fs.Stats;
+  try {
+    expected = await fs.promises.lstat(filename);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!expected.isFile() || expected.isSymbolicLink()) throw new Error(`${label} must be a non-symlinked regular file.`);
+  if (expected.size > maximumBytes) throw new Error(`${label} exceeds the ${maximumBytes}-byte discovery limit.`);
+  const noFollow = process.platform === "win32" ? 0 : fs.constants.O_NOFOLLOW;
+  const handle = await fs.promises.open(filename, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino || opened.size !== expected.size) {
+      throw new Error(`${label} changed while it was being inspected.`);
+    }
+    const contents = await handle.readFile();
+    if (contents.byteLength > maximumBytes) throw new Error(`${label} exceeds the ${maximumBytes}-byte discovery limit.`);
+    const afterRead = await handle.stat();
+    const current = await fs.promises.lstat(filename);
+    if (afterRead.dev !== opened.dev || afterRead.ino !== opened.ino
+      || afterRead.size !== opened.size || afterRead.mtimeMs !== opened.mtimeMs || afterRead.ctimeMs !== opened.ctimeMs
+      || !current.isFile() || current.isSymbolicLink()
+      || current.dev !== opened.dev || current.ino !== opened.ino
+      || current.size !== opened.size || current.mtimeMs !== opened.mtimeMs || current.ctimeMs !== opened.ctimeMs) {
+      throw new Error(`${label} changed while it was being inspected.`);
+    }
+    return contents.toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function safeMarkerExists(root: string, relativePath: string, directory = false): Promise<boolean> {
+  try {
+    const stat = await fs.promises.lstat(path.join(root, relativePath));
+    if (stat.isSymbolicLink()) return false;
+    return directory ? stat.isDirectory() : stat.isFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function safeMetadataParentPath(root: string, components: readonly string[], label: string): Promise<boolean> {
+  let current = root;
+  for (const component of components) {
+    current = path.join(current, component);
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} may not traverse a symbolic link.`);
+  }
+  return true;
 }
 
 function portablePath(value: string): string {
@@ -141,23 +263,42 @@ function secretPath(relativePath: string): boolean {
     || SECRET_EXTENSIONS.has(path.extname(lower));
 }
 
-function readGitHead(root: string): string | null {
+async function readGitHead(root: string): Promise<string | null> {
   const git = path.join(root, ".git");
-  if (!fs.existsSync(git) || !fs.lstatSync(git).isDirectory()) return null;
+  let gitStat: fs.Stats;
+  try {
+    gitStat = await fs.promises.lstat(git);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!gitStat.isDirectory() || gitStat.isSymbolicLink()) return null;
   const headPath = path.join(git, "HEAD");
-  if (!fs.existsSync(headPath)) return null;
-  const head = fs.readFileSync(headPath, "utf8").trim();
+  const headContents = await readBoundedMetadataFile(headPath, MAXIMUM_GIT_POINTER_BYTES, "Git HEAD");
+  if (headContents === null) return null;
+  const head = headContents.trim();
   const reference = /^ref: (.+)$/.exec(head)?.[1];
   if (!reference) return /^[a-f0-9]{40,64}$/i.test(head) ? head.toLowerCase() : null;
-  if (reference.includes("..") || path.isAbsolute(reference)) return null;
-  const referencePath = path.join(git, ...reference.split("/"));
-  if (fs.existsSync(referencePath)) {
-    const value = fs.readFileSync(referencePath, "utf8").trim();
+  if (!/^refs\/[A-Za-z0-9._/-]+$/.test(reference)
+    || reference.split("/").some((part) => part.length === 0 || part === "." || part === "..")) return null;
+  const referenceComponents = reference.split("/");
+  const referencePath = path.join(git, ...referenceComponents);
+  const safeReferenceParents = await safeMetadataParentPath(
+    git,
+    referenceComponents.slice(0, -1),
+    "Git loose reference",
+  );
+  const looseReference = safeReferenceParents
+    ? await readBoundedMetadataFile(referencePath, MAXIMUM_GIT_POINTER_BYTES, "Git loose reference")
+    : null;
+  if (looseReference !== null) {
+    const value = looseReference.trim();
     return /^[a-f0-9]{40,64}$/i.test(value) ? value.toLowerCase() : null;
   }
   const packedRefs = path.join(git, "packed-refs");
-  if (!fs.existsSync(packedRefs)) return null;
-  for (const line of fs.readFileSync(packedRefs, "utf8").split("\n")) {
+  const packedReferenceContents = await readBoundedMetadataFile(packedRefs, MAXIMUM_PACKED_REFS_BYTES, "Git packed refs");
+  if (packedReferenceContents === null) return null;
+  for (const line of packedReferenceContents.split("\n")) {
     const [value, name] = line.trim().split(" ");
     if (name === reference && value && /^[a-f0-9]{40,64}$/i.test(value)) return value.toLowerCase();
   }
@@ -169,11 +310,19 @@ async function detectPlatforms(
   excludedByPolicy: (relativePath: string, directory: boolean) => boolean,
 ): Promise<RepositoryPlatform[]> {
   const platforms = new Set<RepositoryPlatform>();
-  const exists = (name: string, directory = false) => !excludedByPolicy(portablePath(name), directory) && fs.existsSync(path.join(root, name));
+  const exists = async (name: string, directory = false) => (
+    !excludedByPolicy(portablePath(name), directory) && await safeMarkerExists(root, name, directory)
+  );
   let packageJson: Record<string, unknown> | null = null;
-  if (exists("package.json")) {
+  if (await exists("package.json")) {
+    const contents = await readBoundedMetadataFile(
+      path.join(root, "package.json"),
+      MAXIMUM_PACKAGE_JSON_BYTES,
+      "package.json",
+    );
+    if (contents === null) throw new Error("package.json changed while it was being inspected.");
     try {
-      packageJson = JSON.parse(await fs.promises.readFile(path.join(root, "package.json"), "utf8")) as Record<string, unknown>;
+      packageJson = JSON.parse(contents) as Record<string, unknown>;
     } catch {
       packageJson = null;
     }
@@ -182,12 +331,14 @@ async function detectPlatforms(
   const dependencies = packageJson && typeof packageJson.dependencies === "object" && packageJson.dependencies !== null
     ? packageJson.dependencies as Record<string, unknown>
     : {};
-  if ("react-native" in dependencies || exists("metro.config.js") || exists("metro.config.ts")) platforms.add("react-native");
-  if (exists("pubspec.yaml") || exists("pubspec.yml")) platforms.add("flutter");
-  if (exists("settings.gradle") || exists("settings.gradle.kts") || exists("gradlew")) platforms.add("android");
+  if ("react-native" in dependencies || await exists("metro.config.js") || await exists("metro.config.ts")) platforms.add("react-native");
+  if (await exists("pubspec.yaml") || await exists("pubspec.yml")) platforms.add("flutter");
+  if (await exists("settings.gradle") || await exists("settings.gradle.kts") || await exists("gradlew")) platforms.add("android");
   const topLevel = await fs.promises.readdir(root, { withFileTypes: true });
-  if (exists("Package.swift") || topLevel.some((entry) => (
-    !excludedByPolicy(entry.name, entry.isDirectory())
+  if (await exists("Package.swift") || topLevel.some((entry) => (
+    entry.isDirectory()
+    && !entry.isSymbolicLink()
+    && !excludedByPolicy(entry.name, true)
     && (entry.name.endsWith(".xcodeproj") || entry.name.endsWith(".xcworkspace"))
   ))) platforms.add("ios");
   if (platforms.size === 0) platforms.add("generic-git");
@@ -258,13 +409,14 @@ export async function scanRepository(
   const excludedPatterns = normalizeExcludedPatterns(options.excludedPatterns ?? []);
   const excludedByPolicy = excludedPathMatcher(excludedPatterns);
   const platforms = await detectPlatforms(root, excludedByPolicy);
-  const gitHead = readGitHead(root);
+  const gitHead = await readGitHead(root);
   const entities: LocalInventoryEntity[] = [];
   const excluded = { secret: 0, generated: 0, policy: 0, symlink: 0, limit: 0 };
   const fingerprintRows: string[] = [`platforms:${platforms.join(",")}`, `git:${gitHead ?? "none"}`];
   let scannedFileCount = 0;
   let skippedFileCount = 0;
   let bytesRead = 0;
+  let fingerprintBytes = 0;
   let truncated = false;
 
   const visit = async (directory: string, prefix = ""): Promise<void> => {
@@ -310,7 +462,15 @@ export async function scanRepository(
         return;
       }
       scannedFileCount += 1;
-      fingerprintRows.push(`${relativePath}\0${stat.size}`);
+      if (fingerprintBytes + stat.size > limits.maximumFingerprintBytes) {
+        excluded.limit += 1;
+        skippedFileCount += 1;
+        truncated = true;
+        return;
+      }
+      fingerprintBytes += stat.size;
+      const contentHash = await sha256File(absolute, stat);
+      fingerprintRows.push(`${relativePath}\0${stat.size}\0${contentHash}`);
       const extension = path.extname(entry.name).toLowerCase();
       if (ASSET_EXTENSIONS.has(extension)) {
         if (!appendEntity(entities, limits.maximumEntities, relativePath, "asset", path.basename(entry.name, extension), null, null)) {
@@ -331,9 +491,9 @@ export async function scanRepository(
         truncated = true;
         return;
       }
-      const contents = await fs.promises.readFile(absolute, "utf8");
-      bytesRead += Buffer.byteLength(contents);
-      fingerprintRows.push(sha256(contents));
+      const contentsBuffer = await readVerifiedSourceFile(absolute, stat, contentHash);
+      const contents = contentsBuffer.toString("utf8");
+      bytesRead += contentsBuffer.byteLength;
       if (!sourceEntities(relativePath, contents, limits.maximumEntities, entities)) {
         excluded.limit += 1;
         truncated = true;

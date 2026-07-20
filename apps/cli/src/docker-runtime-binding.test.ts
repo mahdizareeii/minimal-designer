@@ -58,6 +58,41 @@ function projectFixture(port = 4310): string {
   return root;
 }
 
+function serverProjectFixture(
+  port = 4310,
+  publicUrl = "https://designer.example.test",
+  token = "server-secret-token-0123456789abcdef",
+): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-server-binding-"));
+  temporaryDirectories.push(root);
+  const runDirectory = path.join(root, ".designer", "run");
+  const environmentDirectory = path.join(root, ".designer", "env");
+  fs.mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(environmentDirectory, { recursive: true, mode: 0o700 });
+  const environmentFile = path.join(environmentDirectory, "server.env");
+  const publicHost = publicUrl.slice("https://".length).toLowerCase();
+  fs.writeFileSync(path.join(runDirectory, "mode"), "server\n", { mode: 0o600 });
+  fs.writeFileSync(path.join(runDirectory, "env-file"), `${environmentFile}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(runDirectory, "url"), `${publicUrl}\n`, { mode: 0o600 });
+  fs.writeFileSync(environmentFile, [
+    "DESIGNER_SERVER_ACCESS=proxy",
+    "APP_MODE=server",
+    "FORMASPEC_CONTAINER_LOCAL=false",
+    "BIND_ADDRESS=127.0.0.1",
+    `PORT=${port}`,
+    `PUBLIC_BASE_URL=${publicUrl}`,
+    "AUTH_MODE=trusted-header",
+    `DESIGNER_TOKEN=${token}`,
+    "TRUSTED_USER_HEADER=x-designer-user",
+    `FORMASPEC_ALLOWED_HOSTS=${publicHost}`,
+    "FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12",
+    `DESIGNER_CORS_ORIGINS=${publicUrl}`,
+    "MAX_UPLOAD_BYTES=5242880",
+    "",
+  ].join("\n"), { mode: 0o600 });
+  return root;
+}
+
 interface RuntimeFixtureState {
   context: string;
   daemonId: string;
@@ -146,6 +181,8 @@ function fixtureRunner(state: RuntimeFixtureState, calls: string[][], projectRoo
     calls.push([...args]);
     expect(options?.env?.DOCKER_HOST).toBeUndefined();
     expect(options?.env?.DOCKER_CONTEXT).toBeUndefined();
+    expect(options?.env?.DESIGNER_TOKEN).toBeUndefined();
+    expect(options?.env?.FORMASPEC_MCP_TOKEN).toBeUndefined();
     if (args[0] === "context" && args[1] === "show") {
       return { exitCode: 0, stdout: `${state.context}\n`, stderr: "" };
     }
@@ -209,11 +246,99 @@ describe("Docker runtime binding", () => {
       containerPort: 4310,
       origin: "http://127.0.0.1:4321",
       rendererNetworkMode: "none",
+      runtimeMode: "docker",
+      serverAccess: "none",
+      healthHostHeader: "127.0.0.1:4321",
     });
     const serializedPublic = JSON.stringify(publicBinding);
     expect(serializedPublic).not.toContain(daemonId);
     expect(serializedPublic).not.toContain(dataVolume);
     expect(dockerPublicPortBinding(binding)).toBe("127.0.0.1:4321:4310/tcp");
+  });
+
+  it("pins a trusted-proxy server runtime without persisting or forwarding its bearer token", async () => {
+    const secret = "server-secret-token-0123456789abcdef";
+    const root = serverProjectFixture(4322, "https://designer.example.test", secret);
+    const binding = await captureDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(defaultState(4322), [], root),
+      dockerExecutable: "/usr/bin/docker",
+      environment: {
+        PATH: "/usr/bin",
+        DOCKER_CONTEXT: context,
+        DESIGNER_TOKEN: secret,
+        FORMASPEC_MCP_TOKEN: secret,
+      },
+      now: () => new Date("2026-07-20T01:03:04.000Z"),
+    });
+
+    expect(binding.runtime).toMatchObject({
+      mode: "server",
+      serverAccess: "proxy",
+      healthHostHeader: "designer.example.test",
+    });
+    expect(binding.runtime.environmentIdentitySha256).toMatch(/^[a-f0-9]{64}$/);
+    const filename = persistDockerRuntimeBinding(root, binding);
+    expect(fs.readFileSync(filename, "utf8")).not.toContain(secret);
+    expect(JSON.stringify(sanitizedPublicDockerBinding(binding))).not.toContain(secret);
+
+    const trailingSlashRoot = serverProjectFixture(4324, "https://designer.example.test/", secret);
+    await expect(captureDockerRuntimeBinding(trailingSlashRoot, {
+      commandRunner: fixtureRunner(defaultState(4324), [], trailingSlashRoot),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+    })).resolves.toMatchObject({
+      runtime: { mode: "server", serverAccess: "proxy", healthHostHeader: "designer.example.test" },
+    });
+  });
+
+  it("fails closed when a server Host configuration or pinned secure environment becomes stale", async () => {
+    const root = serverProjectFixture(4323);
+    const state = defaultState(4323);
+    const binding = await captureDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(state, [], root),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+      now: () => new Date("2026-07-20T01:04:05.000Z"),
+    });
+    persistDockerRuntimeBinding(root, binding);
+
+    const environmentFile = path.join(root, ".designer", "env", "server.env");
+    const original = fs.readFileSync(environmentFile, "utf8");
+    fs.writeFileSync(environmentFile, original.replace(
+      "FORMASPEC_ALLOWED_HOSTS=designer.example.test",
+      "FORMASPEC_ALLOWED_HOSTS=attacker.example.test",
+    ), { mode: 0o600 });
+    await expect(verifyDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(state, [], root),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+    })).rejects.toThrow(/Host allowlist does not match/);
+
+    fs.writeFileSync(environmentFile, original.replace("MAX_UPLOAD_BYTES=5242880", "MAX_UPLOAD_BYTES=1048576"), { mode: 0o600 });
+    await expect(verifyDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(state, [], root),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+    })).rejects.toThrow(/runtime identity drifted/);
+  });
+
+  it("upgrades a persisted v1 local binding in memory so existing launcher state remains usable", async () => {
+    const root = projectFixture();
+    const binding = await captureDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(defaultState(), [], root),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+    });
+    const filename = persistDockerRuntimeBinding(root, binding);
+    const legacy = JSON.parse(fs.readFileSync(filename, "utf8")) as Record<string, unknown>;
+    legacy.version = 1;
+    delete legacy.runtime;
+    fs.writeFileSync(filename, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+    expect(readDockerRuntimeBinding(root)).toMatchObject({
+      version: 2,
+      runtime: { mode: "docker", serverAccess: "none", healthHostHeader: "127.0.0.1:4310" },
+    });
   });
 
   it("pins the runtime image ID separately from Docker Compose's manifest-list image label", async () => {

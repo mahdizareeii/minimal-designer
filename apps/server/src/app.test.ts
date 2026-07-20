@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import type { FastifyInstance } from "fastify";
@@ -197,6 +198,21 @@ describe("designer server", () => {
     expect(render.statusCode).toBe(200);
     expect(render.headers["content-type"]).toContain("image/png");
     expect(render.rawPayload.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    expect(application.database.sqlite.prepare(
+      `SELECT organization_id, design_id, revision_id, document_revision, kind, status,
+              output_sha256, output_bytes, output_renderer
+       FROM render_jobs WHERE design_id = ? ORDER BY created_at DESC LIMIT 1`,
+    ).get(created.document.id)).toMatchObject({
+      organization_id: "organization_legacy",
+      design_id: created.document.id,
+      revision_id: null,
+      document_revision: 2,
+      kind: "render",
+      status: "succeeded",
+      output_sha256: createHash("sha256").update(render.rawPayload).digest("hex"),
+      output_bytes: render.rawPayload.length,
+      output_renderer: expect.stringMatching(/^(playwright|software)$/),
+    });
 
     const committed = await application.app.inject({
       method: "POST",
@@ -276,6 +292,18 @@ describe("designer server", () => {
     expect(asset.operation).toMatchObject({
       type: "upsert_asset",
       asset: { id: asset.id, storage_key: `asset:${asset.id}` },
+    });
+    expect(application.database.sqlite.prepare(
+      `SELECT organization_id, design_id, scope_kind, operation, kind, status, output_renderer
+       FROM render_jobs WHERE kind = 'normalize_raster' ORDER BY created_at DESC LIMIT 1`,
+    ).get()).toEqual({
+      organization_id: "organization_legacy",
+      design_id: null,
+      scope_kind: "organization",
+      operation: "asset_upload",
+      kind: "normalize_raster",
+      status: "succeeded",
+      output_renderer: "chromium",
     });
 
     const fetched = await application.app.inject({

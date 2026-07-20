@@ -266,7 +266,7 @@ test("product manager to verified backup restore completes through browser, MCP,
 
     await step("Start an isolated local FormaSpec workspace and pass readiness", async () => {
       const health = await api<{ ok: boolean; migrations: number; render: { ok: boolean } }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 10, render: { ok: true } });
+      expect(health).toMatchObject({ ok: true, migrations: 11, render: { ok: true } });
     });
 
     await step("Create the product from the dashboard in a real browser", async () => {
@@ -779,7 +779,7 @@ test("product manager to verified backup restore completes through browser, MCP,
       application = await startApplication(config);
 
       const health = await api<{ ok: boolean; migrations: number }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 10 });
+      expect(health).toMatchObject({ ok: true, migrations: 11 });
       const projects = await api<{ designs: Array<{ id: string; version: number }> }>(baseURL, "/api/designs?limit=100");
       expect(projects.designs.some((project) => project.id === sentinel.document.id)).toBe(false);
       expect(projects.designs).toEqual(expect.arrayContaining([expect.objectContaining({ id: designId, version: 6 })]));

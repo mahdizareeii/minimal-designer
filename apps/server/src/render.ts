@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
@@ -16,9 +17,15 @@ import {
   type LayoutMode,
 } from "@designer/core";
 
-import type { NormalizedImageAsset, RasterNormalizationOptions } from "./assets.js";
+import type {
+  NormalizedImageAsset,
+  RasterNormalizationContext,
+  RasterNormalizationOptions,
+} from "./assets.js";
 import { DomainError } from "./errors.js";
+import { hashPayload } from "./ids.js";
 import { RendererSocketClient } from "./renderer-ipc.js";
+import type { RenderJobFailureRecord, RenderJobRecorder } from "./render-job-store.js";
 
 export interface RenderOptions {
   pageId?: string;
@@ -51,6 +58,7 @@ export interface PngRendererOptions {
   allowSystemChrome?: boolean;
   socketPath?: string;
   ipcMaxMessageBytes?: number;
+  jobRecorder?: RenderJobRecorder;
 }
 
 interface BrowserNormalizedRaster {
@@ -372,6 +380,21 @@ function softwareRender(document: DesignDocument, options: RenderOptions): Rende
   };
 }
 
+function boundedJobText(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512);
+}
+
+function renderJobFailure(error: unknown): RenderJobFailureRecord {
+  if (error instanceof DomainError) {
+    return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  return {
+    code: "INTERNAL_ERROR",
+    message: "The render job failed unexpectedly.",
+    retryable: true,
+  };
+}
+
 export class PngRenderer {
   #browser: Browser | null = null;
   #playwrightUnavailable = false;
@@ -383,6 +406,7 @@ export class PngRenderer {
   readonly #allowSoftwareFallback: boolean;
   readonly #allowSystemChrome: boolean;
   readonly #remoteClient: RendererSocketClient | null;
+  readonly #jobRecorder: RenderJobRecorder | null;
   #active = 0;
   #waiters: Array<() => void> = [];
 
@@ -393,6 +417,7 @@ export class PngRenderer {
     this.#queueLimit = options.queueLimit ?? 32;
     this.#allowSoftwareFallback = options.allowSoftwareFallback ?? false;
     this.#allowSystemChrome = options.allowSystemChrome ?? false;
+    this.#jobRecorder = options.jobRecorder ?? null;
     this.#remoteClient = options.socketPath
       ? new RendererSocketClient({
         socketPath: options.socketPath,
@@ -400,6 +425,58 @@ export class PngRenderer {
         ...(options.ipcMaxMessageBytes === undefined ? {} : { maxMessageBytes: options.ipcMaxMessageBytes }),
       })
       : null;
+  }
+
+  async render(
+    document: AnyDesignDocument,
+    options: RenderOptions,
+    assetDataUrl: (id: string) => string | null,
+  ): Promise<RenderResult> {
+    const documentSha256 = hashPayload(document);
+    const jobId = this.#jobRecorder?.queue({
+      kind: "render",
+      requestHash: hashPayload({ kind: "render", documentSha256, options }),
+      requestMetadata: {
+        documentSha256,
+        schemaVersion: document.schema_version,
+        options: {
+          ...(options.pageId === undefined ? {} : { pageId: boundedJobText(options.pageId) }),
+          ...(options.nodeId === undefined ? {} : { nodeId: boundedJobText(options.nodeId) }),
+          ...(options.maxSize === undefined ? {} : { maxSize: options.maxSize }),
+        },
+      },
+      documentId: document.id,
+      documentRevision: document.revision,
+    }) ?? null;
+    try {
+      const result = await this.#render(document, options, assetDataUrl, () => {
+        if (jobId) this.#jobRecorder!.start(jobId);
+      });
+      if (jobId) {
+        this.#jobRecorder!.succeed(jobId, {
+          output: result.png,
+          width: result.width,
+          height: result.height,
+          renderer: result.renderer,
+          warnings: result.warnings,
+        });
+      }
+      return result;
+    } catch (error) {
+      if (jobId) {
+        try {
+          this.#jobRecorder!.fail(jobId, renderJobFailure(error));
+        } catch (recordingError) {
+          throw new DomainError(
+            "INTERNAL_ERROR",
+            "FormaSpec could not persist the render-job terminal state.",
+            500,
+            { retryable: true, cause: recordingError },
+          );
+        }
+      }
+      throw error;
+    }
   }
 
   async #acquire(): Promise<() => void> {
@@ -453,10 +530,11 @@ export class PngRenderer {
     }
   }
 
-  async render(
+  async #render(
     document: AnyDesignDocument,
     options: RenderOptions,
     assetDataUrl: (id: string) => string | null,
+    onStarted: () => void,
   ): Promise<RenderResult> {
     if (this.#remoteClient) {
       const assets: Record<string, string | null> = {};
@@ -465,6 +543,7 @@ export class PngRenderer {
           assets[node.asset_id] = assetDataUrl(node.asset_id);
         }
       }
+      onStarted();
       return this.#remoteClient.render(document, options, assets);
     }
     let compatibleDocument: DesignDocument;
@@ -481,6 +560,7 @@ export class PngRenderer {
     const release = await this.#acquire();
     let context: BrowserContext | null = null;
     try {
+      onStarted();
       const browser = await this.#ensureBrowser();
       if (!browser) {
         if (this.#allowSoftwareFallback) return softwareRender(compatibleDocument, options);
@@ -557,8 +637,72 @@ export class PngRenderer {
     }
   }
 
-  async normalizeRaster(data: Buffer, options: RasterNormalizationOptions): Promise<NormalizedImageAsset> {
-    if (this.#remoteClient) return this.#remoteClient.normalizeRaster(data, options);
+  async normalizeRaster(
+    data: Buffer,
+    options: RasterNormalizationOptions,
+    context?: RasterNormalizationContext,
+  ): Promise<NormalizedImageAsset> {
+    const sourceSha256 = createHash("sha256").update(data).digest("hex");
+    const jobId = this.#jobRecorder?.queue({
+      kind: "normalize_raster",
+      requestHash: hashPayload({ kind: "normalize_raster", sourceSha256, options }),
+      requestMetadata: {
+        sourceSha256,
+        sourceBytes: data.length,
+        sourceMimeType: boundedJobText(options.sourceMimeType),
+        sourceWidth: options.sourceWidth,
+        sourceHeight: options.sourceHeight,
+        maxBytes: options.maxBytes,
+        maxPixels: options.maxPixels,
+      },
+      scope: context?.scope === "organization"
+        ? {
+          kind: "organization",
+          organizationId: context.organizationId,
+          ...(context.designId === undefined ? {} : { designId: context.designId }),
+          operation: context.operation,
+        }
+        : { kind: "internal", operation: context?.operation ?? "raster_normalization" },
+    }) ?? null;
+    try {
+      const result = await this.#normalizeRaster(data, options, () => {
+        if (jobId) this.#jobRecorder!.start(jobId);
+      });
+      if (jobId) {
+        this.#jobRecorder!.succeed(jobId, {
+          output: result.data,
+          width: result.width,
+          height: result.height,
+          renderer: "chromium",
+        });
+      }
+      return result;
+    } catch (error) {
+      if (jobId) {
+        try {
+          this.#jobRecorder!.fail(jobId, renderJobFailure(error));
+        } catch (recordingError) {
+          throw new DomainError(
+            "INTERNAL_ERROR",
+            "FormaSpec could not persist the raster-normalization job terminal state.",
+            500,
+            { retryable: true, cause: recordingError },
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  async #normalizeRaster(
+    data: Buffer,
+    options: RasterNormalizationOptions,
+    onStarted: () => void,
+  ): Promise<NormalizedImageAsset> {
+    if (this.#remoteClient) {
+      onStarted();
+      return this.#remoteClient.normalizeRaster(data, options);
+    }
     if (data.length < 1) throw new DomainError("UNSUPPORTED_ASSET", "The uploaded asset is empty.", 422);
     if (data.length > options.maxBytes) {
       throw new DomainError("PAYLOAD_TOO_LARGE", `Asset exceeds the ${options.maxBytes} byte limit.`, 413);
@@ -572,6 +716,7 @@ export class PngRenderer {
     const release = await this.#acquire();
     let context: BrowserContext | null = null;
     try {
+      onStarted();
       const browser = await this.#ensureBrowser();
       if (!browser) {
         throw new DomainError(

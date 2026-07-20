@@ -536,6 +536,8 @@ export function registerHttpRoutes(
   app.get("/api/events", eventStream);
 
   app.post("/api/assets", async (request, reply) => {
+    const query = z.object({ designId: z.string().optional() }).parse(request.query);
+    const organizationId = service.assetNormalizationOrganizationId(request.actorId, query.designId);
     const part = await request.file({ limits: { files: 1, fileSize: config.maxAssetBytes, fields: 8 } });
     if (!part) throw new DomainError("VALIDATION_FAILED", "A multipart file field is required.", 422);
     const data = await part.toBuffer();
@@ -544,8 +546,13 @@ export function registerHttpRoutes(
       part.mimetype,
       { maxBytes: config.maxAssetBytes, maxPixels: config.maxAssetPixels },
       renderer,
+      {
+        scope: "organization",
+        organizationId,
+        ...(query.designId ? { designId: query.designId } : {}),
+        operation: "asset_upload",
+      },
     );
-    const query = z.object({ designId: z.string().optional() }).parse(request.query);
     const asset = service.saveAsset(request.actorId, {
       ...(query.designId ? { designId: query.designId } : {}),
       filename: safeFilename(part.filename, normalized.mimeType),

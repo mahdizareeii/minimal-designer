@@ -16,10 +16,10 @@ Workspace Bridge workflows.
 
 It is **not production-ready**. The current supported use is local development
 and controlled evaluation. Docker separates API and renderer and now includes
-an externally supervised one-shot restore-worker foundation for the
-launcher-recorded local Docker runtime. Native installers, server-mode restore,
-signed provenance, security/browser/performance matrices, and complete release
-evidence remain unfinished. A disposable
+an externally supervised one-shot restore-worker foundation for the exact
+launcher-recorded local-Docker or server runtime. Native installers, clean
+server-mode restore evidence, signed provenance, security/browser/performance
+matrices, and complete release evidence remain unfinished. A disposable
 local-Docker A/B restore exercise has passed, but it does not qualify the server
 path or close the broader recovery gate. See
 [Release blockers](#release-blockers).
@@ -65,7 +65,7 @@ separate non-root, read-only, capability-free, network-disabled renderer with
 resource limits. A fresh isolated local Compose project reached health and
 preserved a project across API restart. Treat it as evaluation evidence, not a
 release artifact: a separate isolated local-Docker restore and safety-restore
-exercise passed, but server-mode proxy/restore, broader recovery fixtures,
+exercise passed, but server-mode proxy/restore evidence, broader recovery fixtures,
 upgrade, saturation, and long-running security evidence remain incomplete. Do
 not weaken the host binding or publish the port.
 
@@ -114,9 +114,9 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl backup prune execute --preview-id <id> --plan-hash <sha256> --yes [--json]` | Revalidates and commits only the reviewed 7-daily/4-weekly/12-monthly prune plan. |
 | `pnpm formaspecctl backup verify <formaspec-backup.tar> [--json]` | Safely extracts and verifies exact archive/checksum coverage, SQLite/foreign-key/migration integrity, assets and legacy BLOB fallback, canonical snapshots, revision hash chains, and project heads. |
 | `pnpm formaspecctl backup restore <formaspec-backup.tar> --yes [--json]` | Stops a recorded source-local runtime, creates a safety copy when local data exists, and invokes the atomic verified restore engine for `./data`. It refuses Docker volumes and server runtimes and leaves the app stopped. |
-| `pnpm formaspecctl backup restore --backup-id <id> --yes [--json]` | Externally supervises a managed restore for the launcher-recorded local Docker runtime only. It fences traffic, stops only the API, runs the one-shot worker, creates a verified safety backup, verifies database/render state, revokes restored agent credentials, restarts under maintenance, and clears maintenance only after readiness succeeds. |
+| `pnpm formaspecctl backup restore --backup-id <id> --yes [--json]` | Externally supervises a managed restore for the exact launcher-recorded local-Docker or server runtime. It fences traffic, stops only the pinned API container, runs the network-disabled one-shot worker, creates a verified safety backup, verifies exact schema/readiness/renderer state with the configured Host, revokes restored agent credentials, restarts under maintenance, and clears maintenance only after readiness succeeds. |
 | `pnpm formaspecctl backup restore status [--json]` | Reads the path-free maintenance marker and durable restore-operation state through a one-shot control process; it does not clear or mutate recovery state. |
-| `pnpm formaspecctl backup restore resume [--backup-id <id>] --yes [--json]` | Resumes the exact active local-Docker operation. `--backup-id` is required only when interruption preceded creation of the durable operation record. |
+| `pnpm formaspecctl backup restore resume [--backup-id <id>] --yes [--json]` | Resumes the exact active pinned Docker/server operation. `--backup-id` is required only when interruption preceded creation of the durable operation record. |
 | `pnpm formaspecctl backup restore rollback --yes [--json]` | Restores the verified safety backup as a separately supervised operation when the previous operation is in an eligible conclusive state; an inconclusive interruption must be resumed first. |
 | `pnpm formaspecctl backup restore abort --yes [--json]` | Clears only a preflight maintenance attempt for which no durable operation, cutover journal, or shared worker-lock evidence exists. It is not a force-abort. |
 | `pnpm formaspecctl backup restore clear-stale-lock --yes [--json]` | Removes only a valid matching worker lock after the pinned Docker supervisor proves the exact worker container no longer exists. |
@@ -128,9 +128,17 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl support-bundle preview [--json]` | Produces a read-only exact inventory of bounded sanitized diagnostic entries. |
 | `pnpm formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]` | Creates the reviewed deterministic archive plus an adjacent local manifest; excludes databases, assets, backups, environment values, source, and credentials. |
 
-Both restore paths are operations foundations, not production server recovery.
-Managed restore is intentionally limited to launcher-recorded local Docker;
-`APP_MODE=server` requires a deployment-specific external supervisor. Automatic
+The current `backup create/list/schedule/prune` CLI calls use the
+credential-free loopback local API and are not a trusted-header server
+administration client. In server mode, obtain the exact managed backup ID from
+the authenticated Administration UI/API through the configured reverse proxy;
+the external restore/status/recovery commands themselves do not use or reveal a
+bearer or trusted identity credential.
+
+Both restore paths are operations foundations, not release-qualified production recovery.
+Managed restore is intentionally limited to the fixed Compose project and
+launcher-recorded local-Docker/server bindings; unknown Compose deployments,
+custom volumes, and orchestrators still require deployment-specific procedures. Automatic
 supervisor installation/alerting, application autostart, native package
 install/upgrade/uninstall, approved backup signing/provenance, and a migration
 execution/rollback command are not implemented. The migration-status
@@ -426,7 +434,7 @@ chain. Normalized raster bytes are stored under generated
 legacy SQLite BLOBs remain as a verified quarantine/compatibility fallback.
 Treat the whole data directory as one recovery unit.
 
-For a supervised local-Docker restore, `/backups/.formaspec` is also recovery
+For a supervised Docker/server restore, `/backups/.formaspec` is also recovery
 control state. It holds the path-free maintenance marker, durable restore
 operation record, cutover journal, and shared worker lock outside the data
 volume being replaced. Host state holds the exact mode-`0600` runtime binding at
@@ -526,7 +534,7 @@ Two different mechanisms currently exist:
   default when no stored override exists.
 - `formaspecctl backup restore <bundle> --yes` provides the stopped
   source-local atomic path with a compatibility safety copy. For the
-  launcher-recorded local Docker runtime, the
+  launcher-recorded local-Docker or server runtime, the
   `backup restore --backup-id <id> --yes` command externally controls
   maintenance, stops only the API, runs the
   network-disabled one-shot worker, creates a verified managed safety backup,
@@ -538,11 +546,13 @@ Two different mechanisms currently exist:
   server to be stopped, then writes a simple directory manifest. It is not the
   verified FormaSpec bundle format accepted by `formaspecctl backup verify`.
 
-Neither CLI path is a server-mode recovery workflow. The managed path accepts
-only an opaque ID from the recorded local Docker backup catalog and refuses
-unknown/direct Compose and server runtimes. A server operator must provide an
-external supervisor with equivalent maintenance, locking, API stop/start,
-one-shot worker, verification, rollback, and alerting.
+The managed path accepts only an opaque ID from the recorded backup catalog and
+the exact runtime binding captured after current `formaspecctl` local-Docker or
+server startup. It refuses unknown/direct Compose projects, custom project
+names, bind-mounted data, guessed volumes, stale secure environments, and
+unrecognized orchestrators. Server automation/alerting and clean recovery
+evidence remain operator/release work even though the supervised command path
+is implemented.
 
 On 2026-07-20, an isolated Compose project on port `4397` restored
 `backup_0dda1a60c54c5805557426a428739e505e089425` in operation
@@ -567,7 +577,7 @@ provenance. Follow
 [BACKUP_AND_RESTORE.md](./BACKUP_AND_RESTORE.md), and do not treat the current
 foundation as release recovery evidence.
 
-## Local-Docker restore operations
+## Docker/server restore operations
 
 Start from an exact managed backup ID:
 
@@ -576,12 +586,15 @@ pnpm formaspecctl backup list
 pnpm formaspecctl backup restore --backup-id backup_<40-lowercase-hex> --yes
 ```
 
-Install, Docker start, and restart capture a mode-`0600` exact runtime binding
+Install, local-Docker/server start, and restart capture a mode-`0600` exact runtime binding
 at `.designer/run/docker-runtime-binding.json`. Restore refuses to proceed if
 that binding is absent or does not match the Docker context/daemon, image
 digest, container and Compose identities, project path, named volumes, renderer
-isolation, or loopback-published port. This prevents restore from drifting to an
-ambient Compose project or guessed volume.
+isolation, loopback-published port, recorded mode, secret-redacted environment identity SHA-256,
+or required health `Host`. Binding format 2 contains no bearer token; v1 local
+bindings remain readable and are upgraded in memory. This prevents restore from
+drifting to an ambient Compose project, stale server configuration, or guessed
+volume.
 
 The supervisor starts/verifies the pinned renderer and performs a read-only
 target preflight before creating maintenance, including a conservative
@@ -741,7 +754,8 @@ and evidenced:
   continuous egress/crash/saturation/load evidence beyond the verified local
   network-denied Docker worker;
 - finish and verify strict server-mode reverse-proxy, direct-port denial,
-  external-supervisor restore, upgrade, and long-running Compose evidence;
+  supervised restore/rollback, upgrade, alerting, and long-running Compose
+  evidence; the command path exists but has not passed that release matrix;
 - extend browser and visual-regression coverage beyond the passing 20-step
   local scenario and zoom/pan/DPR/RTL alignment foundations to the full
   invalidation, auto-layout, fractional-group, and cross-platform matrix;

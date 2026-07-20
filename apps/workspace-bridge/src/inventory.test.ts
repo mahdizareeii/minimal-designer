@@ -64,6 +64,19 @@ describe("Workspace Bridge inventory", () => {
     expect((await scanRepository(genericRoot)).platforms).toEqual(["generic-git"]);
   });
 
+  it("content-hashes included metadata and assets so same-size changes invalidate the repository fingerprint", async () => {
+    const root = temporaryDirectory();
+    write(root, "package.json", JSON.stringify({ name: "aaaa", dependencies: {} }));
+    write(root, "assets/logo.png", "asset-one");
+    const first = await scanRepository(root);
+    write(root, "package.json", JSON.stringify({ name: "bbbb", dependencies: {} }));
+    const metadataChanged = await scanRepository(root);
+    expect(metadataChanged.repositoryFingerprint).not.toBe(first.repositoryFingerprint);
+    write(root, "assets/logo.png", "asset-two");
+    const assetChanged = await scanRepository(root);
+    expect(assetChanged.repositoryFingerprint).not.toBe(metadataChanged.repositoryFingerprint);
+  });
+
   it("enforces and records organization exclusion patterns without weakening mandatory secret exclusion", async () => {
     const root = temporaryDirectory();
     write(root, "src/App.tsx", "export function App() { return null; }\n");
@@ -113,6 +126,31 @@ describe("Workspace Bridge inventory", () => {
     ]));
   });
 
+  it("bounds and refuses symlinked package and Git discovery metadata before scanning", async () => {
+    const packageRoot = temporaryDirectory();
+    const outside = temporaryDirectory();
+    write(outside, "package.json", JSON.stringify({ dependencies: { "react-native": "secret-outside" } }));
+    fs.symlinkSync(path.join(outside, "package.json"), path.join(packageRoot, "package.json"));
+    const symlinkedPackage = await scanRepository(packageRoot);
+    expect(symlinkedPackage.platforms).toEqual(["generic-git"]);
+    expect(symlinkedPackage.excluded).toContainEqual({ category: "symlink", count: 1 });
+
+    const oversizedPackageRoot = temporaryDirectory();
+    write(oversizedPackageRoot, "package.json", "x".repeat(1024 * 1024 + 1));
+    await expect(scanRepository(oversizedPackageRoot)).rejects.toThrow("package.json exceeds");
+
+    const symlinkedHeadRoot = temporaryDirectory();
+    write(symlinkedHeadRoot, ".git/placeholder", "git metadata\n");
+    write(outside, "HEAD", `${"a".repeat(40)}\n`);
+    fs.symlinkSync(path.join(outside, "HEAD"), path.join(symlinkedHeadRoot, ".git", "HEAD"));
+    await expect(scanRepository(symlinkedHeadRoot)).rejects.toThrow("Git HEAD must be a non-symlinked regular file");
+
+    const oversizedPackedRefsRoot = temporaryDirectory();
+    write(oversizedPackedRefsRoot, ".git/HEAD", "ref: refs/heads/main\n");
+    write(oversizedPackedRefsRoot, ".git/packed-refs", "x".repeat(4 * 1024 * 1024 + 1));
+    await expect(scanRepository(oversizedPackedRefsRoot)).rejects.toThrow("Git packed refs exceeds");
+  });
+
   it("enforces explicit expiring grants and immediate revocation", async () => {
     const root = temporaryDirectory();
     const state = temporaryDirectory();
@@ -123,6 +161,11 @@ describe("Workspace Bridge inventory", () => {
     const now = new Date("2026-01-01T00:00:00.000Z");
     const grant = await store.create(root, inventory.repositoryFingerprint, { ttlSeconds: 60, now, excludedPatterns });
     expect(publicRepositoryGrant(grant, now).status).toBe("active");
+    const grantPath = path.join(state, `${grant.id}.json`);
+    const legacyGrant = JSON.parse(fs.readFileSync(grantPath, "utf8")) as Record<string, unknown>;
+    delete legacyGrant.persistedInventory;
+    fs.writeFileSync(grantPath, `${JSON.stringify(legacyGrant)}\n`, { mode: 0o600 });
+    expect((await store.read(grant.id)).persistedInventory).toBeNull();
     expect((await store.read(grant.id)).excludedPatterns).toEqual(excludedPatterns);
     expect(publicRepositoryGrant(grant, now).excludedPatterns).toEqual(excludedPatterns);
     await expect(store.requireActive(grant.id, new Date("2026-01-01T00:00:59.000Z"))).resolves.toMatchObject({ id: grant.id });
@@ -131,6 +174,43 @@ describe("Workspace Bridge inventory", () => {
     expect(publicRepositoryGrant(revoked, now).status).toBe("revoked");
     await expect(store.requireActive(grant.id, now)).rejects.toThrow("revoked");
     expect(JSON.stringify(publicRepositoryGrant(grant))).not.toContain(path.resolve(root));
+  });
+
+  it("serializes immutable inventory binding with monotonic revocation", async () => {
+    const root = temporaryDirectory();
+    const state = temporaryDirectory();
+    write(root, "src/App.tsx", "export function App() { return null; }\n");
+    const inventory = await scanRepository(root);
+    const store = new RepositoryGrantStore(state);
+    const grant = await store.create(root, inventory.repositoryFingerprint);
+    await Promise.allSettled([
+      store.bindPersistedInventory(grant.id, {
+        id: `inventory_${"1".repeat(32)}`,
+        inventoryHash: "2".repeat(64),
+      }),
+      store.revoke(grant.id),
+    ]);
+    const finalGrant = await store.read(grant.id);
+    expect(finalGrant.revokedAt).not.toBeNull();
+    await expect(store.requireActive(grant.id)).rejects.toThrow("revoked");
+
+    const second = await store.create(root, inventory.repositoryFingerprint);
+    const competing = await Promise.allSettled([
+      store.bindPersistedInventory(second.id, {
+        id: `inventory_${"3".repeat(32)}`,
+        inventoryHash: "4".repeat(64),
+      }),
+      store.bindPersistedInventory(second.id, {
+        id: `inventory_${"5".repeat(32)}`,
+        inventoryHash: "6".repeat(64),
+      }),
+    ]);
+    expect(competing.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(competing.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect([
+      `inventory_${"3".repeat(32)}`,
+      `inventory_${"5".repeat(32)}`,
+    ]).toContain((await store.read(second.id)).persistedInventory?.id);
   });
 
   it("fails closed when inventory limits are reached", async () => {

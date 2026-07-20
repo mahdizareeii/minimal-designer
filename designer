@@ -1365,7 +1365,7 @@ Usage:
   ./designer backup create | list
   ./designer backup verify <formaspec-backup.tar>
   ./designer --yes backup restore <formaspec-backup.tar>
-  ./designer --yes backup restore --backup-id BACKUP_ID
+  ./designer --yes backup restore --backup-id BACKUP_ID  # recorded Docker/server runtime
   ./designer backup restore status
   ./designer --yes backup restore resume [--backup-id BACKUP_ID]
   ./designer --yes backup restore rollback

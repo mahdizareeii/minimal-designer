@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 
+import { executeCodexLaunch, prepareCodexLaunch } from "./codex-launch.js";
 import { RepositoryGrantStore, publicRepositoryGrant } from "./grants.js";
 import { inventoryForUpload, scanRepository } from "./inventory.js";
 import {
@@ -20,6 +21,7 @@ Usage:
   formaspec-workspace-bridge inspect <grant-id> [--local-paths]
   formaspec-workspace-bridge list
   formaspec-workspace-bridge revoke <grant-id>
+  formaspec-workspace-bridge launch-codex <grant-id> <handoff-id> [--dry-run|--print-plan]
 
 The default inspect output is safe to upload and contains opaque location IDs,
 not repository paths. --local-paths is for workstation-only diagnostics.
@@ -81,7 +83,7 @@ async function main(arguments_: string[]): Promise<number> {
       ...(policy === null ? {} : { limits: { maximumEntities: policy.maximumInventoryEntities } }),
     });
     if (policy !== null) assertInventoryMatchesPolicy(inventory, policy);
-    const grant = await store.create(repository, inventory.repositoryFingerprint, {
+    let grant = await store.create(repository, inventory.repositoryFingerprint, {
       ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
       excludedPatterns: inventory.excludedPatterns,
     });
@@ -89,6 +91,12 @@ async function main(arguments_: string[]): Promise<number> {
     const persisted = connected === null
       ? null
       : await persistRepositoryInventory(connected.connection, upload);
+    if (persisted !== null) {
+      grant = await store.bindPersistedInventory(grant.id, {
+        id: persisted.id,
+        inventoryHash: persisted.inventoryHash,
+      });
+    }
     process.stdout.write(`${JSON.stringify({
       grant: publicRepositoryGrant(grant),
       inventory: upload,
@@ -125,6 +133,39 @@ async function main(arguments_: string[]): Promise<number> {
     if (!grantId || arguments_.length > 0) throw new Error("revoke requires exactly one repository grant ID.");
     process.stdout.write(`${JSON.stringify(publicRepositoryGrant(await store.revoke(grantId)))}\n`);
     return 0;
+  }
+  if (command === "launch-codex") {
+    const grantId = arguments_.shift();
+    const handoffId = arguments_.shift();
+    if (!grantId || !handoffId) {
+      throw new Error("launch-codex requires a repository grant ID and an approved FormaSpec handoff ID.");
+    }
+    let dryRun = false;
+    while (arguments_.length > 0) {
+      const option = arguments_.shift();
+      if (option === "--dry-run" || option === "--print-plan") {
+        if (dryRun) throw new Error("Only one of --dry-run or --print-plan may be supplied.");
+        dryRun = true;
+        continue;
+      }
+      throw new Error(`Unexpected launch-codex option: ${option}`);
+    }
+    const connection = repositoryPolicyConnectionFromEnvironment(process.env);
+    if (connection === null) {
+      throw new Error("launch-codex requires FORMASPEC_UPSTREAM_MCP_URL or FORMASPEC_API_URL.");
+    }
+    const options = {
+      grantStore: store,
+      grantId,
+      handoffId,
+      connection,
+      environment: process.env,
+    };
+    const plan = await prepareCodexLaunch(options);
+    process.stdout.write(`${JSON.stringify({ launchPlan: plan, dryRun })}\n`);
+    if (dryRun) return 0;
+    const launched = await executeCodexLaunch(plan, options);
+    return launched.exitCode;
   }
   throw new Error(`Unknown command: ${command}`);
 }

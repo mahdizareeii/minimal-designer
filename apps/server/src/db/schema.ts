@@ -401,6 +401,46 @@ export const portableImports = sqliteTable("portable_imports", {
   createdAt: text("created_at").notNull(),
 });
 
+export const renderJobs = sqliteTable("render_jobs", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id"),
+  designId: text("design_id"),
+  revisionId: text("revision_id"),
+  documentId: text("document_id"),
+  documentRevision: integer("document_revision"),
+  scopeKind: text("scope_kind").notNull(),
+  operation: text("operation").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status").notNull(),
+  ownerId: text("owner_id").notNull(),
+  requestHash: text("request_hash").notNull(),
+  requestMetadataJson: text("request_metadata_json").notNull(),
+  rendererVersion: text("renderer_version").notNull(),
+  rendererIpcProtocolVersion: integer("renderer_ipc_protocol_version").notNull(),
+  rasterNormalizerVersion: text("raster_normalizer_version").notNull(),
+  outputSha256: text("output_sha256"),
+  outputBytes: integer("output_bytes"),
+  outputWidth: integer("output_width"),
+  outputHeight: integer("output_height"),
+  outputRenderer: text("output_renderer"),
+  warningsJson: text("warnings_json").notNull(),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  retryable: integer("retryable", { mode: "boolean" }),
+  createdAt: text("created_at").notNull(),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  heartbeatAt: text("heartbeat_at").notNull(),
+  leaseExpiresAt: text("lease_expires_at").notNull(),
+});
+
+export const renderJobDeletePermits = sqliteTable("render_job_delete_permits", {
+  jobId: text("job_id").primaryKey(),
+  organizationId: text("organization_id"),
+  cutoffAt: text("cutoff_at").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const operationalLocks = sqliteTable("operational_locks", {
   name: text("name").notNull(),
   organizationId: text("organization_id").notNull(),

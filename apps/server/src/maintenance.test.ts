@@ -288,7 +288,7 @@ describe("MaintenanceStore", () => {
     await application.app.ready();
     expect(await application.maintenance.read()).toEqual({ active: false, markerValid: true });
     expect(fs.existsSync(path.join(dataDirectory, ".formaspec-restore-journal"))).toBe(false);
-    expect(application.database.schemaVersion()).toBe(10);
+    expect(application.database.schemaVersion()).toBe(11);
   });
 });
 
@@ -311,7 +311,7 @@ describe("maintenance HTTP gate", () => {
       ok: false,
       status: "maintenance",
       database: "ready",
-      migrations: 10,
+      migrations: 11,
       maintenance: { active: true, phase: "restore", operationId: restoreOperationId },
       render: { ok: true },
     });
@@ -382,7 +382,7 @@ describe("maintenance HTTP gate", () => {
       ok: false,
       status: "maintenance",
       database: "ready",
-      migrations: 10,
+      migrations: 11,
       maintenance: { active: true, phase: "unknown" },
     });
     expect(ready.body).not.toContain("private");

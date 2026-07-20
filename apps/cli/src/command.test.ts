@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BackupVerification } from "./backup.js";
 import type { BridgeController } from "./bridge-lifecycle.js";
 import { runCli, type CliIo } from "./command.js";
+import { CLI_SUPPORTED_DATABASE_VERSION } from "./migrations.js";
 import type { CommandOptions } from "./process.js";
 
 const temporaryDirectories: string[] = [];
@@ -275,6 +276,32 @@ describe("formaspecctl", () => {
     expect(bridge.starts).toBe(1);
   });
 
+  it("pins the exact runtime binding after server startup without emitting the configured bearer token", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    const secret = "server-secret-token-0123456789abcdef";
+    let bindings = 0;
+    const result = await runCli(["--yes", "start", "server", "--no-build"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin", DESIGNER_TOKEN: secret },
+      recordDockerRuntimeBinding: async () => { bindings += 1; },
+      commandRunner: async (executable, args) => {
+        expect(executable).toBe(path.join(root, "designer"));
+        expect(args).toEqual(["--yes", "start", "server", "--no-build"]);
+        expect(args.join(" ")).not.toContain(secret);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(result).toBe(0);
+    expect(bindings).toBe(1);
+    expect(bridge.starts).toBe(1);
+    expect([...io.output, ...io.errors].join("\n")).not.toContain(secret);
+    expect(io.output.some((line) => line.includes("Compose project"))).toBe(true);
+  });
+
   it("uses one install authorization and automatically connects supported Codex", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
@@ -326,11 +353,12 @@ describe("formaspecctl", () => {
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(8, "enterprise_domain_models", "2026-01-08T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(9, "audit_retention_execution", "2026-01-09T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(10, "portable_import_provenance", "2026-01-10T00:00:00.000Z");
+    sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(11, "render_job_persistence", "2026-01-11T00:00:00.000Z");
     sqlite.close();
     const io = collectingIo();
     const result = await runCli(["migrate", "status", "--json"], { projectRoot: root, bridge: fakeBridge(), io });
     expect(result).toBe(0);
-    expect(JSON.parse(io.output[0]!)).toMatchObject({ latestAppliedVersion: 10, supportedVersion: 10, state: "current" });
+    expect(JSON.parse(io.output[0]!)).toMatchObject({ latestAppliedVersion: 11, supportedVersion: 11, state: "current" });
   });
 
   it("creates and lists managed backups through the credential-free loopback API", async () => {
@@ -663,7 +691,7 @@ describe("formaspecctl", () => {
           phase: "reconciled",
           createdAt: "2026-07-19T12:00:00.000Z",
           updatedAt: "2026-07-19T12:01:00.000Z",
-          smoke: { schemaVersion: 10, renderedDesignId: null },
+          smoke: { schemaVersion: CLI_SUPPORTED_DATABASE_VERSION, renderedDesignId: null },
           result: { auditEventId: 2, outboxEventId: 3, revoked: { grants: 1, connections: 1, nonces: 1 } },
           errorCode: null,
         },
@@ -723,7 +751,7 @@ describe("formaspecctl", () => {
     expect(restored).toBe(false);
     expect(delegated).toBe(false);
     expect(bridge.stops).toBe(0);
-    expect(io.errors[0]).toMatch(mode === "docker" ? /Docker runtime uses a managed volume/ : /not a server maintenance workflow/);
+    expect(io.errors[0]).toMatch(mode === "docker" ? /Docker runtime uses a managed volume/ : /managed backup ID through the supervised maintenance workflow/);
   });
 
   it("verifies, stops local services, creates a safety copy, and invokes the atomic restore engine", async () => {
@@ -816,7 +844,7 @@ describe("formaspecctl", () => {
       projectRoot: root,
       bridge,
       io,
-      backupVerifier: async () => backupVerification(11),
+      backupVerifier: async () => backupVerification(12),
       commandRunner: async () => { delegated = true; return { exitCode: 0, stdout: "", stderr: "" }; },
       restoreVerifiedBackup: async () => undefined,
     });

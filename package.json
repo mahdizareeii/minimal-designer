@@ -28,6 +28,8 @@
     "release:evidence": "pnpm release:evidence:generate && pnpm release:evidence:check",
     "ci:release-evidence": "bash scripts/ci-release-evidence.sh",
     "package:macos:unsigned": "pnpm -r build && node apps/installer/dist/build-macos.js",
+    "package:linux:deb": "pnpm -r build && node apps/installer/dist/build-linux-deb.js",
+    "package:linux:rpm": "pnpm -r build && node apps/installer/dist/build-linux-rpm.js",
     "release:evidence:macos:generate": "node scripts/macos-pkg-evidence.mjs generate",
     "release:evidence:macos:verify": "node scripts/macos-pkg-evidence.mjs verify",
     "release:evidence:macos:gate": "node scripts/macos-pkg-evidence.mjs gate",

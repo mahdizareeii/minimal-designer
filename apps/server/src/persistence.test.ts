@@ -116,7 +116,7 @@ describe("content-addressed persistence", () => {
 
     const opened = openService(filename);
     try {
-      expect(opened.database.schemaVersion()).toBe(10);
+      expect(opened.database.schemaVersion()).toBe(11);
       expect(opened.database.sqlite.prepare(
         "SELECT version, name FROM schema_migrations ORDER BY version",
       ).all()).toEqual([
@@ -130,8 +130,9 @@ describe("content-addressed persistence", () => {
         { version: 8, name: "enterprise_domain_models" },
         { version: 9, name: "audit_retention_execution" },
         { version: 10, name: "portable_import_provenance" },
+        { version: 11, name: "render_job_persistence" },
       ]);
-      expect(opened.database.metadata("database_schema_version")).toBe("10");
+      expect(opened.database.metadata("database_schema_version")).toBe("11");
       expect(DEFAULT_RUNTIME_VERSIONS).toMatchObject({
         commandEngine: ENGINE_VERSIONS.commandEngine,
         renderer: ENGINE_VERSIONS.renderer,
@@ -189,6 +190,40 @@ describe("content-addressed persistence", () => {
         mutate: (sqlite) => sqlite.exec("DROP TRIGGER audit_events_retention_delete"),
         expected: /migration 9 is missing required trigger audit_events_retention_delete/,
       },
+      {
+        mutate: (sqlite) => sqlite.exec("DROP TABLE render_jobs"),
+        expected: /migration 11 is missing required table render_jobs/,
+      },
+      {
+        mutate: (sqlite) => {
+          const row = sqlite.prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'render_jobs'",
+          ).get() as { sql: string };
+          const modified = row.sql.replace("CHECK(kind IN ('render', 'normalize_raster'))", "");
+          if (modified === row.sql) throw new Error("Render-job CHECK fixture did not match the current migration SQL.");
+          sqlite.unsafeMode(true);
+          sqlite.exec("PRAGMA writable_schema = ON");
+          sqlite.prepare("UPDATE sqlite_schema SET sql = ? WHERE type = 'table' AND name = 'render_jobs'").run(modified);
+          sqlite.exec("PRAGMA writable_schema = OFF");
+          sqlite.unsafeMode(false);
+        },
+        expected: /migration 11 table render_jobs has unexpected SQL/,
+      },
+      {
+        mutate: (sqlite) => {
+          const row = sqlite.prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'render_jobs_lifecycle_update'",
+          ).get() as { sql: string };
+          sqlite.unsafeMode(true);
+          sqlite.exec("PRAGMA writable_schema = ON");
+          sqlite.prepare(
+            "UPDATE sqlite_schema SET sql = ? WHERE type = 'trigger' AND name = 'render_jobs_lifecycle_update'",
+          ).run(`${row.sql} /* retained fragments but altered schema object */`);
+          sqlite.exec("PRAGMA writable_schema = OFF");
+          sqlite.unsafeMode(false);
+        },
+        expected: /migration 11 trigger render_jobs_lifecycle_update has unexpected SQL digest/,
+      },
     ];
 
     for (const fixture of cases) {
@@ -206,7 +241,7 @@ describe("content-addressed persistence", () => {
       const inspected = new Database(filename, { readonly: true });
       try {
         expect(inspected.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
-          .toEqual({ version: 10 });
+          .toEqual({ version: 11 });
       } finally {
         inspected.close();
       }

@@ -24,8 +24,24 @@ export interface RasterNormalizationOptions {
   maxPixels: number;
 }
 
+export type RasterNormalizationContext =
+  | {
+    scope: "organization";
+    organizationId: string;
+    designId?: string;
+    operation: string;
+  }
+  | {
+    scope: "internal";
+    operation: string;
+  };
+
 export interface RasterNormalizationEngine {
-  normalizeRaster(data: Buffer, options: RasterNormalizationOptions): Promise<NormalizedImageAsset>;
+  normalizeRaster(
+    data: Buffer,
+    options: RasterNormalizationOptions,
+    context?: RasterNormalizationContext,
+  ): Promise<NormalizedImageAsset>;
 }
 
 interface DetectedImageInfo extends ImageInfo {
@@ -337,6 +353,7 @@ export async function normalizeImageAsset(
   claimedMimeType: string | undefined,
   limits: { maxBytes: number; maxPixels: number },
   engine: RasterNormalizationEngine,
+  context?: RasterNormalizationContext,
 ): Promise<NormalizedImageAsset> {
   const detected = validateImageAsset(data, claimedMimeType, limits);
   try {
@@ -346,7 +363,7 @@ export async function normalizeImageAsset(
       sourceHeight: detected.height,
       maxBytes: limits.maxBytes,
       maxPixels: limits.maxPixels,
-    });
+    }, context);
     if (normalized.mimeType !== "image/png") {
       throw new DomainError("INTERNAL_ERROR", "The raster worker returned a non-canonical output format.", 500);
     }

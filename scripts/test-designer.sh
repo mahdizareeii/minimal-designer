@@ -253,6 +253,7 @@ run_static_contract_tests() {
   expect_status 0 "help exits successfully"
   expect_contains "FormaSpec launcher" "help identifies the launcher"
   expect_contains "--dry-run" "help documents dry-run mode"
+  expect_contains "recorded Docker/server runtime" "help documents supervised server restore through formaspecctl"
 
   capture bash "$LAUNCHER" version
   expect_status 0 "version exits successfully"

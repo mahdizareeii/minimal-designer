@@ -187,7 +187,7 @@ function assertSourceLocalRestoreMode(projectRoot: string, mode: RecordedRuntime
     throw new Error("backup restore supports only the source-local ./data directory. The recorded Docker runtime uses a managed volume; no Docker data was changed.");
   }
   if (mode === "server") {
-    throw new Error("backup restore is not a server maintenance workflow. Restore on the server only after a supported maintenance-mode and volume procedure exists; no server data was changed.");
+    throw new Error("A server runtime must restore an exact managed backup ID through the supervised maintenance workflow; arbitrary source-local bundle paths cannot target server volumes. No server data was changed.");
   }
   if (mode === undefined) {
     const recordedEnvironment = optionalRuntimeFile(projectRoot, "env-file");
@@ -270,7 +270,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         });
         persistDockerRuntimeBinding(root, binding);
       }
-      io.stdout("Pinned the exact local Docker daemon, image, containers, and data volumes for safe restore.");
+      io.stdout("Pinned the exact Docker daemon, Compose project, image, containers, runtime mode, and data volumes for safe restore.");
     };
     const delegate = async (launcherArguments: string[]): Promise<number> => {
       const root = projectRoot();
@@ -359,7 +359,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       const startArguments = validateStartArguments([...arguments_, ...(globalNoOpen ? ["--no-open"] : [])]);
       const exitCode = await delegate([...(assumeYes ? ["--yes"] : []), "start", ...startArguments]);
       if (exitCode !== 0) return exitCode;
-      if (startArguments[0] === "docker") await recordDockerBinding();
+      if (startArguments[0] === "docker" || startArguments[0] === "server") await recordDockerBinding();
       const bridgeStatus = await bridge().ensureStarted();
       io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
       await offerCodexConnection();
@@ -377,7 +377,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       await bridge().stop();
       const exitCode = await delegate(["restart"]);
       if (exitCode !== 0) return exitCode;
-      if (recordedRuntimeMode(projectRoot()) === "docker") await recordDockerBinding();
+      if (["docker", "server"].includes(recordedRuntimeMode(projectRoot()) ?? "")) await recordDockerBinding();
       const bridgeStatus = await bridge().ensureStarted();
       io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
       return 0;
@@ -799,7 +799,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup restore option: ${option}`);
           if (arguments_.length > 0) throw new Error(`Unexpected backup restore option: ${arguments_[0]}`);
           if (!assumeYes) {
-            throw new Error("backup restore replaces the local Docker data volume. Review the managed backup and rerun with explicit --yes authorization.");
+            throw new Error("backup restore replaces the pinned Docker/server data volume. Review the managed backup and rerun with explicit --yes authorization.");
           }
           await bridge().stop();
           const result = await (dependencies.restoreDockerBackup ?? restoreDockerBackup)(

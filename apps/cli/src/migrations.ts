@@ -11,7 +11,7 @@ export interface MigrationStatus {
   migrations: Array<{ version: number; name: string; appliedAt: string }>;
 }
 
-export const CLI_SUPPORTED_DATABASE_VERSION = 10;
+export const CLI_SUPPORTED_DATABASE_VERSION = 11;
 
 export function defaultDatabasePath(projectRoot: string): string {
   return path.join(projectRoot, "data", "designer.sqlite");

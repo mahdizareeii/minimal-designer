@@ -846,6 +846,20 @@ export class DesignerService {
     return resolveAccess(this.database.sqlite, actorId).organizationId;
   }
 
+  assetNormalizationOrganizationId(actorId: string, designId?: string): string {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    assertDesignWrite(access);
+    if (access.projectIds.length > 0 && !designId) {
+      throw new DomainError("FORBIDDEN", "A project-restricted grant must associate every asset with an allowed project.", 403);
+    }
+    if (designId) this.requireDesign(actorId, designId);
+    const assetPolicy = loadOrganizationPolicy(this.database.sqlite, access.organizationId).policy.assets;
+    if (!assetPolicy.enabled) {
+      throw new DomainError("FORBIDDEN", "Asset uploads are disabled by organization policy.", 403);
+    }
+    return access.organizationId;
+  }
+
   eventProjectIds(actorId: string): string[] {
     return resolveAccess(this.database.sqlite, actorId).projectIds;
   }

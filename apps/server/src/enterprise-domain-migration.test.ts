@@ -28,7 +28,12 @@ function simulateVersionSevenDatabase(filename: string): void {
     DROP TRIGGER audit_retention_runs_immutable_delete;
     DROP TRIGGER portable_imports_immutable_update;
     DROP TRIGGER portable_imports_immutable_delete;
+    DROP TRIGGER render_jobs_initial_insert;
+    DROP TRIGGER render_jobs_lifecycle_update;
+    DROP TRIGGER render_jobs_retention_delete;
 
+    DROP TABLE render_job_delete_permits;
+    DROP TABLE render_jobs;
     DROP TABLE portable_imports;
     DROP TABLE audit_retention_delete_permits;
     DROP TABLE audit_retention_runs;
@@ -69,11 +74,11 @@ afterEach(() => {
 });
 
 describe("enterprise domain migration", () => {
-  it("brings a clean database through the enterprise domain, audit-retention, and portable-import migrations", () => {
+  it("brings a clean database through the enterprise domain, retention, import, and render-job migrations", () => {
     const database = new DesignerDatabase(temporaryDatabase());
     try {
-      expect(database.schemaVersion()).toBe(10);
-      expect(database.metadata("database_schema_version")).toBe("10");
+      expect(database.schemaVersion()).toBe(11);
+      expect(database.metadata("database_schema_version")).toBe("11");
       const tables = database.sqlite.prepare(
         `SELECT name FROM sqlite_master
          WHERE type = 'table' AND name IN (
@@ -82,7 +87,7 @@ describe("enterprise domain migration", () => {
            'design_system_upgrade_previews', 'repository_inventories',
            'implementation_mappings', 'handoffs', 'handoff_versions',
            'handoff_transitions', 'redesign_assessments',
-           'redesign_assessment_versions', 'redesign_transitions'
+           'redesign_assessment_versions', 'redesign_transitions', 'render_jobs'
          ) ORDER BY name`,
       ).all() as Array<{ name: string }>;
       expect(tables.map((row) => row.name)).toEqual([
@@ -99,6 +104,7 @@ describe("enterprise domain migration", () => {
         "redesign_assessment_versions",
         "redesign_assessments",
         "redesign_transitions",
+        "render_jobs",
         "repository_inventories",
       ]);
     } finally {
@@ -129,7 +135,7 @@ describe("enterprise domain migration", () => {
 
     const upgraded = new DesignerDatabase(copied);
     try {
-      expect(upgraded.schemaVersion()).toBe(10);
+      expect(upgraded.schemaVersion()).toBe(11);
       expect(upgraded.sqlite.prepare(
         "SELECT name FROM schema_migrations WHERE version = 8",
       ).get()).toEqual({ name: "enterprise_domain_models" });
@@ -139,6 +145,9 @@ describe("enterprise domain migration", () => {
       expect(upgraded.sqlite.prepare(
         "SELECT name FROM schema_migrations WHERE version = 10",
       ).get()).toEqual({ name: "portable_import_provenance" });
+      expect(upgraded.sqlite.prepare(
+        "SELECT name FROM schema_migrations WHERE version = 11",
+      ).get()).toEqual({ name: "render_job_persistence" });
       expect(upgraded.sqlite.prepare(
         `SELECT id, design_id, version, parent_revision_id, actor_id, message,
                 document_json, operations_json, snapshot_hash, operation_hash,

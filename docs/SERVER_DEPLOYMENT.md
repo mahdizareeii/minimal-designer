@@ -29,6 +29,24 @@ Generate source-mode server configuration with:
 ./designer server init --public-url https://design.example.com
 ```
 
+Starting through the current `formaspecctl`/`designer` wrapper records a
+mode-`0600`, secret-free runtime binding for the fixed Compose project. An
+Organization Administrator can then select an exact managed backup ID from the
+Administration UI and run the external maintenance workflow on the server host:
+
+```bash
+./designer --yes backup restore --backup-id backup_<40-lowercase-hex>
+./designer backup restore status
+./designer --yes backup restore resume
+./designer --yes backup restore rollback
+```
+
+The supervisor revalidates the secure server environment hash, public Host,
+loopback port, Docker context/daemon, image, container labels, and named volumes
+before each action. It never serializes or passes `DESIGNER_TOKEN` to the
+network-disabled restore worker. Unknown/custom Compose projects, bind mounts,
+Kubernetes/Swarm, and off-host volumes are outside this supported boundary.
+
 Do not expose current source builds as enterprise production services. The
-required renderer isolation, deployment/security suites, signed packages, and
-release evidence remain incomplete.
+required clean server restore/rollback exercise, deployment/security suites,
+signed packages, alerting, and release evidence remain incomplete.

@@ -392,7 +392,7 @@ describe("portable FormaSpec project bundles", () => {
     expect(() => readPortableProjectBundle(trailing)).toThrow(/compressed stream is malformed/);
   });
 
-  it("accepts signed and signatureless data descriptors and rejects descriptor mismatches", () => {
+  it("accepts signed and signatureless data descriptors and rejects descriptor mismatches and boundary padding", () => {
     const source = Buffer.from(zipSync({ "payload.bin": deterministicNoise(48 * 1024) }));
     for (const signature of [true, false]) {
       const descriptorBundle = withDataDescriptor(source, "payload.bin", signature);
@@ -404,6 +404,17 @@ describe("portable FormaSpec project bundles", () => {
     const descriptorOffset = layout.dataOffset + layout.compressedBytes + 4;
     mismatched.writeUInt32LE(mismatched.readUInt32LE(descriptorOffset) ^ 0xffff_ffff, descriptorOffset);
     expect(() => readPortableProjectBundle(mismatched)).toThrow(/data descriptor does not match/);
+
+    const bounded = withDataDescriptor(source, "payload.bin", true);
+    const boundedEocd = endOfCentralDirectoryOffset(bounded);
+    const boundedDirectoryOffset = bounded.readUInt32LE(boundedEocd + 16);
+    const paddedBoundary = Buffer.concat([
+      bounded.subarray(0, boundedDirectoryOffset),
+      Buffer.from([0]),
+      bounded.subarray(boundedDirectoryOffset),
+    ]);
+    paddedBoundary.writeUInt32LE(boundedDirectoryOffset + 1, boundedEocd + 1 + 16);
+    expect(() => readPortableProjectBundle(paddedBoundary)).toThrow(/data descriptor is malformed/);
   });
 
   it("rejects encrypted, unsupported, mismatched, symlink, and DOS-directory entries before extraction", () => {

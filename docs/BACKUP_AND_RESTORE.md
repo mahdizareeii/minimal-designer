@@ -10,7 +10,7 @@ interchangeable:
 | Mechanism | Implemented now | Important limitation |
 | --- | --- | --- |
 | Verified FormaSpec bundle engine | The server can create, verify, list, and download `formaspec-backup-*.tar` bundles. Verification checks semantic asset ownership/references, snapshots, typed operations, revision chains, and project heads across strict V1/V2 documents. Verification and download use private descriptor-pinned bytes. Restore forecasts whole-workflow capacity before maintenance, rechecks each copy/extraction step, opens sources with `O_NOFOLLOW`, and uses only expected size/SHA-256 pinned bytes afterward. | Bundles remain unsigned, so integrity and consistency checks do not establish creator provenance. Node does not expose a portable atomic no-replace directory rename, so the cutover destination race remains documented for hostile local filesystems. |
-| `formaspecctl` | `backup create`, `backup list`, schedule show/enable/disable/run, preview-first retention pruning, `backup verify <bundle>`, source-local bundle restore, and externally supervised local-Docker restore/status/resume/rollback/abort/stale-lock recovery by opaque backup ID are implemented. | Managed restore supports only the launcher-recorded local Docker runtime. Server mode still needs a deployment-specific external supervisor, and bundles are checksummed but unsigned. |
+| `formaspecctl` | `backup create`, `backup list`, schedule show/enable/disable/run, preview-first retention pruning, `backup verify <bundle>`, source-local bundle restore, and externally supervised Docker/server restore/status/resume/rollback/abort/stale-lock recovery by opaque backup ID are implemented. | Managed restore accepts only the exact launcher-recorded Compose project, loopback binding, image, containers, named volumes, secure runtime environment, and Docker context. It is not a generic Compose/Kubernetes/remote-volume recovery tool, and bundles remain unsigned. |
 | Compatibility launcher | `./designer backup [DESTINATION]` makes a full stopped-service copy of `DATA_DIR`. | This is a downtime copy with a small text manifest, not a verified FormaSpec bundle. |
 
 Managed schedules use one daily UTC time and organization-policy retention
@@ -22,11 +22,12 @@ retention plans. Changing the policy default does not rewrite an already stored
 schedule row; operators should review and explicitly update the schedule after
 policy changes.
 FormaSpec does not yet run an internal background scheduler; an authenticated
-operator or service supervisor must call the schedule-run operation. The local
-Docker restore foundation is deliberately controlled by `formaspecctl` outside
+operator or service supervisor must call the schedule-run operation. The
+managed Docker/server restore foundation is deliberately controlled by
+`formaspecctl` outside
 the running Fastify process. Backup and restore remain a production-readiness
-blocker until the server supervisor, signed provenance, native packaging, and
-complete release evidence are delivered.
+blocker until clean server-mode recovery evidence, signed provenance, native
+packaging, and complete release evidence are delivered.
 
 The installed Docker volume has two valid checkpoint bundles:
 
@@ -126,8 +127,9 @@ persists its exact backup IDs, plan hash, and approximately 15-minute expiry;
 commit re-computes the policy and revalidates every record, regular-file path,
 size, inode, and SHA-256 before deletion. There is no restore endpoint, server
 process self-restore, built-in timer/cron supervisor, or supported off-host
-destination workflow. The local-Docker restore is instead supervised by the
-host CLI and a one-shot `restore-worker` container.
+destination workflow. Restore is instead supervised by the host CLI and a
+network-disabled one-shot `restore-worker` container for an exact
+launcher-pinned local-Docker or server runtime.
 
 The tested server restore primitive requires a closed database, verifies the
 bundle, stages candidate and rollback trees inside the destination filesystem,
@@ -135,7 +137,7 @@ and journals top-level moves without renaming the `/data` mount root. It retains
 rollback material when cutover or rollback is uncertain and resumes an
 incomplete rollback on the next invocation.
 
-For the launcher-recorded local Docker runtime, `formaspecctl` now fences the
+For a launcher-recorded Docker or server runtime, `formaspecctl` now fences the
 application with maintenance state outside `/data`, stops only the API, and runs
 the restore engine in a network-disabled one-shot worker. That worker creates a
 verified manual safety backup, closes SQLite before cutover, validates the
@@ -145,10 +147,11 @@ reconciles audit/outbox state, and revokes restored grants, connections, and
 pairing nonces. The API is restarted under maintenance and normal readiness is
 required before maintenance can clear.
 
-The isolated A/B exercise above is recorded recovery evidence for this exact
-launcher-local topology. Server mode still requires an external deployment
-supervisor. Signing, encryption, native installer integration, and broader
-recovery fixtures are unfinished. Restore now closes the pathname replacement
+The isolated A/B exercise above is recorded recovery evidence only for its
+launcher-local topology. The same supervisor now supports the strict
+launcher-recorded server topology, but a clean server-mode proxy/restore run,
+failure-injection matrix, signing, encryption, native installer integration,
+and broader recovery fixtures are unfinished. Restore closes the pathname replacement
 window by copying from an `O_NOFOLLOW` handle into private read-only staging,
 checking the expected managed size/SHA-256, and using only those pinned bytes
 for journal matching, verification, and extraction. The current hashes prove
@@ -263,23 +266,29 @@ path itself still does not provide maintenance mode, automatic restart,
 audit-complete external supervision, or server deployment orchestration; those
 remain release blockers for this restore path.
 
-### Externally supervised local-Docker restore foundation
+### Externally supervised Docker/server restore foundation
 
-Use only an exact opaque ID returned by `backup list`; arbitrary host or
-container paths are rejected:
+Use only an exact opaque ID returned by the Administration backup list (or by
+`backup list` in local Docker mode); arbitrary host or container paths are
+rejected:
 
 ```bash
 pnpm formaspecctl backup list
 pnpm formaspecctl backup restore --backup-id backup_<40-lowercase-hex> --yes
 ```
 
-The command is accepted only when launcher state records the local `docker`
-runtime and a mode-`0600` binding exists at
+The command is accepted only when launcher state records `docker` or `server`
+mode and a mode-`0600` binding exists at
 `.designer/run/docker-runtime-binding.json`. The binding pins the Docker
 context and daemon identity, image digest, container identities and Compose
 labels/project path, named data/backup/socket volumes, renderer isolation, and
-loopback-published API port. Restore revalidates that exact runtime instead of
-trusting the ambient Docker context or current Compose discovery. It holds the
+loopback-published API port. Binding format 2 also pins a SHA-256 of the
+secret-redacted environment identity plus the non-secret runtime/access mode
+and health `Host`;
+the bearer value is never serialized or forwarded to the one-shot worker.
+Format-1 local bindings are read compatibly and upgraded in memory. Restore
+revalidates that exact runtime instead of trusting the ambient Docker context
+or current Compose discovery. It holds the
 launcher application lock, stops the local bridge, and performs these
 externally supervised steps:
 
@@ -307,8 +316,8 @@ externally supervised steps:
    revocation postcondition after audit/outbox triggers have run; and
 9. restart the API while maintenance is still active, verify liveness,
    renderer health, maintenance-fenced readiness, clear maintenance only after
-   a durable terminal result, then verify normal readiness and authorized
-   design listing.
+   a durable terminal result, then verify exact-schema normal readiness and the
+   isolated Playwright renderer again.
 
 The worker and control process share the non-expiring lock
 `/backups/.formaspec/restore-worker.lock.json`. Fastify refuses to open SQLite
@@ -401,11 +410,16 @@ rollback revokes all restored agent credentials; reconnect Codex explicitly:
 pnpm formaspecctl agent connect codex --yes
 ```
 
-This command surface is supported only for the launcher-recorded local Docker
-topology. It is not accepted for `APP_MODE=server`, direct/unknown Compose
-projects, guessed volumes, or remote hosts. A server deployment must supply its
-own external supervisor with equivalent application locking, maintenance,
-service stop/start, one-shot worker, verification, rollback, and alerting.
+This command surface is supported only for the launcher-recorded Compose
+topology created by the current `designer`/`formaspecctl` server or local-Docker
+startup. Server mode must retain its mode-`0600` `.designer/env/server.env`,
+loopback-only published port, exact HTTPS public origin/Host, trusted-header
+configuration, fixed Compose project, and pinned named volumes. A changed env,
+Host, context, daemon, image, container, label, port, or volume makes the
+binding stale and restore fails before mutation. Direct/unknown Compose
+projects, custom project names, bind-mounted data, Kubernetes/Swarm, guessed
+volumes, and an operator invoking the CLI from a different unpinned checkout
+remain unsupported.
 
 The local-Docker implementation, focused tests, and the recorded isolated A/B
 exercise are still not a completed release gate. Restore pins the source once,
@@ -453,10 +467,9 @@ secret-management lifecycle.
 
 `formaspecctl backup restore <bundle> --yes` supports the source-local `./data`
 recovery unit and leaves that service stopped. The
-`formaspecctl backup restore --backup-id <id> --yes` command supports only the
-launcher-recorded local Docker data and backup volumes through the external
-supervisor above. There is no supported
-server restore. Test recovery in an isolated environment, keep source bundles
+`formaspecctl backup restore --backup-id <id> --yes` command supports the
+launcher-recorded local-Docker or server data and backup volumes through the
+external supervisor above. Test recovery in an isolated environment, keep source bundles
 unchanged, and never replace a volume manually while an operation or
 maintenance marker exists. Docker volume names are deployment-specific;
 determine them from `docker compose config` rather than guessing.
@@ -478,13 +491,13 @@ of these checks pass:
 
 The bundle verifier now covers archive/checksum, asset, canonical snapshot,
 revision/hash-chain, project-head, SQLite, foreign-key, and migration-ledger
-integrity. The local-Docker worker additionally checks the current schema,
+integrity. The Docker/server worker additionally checks the current schema,
 organization, deterministic renderer, audit/outbox reconciliation, and agent
 revocation before the supervisor clears maintenance. The isolated A/B Docker
 scenario and the separate 20-step source-local V1/V2/product-spec/task/hash/
 render scenario both pass. Complete normalized/legacy asset and design-system
 recovery coverage, historical fixtures, failure injection, reconnect/
-revocation, and the server-supervisor path remain unverified.
+revocation, and a clean server-mode restore exercise remain unverified.
 
 ## Retention and unfinished operator work
 

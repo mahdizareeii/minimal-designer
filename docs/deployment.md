@@ -7,9 +7,9 @@ Last audited: 2026-07-20
 FormaSpec is **not ready for production or public deployment**. The repository
 can be used for local development and controlled, access-restricted evaluation,
 and the hardened local Docker API/renderer split plus externally supervised
-local-Docker restore foundation exist, but native packages, server restore,
-reverse-proxy evidence, installer matrix, signed backup provenance, and complete
-release evidence do not exist yet. One isolated local-Docker A/B restore and
+Docker/server restore command foundation exist, but native packages, clean
+server restore/reverse-proxy evidence, installer matrix, signed backup
+provenance, and complete release evidence do not exist yet. One isolated local-Docker A/B restore and
 safety-restore exercise has passed; it does not qualify the server deployment
 path.
 
@@ -90,9 +90,10 @@ asset, and worker render. Current gaps include:
 - no continuous canary-egress, crash, saturation, or long-running load proof;
 - no installed schedule supervisor; online create/list/verify/download and
   supervisor-callable schedule/prune use the mounted backup volume;
-- a tested externally supervised restore foundation and one disposable A/B
-  exercise exist only for the launcher-recorded local Docker runtime; server
-  mode still has no deployment supervisor;
+- a tested externally supervised restore foundation supports the exact
+  launcher-recorded local-Docker/server runtime, but the disposable A/B
+  exercise covers only local Docker and no server deployment automation or
+  alerting has been qualified;
 - no release evidence proving the strict server-mode reverse-proxy path,
   upgrade, restore, or multi-user long-duration behavior.
 
@@ -322,7 +323,7 @@ revision hash chains, and exact project heads. The running application and
 Administration UI expose create/list/re-verify/download. Supervisor-callable
 schedule execution and preview-first retention pruning are implemented. The CLI
 supports both explicitly authorized source-local restore and an externally
-supervised launcher-local Docker restore by opaque managed backup ID:
+supervised launcher-pinned Docker/server restore by opaque managed backup ID:
 
 ```bash
 pnpm formaspecctl backup create
@@ -341,14 +342,18 @@ pnpm formaspecctl backup restore clear-stale-lock --yes
 
 `./designer backup` is a legacy downtime copy, not the verified bundle format.
 The path-based source-local command deliberately refuses Docker/server data.
-The ID-based command accepts only the launcher's recorded local Docker runtime;
-it refuses `APP_MODE=server`, direct/unknown Compose projects, arbitrary paths,
-and guessed volumes. Install/start/restart record a mode-`0600` exact runtime
+The ID-based command accepts only the launcher's recorded local-Docker or
+server runtime; it refuses direct/unknown Compose projects, custom project
+names, arbitrary paths, bind-mounted data, and guessed volumes.
+Install/start/restart record a mode-`0600` exact runtime
 binding at `.designer/run/docker-runtime-binding.json`; restore revalidates its
 Docker context/daemon, image digest, container and Compose identities/project
-path, named volumes, renderer isolation, and loopback-published port.
+path, named volumes, renderer isolation, loopback-published port, runtime mode,
+secret-redacted environment identity SHA-256, and exact health `Host`. The binding never stores
+the bearer value, and the one-shot worker receives no application bearer
+credential.
 
-The local-Docker supervisor holds the launcher lock, stops the bridge, performs
+The Docker/server supervisor holds the launcher lock, stops the bridge, performs
 a read-only target preflight before maintenance, writes a fixed path-free marker
 under `/backups/.formaspec`, stops only the API, and uses hardened direct
 `docker run` to launch the network-disabled one-shot worker with the exact
@@ -413,11 +418,12 @@ server startup applies pending numbered database migrations automatically and
 refuses an unknown/newer migration ledger. The CLI migration command is
 read-only and source-database-only.
 
-The local-Docker restore supervisor is a recovery foundation, not an unattended
-deployment rollback mechanism. It is intentionally unavailable in server mode;
-a real server deployment must keep maintenance ownership and service lifecycle
-under an external orchestrator rather than asking the running Fastify process
-to replace its own open database.
+The Docker/server restore supervisor is a recovery foundation, not an
+unattended deployment rollback mechanism. In the supported server boundary the
+host CLI owns maintenance and the exact pinned container lifecycle; the running
+Fastify process never replaces its own open database. Custom Compose projects,
+Kubernetes/Swarm, off-host volumes, automatic alerting, and unattended recovery
+still require a deployment-specific orchestrator.
 
 For a controlled source upgrade:
 
@@ -441,15 +447,15 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
 
 - Windows/native renderer IPC packaging plus continuous egress, crash,
   saturation, and load evidence beyond the verified local Docker worker;
-- strict server-mode proxy/direct-port, upgrade, and long-running Compose
-  evidence;
+- strict server-mode proxy/direct-port, supervised restore/rollback, upgrade,
+  alerting, and long-running Compose evidence;
 - broader local-Docker V1/V2, asset/hash/render and historical-fixture recovery
   evidence beyond the isolated A/B exercise, signed provenance, durable `/data`
   and `/backups` operational proof, and complete scheduling/retention/pruning
   failure recovery;
-- server-mode external-supervisor restore with maintenance, safety backup,
-  deterministic render smoke, audit/outbox reconciliation, rollback, and
-  alerting;
+- release evidence for the implemented server-mode supervisor covering
+  maintenance, safety backup, deterministic render smoke, audit/outbox
+  reconciliation, rollback, revocation, crash recovery, and alerting;
 - browser E2E and visual-regression suites beyond the passing integrated local
   scenario, proving the complete cross-platform selection/canvas matrix;
 - pinned cross-platform CI retention for the already-passing 1,000-node

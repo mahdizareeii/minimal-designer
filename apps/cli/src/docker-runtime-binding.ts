@@ -1,11 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { findExecutable, runCommand, type CommandRunner } from "./process.js";
 
 const BINDING_FORMAT = "formaspec-docker-runtime-binding";
-const BINDING_VERSION = 1;
+const LEGACY_BINDING_VERSION = 1;
+const BINDING_VERSION = 2;
 const BINDING_FILENAME = "docker-runtime-binding.json";
 const COMPOSE_PROJECT = "minimalappdesigner";
 const CONTAINER_PORT = 4310;
@@ -26,11 +27,16 @@ const containerIdPattern = /^[a-f0-9]{64}$/;
 const imageIdPattern = /^sha256:[a-f0-9]{64}$/;
 const volumeNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 const configHashPattern = /^[a-f0-9]{64}$/;
+const sha256Pattern = /^[a-f0-9]{64}$/;
 const containerNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const composeVersionPattern = /^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/;
+const trustedHeaderPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
+const bearerTokenPattern = /^[A-Za-z0-9._-]{16,4096}$/;
 
 type BoundService = "designer" | "renderer";
 type LoopbackHost = "127.0.0.1" | "::1";
+type RecordedRuntimeMode = "docker" | "server";
+type ServerAccess = "none" | "ssh" | "proxy";
 
 export interface DockerComposeBindingLabels {
   project: typeof COMPOSE_PROJECT;
@@ -74,6 +80,12 @@ export interface DockerRuntimeBinding {
     containerPort: typeof CONTAINER_PORT;
     origin: string;
   };
+  runtime: {
+    mode: RecordedRuntimeMode;
+    serverAccess: ServerAccess;
+    healthHostHeader: string;
+    environmentIdentitySha256: string;
+  };
 }
 
 export interface PublicDockerRuntimeBinding {
@@ -83,6 +95,9 @@ export interface PublicDockerRuntimeBinding {
   containerPort: typeof CONTAINER_PORT;
   origin: string;
   rendererNetworkMode: "none";
+  runtimeMode: RecordedRuntimeMode;
+  serverAccess: ServerAccess;
+  healthHostHeader: string;
 }
 
 export interface DockerRuntimeBindingDependencies {
@@ -102,9 +117,13 @@ export interface HardenedDockerRunOptions {
 }
 
 interface RecordedDockerEnvironment {
+  mode: RecordedRuntimeMode;
+  serverAccess: ServerAccess;
   host: LoopbackHost;
   port: number;
   origin: string;
+  healthHostHeader: string;
+  environmentIdentitySha256: string;
 }
 
 interface RawMount {
@@ -236,14 +255,70 @@ function parsePersistedLabels(value: unknown, service: BoundService): DockerComp
   };
 }
 
-function parseBinding(value: unknown): DockerRuntimeBinding {
+function parseHealthHostHeader(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 512
+    || value !== value.trim().toLowerCase() || /[\s/@\\]/.test(value)) {
+    throw new Error(`${label} is invalid.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(`http://${value}`);
+  } catch {
+    throw new Error(`${label} is invalid.`);
+  }
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.pathname !== "/"
+    || parsed.search || parsed.hash || parsed.host.toLowerCase() !== value) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return value;
+}
+
+function runtimeBinding(value: unknown): DockerRuntimeBinding["runtime"] {
+  if (!isRecord(value)) throw new Error("Persisted Docker runtime mode is invalid.");
+  assertExactKeys(
+    value,
+    ["mode", "serverAccess", "healthHostHeader", "environmentIdentitySha256"],
+    "Persisted Docker runtime mode",
+  );
+  const mode = value.mode;
+  const serverAccess = value.serverAccess;
+  if (mode !== "docker" && mode !== "server") throw new Error("Persisted Docker runtime mode is invalid.");
+  if (serverAccess !== "none" && serverAccess !== "ssh" && serverAccess !== "proxy") {
+    throw new Error("Persisted Docker server access mode is invalid.");
+  }
+  if ((mode === "docker" && serverAccess !== "none") || (mode === "server" && serverAccess === "none")) {
+    throw new Error("Persisted Docker runtime and server access modes are inconsistent.");
+  }
+  return {
+    mode,
+    serverAccess,
+    healthHostHeader: parseHealthHostHeader(value.healthHostHeader, "Persisted Docker health Host header"),
+    environmentIdentitySha256: strictString(
+      value.environmentIdentitySha256,
+      sha256Pattern,
+      "Persisted Docker environment SHA-256",
+    ),
+  };
+}
+
+function parseBinding(
+  value: unknown,
+  legacyRuntime?: DockerRuntimeBinding["runtime"],
+): DockerRuntimeBinding {
   if (!isRecord(value)) throw new Error("Persisted Docker runtime binding is invalid.");
+  const version = value.version;
+  const legacy = version === LEGACY_BINDING_VERSION;
   assertExactKeys(value, [
     "format", "version", "capturedAt", "context", "daemonId", "composeProject", "imageId",
-    "containers", "labels", "volumes", "renderer", "publicBinding",
+    "containers", "labels", "volumes", "renderer", "publicBinding", ...(legacy ? [] : ["runtime"]),
   ], "Persisted Docker runtime binding");
-  if (value.format !== BINDING_FORMAT || value.version !== BINDING_VERSION || value.composeProject !== COMPOSE_PROJECT) {
+  if (value.format !== BINDING_FORMAT
+    || (version !== LEGACY_BINDING_VERSION && version !== BINDING_VERSION)
+    || value.composeProject !== COMPOSE_PROJECT) {
     throw new Error("Persisted Docker runtime binding format is unsupported.");
+  }
+  if (legacy && legacyRuntime === undefined) {
+    throw new Error("Legacy Docker runtime binding requires its recorded runtime environment.");
   }
   if (!isRecord(value.containers) || !isRecord(value.labels) || !isRecord(value.volumes)
     || !isRecord(value.renderer) || !isRecord(value.publicBinding)) {
@@ -279,6 +354,11 @@ function parseBinding(value: unknown): DockerRuntimeBinding {
   if (designerLabels.imageId !== rendererLabels.imageId) {
     throw new Error("Persisted Docker Compose image labels do not match each other.");
   }
+  const runtime = legacy ? legacyRuntime! : runtimeBinding(value.runtime);
+  if ((runtime.mode === "docker" || runtime.serverAccess === "ssh")
+    && runtime.healthHostHeader !== new URL(normalizedOrigin(host, port)).host) {
+    throw new Error("Persisted local Docker health Host header is inconsistent.");
+  }
   return {
     format: BINDING_FORMAT,
     version: BINDING_VERSION,
@@ -292,6 +372,7 @@ function parseBinding(value: unknown): DockerRuntimeBinding {
     volumes,
     renderer: { networkMode: "none" },
     publicBinding: { host, port, containerPort: CONTAINER_PORT, origin: normalizedOrigin(host, port) },
+    runtime,
   };
 }
 
@@ -391,40 +472,147 @@ function parseEnvironmentFile(contents: string): Map<string, string> {
   return result;
 }
 
+function isSensitiveEnvironmentKey(key: string): boolean {
+  return /(^|_)(?:TOKEN|SECRET|PASSWORD|PASSCODE|API_KEY|PRIVATE_KEY|CREDENTIALS?)(?:_|$)/i.test(key);
+}
+
+function environmentIdentitySha256(values: Map<string, string>, stat: fs.Stats): string {
+  const entries = [...values.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => [key, isSensitiveEnvironmentKey(key) ? "[redacted]" : value]);
+  return createHash("sha256").update(JSON.stringify({
+    device: stat.dev,
+    inode: stat.ino,
+    size: stat.size,
+    modifiedMs: stat.mtimeMs,
+    entries,
+  })).digest("hex");
+}
+
 function readRecordedDockerEnvironment(projectRoot: string): RecordedDockerEnvironment {
   const root = path.resolve(projectRoot);
   const runDirectory = assertRuntimeDirectory(root);
   assertRealDirectory(path.join(root, ".designer", "env"), "FormaSpec runtime environment directory");
-  const expectedEnvironment = path.join(root, ".designer", "env", "docker.env");
-  const mode = readSmallRegularFile(path.join(runDirectory, "mode"), 64, "Recorded Docker mode").trim();
-  if (mode !== "docker") throw new Error("Docker runtime binding requires the recorded local Docker mode.");
+  const modeValue = readSmallRegularFile(path.join(runDirectory, "mode"), 64, "Recorded Docker mode").trim();
+  if (modeValue !== "docker" && modeValue !== "server") {
+    throw new Error("Docker runtime binding requires a recorded Docker or server mode.");
+  }
+  const mode: RecordedRuntimeMode = modeValue;
+  const expectedEnvironment = path.join(root, ".designer", "env", mode === "server" ? "server.env" : "docker.env");
   const recordedEnvironment = readSmallRegularFile(
     path.join(runDirectory, "env-file"),
     4096,
     "Recorded Docker environment path",
   ).trim();
   if (path.resolve(recordedEnvironment) !== expectedEnvironment) {
-    throw new Error("Recorded Docker environment path does not match the managed local environment.");
+    throw new Error("Recorded Docker environment path does not match the managed runtime mode.");
   }
   const environmentStat = fs.lstatSync(expectedEnvironment);
-  if (!environmentStat.isFile() || environmentStat.isSymbolicLink() || environmentStat.size > 16 * 1024) {
+  if (!environmentStat.isFile() || environmentStat.isSymbolicLink()
+    || environmentStat.size < 1 || environmentStat.size > 16 * 1024) {
     throw new Error("Managed Docker environment must be a bounded regular file.");
   }
-  const values = parseEnvironmentFile(readSmallRegularFile(expectedEnvironment, 16 * 1024, "Managed Docker environment"));
-  if (values.get("APP_MODE") !== "local" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "true"
-    || values.get("AUTH_MODE") !== "none" || (values.get("DESIGNER_TOKEN") ?? "") !== "") {
-    throw new Error("Managed Docker environment is not an unauthenticated loopback-local configuration.");
+  if (process.platform !== "win32" && (environmentStat.mode & 0o777) !== 0o600) {
+    throw new Error("Managed Docker environment permissions must be exactly 0600.");
   }
+  const contents = readSmallRegularFile(expectedEnvironment, 16 * 1024, "Managed Docker environment");
+  const values = parseEnvironmentFile(contents);
   const host = parseLoopbackHost(values.get("BIND_ADDRESS"), "Managed Docker bind address");
   const port = parsePort(values.get("PORT"), "Managed Docker port");
   const origin = normalizedOrigin(host, port);
-  if (values.get("PUBLIC_BASE_URL") !== origin) throw new Error("Managed Docker public URL does not match its loopback binding.");
   const recordedUrl = readSmallRegularFile(path.join(runDirectory, "url"), 2048, "Recorded Docker URL").trim();
-  if (recordedUrl !== origin) throw new Error("Recorded Docker URL does not match the managed local environment.");
-  return { host, port, origin };
+  const environmentIdentity = environmentIdentitySha256(values, environmentStat);
+
+  if (mode === "docker") {
+    if (values.get("APP_MODE") !== "local" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "true"
+      || values.get("AUTH_MODE") !== "none" || (values.get("DESIGNER_TOKEN") ?? "") !== "") {
+      throw new Error("Managed Docker environment is not an unauthenticated loopback-local configuration.");
+    }
+    if (values.get("PUBLIC_BASE_URL") !== origin) {
+      throw new Error("Managed Docker public URL does not match its loopback binding.");
+    }
+    if (recordedUrl !== origin) throw new Error("Recorded Docker URL does not match the managed local environment.");
+    return {
+      mode,
+      serverAccess: "none",
+      host,
+      port,
+      origin,
+      healthHostHeader: new URL(origin).host,
+      environmentIdentitySha256: environmentIdentity,
+    };
+  }
+
+  const serverAccess = values.get("DESIGNER_SERVER_ACCESS");
+  if (serverAccess !== "ssh" && serverAccess !== "proxy") {
+    throw new Error("Managed server environment has an invalid access mode.");
+  }
+  const trustedHeader = values.get("TRUSTED_USER_HEADER");
+  if (typeof trustedHeader !== "string" || !trustedHeaderPattern.test(trustedHeader)) {
+    throw new Error("Managed server environment has an invalid trusted identity header.");
+  }
+  if (serverAccess === "ssh") {
+    if (values.get("APP_MODE") !== "local" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "true"
+      || values.get("AUTH_MODE") !== "none" || (values.get("DESIGNER_TOKEN") ?? "") !== ""
+      || values.get("PUBLIC_BASE_URL") !== origin || recordedUrl !== origin) {
+      throw new Error("Managed SSH-only server environment is not a loopback-local configuration.");
+    }
+    return {
+      mode,
+      serverAccess,
+      host,
+      port,
+      origin,
+      healthHostHeader: new URL(origin).host,
+      environmentIdentitySha256: environmentIdentity,
+    };
+  }
+
+  if (values.get("APP_MODE") !== "server" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "false"
+    || values.get("AUTH_MODE") !== "trusted-header"
+    || !bearerTokenPattern.test(values.get("DESIGNER_TOKEN") ?? "")) {
+    throw new Error("Managed trusted-proxy server environment is incomplete or unsafe.");
+  }
+  const publicBaseUrl = values.get("PUBLIC_BASE_URL");
+  let publicUrl: URL;
+  try {
+    if (!publicBaseUrl) throw new Error("missing");
+    publicUrl = new URL(publicBaseUrl);
+  } catch {
+    throw new Error("Managed trusted-proxy server public URL is invalid.");
+  }
+  if (publicUrl.protocol !== "https:" || publicUrl.username || publicUrl.password
+    || (publicUrl.pathname !== "/" && publicUrl.pathname !== "") || publicUrl.search || publicUrl.hash
+    || (publicBaseUrl !== publicUrl.origin && publicBaseUrl !== `${publicUrl.origin}/`)) {
+    throw new Error("Managed trusted-proxy server public URL must be an exact HTTPS origin.");
+  }
+  const healthHostHeader = parseHealthHostHeader(publicUrl.host.toLowerCase(), "Managed server health Host header");
+  const allowedHosts = values.get("FORMASPEC_ALLOWED_HOSTS");
+  const normalizedAllowedHosts = allowedHosts?.trim().toLowerCase();
+  if (normalizedAllowedHosts !== undefined
+    && normalizedAllowedHosts !== healthHostHeader
+    && normalizedAllowedHosts !== `${healthHostHeader}/`) {
+    throw new Error("Managed server Host allowlist does not match its public HTTPS origin.");
+  }
+  const corsOrigins = values.get("DESIGNER_CORS_ORIGINS");
+  if (corsOrigins !== undefined && corsOrigins !== publicBaseUrl) {
+    throw new Error("Managed server CORS origin does not match its public HTTPS origin.");
+  }
+  if (recordedUrl !== publicBaseUrl) {
+    throw new Error("Recorded server URL does not match the managed trusted-proxy environment.");
+  }
+  return {
+    mode,
+    serverAccess,
+    host,
+    port,
+    origin,
+    healthHostHeader,
+    environmentIdentitySha256: environmentIdentity,
+  };
 }
 
-function sanitizedDockerEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function sanitizedDockerProcessEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result = { ...environment };
   for (const key of [
     "DOCKER_HOST",
@@ -436,6 +624,11 @@ function sanitizedDockerEnvironment(environment: NodeJS.ProcessEnv): NodeJS.Proc
     "COMPOSE_FILE",
     "COMPOSE_PROFILES",
   ]) delete result[key];
+  for (const key of Object.keys(result)) {
+    if (isSensitiveEnvironmentKey(key)) {
+      delete result[key];
+    }
+  }
   return result;
 }
 
@@ -623,7 +816,7 @@ async function captureWithContext(
   context: string,
   dependencies: DockerRuntimeBindingDependencies,
 ): Promise<DockerRuntimeBinding> {
-  const environment = sanitizedDockerEnvironment(dependencies.environment ?? process.env);
+  const environment = sanitizedDockerProcessEnvironment(dependencies.environment ?? process.env);
   const runner = dependencies.commandRunner ?? runCommand;
   const executable = executableFor(dependencies);
   const recorded = readRecordedDockerEnvironment(projectRoot);
@@ -666,6 +859,12 @@ async function captureWithContext(
       containerPort: CONTAINER_PORT,
       origin: recorded.origin,
     },
+    runtime: {
+      mode: recorded.mode,
+      serverAccess: recorded.serverAccess,
+      healthHostHeader: recorded.healthHostHeader,
+      environmentIdentitySha256: recorded.environmentIdentitySha256,
+    },
   });
 }
 
@@ -687,7 +886,7 @@ export async function captureDockerRuntimeBinding(
   projectRoot: string,
   dependencies: DockerRuntimeBindingDependencies = {},
 ): Promise<DockerRuntimeBinding> {
-  const environment = sanitizedDockerEnvironment(dependencies.environment ?? process.env);
+  const environment = sanitizedDockerProcessEnvironment(dependencies.environment ?? process.env);
   const runner = dependencies.commandRunner ?? runCommand;
   const executable = executableFor(dependencies);
   const context = await resolveContext(runner, executable, dependencies, environment);
@@ -736,7 +935,18 @@ export function readDockerRuntimeBinding(projectRoot: string): DockerRuntimeBind
     if (error instanceof SyntaxError) throw new Error("Persisted Docker runtime binding is malformed.");
     throw error;
   }
-  const binding = parseBinding(parsed);
+  const legacyRuntime = isRecord(parsed) && parsed.version === LEGACY_BINDING_VERSION
+    ? (() => {
+      const recorded = readRecordedDockerEnvironment(projectRoot);
+      return {
+        mode: recorded.mode,
+        serverAccess: recorded.serverAccess,
+        healthHostHeader: recorded.healthHostHeader,
+        environmentIdentitySha256: recorded.environmentIdentitySha256,
+      } satisfies DockerRuntimeBinding["runtime"];
+    })()
+    : undefined;
+  const binding = parseBinding(parsed, legacyRuntime);
   assertBindingProjectRoot(binding, projectRoot);
   return binding;
 }
@@ -769,6 +979,9 @@ export function sanitizedPublicDockerBinding(binding: DockerRuntimeBinding): Pub
     containerPort: CONTAINER_PORT,
     origin: validated.publicBinding.origin,
     rendererNetworkMode: "none",
+    runtimeMode: validated.runtime.mode,
+    serverAccess: validated.runtime.serverAccess,
+    healthHostHeader: validated.runtime.healthHostHeader,
   };
 }
 

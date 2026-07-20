@@ -34,7 +34,7 @@ function sha256(data: Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-function writeMigrationDatabase(root: string, version = 10): void {
+function writeMigrationDatabase(root: string, version = 11): void {
   const filename = path.join(root, "data", "designer.sqlite");
   fs.mkdirSync(path.dirname(filename), { recursive: true });
   const sqlite = new Database(filename);
@@ -199,11 +199,11 @@ describe("FormaSpec support bundles", () => {
     ]);
     const migration = JSON.parse(extracted.files.get("diagnostics/migration-status.json")!.toString("utf8"));
     expect(migration).toEqual({
-      appliedMigrationCount: 10,
+      appliedMigrationCount: 11,
       available: true,
-      latestAppliedVersion: 10,
+      latestAppliedVersion: 11,
       state: "current",
-      supportedVersion: 10,
+      supportedVersion: 11,
     });
     const runtime = JSON.parse(extracted.files.get("diagnostics/runtime-state.json")!.toString("utf8"));
     expect(runtime).toMatchObject({

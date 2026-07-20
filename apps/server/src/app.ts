@@ -31,6 +31,7 @@ import { OperationsService } from "./operations-service.js";
 import { registerOrganizationPolicyHttpRoutes } from "./organization-policy-http-routes.js";
 import { OrganizationPolicyService } from "./organization-policy-service.js";
 import { PngRenderer } from "./render.js";
+import { SqliteRenderJobStore } from "./render-job-store.js";
 import { RedesignStudioService } from "./redesign-studio-service.js";
 import { RestoreOperationStore } from "./restore-operation-store.js";
 import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
@@ -48,6 +49,7 @@ export interface DesignerApplication {
   redesign: RedesignStudioService;
   events: EventHub;
   renderer: PngRenderer;
+  renderJobs: SqliteRenderJobStore;
   backups: BackupManager;
   operations: OperationsService;
   policies: OrganizationPolicyService;
@@ -119,6 +121,9 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   const assetStore = new ContentAddressedRasterStore(config.dataDir);
   const database = new DesignerDatabase(config.databasePath);
   const events = new EventHub();
+  const renderJobs = new SqliteRenderJobStore(database.sqlite);
+  renderJobs.recoverExpired();
+  renderJobs.cleanupRetention();
   const renderer = new PngRenderer({
     timeoutMs: config.renderTimeoutMs,
     maxPixels: config.renderMaxPixels,
@@ -128,6 +133,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     allowSystemChrome: config.allowSystemChrome,
     ...(config.renderSocket ? { socketPath: config.renderSocket } : {}),
     ipcMaxMessageBytes: config.renderIpcMaxBytes,
+    jobRecorder: renderJobs,
   });
   const service = new DesignerService(database, events, config.previewTtlSeconds, {}, assetStore);
   const enterprise = new EnterpriseService(database, events, {
@@ -277,7 +283,21 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     });
   }
 
+  let renderJobLeaseTicks = 0;
+  const renderJobLeaseTimer = setInterval(() => {
+    try {
+      renderJobs.heartbeat();
+      renderJobs.recoverExpired();
+      renderJobLeaseTicks += 1;
+      if (renderJobLeaseTicks % 6 === 0) renderJobs.cleanupRetention();
+    } catch (error) {
+      app.log.error({ error }, "Render-job lease maintenance failed.");
+    }
+  }, 10_000);
+  renderJobLeaseTimer.unref?.();
+
   app.addHook("onClose", async () => {
+    clearInterval(renderJobLeaseTimer);
     await renderer.close();
     database.close();
   });
@@ -293,6 +313,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     redesign,
     events,
     renderer,
+    renderJobs,
     backups,
     operations,
     policies,

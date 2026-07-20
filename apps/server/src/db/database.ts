@@ -14,6 +14,7 @@ import {
   revisionHash,
   storeSnapshot,
 } from "../persistence.js";
+import { cleanupRetainedRenderJobs } from "../render-job-store.js";
 import * as schema from "./schema.js";
 
 export interface DatabaseMigrationLedgerEntry {
@@ -1287,6 +1288,197 @@ function addPortableImportProvenance(sqlite: Database.Database): void {
   `);
 }
 
+function addRenderJobPersistence(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS render_jobs (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT REFERENCES organizations(id) ON DELETE RESTRICT,
+      design_id TEXT REFERENCES designs(id) ON DELETE RESTRICT,
+      revision_id TEXT REFERENCES revisions(id) ON DELETE RESTRICT,
+      document_id TEXT CHECK(document_id IS NULL OR length(document_id) BETWEEN 1 AND 256),
+      document_revision INTEGER CHECK(document_revision IS NULL OR document_revision >= 0),
+      scope_kind TEXT NOT NULL CHECK(scope_kind IN ('organization', 'internal')),
+      operation TEXT NOT NULL CHECK(length(operation) BETWEEN 1 AND 128),
+      kind TEXT NOT NULL CHECK(kind IN ('render', 'normalize_raster')),
+      status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed')),
+      owner_id TEXT NOT NULL CHECK(
+        length(owner_id) = 45 AND owner_id GLOB 'render_owner_*'
+        AND substr(owner_id, 14) NOT GLOB '*[^0-9a-f]*'
+      ),
+      request_hash TEXT NOT NULL CHECK(
+        length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'
+      ),
+      request_metadata_json TEXT NOT NULL CHECK(
+        json_valid(request_metadata_json) = 1 AND length(CAST(request_metadata_json AS BLOB)) <= 8192
+      ),
+      renderer_version TEXT NOT NULL,
+      renderer_ipc_protocol_version INTEGER NOT NULL CHECK(renderer_ipc_protocol_version > 0),
+      raster_normalizer_version TEXT NOT NULL,
+      output_sha256 TEXT CHECK(
+        output_sha256 IS NULL OR (
+          length(output_sha256) = 64 AND output_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+      ),
+      output_bytes INTEGER CHECK(output_bytes IS NULL OR output_bytes > 0),
+      output_width INTEGER CHECK(output_width IS NULL OR output_width > 0),
+      output_height INTEGER CHECK(output_height IS NULL OR output_height > 0),
+      output_renderer TEXT CHECK(output_renderer IS NULL OR output_renderer IN ('playwright', 'software', 'chromium')),
+      warnings_json TEXT NOT NULL CHECK(
+        json_valid(warnings_json) = 1 AND json_type(warnings_json) = 'array'
+        AND length(CAST(warnings_json AS BLOB)) <= 8192
+      ),
+      error_code TEXT CHECK(error_code IS NULL OR (length(error_code) BETWEEN 1 AND 64)),
+      error_message TEXT CHECK(error_message IS NULL OR (length(error_message) BETWEEN 1 AND 1000)),
+      retryable INTEGER CHECK(retryable IS NULL OR retryable IN (0, 1)),
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      heartbeat_at TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      CHECK(
+        (scope_kind = 'organization' AND organization_id IS NOT NULL)
+        OR (scope_kind = 'internal' AND organization_id IS NULL AND design_id IS NULL AND revision_id IS NULL)
+      ),
+      CHECK(design_id IS NULL OR organization_id IS NOT NULL),
+      CHECK(
+        length(created_at) = 24 AND substr(created_at, 11, 1) = 'T'
+        AND substr(created_at, 24, 1) = 'Z' AND julianday(created_at) IS NOT NULL
+      ),
+      CHECK(
+        started_at IS NULL OR (
+          length(started_at) = 24 AND substr(started_at, 11, 1) = 'T'
+          AND substr(started_at, 24, 1) = 'Z' AND julianday(started_at) IS NOT NULL
+          AND started_at >= created_at
+        )
+      ),
+      CHECK(
+        completed_at IS NULL OR (
+          length(completed_at) = 24 AND substr(completed_at, 11, 1) = 'T'
+          AND substr(completed_at, 24, 1) = 'Z' AND julianday(completed_at) IS NOT NULL
+          AND completed_at >= COALESCE(started_at, created_at)
+        )
+      ),
+      CHECK(
+        length(heartbeat_at) = 24 AND substr(heartbeat_at, 11, 1) = 'T'
+        AND substr(heartbeat_at, 24, 1) = 'Z' AND julianday(heartbeat_at) IS NOT NULL
+        AND heartbeat_at >= created_at
+      ),
+      CHECK(
+        length(lease_expires_at) = 24 AND substr(lease_expires_at, 11, 1) = 'T'
+        AND substr(lease_expires_at, 24, 1) = 'Z' AND julianday(lease_expires_at) IS NOT NULL
+        AND lease_expires_at >= heartbeat_at
+      ),
+      CHECK(
+        (status = 'queued'
+          AND started_at IS NULL AND completed_at IS NULL
+          AND output_sha256 IS NULL AND output_bytes IS NULL AND output_width IS NULL
+          AND output_height IS NULL AND output_renderer IS NULL
+          AND error_code IS NULL AND error_message IS NULL AND retryable IS NULL)
+        OR
+        (status = 'running'
+          AND started_at IS NOT NULL AND completed_at IS NULL
+          AND output_sha256 IS NULL AND output_bytes IS NULL AND output_width IS NULL
+          AND output_height IS NULL AND output_renderer IS NULL
+          AND error_code IS NULL AND error_message IS NULL AND retryable IS NULL)
+        OR
+        (status = 'succeeded'
+          AND started_at IS NOT NULL AND completed_at IS NOT NULL
+          AND output_sha256 IS NOT NULL AND output_bytes IS NOT NULL AND output_width IS NOT NULL
+          AND output_height IS NOT NULL AND output_renderer IS NOT NULL
+          AND error_code IS NULL AND error_message IS NULL AND retryable IS NULL)
+        OR
+        (status = 'failed'
+          AND completed_at IS NOT NULL
+          AND output_sha256 IS NULL AND output_bytes IS NULL AND output_width IS NULL
+          AND output_height IS NULL AND output_renderer IS NULL
+          AND error_code IS NOT NULL AND error_message IS NOT NULL AND retryable IS NOT NULL)
+      ),
+      CHECK(
+        output_renderer IS NULL
+        OR (kind = 'render' AND output_renderer IN ('playwright', 'software'))
+        OR (kind = 'normalize_raster' AND output_renderer = 'chromium')
+      )
+    );
+    CREATE INDEX IF NOT EXISTS render_jobs_status_created
+      ON render_jobs(status, created_at, id);
+    CREATE INDEX IF NOT EXISTS render_jobs_design_created
+      ON render_jobs(design_id, created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS render_jobs_retention
+      ON render_jobs(status, completed_at, organization_id, id);
+
+    CREATE TABLE IF NOT EXISTS render_job_delete_permits (
+      job_id TEXT PRIMARY KEY REFERENCES render_jobs(id) ON DELETE CASCADE,
+      organization_id TEXT REFERENCES organizations(id) ON DELETE RESTRICT,
+      cutoff_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK(
+        length(cutoff_at) = 24 AND substr(cutoff_at, 11, 1) = 'T'
+        AND substr(cutoff_at, 24, 1) = 'Z' AND julianday(cutoff_at) IS NOT NULL
+      ),
+      CHECK(
+        length(created_at) = 24 AND substr(created_at, 11, 1) = 'T'
+        AND substr(created_at, 24, 1) = 'Z' AND julianday(created_at) IS NOT NULL
+      )
+    );
+
+    CREATE TRIGGER IF NOT EXISTS render_jobs_initial_insert
+    BEFORE INSERT ON render_jobs
+    WHEN NEW.status != 'queued'
+      OR NEW.started_at IS NOT NULL
+      OR NEW.completed_at IS NOT NULL
+      OR NEW.output_sha256 IS NOT NULL
+      OR NEW.output_bytes IS NOT NULL
+      OR NEW.output_width IS NOT NULL
+      OR NEW.output_height IS NOT NULL
+      OR NEW.output_renderer IS NOT NULL
+      OR NEW.error_code IS NOT NULL
+      OR NEW.error_message IS NOT NULL
+      OR NEW.retryable IS NOT NULL
+      OR NEW.warnings_json != '[]'
+    BEGIN SELECT RAISE(ABORT, 'render jobs must begin in the canonical queued state'); END;
+
+    CREATE TRIGGER IF NOT EXISTS render_jobs_lifecycle_update
+    BEFORE UPDATE ON render_jobs
+    WHEN OLD.status IN ('succeeded', 'failed')
+      OR NEW.id IS NOT OLD.id
+      OR NEW.organization_id IS NOT OLD.organization_id
+      OR NEW.design_id IS NOT OLD.design_id
+      OR NEW.revision_id IS NOT OLD.revision_id
+      OR NEW.document_id IS NOT OLD.document_id
+      OR NEW.document_revision IS NOT OLD.document_revision
+      OR NEW.scope_kind IS NOT OLD.scope_kind
+      OR NEW.operation IS NOT OLD.operation
+      OR NEW.kind IS NOT OLD.kind
+      OR NEW.owner_id IS NOT OLD.owner_id
+      OR NEW.request_hash IS NOT OLD.request_hash
+      OR NEW.request_metadata_json IS NOT OLD.request_metadata_json
+      OR NEW.renderer_version IS NOT OLD.renderer_version
+      OR NEW.renderer_ipc_protocol_version IS NOT OLD.renderer_ipc_protocol_version
+      OR NEW.raster_normalizer_version IS NOT OLD.raster_normalizer_version
+      OR NEW.created_at IS NOT OLD.created_at
+      OR NOT (
+        (OLD.status = 'queued' AND NEW.status IN ('queued', 'running', 'failed'))
+        OR (OLD.status = 'running' AND NEW.status IN ('running', 'succeeded', 'failed'))
+      )
+      OR (OLD.status = 'queued' AND NEW.status = 'failed' AND NEW.started_at IS NOT OLD.started_at)
+      OR (OLD.status = NEW.status AND NEW.started_at IS NOT OLD.started_at)
+      OR (OLD.status = 'running' AND NEW.status != 'running' AND NEW.started_at IS NOT OLD.started_at)
+      OR (NEW.status IN ('running', 'failed') AND NEW.warnings_json IS NOT OLD.warnings_json)
+    BEGIN SELECT RAISE(ABORT, 'render jobs permit only valid lifecycle transitions'); END;
+
+    CREATE TRIGGER IF NOT EXISTS render_jobs_retention_delete
+    BEFORE DELETE ON render_jobs
+    WHEN OLD.status NOT IN ('succeeded', 'failed')
+      OR NOT EXISTS (
+        SELECT 1 FROM render_job_delete_permits permit
+        WHERE permit.job_id = OLD.id
+          AND permit.organization_id IS OLD.organization_id
+          AND OLD.completed_at <= permit.cutoff_at
+      )
+    BEGIN SELECT RAISE(ABORT, 'render jobs require an exact retention permit'); END;
+  `);
+}
+
 const migrations: Migration[] = [
   { version: 1, name: "baseline_v1", up: (sqlite) => sqlite.exec(baselineSql) },
   { version: 2, name: "content_addressed_persistence", up: addPersistenceIntegrity },
@@ -1298,6 +1490,7 @@ const migrations: Migration[] = [
   { version: 8, name: "enterprise_domain_models", up: addEnterpriseDomainModels },
   { version: 9, name: "audit_retention_execution", up: addAuditRetentionExecution },
   { version: 10, name: "portable_import_provenance", up: addPortableImportProvenance },
+  { version: 11, name: "render_job_persistence", up: addRenderJobPersistence },
 ];
 
 const migrationNames = new Set<string>();
@@ -1346,6 +1539,8 @@ export function validateDatabaseMigrationLedger(
 interface RequiredTableShape {
   readonly name: string;
   readonly columns: readonly string[];
+  readonly sqlFragments?: readonly string[];
+  readonly sqlSha256?: string;
 }
 
 interface RequiredIndexShape {
@@ -1358,6 +1553,7 @@ interface RequiredTriggerShape {
   readonly name: string;
   readonly table: string;
   readonly sqlFragments: readonly string[];
+  readonly sqlSha256?: string;
 }
 
 interface RequiredMigrationShape {
@@ -1500,6 +1696,106 @@ const requiredEnterpriseMigrationShapes: readonly RequiredMigrationShape[] = [
       },
     ],
   },
+  {
+    version: 11,
+    tables: [
+      {
+        name: "render_jobs",
+        columns: [
+          "id", "organization_id", "design_id", "revision_id", "document_id", "document_revision",
+          "scope_kind", "operation", "kind", "status", "owner_id", "request_hash", "request_metadata_json", "renderer_version",
+          "renderer_ipc_protocol_version", "raster_normalizer_version", "output_sha256", "output_bytes",
+          "output_width", "output_height", "output_renderer", "warnings_json", "error_code",
+          "error_message", "retryable", "created_at", "started_at", "completed_at", "heartbeat_at",
+          "lease_expires_at",
+        ],
+        sqlFragments: [
+          "check(scope_kind in ('organization', 'internal'))",
+          "check(kind in ('render', 'normalize_raster'))",
+          "check(status in ('queued', 'running', 'succeeded', 'failed'))",
+          "json_valid(request_metadata_json) = 1",
+          "status = 'queued'",
+          "status = 'running'",
+          "status = 'succeeded'",
+          "status = 'failed'",
+          "kind = 'normalize_raster' and output_renderer = 'chromium'",
+        ],
+        sqlSha256: "ff9dc84361a86355c07d83bbc99910938f8a67ed800b149fd87e224c84abd684",
+      },
+      {
+        name: "render_job_delete_permits",
+        columns: ["job_id", "organization_id", "cutoff_at", "created_at"],
+        sqlFragments: [
+          "job_id text primary key references render_jobs(id) on delete cascade",
+          "organization_id text references organizations(id) on delete restrict",
+          "julianday(cutoff_at) is not null",
+        ],
+        sqlSha256: "4929351eb018e80c1fa650be90d7f62bb5509f4b14d50c0699e93a8df7e5cd12",
+      },
+    ],
+    indexes: [
+      {
+        name: "render_jobs_status_created",
+        table: "render_jobs",
+        columns: [{ name: "status" }, { name: "created_at" }, { name: "id" }],
+      },
+      {
+        name: "render_jobs_design_created",
+        table: "render_jobs",
+        columns: [
+          { name: "design_id" },
+          { name: "created_at", descending: true },
+          { name: "id", descending: true },
+        ],
+      },
+      {
+        name: "render_jobs_retention",
+        table: "render_jobs",
+        columns: [
+          { name: "status" },
+          { name: "completed_at" },
+          { name: "organization_id" },
+          { name: "id" },
+        ],
+      },
+    ],
+    triggers: [
+      {
+        name: "render_jobs_initial_insert",
+        table: "render_jobs",
+        sqlFragments: [
+          "before insert on render_jobs",
+          "new.status != 'queued'",
+          "canonical queued state",
+          "raise(abort",
+        ],
+        sqlSha256: "bbea9381087cc16a67355afcd55bede05f7c40d7b1553807a78263a818b12951",
+      },
+      {
+        name: "render_jobs_lifecycle_update",
+        table: "render_jobs",
+        sqlFragments: [
+          "before update on render_jobs",
+          "old.status in ('succeeded', 'failed')",
+          "old.status = 'queued' and new.status in ('queued', 'running', 'failed')",
+          "old.status = 'running' and new.status in ('running', 'succeeded', 'failed')",
+          "raise(abort",
+        ],
+        sqlSha256: "d68243e8d89866b703c7937689e8cf675f8d7e6583c214b8c8a0999897c8c010",
+      },
+      {
+        name: "render_jobs_retention_delete",
+        table: "render_jobs",
+        sqlFragments: [
+          "before delete on render_jobs",
+          "render_job_delete_permits",
+          "old.completed_at <= permit.cutoff_at",
+          "raise(abort",
+        ],
+        sqlSha256: "0e461e8b12fdc8259db0dcaf70a485c4430337a1c09636c4669352e05f002991",
+      },
+    ],
+  },
 ];
 
 function quotedSchemaIdentifier(value: string): string {
@@ -1533,7 +1829,7 @@ export function validateDatabaseSchemaShape(sqlite: Database.Database, appliedVe
   for (const shape of requiredEnterpriseMigrationShapes) {
     if (appliedVersion < shape.version) continue;
     for (const table of shape.tables) {
-      requiredSchemaObject(sqlite, "table", table.name, shape.version);
+      const object = requiredSchemaObject(sqlite, "table", table.name, shape.version);
       const rows = sqlite.prepare(`PRAGMA table_info(${quotedSchemaIdentifier(table.name)})`).all() as Array<{
         name: unknown;
       }>;
@@ -1543,6 +1839,22 @@ export function validateDatabaseSchemaShape(sqlite: Database.Database, appliedVe
         throw new Error(
           `Database schema migration ${shape.version} table ${table.name} is missing required columns: ${missing.join(", ")}.`,
         );
+      }
+      if (table.sqlFragments && table.sqlFragments.length > 0) {
+        if (object.sql === null) {
+          throw new Error(`Database schema migration ${shape.version} table ${table.name} has unexpected SQL.`);
+        }
+        const sql = normalizedSchemaSql(object.sql);
+        const missingSql = table.sqlFragments.filter((fragment) => !sql.includes(normalizedSchemaSql(fragment)));
+        if (missingSql.length > 0) {
+          throw new Error(`Database schema migration ${shape.version} table ${table.name} has unexpected SQL.`);
+        }
+      }
+      if (table.sqlSha256) {
+        if (object.sql === null
+          || createHash("sha256").update(normalizedSchemaSql(object.sql)).digest("hex") !== table.sqlSha256) {
+          throw new Error(`Database schema migration ${shape.version} table ${table.name} has unexpected SQL digest.`);
+        }
       }
     }
     for (const index of shape.indexes) {
@@ -1582,6 +1894,10 @@ export function validateDatabaseSchemaShape(sqlite: Database.Database, appliedVe
       const missing = trigger.sqlFragments.filter((fragment) => !sql.includes(normalizedSchemaSql(fragment)));
       if (missing.length > 0) {
         throw new Error(`Database schema migration ${shape.version} trigger ${trigger.name} has unexpected SQL.`);
+      }
+      if (trigger.sqlSha256
+        && createHash("sha256").update(sql).digest("hex") !== trigger.sqlSha256) {
+        throw new Error(`Database schema migration ${shape.version} trigger ${trigger.name} has unexpected SQL digest.`);
       }
     }
     for (const trigger of shape.forbiddenTriggers ?? []) {
@@ -1672,6 +1988,7 @@ export class DesignerDatabase {
   cleanup(now = new Date().toISOString()): void {
     this.cleanupPreviews(now);
     this.cleanupIdempotency(now);
+    cleanupRetainedRenderJobs(this.sqlite, now);
   }
 
   cleanupPreviews(now = new Date().toISOString()): void {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,12 +9,14 @@ import { persistDockerRuntimeBinding, type DockerRuntimeBinding } from "./docker
 import {
   abortDockerRestore,
   clearStaleDockerRestoreLock,
+  dockerRestoreHealthRequestOptions,
   dockerRestoreStatus,
   restoreDockerBackup,
   resumeDockerRestore,
   rollbackDockerRestore,
   type DockerRestoreOperationStatus,
 } from "./docker-restore.js";
+import { CLI_SUPPORTED_DATABASE_VERSION } from "./migrations.js";
 import type { CommandRunner } from "./process.js";
 
 const temporaryDirectories: string[] = [];
@@ -42,16 +45,32 @@ function projectFixture(mode = "docker"): string {
   temporaryDirectories.push(root);
   fs.mkdirSync(path.join(root, ".designer", "run"), { recursive: true });
   fs.mkdirSync(path.join(root, ".designer", "env"), { recursive: true });
-  const environment = path.join(root, ".designer", "env", "docker.env");
+  const environment = path.join(root, ".designer", "env", mode === "server" ? "server.env" : "docker.env");
   fs.writeFileSync(path.join(root, ".designer", "run", "mode"), `${mode}\n`);
   fs.writeFileSync(path.join(root, ".designer", "run", "env-file"), `${environment}\n`);
-  fs.writeFileSync(path.join(root, ".designer", "run", "url"), "http://127.0.0.1:4310\n");
-  fs.writeFileSync(environment, [
+  const publicUrl = mode === "server" ? "https://designer.example.test" : "http://127.0.0.1:4310";
+  fs.writeFileSync(path.join(root, ".designer", "run", "url"), `${publicUrl}\n`);
+  fs.writeFileSync(environment, mode === "server" ? [
+    "DESIGNER_SERVER_ACCESS=proxy",
+    "APP_MODE=server",
+    "FORMASPEC_CONTAINER_LOCAL=false",
+    "BIND_ADDRESS=127.0.0.1",
+    "PORT=4310",
+    `PUBLIC_BASE_URL=${publicUrl}`,
+    "AUTH_MODE=trusted-header",
+    "DESIGNER_TOKEN=server-secret-token-0123456789abcdef",
+    "TRUSTED_USER_HEADER=x-designer-user",
+    "FORMASPEC_ALLOWED_HOSTS=designer.example.test",
+    "FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12",
+    `DESIGNER_CORS_ORIGINS=${publicUrl}`,
+    "MAX_UPLOAD_BYTES=5242880",
+    "",
+  ].join("\n") : [
     "APP_MODE=local",
     "FORMASPEC_CONTAINER_LOCAL=true",
     "BIND_ADDRESS=127.0.0.1",
     "PORT=4310",
-    "PUBLIC_BASE_URL=http://127.0.0.1:4310",
+    `PUBLIC_BASE_URL=${publicUrl}`,
     "AUTH_MODE=none",
     "DESIGNER_TOKEN=",
     "TRUSTED_USER_HEADER=x-designer-user",
@@ -62,6 +81,31 @@ function projectFixture(mode = "docker"): string {
   persistDockerRuntimeBinding(root, runtimeBinding(root));
   runtimeStates.set(root, { designerRunning: true, rendererRunning: true });
   return root;
+}
+
+function environmentIdentitySha256(filename: string): string {
+  const values = new Map<string, string>();
+  for (const line of fs.readFileSync(filename, "utf8").split(/\r?\n/)) {
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    values.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  const stat = fs.lstatSync(filename);
+  const entries = [...values.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => [
+      key,
+      /(^|_)(?:TOKEN|SECRET|PASSWORD|PASSCODE|API_KEY|PRIVATE_KEY|CREDENTIALS?)(?:_|$)/i.test(key)
+        ? "[redacted]"
+        : value,
+    ]);
+  return createHash("sha256").update(JSON.stringify({
+    device: stat.dev,
+    inode: stat.ino,
+    size: stat.size,
+    modifiedMs: stat.mtimeMs,
+    entries,
+  })).digest("hex");
 }
 
 function runtimeBinding(root: string): DockerRuntimeBinding {
@@ -77,7 +121,7 @@ function runtimeBinding(root: string): DockerRuntimeBinding {
   };
   return {
     format: "formaspec-docker-runtime-binding",
-    version: 1,
+    version: 2,
     capturedAt: "2026-07-19T12:00:00.000Z",
     context: dockerContext,
     daemonId,
@@ -103,6 +147,23 @@ function runtimeBinding(root: string): DockerRuntimeBinding {
       port: 4310,
       containerPort: 4310,
       origin: "http://127.0.0.1:4310",
+    },
+    runtime: {
+      mode: fs.readFileSync(path.join(root, ".designer", "run", "mode"), "utf8").trim() as "docker" | "server",
+      serverAccess: fs.readFileSync(path.join(root, ".designer", "run", "mode"), "utf8").trim() === "server"
+        ? "proxy"
+        : "none",
+      healthHostHeader: fs.readFileSync(path.join(root, ".designer", "run", "mode"), "utf8").trim() === "server"
+        ? "designer.example.test"
+        : "127.0.0.1:4310",
+      environmentIdentitySha256: environmentIdentitySha256(path.join(
+        root,
+        ".designer",
+        "env",
+        fs.readFileSync(path.join(root, ".designer", "run", "mode"), "utf8").trim() === "server"
+          ? "server.env"
+          : "docker.env",
+      )),
     },
   };
 }
@@ -192,7 +253,7 @@ function terminalStatus(active: boolean, phase: "reconciled" | "rolled_back" = "
       phase,
       createdAt: "2026-07-19T12:00:00.000Z",
       updatedAt: "2026-07-19T12:01:00.000Z",
-      smoke: { schemaVersion: 10, renderedDesignId: "design_fixture" },
+      smoke: { schemaVersion: CLI_SUPPORTED_DATABASE_VERSION, renderedDesignId: "design_fixture" },
       result: phase === "reconciled"
         ? {
           auditEventId: 11,
@@ -213,7 +274,43 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
+function healthyFetch(expectedHost = "127.0.0.1:4310"): typeof fetch {
+  return async (input, init) => {
+    expect(new Headers(init?.headers).get("host")).toBe(expectedHost);
+    const pathname = new URL(String(input)).pathname;
+    if (pathname === "/health/render") {
+      return response({ ok: true, mode: "worker", renderer: "playwright", softwareFallback: false });
+    }
+    if (pathname === "/health/ready") {
+      return response({
+        ok: true,
+        database: "ready",
+        migrations: CLI_SUPPORTED_DATABASE_VERSION,
+        render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+      });
+    }
+    return response({ ok: true, service: "formaspec-api" });
+  };
+}
+
 describe("Docker restore supervision", () => {
+  it("builds the production health request with an explicit public Host over loopback", () => {
+    expect(dockerRestoreHealthRequestOptions({
+      connectHost: "127.0.0.1",
+      port: 4310,
+      hostHeader: "designer.example.test",
+      pathname: "/health/ready",
+      timeoutMs: 5_000,
+    })).toMatchObject({
+      hostname: "127.0.0.1",
+      port: 4310,
+      path: "/health/ready",
+      method: "GET",
+      agent: false,
+      headers: { host: "designer.example.test" },
+    });
+  });
+
   it("fences, stops only the API, runs the one-shot worker, verifies, and clears maintenance", async () => {
     const root = projectFixture();
     const commands: string[][] = [];
@@ -269,7 +366,8 @@ describe("Docker restore supervision", () => {
       }
       return { exitCode: 0, stdout: "", stderr: "" };
     };
-    const fetchMock: typeof fetch = async (input) => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      expect(new Headers(init?.headers).get("host")).toBe("127.0.0.1:4310");
       const pathname = new URL(String(input)).pathname;
       if (pathname === "/health/render") {
         return response({ ok: true, mode: "worker", renderer: "playwright", softwareFallback: false });
@@ -280,7 +378,9 @@ describe("Docker restore supervision", () => {
           ok: false,
           status: "maintenance",
           database: "ready",
-          migrations: maintenanceReadyAttempts === 1 ? 8 : 10,
+          migrations: maintenanceReadyAttempts === 1
+            ? CLI_SUPPORTED_DATABASE_VERSION - 1
+            : CLI_SUPPORTED_DATABASE_VERSION,
           render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
           maintenance: { active: true, phase: "verification", operationId },
         }, 503);
@@ -290,7 +390,9 @@ describe("Docker restore supervision", () => {
         return response({
           ok: true,
           database: "ready",
-          migrations: readyAttempts === 1 ? 8 : 10,
+          migrations: readyAttempts === 1
+            ? CLI_SUPPORTED_DATABASE_VERSION - 1
+            : CLI_SUPPORTED_DATABASE_VERSION,
           render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
         });
       }
@@ -328,7 +430,7 @@ describe("Docker restore supervision", () => {
     expect(startIndex).toBeGreaterThan(workerIndex);
     expect(clearIndex).toBeGreaterThan(startIndex);
     expect(maintenanceReadyAttempts).toBe(2);
-    expect(readyAttempts).toBe(2);
+    expect(readyAttempts).toBe(3);
     expect(fs.existsSync(path.join(root, ".designer", "run", "launcher.lock"))).toBe(false);
   });
 
@@ -378,7 +480,7 @@ describe("Docker restore supervision", () => {
       commandRunner: runner,
       dockerExecutable: "/usr/bin/docker",
       createOperationId: () => operationId,
-      fetch: async () => response({ ok: true, database: "ready", migrations: 10 }),
+      fetch: healthyFetch(),
     })).rejects.toThrow(/Restore worker failed/);
     expect(maintenance).toBe(false);
     expect(commands.some((args) => args.includes("start") && args.includes(designerContainerId))).toBe(true);
@@ -419,7 +521,7 @@ describe("Docker restore supervision", () => {
   });
 
   it("rolls a reconciled restore back by targeting its verified safety backup under one lock", async () => {
-    const root = projectFixture();
+    const root = projectFixture("server");
     const rollbackOperationId = "restore_cccccccccccccccccccccccccccccccc";
     const nextSafetyBackupId = `backup_${"c".repeat(40)}`;
     let maintenance = false;
@@ -481,7 +583,8 @@ describe("Docker restore supervision", () => {
       }
       return { exitCode: 0, stdout: "", stderr: "" };
     };
-    const fetchMock: typeof fetch = async (input) => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      expect(new Headers(init?.headers).get("host")).toBe("designer.example.test");
       const pathname = new URL(String(input)).pathname;
       if (pathname === "/health/render") {
         return response({ ok: true, mode: "worker", renderer: "playwright", softwareFallback: false });
@@ -491,13 +594,18 @@ describe("Docker restore supervision", () => {
           ok: false,
           status: "maintenance",
           database: "ready",
-          migrations: 10,
+          migrations: CLI_SUPPORTED_DATABASE_VERSION,
           render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
           maintenance: { active: true, phase: "verification", operationId: rollbackOperationId },
         }, 503);
       }
       if (pathname === "/api/designs") return response({ designs: [] });
-      return response({ ok: true, database: "ready", migrations: 10 });
+      return response({
+        ok: true,
+        database: "ready",
+        migrations: CLI_SUPPORTED_DATABASE_VERSION,
+        render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+      });
     };
     const result = await rollbackDockerRestore(root, { stdout: () => undefined }, {
       commandRunner: runner,
@@ -550,7 +658,7 @@ describe("Docker restore supervision", () => {
     const result = await abortDockerRestore(root, {
       commandRunner: runner,
       dockerExecutable: "/usr/bin/docker",
-      fetch: async () => response({ ok: true, database: "ready", migrations: 10 }),
+      fetch: healthyFetch(),
     });
     expect(result).toEqual({
       status: "aborted",
@@ -669,14 +777,79 @@ describe("Docker restore supervision", () => {
     })).resolves.toMatchObject({ status: "stale_lock_cleared", operationId });
   });
 
-  it("refuses to target server mode or an unrecognized environment file", async () => {
+  it("reads server restore status only through the pinned Compose binding and redacts bearer environments", async () => {
     const serverRoot = projectFixture("server");
-    await expect(dockerRestoreStatus(serverRoot, { dockerExecutable: "/usr/bin/docker" }))
-      .rejects.toThrow(/requires the recorded local Docker mode/);
+    const secret = "server-secret-token-0123456789abcdef";
+    const runner: CommandRunner = async (_executable, args, options) => {
+      expect(options?.env?.DESIGNER_TOKEN).toBeUndefined();
+      expect(options?.env?.FORMASPEC_MCP_TOKEN).toBeUndefined();
+      expect(args.join(" ")).not.toContain(secret);
+      const identity = dockerIdentityResponse(args, serverRoot);
+      if (identity) return identity;
+      if (args.includes("apps/server/dist/restore-control.js")) {
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({ ok: true, status: terminalStatus(false) })}\n`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+    await expect(dockerRestoreStatus(serverRoot, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      environment: { PATH: "/usr/bin", DESIGNER_TOKEN: secret, FORMASPEC_MCP_TOKEN: secret },
+    })).resolves.toMatchObject({ operation: { phase: "reconciled" } });
 
     const root = projectFixture();
     fs.writeFileSync(path.join(root, ".designer", "run", "env-file"), "/tmp/untrusted.env\n");
     await expect(dockerRestoreStatus(root, { dockerExecutable: "/usr/bin/docker" }))
-      .rejects.toThrow(/does not match the managed local environment/);
+      .rejects.toThrow(/does not match the managed runtime mode/);
+  });
+
+  it("uses the exact server Host header and rejects a schema mismatch before declaring recovery ready", async () => {
+    const root = projectFixture("server");
+    const runner: CommandRunner = async (_executable, args) => {
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      if (args.includes("apps/server/dist/restore-control.js")) {
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({ ok: true, status: terminalStatus(false) })}\n`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    await expect(resumeDockerRestore(root, undefined, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: healthyFetch("designer.example.test"),
+    })).resolves.toMatchObject({ status: "restored", serviceReady: true });
+
+    const mismatchedSchemaFetch: typeof fetch = async (input, init) => {
+      expect(new Headers(init?.headers).get("host")).toBe("designer.example.test");
+      const pathname = new URL(String(input)).pathname;
+      if (pathname === "/health/render") {
+        return response({ ok: true, mode: "worker", renderer: "playwright", softwareFallback: false });
+      }
+      if (pathname === "/health/ready") {
+        return response({
+          ok: true,
+          database: "ready",
+          migrations: CLI_SUPPORTED_DATABASE_VERSION - 1,
+          render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+        });
+      }
+      return response({ ok: true, service: "formaspec-api" });
+    };
+    await expect(resumeDockerRestore(root, undefined, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: mismatchedSchemaFetch,
+      healthTimeoutMs: 5,
+      healthPollIntervalMs: 1,
+    })).rejects.toThrow(/health verification timed out at \/health\/ready/);
   });
 });

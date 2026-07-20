@@ -144,7 +144,7 @@ function captureThrown(callback: () => unknown): unknown {
 describe("persisted Workspace Bridge repository inventories", () => {
   it("persists a bounded path-free inventory, deduplicates exact retries, and supersedes immutable versions", () => {
     const opened = setup();
-    expect(opened.database.schemaVersion()).toBe(10);
+    expect(opened.database.schemaVersion()).toBe(11);
 
     const first = opened.handoffs.persistRepositoryInventory("local", inventory());
     expect(first).toMatchObject({ status: "active", deduplicated: false });

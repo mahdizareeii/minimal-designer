@@ -67,7 +67,7 @@ describe("enterprise workflow migration", () => {
 
     const migrated = new DesignerDatabase(filename);
     try {
-      expect(migrated.schemaVersion()).toBe(10);
+      expect(migrated.schemaVersion()).toBe(11);
       expect(migrated.sqlite.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'product_spec_previews'",
       ).get()).toEqual({ name: "product_spec_previews" });

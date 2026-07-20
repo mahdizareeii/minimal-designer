@@ -135,6 +135,19 @@ describe("Workspace Bridge organization policy", () => {
     await expect(readRepositoryScanPolicy({ apiUrl: "http://127.0.0.1:4310" }, {
       fetchImplementation: (async () => policyResponse({ excludedPatterns: ["valid", "valid"] })) as typeof fetch,
     })).rejects.toThrow("duplicated");
+
+    const oversizedChunkedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let index = 0; index < 33; index += 1) controller.enqueue(new Uint8Array(64 * 1024));
+        controller.close();
+      },
+    });
+    await expect(readRepositoryScanPolicy({ apiUrl: "http://127.0.0.1:4310" }, {
+      fetchImplementation: (async () => new Response(oversizedChunkedBody, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch,
+    })).rejects.toThrow("bounded response limit");
   });
 
   it("rejects stale policy metadata, disallowed platforms, and bounded upload violations", async () => {

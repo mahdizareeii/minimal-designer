@@ -247,9 +247,39 @@ describe("verified FormaSpec backups", () => {
       .toEqual([]);
   });
 
-  it("accepts and restores schema-7 through schema-10 migration-ledger prefixes", async () => {
+  it("accepts and restores schema-7 through schema-11 migration-ledger prefixes", async () => {
     const root = await temporaryDirectory();
-    const schemaTen = await createVerifiedBundle(root);
+    const schemaEleven = await createVerifiedBundle(root);
+    await expect(verifyBackupBundle(schemaEleven)).resolves.toMatchObject({
+      valid: true,
+      manifest: { databaseSchemaVersion: 11 },
+    });
+
+    const schemaTen = await mutateBundle(root, schemaEleven, async (entries) => {
+      await mutateDatabasePayload(root, entries, (sqlite, manifest) => {
+        sqlite.exec(`
+          PRAGMA foreign_keys = OFF;
+          DROP TRIGGER schema_migrations_immutable_update;
+          DROP TRIGGER schema_migrations_immutable_delete;
+          DROP TRIGGER render_jobs_initial_insert;
+          DROP TRIGGER render_jobs_lifecycle_update;
+          DROP TRIGGER render_jobs_retention_delete;
+
+          DROP TABLE render_job_delete_permits;
+          DROP TABLE render_jobs;
+
+          DELETE FROM schema_migrations WHERE version = 11;
+          UPDATE system_metadata SET value = '10' WHERE key = 'database_schema_version';
+
+          CREATE TRIGGER schema_migrations_immutable_update
+          BEFORE UPDATE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
+          CREATE TRIGGER schema_migrations_immutable_delete
+          BEFORE DELETE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
+          PRAGMA foreign_keys = ON;
+        `);
+        manifest.databaseSchemaVersion = 10;
+      });
+    });
     await expect(verifyBackupBundle(schemaTen)).resolves.toMatchObject({
       valid: true,
       manifest: { databaseSchemaVersion: 10 },
@@ -357,6 +387,7 @@ describe("verified FormaSpec backups", () => {
     });
 
     for (const [sourceVersion, bundle] of [
+      [10, schemaTen],
       [9, schemaNine],
       [8, schemaEight],
       [7, schemaSeven],
@@ -372,27 +403,50 @@ describe("verified FormaSpec backups", () => {
       });
       const upgraded = new DesignerDatabase(path.join(restored, "designer.sqlite"));
       try {
-        expect(upgraded.schemaVersion()).toBe(10);
-        expect(upgraded.metadata("database_schema_version")).toBe("10");
+        expect(upgraded.schemaVersion()).toBe(11);
+        expect(upgraded.metadata("database_schema_version")).toBe("11");
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_retention_runs'",
         ).get()).toEqual({ name: "audit_retention_runs" });
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'portable_imports'",
         ).get()).toEqual({ name: "portable_imports" });
+        expect(upgraded.sqlite.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'render_jobs'",
+        ).get()).toEqual({ name: "render_jobs" });
       } finally {
         upgraded.close();
       }
     }
   });
 
-  it("rejects ledger-only migration-9 and migration-10 schema tampering", async () => {
+  it("rejects ledger-only migration-9 through migration-11 schema tampering", async () => {
     const root = await temporaryDirectory();
     const source = await createVerifiedBundle(root);
     const mutations: Array<{
       expectedReason: string;
       apply: (sqlite: Database.Database) => void;
     }> = [
+      {
+        expectedReason: "missing required table render_jobs",
+        apply: (sqlite) => sqlite.exec("DROP TABLE render_jobs"),
+      },
+      {
+        expectedReason: "missing required table render_job_delete_permits",
+        apply: (sqlite) => sqlite.exec("DROP TABLE render_job_delete_permits"),
+      },
+      {
+        expectedReason: "missing required index render_jobs_retention",
+        apply: (sqlite) => sqlite.exec("DROP INDEX render_jobs_retention"),
+      },
+      {
+        expectedReason: "missing required trigger render_jobs_initial_insert",
+        apply: (sqlite) => sqlite.exec("DROP TRIGGER render_jobs_initial_insert"),
+      },
+      {
+        expectedReason: "missing required trigger render_jobs_retention_delete",
+        apply: (sqlite) => sqlite.exec("DROP TRIGGER render_jobs_retention_delete"),
+      },
       {
         expectedReason: "missing required table portable_imports",
         apply: (sqlite) => sqlite.exec("DROP TABLE portable_imports"),
@@ -854,9 +908,9 @@ describe("verified FormaSpec backups", () => {
           DROP TRIGGER schema_migrations_immutable_update;
           DROP TRIGGER schema_migrations_immutable_delete;
           INSERT INTO schema_migrations(version, name, applied_at)
-          VALUES (11, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
+          VALUES (12, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
         `);
-        manifest.databaseSchemaVersion = 11;
+        manifest.databaseSchemaVersion = 12;
       },
     ];
     for (const mutation of mutations) {
@@ -871,7 +925,7 @@ describe("verified FormaSpec backups", () => {
       manifest.databaseSchemaVersion = 7;
       rewriteManifest(entries, manifest);
     });
-    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 10/);
+    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 11/);
   });
 
   it("rejects snapshot, revision-chain, and project-head integrity tampering", async () => {
