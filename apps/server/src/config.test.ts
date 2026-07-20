@@ -69,7 +69,7 @@ describe("FormaSpec application modes", () => {
       HOST: "0.0.0.0",
       PUBLIC_BASE_URL: "https://design.example.com",
       AUTH_MODE: "trusted-header",
-      DESIGNER_TOKEN: "0123456789abcdef",
+      DESIGNER_TOKEN: "designer-token-0123456789abcdef0123456789",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
       FORMASPEC_CONTAINER_LOCAL: "true",
     })).toThrow(/cannot be enabled in server mode/);
@@ -128,7 +128,7 @@ describe("FormaSpec application modes", () => {
       HOST: "0.0.0.0",
       PUBLIC_BASE_URL: "https://design.example.com",
       AUTH_MODE: "trusted-header",
-      DESIGNER_TOKEN: "0123456789abcdef",
+      DESIGNER_TOKEN: "designer-token-0123456789abcdef0123456789",
       FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
       FORMASPEC_PROXY_SECRET: PROXY_SECRET,
     } as const;
@@ -308,7 +308,7 @@ describe("FormaSpec application modes", () => {
 
     const health = await application.app.inject({
       method: "GET",
-      url: "/health/ready",
+      url: "/health/live",
       headers: { host: "design.example.com" },
     });
     expect(health.statusCode).toBe(200);

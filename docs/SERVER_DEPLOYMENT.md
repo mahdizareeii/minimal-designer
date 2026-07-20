@@ -43,10 +43,20 @@ Administration UI and run the external maintenance workflow on the server host:
 
 The supervisor revalidates the secure server environment hash, public Host,
 loopback port, Docker context/daemon, image, container labels, and named volumes
-before each action. It never serializes or passes `DESIGNER_TOKEN` to the
-network-disabled restore worker. Unknown/custom Compose projects, bind mounts,
+before each action. Live volume inspection requires the local driver and scope,
+no driver options, bounded absolute mountpoints, and distinct backing identities
+for data, backups, and the renderer socket; plugin, NFS, bind-backed, and
+aliased volumes fail closed. It never serializes or passes `DESIGNER_TOKEN` to
+the network-disabled restore worker. Unknown/custom Compose projects,
 Kubernetes/Swarm, and off-host volumes are outside this supported boundary.
 
+This command is `HEALTHY_PLANNED_RESTORE_ONLY`. It requires the current API and
+database to be healthy while resolving the backup ID and completing preflight.
+It cannot restore a stopped or corrupt deployment from an otherwise valid
+bundle and must not be treated as offline disaster recovery.
+
 Do not expose current source builds as enterprise production services. The
-required clean server restore/rollback exercise, deployment/security suites,
-signed packages, alerting, and release evidence remain incomplete.
+required clean server planned-restore/rollback exercise, a separately authorized
+offline recovery design, deployment/security suites, signed packages, alerting,
+and release evidence remain incomplete. Server proxy-origin authentication
+hardening is still under verification in the current working tree.

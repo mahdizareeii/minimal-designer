@@ -265,7 +265,10 @@ These foundations do not close the release gates listed below.
   signing/notarization, reproducibility, vulnerability scans, and clean
   lifecycle proof remain open. Deterministic Linux DEB/RPM builders and a
   Windows WiX v4 unsigned-MSI foundation now exist in source, but no current
-  native artifact/lifecycle evidence qualifies them for release. See
+  native artifact/lifecycle evidence qualifies them for release. Windows tests
+  use fake PE/CFB/WiX fixtures and do not establish a real WiX compile or MSI
+  validity. See [Linux packaging](docs/LINUX_PACKAGING.md),
+  [Windows packaging](docs/WINDOWS_PACKAGING.md), and
   [macOS PKG evidence](docs/MACOS_PKG_EVIDENCE.md).
 - New server initializer output includes the strict server-mode, proxy,
   allowlist, CORS, and container-boundary contract, and the CLI/server migration

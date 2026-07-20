@@ -10,7 +10,7 @@ interchangeable:
 | Mechanism | Implemented now | Important limitation |
 | --- | --- | --- |
 | Verified FormaSpec bundle engine | The server can create, verify, list, and download `formaspec-backup-*.tar` bundles. Verification checks semantic asset ownership/references, snapshots, typed operations, revision chains, and project heads across strict V1/V2 documents. Verification and download use private descriptor-pinned bytes. Restore forecasts whole-workflow capacity before maintenance, rechecks each copy/extraction step, opens sources with `O_NOFOLLOW`, and uses only expected size/SHA-256 pinned bytes afterward. | Bundles remain unsigned, so integrity and consistency checks do not establish creator provenance. Node does not expose a portable atomic no-replace directory rename, so the cutover destination race remains documented for hostile local filesystems. |
-| `formaspecctl` | `backup create`, `backup list`, schedule show/enable/disable/run, preview-first retention pruning, `backup verify <bundle>`, source-local bundle restore, and externally supervised Docker/server restore/status/resume/rollback/abort/stale-lock recovery by opaque backup ID are implemented. | Managed restore accepts only the exact launcher-recorded Compose project, loopback binding, image, containers, named volumes, secure runtime environment, and Docker context. It is not a generic Compose/Kubernetes/remote-volume recovery tool, and bundles remain unsigned. |
+| `formaspecctl` | `backup create`, `backup list`, schedule show/enable/disable/run, preview-first retention pruning, `backup verify <bundle>`, source-local bundle restore, and externally supervised Docker/server restore/status/resume/rollback/abort/stale-lock recovery by opaque backup ID are implemented. | The Docker/server capability is `HEALTHY_PLANNED_RESTORE_ONLY`: the current API/database must be healthy for backup-ID resolution and preflight. It accepts only the exact launcher-recorded Compose project, loopback binding, image, containers, verified local named volumes, secure runtime environment, and Docker context. It is not offline disaster recovery or a generic Compose/Kubernetes/remote-volume recovery tool, and bundles remain unsigned. |
 | Compatibility launcher | `./designer backup [DESTINATION]` makes a full stopped-service copy of `DATA_DIR`. | This is a downtime copy with a small text manifest, not a verified FormaSpec bundle. |
 
 Managed schedules use one daily UTC time and organization-policy retention
@@ -26,7 +26,8 @@ operator or service supervisor must call the schedule-run operation. The
 managed Docker/server restore foundation is deliberately controlled by
 `formaspecctl` outside
 the running Fastify process. Backup and restore remain a production-readiness
-blocker until clean server-mode recovery evidence, signed provenance, native
+blocker until clean server-mode planned-recovery evidence, a separately
+authorized offline disaster-recovery path, signed provenance, native
 packaging, and complete release evidence are delivered.
 
 The installed Docker volume has two valid checkpoint bundles:
@@ -158,6 +159,13 @@ for journal matching, verification, and extraction. The current hashes prove
 consistency of the bytes that were checked; without a trusted signature they do
 not prove who created the bundle.
 
+This supervised path is deliberately classified as
+`HEALTHY_PLANNED_RESTORE_ONLY`. Before maintenance, it uses the healthy current
+API/database to resolve the opaque backup ID and perform target preflight. It
+cannot recover a stopped or corrupt API/database from an otherwise valid
+bundle. Operators must not describe it as offline disaster recovery; that
+requires a separate authorization and recovery design.
+
 ## Create, list, verify, and restore from the CLI
 
 With the local loopback service running:
@@ -288,11 +296,16 @@ and health `Host`;
 the bearer value is never serialized or forwarded to the one-shot worker.
 Format-1 local bindings are read compatibly and upgraded in memory. Restore
 revalidates that exact runtime instead of trusting the ambient Docker context
-or current Compose discovery. It holds the
+or current Compose discovery. Binding capture and every verification call live
+`docker volume inspect` for the data, backup, and renderer-socket volumes. Each
+must use driver `local`, scope `local`, no options, a bounded absolute
+mountpoint, and a distinct backing identity. Plugin, NFS, bind-backed, and
+aliased volumes are rejected. It holds the
 launcher application lock, stops the local bridge, and performs these
 externally supervised steps:
 
-1. start/verify the pinned renderer and complete a read-only target preflight
+1. require the current API/database to be healthy, start/verify the pinned
+   renderer, and complete a read-only target preflight
    before maintenance is entered, including a conservative forecast for the
    simultaneous safety-backup, source pin, verification, and candidate-data
    capacity peak;
@@ -338,6 +351,13 @@ verification before cleanup. Exact restore-source orphan directories are never
 deleted while a durable `prepared` or `cutover_committed` operation may still
 need operator recovery evidence. Maintenance removal is the final restore
 mutation.
+
+Every health request has an independent absolute deadline, including when a
+requester never settles. Launcher lock acquisition rejects symlinked or
+unexpected `.designer/run` state without recursively removing an unvalidated
+path. If a pre-cutover resume or rollback worker fails after maintenance aborts,
+the supervisor restarts and verifies the unchanged API. If that restart also
+fails, both failures are preserved in an aggregate error.
 
 During maintenance, `/api/*`, `/mcp`, `/events`, and `/api/events` fail with
 retryable `TEMPORARILY_UNAVAILABLE`; `/health/ready` and `/ready` still perform
@@ -497,7 +517,8 @@ revocation before the supervisor clears maintenance. The isolated A/B Docker
 scenario and the separate 20-step source-local V1/V2/product-spec/task/hash/
 render scenario both pass. Complete normalized/legacy asset and design-system
 recovery coverage, historical fixtures, failure injection, reconnect/
-revocation, and a clean server-mode restore exercise remain unverified.
+revocation, a clean server-mode planned-restore exercise, and offline disaster
+recovery remain unverified.
 
 ## Retention and unfinished operator work
 

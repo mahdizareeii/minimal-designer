@@ -31,8 +31,10 @@ deterministic payload layout, systemd units, lifecycle scripts, and
 macOS-runnable unit tests now exist, but no release-qualified Linux artifact or
 real Linux lifecycle evidence exists. See
 [Native Linux packaging](./LINUX_PACKAGING.md). A native-Windows-only WiX v4
-builder also exists, but it requires an externally supplied real service host
-and exact provenance; no Windows artifact has been built or qualified. See
+builder also exists, but it requires an externally supplied service host and
+caller-supplied provenance whose internal consistency is checked without
+establishing a trust anchor; no real WiX compile, Windows artifact, or lifecycle
+has been built or qualified. See
 [Native Windows packaging](./WINDOWS_PACKAGING.md).
 
 ## What installation changes

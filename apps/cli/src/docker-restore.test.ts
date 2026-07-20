@@ -1040,10 +1040,13 @@ describe("Docker restore supervision", () => {
   it("reads server restore status only through the pinned Compose binding and redacts bearer environments", async () => {
     const serverRoot = projectFixture("server");
     const secret = "server-secret-token-0123456789abcdef";
+    const proxySecret = "proxy-secret-0123456789abcdef0123456789abcdef";
     const runner: CommandRunner = async (_executable, args, options) => {
       expect(options?.env?.DESIGNER_TOKEN).toBeUndefined();
       expect(options?.env?.FORMASPEC_MCP_TOKEN).toBeUndefined();
+      expect(options?.env?.FORMASPEC_PROXY_SECRET).toBeUndefined();
       expect(args.join(" ")).not.toContain(secret);
+      expect(args.join(" ")).not.toContain(proxySecret);
       const identity = dockerIdentityResponse(args, serverRoot);
       if (identity) return identity;
       if (args.includes("apps/server/dist/restore-control.js")) {
@@ -1058,7 +1061,12 @@ describe("Docker restore supervision", () => {
     await expect(dockerRestoreStatus(serverRoot, {
       commandRunner: runner,
       dockerExecutable: "/usr/bin/docker",
-      environment: { PATH: "/usr/bin", DESIGNER_TOKEN: secret, FORMASPEC_MCP_TOKEN: secret },
+      environment: {
+        PATH: "/usr/bin",
+        DESIGNER_TOKEN: secret,
+        FORMASPEC_MCP_TOKEN: secret,
+        FORMASPEC_PROXY_SECRET: proxySecret,
+      },
     })).resolves.toMatchObject({ operation: { phase: "reconciled" } });
 
     const root = projectFixture();

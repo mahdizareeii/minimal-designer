@@ -92,12 +92,14 @@ describe("FormaSpec support bundles", () => {
     const root = temporaryDirectory();
     const home = path.join(root, "private-home");
     const secret = "company-super-secret-value";
+    const proxySecret = "proxy-secret-0123456789abcdef0123456789abcdef";
     fs.mkdirSync(path.join(root, ".designer", "env"), { recursive: true });
     fs.mkdirSync(path.join(root, ".designer", "run"), { recursive: true });
     fs.mkdirSync(path.join(root, ".designer", "logs"), { recursive: true });
     fs.writeFileSync(path.join(root, ".designer", "env", "server.env"), [
       "APP_MODE=server",
       `MCP_BEARER_TOKEN=${secret}`,
+      `FORMASPEC_PROXY_SECRET=${proxySecret}`,
       "FORMASPEC_PUBLIC_URL=https://private.example.test/designs",
       "IDENTITY_HEADER=X-Company-Identity",
     ].join("\n"));
@@ -117,6 +119,7 @@ describe("FormaSpec support bundles", () => {
       `workspace=${root}/apps/server/src/index.ts`,
       `home=${home}/Library/Keychains`,
       `configured=${secret}`,
+      `proxy-hop=${proxySecret}`,
       "Authorization: Bearer bearer-secret-1234567890",
       'request={"password":"password-secret","token":"token-secret"}',
       "url=https://user:password@private.example.test/path?api_key=query-secret",
@@ -167,6 +170,7 @@ describe("FormaSpec support bundles", () => {
     const combined = Buffer.concat([...extracted.files.values()]).toString("utf8");
     for (const forbidden of [
       secret,
+      proxySecret,
       "private.example.test",
       "bridge-instance-secret-value",
       "bearer-secret-1234567890",
@@ -193,6 +197,7 @@ describe("FormaSpec support bundles", () => {
     };
     expect(config.sources.find((source) => source.file === "server.env")?.keys).toEqual([
       { key: "APP_MODE", value: "<redacted>" },
+      { key: "FORMASPEC_PROXY_SECRET", value: "<redacted>" },
       { key: "FORMASPEC_PUBLIC_URL", value: "<redacted>" },
       { key: "IDENTITY_HEADER", value: "<redacted>" },
       { key: "MCP_BEARER_TOKEN", value: "<redacted>" },

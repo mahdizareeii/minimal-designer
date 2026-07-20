@@ -146,6 +146,7 @@ export interface WindowsMsiBuildOptions {
   wixExecutable: string;
   wixProvenance: string;
   commandRunner?: PackageCommandRunner;
+  environment?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
 }
 
@@ -713,6 +714,7 @@ function verifyWixToolset(
   executableValue: string,
   provenancePath: string,
   runner: PackageCommandRunner,
+  commandOptions: { cwd: string; env: NodeJS.ProcessEnv },
 ): WixToolsetProvenance {
   const executable = requireAbsolutePath(executableValue, "WiX Toolset executable");
   if (path.extname(executable).toLowerCase() !== ".exe") throw new Error("WiX Toolset executable must use the .exe extension.");
@@ -721,7 +723,10 @@ function verifyWixToolset(
   if (stat.size !== provenance.executableSizeBytes || sha256WindowsFile(executable) !== provenance.executableSha256) {
     throw new Error("WiX Toolset executable failed its exact provenance integrity check.");
   }
-  const result = runPackageCommand(runner, executable, ["--version"]);
+  const result = runPackageCommand(runner, executable, ["--version"], {
+    ...commandOptions,
+    timeoutMs: 30_000,
+  });
   if (result.stdout.trim() !== provenance.version) {
     throw new Error(`WiX Toolset executable must report exactly version ${provenance.version}.`);
   }
@@ -730,6 +735,33 @@ function verifyWixToolset(
 
 export function assertWindowsPackagingHost(platform = process.platform): void {
   if (platform !== "win32") throw new Error("Native Windows MSI packages must be built on Windows.");
+}
+
+function windowsPackagingEnvironment(
+  source: NodeJS.ProcessEnv,
+  buildRoot: string,
+  sourceDateEpoch: number,
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    DOTNET_CLI_HOME: buildRoot,
+    DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+    DOTNET_EnableDiagnostics: "0",
+    DOTNET_NOLOGO: "1",
+    LC_ALL: "C",
+    SOURCE_DATE_EPOCH: String(sourceDateEpoch),
+    TEMP: buildRoot,
+    TMP: buildRoot,
+    TZ: "UTC",
+  };
+  for (const key of ["SystemRoot", "WINDIR", "COMSPEC"] as const) {
+    const value = source[key] ?? source[key.toUpperCase()];
+    if (value === undefined) continue;
+    if (value.length < 1 || value.length > 4096 || /[\0\r\n]/.test(value)) {
+      throw new Error(`Windows packaging environment ${key} is invalid.`);
+    }
+    environment[key] = value;
+  }
+  return environment;
 }
 
 function assertMsiArtifact(filename: string): void {
@@ -760,21 +792,30 @@ export function buildUnsignedWindowsMsi(options: WindowsMsiBuildOptions): string
   const version = assertWindowsMsiVersion(options.version);
   const architecture = assertWindowsPackageArchitecture(options.architecture);
   const sourceDateEpoch = normalizeWindowsSourceDateEpoch(options.sourceDateEpoch);
-  const payloadRoot = requireAbsolutePath(options.payloadRoot, "Windows payload root");
+  const sourcePayloadRoot = requireAbsolutePath(options.payloadRoot, "Windows payload root");
   const outputDirectory = requireAbsolutePath(options.outputDirectory, "Windows MSI output directory");
   const wixExecutable = requireAbsolutePath(options.wixExecutable, "WiX Toolset executable");
   const runner = options.commandRunner ?? spawnPackageCommandRunner;
-  verifyWindowsPayload(payloadRoot, version, architecture, sourceDateEpoch);
-  verifyWixToolset(wixExecutable, options.wixProvenance, runner);
+  verifyWindowsPayload(sourcePayloadRoot, version, architecture, sourceDateEpoch);
   const buildRoot = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-wix-v4-"));
+  const payloadRoot = path.join(buildRoot, "payload");
   const sourcePath = path.join(buildRoot, "formaspec.wxs");
-  fs.writeFileSync(sourcePath, generateWindowsWixSource(payloadRoot, version, architecture), { flag: "wx" });
-  fs.utimesSync(sourcePath, sourceDateEpoch, sourceDateEpoch);
-  fs.mkdirSync(outputDirectory, { recursive: true });
   const output = path.join(outputDirectory, `FormaSpec-${version}-windows-${architecture}-unsigned.msi`);
-  fs.rmSync(output, { force: true });
-  fs.rmSync(`${output}.sha256`, { force: true });
   try {
+    const environment = windowsPackagingEnvironment(
+      options.environment ?? process.env,
+      buildRoot,
+      sourceDateEpoch,
+    );
+    verifyWixToolset(wixExecutable, options.wixProvenance, runner, { cwd: buildRoot, env: environment });
+    copyRegularTree(sourcePayloadRoot, payloadRoot);
+    normalizeWindowsPayload(payloadRoot, sourceDateEpoch);
+    verifyWindowsPayload(payloadRoot, version, architecture, sourceDateEpoch);
+    fs.writeFileSync(sourcePath, generateWindowsWixSource(payloadRoot, version, architecture), { flag: "wx" });
+    fs.utimesSync(sourcePath, sourceDateEpoch, sourceDateEpoch);
+    fs.mkdirSync(outputDirectory, { recursive: true });
+    fs.rmSync(output, { force: true });
+    fs.rmSync(`${output}.sha256`, { force: true });
     runPackageCommand(
       runner,
       wixExecutable,
@@ -790,14 +831,8 @@ export function buildUnsignedWindowsMsi(options: WindowsMsiBuildOptions): string
       ],
       {
         cwd: buildRoot,
-        env: {
-          ...process.env,
-          DOTNET_CLI_TELEMETRY_OPTOUT: "1",
-          DOTNET_NOLOGO: "1",
-          LC_ALL: "C",
-          SOURCE_DATE_EPOCH: String(sourceDateEpoch),
-          TZ: "UTC",
-        },
+        env: environment,
+        timeoutMs: 30 * 60_000,
       },
     );
     assertMsiArtifact(output);

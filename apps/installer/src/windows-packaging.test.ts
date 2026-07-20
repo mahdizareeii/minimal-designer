@@ -175,9 +175,9 @@ describe("Windows MSI validation", () => {
     ]) expect(() => assertWindowsRelativePath(candidate)).toThrow(/Windows payload path/);
   });
 
-  it("uses stable architecture-specific upgrade identity and version-specific product identity", () => {
+  it("uses one cross-architecture product family and version-specific product identity", () => {
     expect(windowsUpgradeCode("x64")).toBe(windowsUpgradeCode("x64"));
-    expect(windowsUpgradeCode("x64")).not.toBe(windowsUpgradeCode("arm64"));
+    expect(windowsUpgradeCode("x64")).toBe(windowsUpgradeCode("arm64"));
     expect(windowsProductCode("1.2.3", "x64")).toBe(windowsProductCode("1.2.3", "x64"));
     expect(windowsProductCode("1.2.3", "x64")).not.toBe(windowsProductCode("1.2.4", "x64"));
     expect(windowsProductCode("1.2.3", "x64")).toMatch(/^\{[A-F0-9-]{36}\}$/);
@@ -369,11 +369,18 @@ describe("Windows-only WiX command boundary", () => {
     const outputDirectory = path.join(root, "artifacts");
     const calls: Array<{ command: string; arguments_: readonly string[]; epoch?: string }> = [];
     let source = "";
+    let boundPayloadRoot = "";
+    let boundServerEntry = "";
+    let buildEnvironment: NodeJS.ProcessEnv | undefined;
     const runner: PackageCommandRunner = {
       run(command, arguments_, options) {
         const epoch = options?.env?.SOURCE_DATE_EPOCH;
         calls.push({ command, arguments_, ...(epoch === undefined ? {} : { epoch }) });
         if (arguments_[0] === "--version") return { status: 0, stdout: `${wix.version}\n`, stderr: "" };
+        buildEnvironment = options?.env;
+        boundPayloadRoot = arguments_[arguments_.indexOf("-bindpath") + 1]!;
+        fs.appendFileSync(path.join(payloadRoot, "app/apps/server/dist/index.js"), "source-mutated-after-verification\n");
+        boundServerEntry = fs.readFileSync(path.join(boundPayloadRoot, "app/apps/server/dist/index.js"), "utf8");
         source = fs.readFileSync(arguments_[1]!, "utf8");
         const outputIndex = arguments_.indexOf("-out");
         const output = arguments_[outputIndex + 1]!;
@@ -394,6 +401,15 @@ describe("Windows-only WiX command boundary", () => {
       wixExecutable: wix.executable,
       wixProvenance: wix.provenance,
       commandRunner: runner,
+      environment: {
+        SystemRoot: "C:\\Windows",
+        WINDIR: "C:\\Windows",
+        COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+        PATH: "C:\\attacker-controlled",
+        DOTNET_STARTUP_HOOKS: "C:\\attacker-controlled\\hook.dll",
+        CORECLR_ENABLE_PROFILING: "1",
+        DESIGNER_TOKEN: "must-not-enter-packaging-environment",
+      },
       platform: "win32",
     });
 
@@ -402,8 +418,24 @@ describe("Windows-only WiX command boundary", () => {
     expect(calls[0]?.arguments_).toEqual(["--version"]);
     expect(calls[1]?.arguments_).toContain("build");
     expect(calls[1]?.arguments_).toContain("-pdbtype");
-    expect(calls[1]?.arguments_).toContain(`PayloadRoot=${payloadRoot}`);
+    expect(calls[1]?.arguments_).toContain(`PayloadRoot=${boundPayloadRoot}`);
+    expect(boundPayloadRoot).not.toBe(payloadRoot);
+    expect(boundPayloadRoot).toContain("formaspec-wix-v4-");
+    expect(fs.existsSync(boundPayloadRoot)).toBe(false);
+    expect(boundServerEntry).toBe("fixture:app/apps/server/dist/index.js\n");
     expect(calls[1]?.epoch).toBe("1700000000");
+    expect(buildEnvironment).toMatchObject({
+      SystemRoot: "C:\\Windows",
+      WINDIR: "C:\\Windows",
+      COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+      DOTNET_EnableDiagnostics: "0",
+      SOURCE_DATE_EPOCH: "1700000000",
+    });
+    expect(buildEnvironment?.PATH).toBeUndefined();
+    expect(buildEnvironment?.DOTNET_STARTUP_HOOKS).toBeUndefined();
+    expect(buildEnvironment?.CORECLR_ENABLE_PROFILING).toBeUndefined();
+    expect(buildEnvironment?.DESIGNER_TOKEN).toBeUndefined();
     expect(source).toContain('<Package Name="FormaSpec"');
     expect(fs.readFileSync(`${output}.sha256`, "utf8"))
       .toBe(`${sha256WindowsFile(output)}  ${path.basename(output)}\n`);
@@ -484,7 +516,7 @@ describe("Windows-only WiX command boundary", () => {
       platform: "win32",
     });
     expect(fs.existsSync(output)).toBe(true);
-    expect(transientPayload).toContain("formaspec-windows-msi-");
+    expect(transientPayload).toContain("formaspec-wix-v4-");
     expect(fs.existsSync(transientPayload)).toBe(false);
   });
 

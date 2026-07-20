@@ -138,15 +138,16 @@ source-workspace permissive-only license gate now passes.
 - Added deterministic unsigned Linux DEB/RPM source builders with pinned
   runtimes, hardened systemd API/renderer services, strict secret-free protocol
   registration, and data-preserving lifecycle scripts. Added a native-Windows-
-  only WiX v4 MSI builder foundation that requires an externally supplied real
-  service host and exact service-host/WiX provenance. Neither platform has
+  only WiX v4 MSI builder foundation that checks internally consistent caller-
+  supplied service-host/WiX inputs. Its tests use fake PE/CFB/WiX fixtures; no
+  trust anchor or real WiX compile has occurred. Neither platform has
   release-qualified artifact or lifecycle evidence.
 
 ## Verification evidence
 
 | Gate | Result |
 | --- | --- |
-| Focused package checkpoints | Core 40/40, server 235/235 with Chromium and Unix sockets, web 30/30, CLI 52/52 before the latest restore regressions, Workspace Bridge 23/23, and installer 41/41 through Linux packaging. The consolidated current-tree run remains pending. |
+| Focused package checkpoints | Core 40/40, server 235/235 with Chromium and Unix sockets, web 30/30, CLI 64/64 after the restore hardening, Workspace Bridge 23/23, and installer 60/60 including 19 Windows foundation tests. The Windows tests use fake PE/CFB/WiX fixtures; the consolidated current-tree run remains pending. |
 | Typecheck | All seven buildable workspace packages passed |
 | Production build | Core, server, web, CLI, local bridge, Workspace Bridge, and installer passed |
 | Launcher | 165/165 passed at the recorded checkpoint |

@@ -115,7 +115,12 @@ export function assertWindowsPayloadPathSet(values: readonly string[]): string[]
 }
 
 export function windowsUpgradeCode(architecture: WindowsPackageArchitecture): string {
-  return deterministicGuid(UPGRADE_NAMESPACE, `upgrade:${assertWindowsPackageArchitecture(architecture)}`);
+  // Both architectures own the same install directory, services, protocol,
+  // shortcuts, and ProgramData roots. They must therefore be one mutually
+  // exclusive product family on Windows ARM64 rather than co-installable
+  // products that can remove each other's shared resources.
+  assertWindowsPackageArchitecture(architecture);
+  return deterministicGuid(UPGRADE_NAMESPACE, "upgrade:formaspec");
 }
 
 export function windowsProductCode(version: string, architecture: WindowsPackageArchitecture): string {

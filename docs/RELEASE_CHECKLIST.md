@@ -31,14 +31,17 @@ pnpm build
 docker compose config --quiet
 ```
 
-Current verification on 2026-07-20 passed 393 tests: 40 core, 230 server, 30
-web, 49 CLI, 12 local bridge, 9 Workspace Bridge, and 23 installer.
-All seven workspace typechecks and production builds, 164 launcher tests, 6/6
+Recorded checkpoints on 2026-07-20 passed core 40/40, server 235/235 with
+Chromium and Unix sockets, web 30/30, CLI 64/64 after the restore hardening,
+Workspace Bridge 23/23, and installer 60/60 including 19 Windows
+foundation tests,
+and launcher 165/165. All seven workspace typechecks/builds, 6/6
 Chrome DPR alignment/auto-layout/inspect tests, 7/7 visual baselines, the 1/1 20-step
-release E2E, the 1/1 1,000-node browser gate, source evidence with 342
-third-party components and zero violations, exact macOS-PKG integrity
-verification, `docker compose config --quiet`, and `git diff --check` also
-passed. The separate disposable recovery exercise below proves one local Docker
+release E2E, and the 1/1 1,000-node browser gate also passed. The 342-component
+source evidence and exact macOS-PKG integrity verification belong to the
+earlier schema-10 checkpoint, not the current schema-11 tree. The consolidated
+current-tree package/typecheck/build/launcher/Compose/evidence run remains
+required. The separate disposable recovery exercise below proves one local Docker
 recovery path but not the complete enterprise release matrix.
 
 Recorded disposable evidence on 2026-07-20 used an isolated Compose project on
@@ -81,8 +84,8 @@ Do not start a production rollout or V2 head migration until every item passes:
   budgets pass without software fallback.
 - [ ] Numbered database migrations pass clean install and legacy upgrade.
 - [x] Startup, backup verification, restore preflight, and restore control fail
-  closed when migration-9/10 ledger rows lack required tables, columns, indexes,
-  triggers, trigger SQL, or forbidden-trigger removal.
+  closed when migration-9/10/11 ledger rows lack required tables, columns,
+  indexes, triggers, normalized schema SQL, or forbidden-trigger removal.
 - [ ] Legacy data is backfilled into one organization without ID loss.
 - [ ] Role/scope/project/expiry/revocation authorization matrix passes for
   REST, SSE, MCP, assets, previews, revisions, and contexts.
@@ -108,6 +111,11 @@ Do not start a production rollout or V2 head migration until every item passes:
   and without external network.
 - [ ] Production render failure returns a render error without software
   fallback or API termination.
+- [x] Migration 11 persists API-owned render/raster-normalization jobs through
+  queued/running/terminal states with leases, heartbeats, expired-owner
+  recovery, organization/internal scopes, bounded safe metadata, and permit-
+  guarded exact 30-day retention; worker/database separation and trigger/table
+  tamper checks pass focused tests.
 - [x] Backup verifier focused tests cover strict manifests/checksums, exact
   asset-manifest/file matching, normalized asset and legacy BLOB integrity,
   canonical snapshots, typed operations, revision hash chains, contiguous
@@ -119,7 +127,10 @@ Do not start a production rollout or V2 head migration until every item passes:
   eligible rollback behavior. They also cover the exact mode-`0600` Docker
   runtime binding, shared non-expiring worker lock, durable `prepared` /
   `cutover_committed` / `reconciled` / `rolled_back` states, safe abort, and
-  proven-stale-lock clearing.
+  proven-stale-lock clearing. Live volume inspection rejects plugin, NFS,
+  bind-backed, and aliased backing identities; health probes have absolute
+  deadlines; unsafe launcher-lock paths are not deleted; and pre-cutover
+  resume/rollback worker failures restart and verify the unchanged API.
 - [x] A disposable local-Docker backup-A/mutate-B/restore-A/restore-safety-B
   exercise passes with original design/revision IDs and restored credential
   revocation, using the exact IDs recorded in Baseline evidence.
@@ -146,8 +157,10 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [ ] Backup authenticity/provenance is established through an approved signing
   and key-management design; current checksums prove consistency only.
 - [ ] Server mode has a tested deployment-specific external supervisor for
-  locking, maintenance, API/renderer lifecycle, safety backup, restore,
-  verification, rollback, alerting, and recovery after interruption.
+  locking, maintenance, API/renderer lifecycle, safety backup, planned restore,
+  verification, rollback, alerting, and recovery after interruption. The
+  existing command is `HEALTHY_PLANNED_RESTORE_ONLY` and requires a healthy
+  current API/database; offline disaster recovery is not implemented.
 - [ ] Scheduled backup execution, retention failure recovery, off-host storage,
   and the 7/4/12 policy pass release scenarios.
 - [ ] No critical or high security finding remains.
@@ -235,8 +248,12 @@ Do not start a production rollout or V2 head migration until every item passes:
   through REST or the authorized token-free MCP bridge. Direct REST still
   requires a compatible API identity/bearer channel in trusted-header setups.
 - [ ] Design/spec/source mappings are pinned and inspectable.
-- [ ] Handoff launch uses a secret-free task reference and selected local
-  workspace only.
+- [x] Selected-workspace `launch-codex` revalidates the exact local grant,
+  central inventory binding, repository fingerprint, policy, and approved/
+  implementing handoff; it starts Codex with exact repository `cwd`,
+  `shell: false`, one secret-free task argument, a minimal environment, and
+  POSIX process-group revocation monitoring. Packaged Windows Job Object or
+  equivalent descendant containment remains open.
 - [ ] Plan, branch/worktree, diff, validation, commit, push, and PR permissions
   are independently enforced and audited.
 - [ ] Seven redesign stages are resumable and reuse canonical spec/system/task/
@@ -260,6 +277,15 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [ ] `designer` migrates legacy state and delegates without data loss.
 - [ ] Release-ready macOS PKG, Windows WiX v4 MSI, and Linux DEB/RPM
   artifacts are produced and pass their platform gates.
+- [x] Deterministic Linux DEB/RPM source builders, payload layout, hardened
+  systemd API/renderer units, data-preserving lifecycle scripts, strict
+  protocol registration, and focused unit tests exist. No real Linux artifact
+  or lifecycle evidence exists.
+- [x] A native-Windows-only WiX v4 unsigned-MSI builder foundation checks
+  internally consistent caller-supplied service-host/WiX inputs. Tests use fake
+  PE/CFB/WiX fixtures; no trust anchor, real WiX compile, MSI validity, artifact,
+  qualified service host, SCM/ACL/Job Object/named-pipe/Chromium/protocol/
+  signing/lifecycle evidence exists.
 - [ ] Clean install, automatic startup, upgrade, uninstall, reinstall, and
   protocol registration tests pass on each supported OS.
 - [ ] Setup wizard completes agent authorization, backup destination, render
@@ -268,22 +294,27 @@ Do not start a production rollout or V2 head migration until every item passes:
   services and the profiled one-shot restore worker passes non-root,
   capability, filesystem, migration, readiness, restart, restore, and egress
   tests.
-- [x] A fresh disposable schema-10 Docker smoke reached Playwright-worker
+- [x] The last disposable schema-10 Docker smoke reached Playwright-worker
   readiness without fallback, processed a real 1,303-byte PNG, preserved a
   project across API restart, verified both services as `pwuser` with read-only
   roots/capability drops/resource bounds, verified renderer `network_mode: none`
   and a digest-pinned base image, and removed the project and volumes.
+- [ ] A fresh schema-11 Docker rebuild/smoke repeats readiness, real PNG,
+  restart persistence, non-root/read-only/resource/egress checks, and cleanup.
 - [x] Provider-neutral, offline, deterministic CycloneDX 1.6 source-workspace
   SBOM generation, approved-license reporting, notice hashes, checksum
   generation, stale-evidence checking, and focused tests exist.
-- [x] The current Darwin ARM64 source workspace passes the permissive-only gate:
-  342 third-party components, zero violations, and no Sharp/libvips dependency.
-- [x] The fresh unsigned macOS ARM64 PKG candidate at
-  `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` has current-
-  tree offline evidence: SHA-256
+- [x] The earlier schema-10 Darwin ARM64 source-workspace checkpoint passed the
+  permissive-only gate: 342 third-party components, zero violations, and no
+  Sharp/libvips dependency. A current schema-11 evidence run remains required.
+- [x] The earlier unsigned macOS ARM64 PKG candidate at
+  `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
+  has checkpoint offline evidence: SHA-256
   `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`,
   184,835,514 bytes, integrity `PASS`, 349 linked components, seven exact
   workspace trees, and two bundled runtimes.
+- [ ] Rebuild macOS artifact/evidence from the stabilized schema-11 source; the
+  schema-10 candidate must not be presented or installed as current.
 - [ ] The macOS package passes the release gate. It remains blocked by Chromium
   LGPL-notice allowlist review, missing Developer ID signature, missing
   notarization, missing independent reproducibility evidence, and missing

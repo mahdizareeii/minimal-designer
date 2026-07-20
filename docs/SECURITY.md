@@ -13,8 +13,12 @@ server trust configuration, and a network-denied renderer are now implemented
 foundations. Production remains blocked by incomplete exhaustive authorization,
 proxy, browser, restore, image-worker, prompt-injection, secret-exclusion,
 installer, and long-running operational evidence. An isolated local-Docker
-restore/safety-restore exercise now passes, but server-mode supervision,
-broader recovery evidence, and signed provenance remain unverified.
+restore/safety-restore exercise now passes, but the server command is only
+`HEALTHY_PLANNED_RESTORE_ONLY`, not offline disaster recovery. Clean server
+planned-restore supervision, broader recovery evidence, and signed provenance
+remain unverified. Additional proxy-origin authentication hardening is active
+in the current working tree and must be rerun through the full deployment
+matrix before its details are treated as verified release evidence.
 
 ## Current controls that are retained
 
@@ -33,9 +37,11 @@ broader recovery evidence, and signed provenance remain unverified.
 | Portable import boundary | Read-only validation is separate from Organization Administrator mutation. Import requires scoped idempotency, preserve-ID conflict failure or deterministic clone remapping, strict V1/V2/product-spec validation, isolated raster normalization, database rollback on failure, and immutable migration-10 provenance. |
 | Live event authorization | SSE resolves the actor again before every delivered event and every 15-second heartbeat, so revocation or policy denial closes an already-open stream. |
 | Container isolation | Docker runs API and renderer separately. The renderer is `pwuser`, network-disabled, read-only, capability-free, no-new-privileges, and resource-limited. Linux startup inspects the mount table and refuses `/data`, `/backups`, or nested production mounts; the rebuilt renderer exposes only `/run/formaspec`. |
-| Restore fencing | Launcher-local Docker restore is externally supervised against a mode-`0600` exact runtime binding, a non-expiring shared worker lock, fail-closed maintenance, and crash-resumable operation/journal state. Fastify never restores its own open database and refuses to open SQLite during incomplete cutover. |
+| Restore fencing | Launcher-pinned Docker/server planned restore is externally supervised against a mode-`0600` exact runtime binding, a non-expiring shared worker lock, fail-closed maintenance, and crash-resumable operation/journal state. Every capture/verification requires local-driver/local-scope Docker volumes with no options, bounded absolute and distinct backing mountpoints; plugin, NFS, bind-backed, and aliased volumes fail closed. Fastify never restores its own open database and refuses to open SQLite during incomplete cutover. The path requires a healthy current API/database and is not offline disaster recovery. |
 | Restore source identity | Restore and verified download use `O_NOFOLLOW` plus private descriptor-pinned bytes, expected size/SHA-256 validation, and only the opened pin for later reads. Whole-workflow capacity is checked before maintenance and every copy/extraction step rechecks available space. Active-operation source-pin orphans are preserved; committed journal evidence survives cleanup failure. |
 | Local agent bridge | The token-free Codex URL is a loopback proxy that requires an OS-stored scoped grant upstream, validates its bound Host, rejects browser-origin requests, strips caller credentials, fails closed when no grant is available, and is automatically restarted when its runtime fingerprint is stale. |
+| Render-job metadata | Migration 11 persists only bounded API-owned lifecycle metadata: organization/internal scope, hashes, versions, dimensions, bounded warnings, and safe errors. It does not store documents, raw assets, PNG bytes, paths, or filenames. Owner leases/heartbeats recover only expired work; terminal deletion requires scoped permits at the exact 30-day cutoff. The renderer remains database-free. |
+| Selected-workspace launch | The Workspace Bridge binds a local grant to the exact central inventory and approved handoff, launches Codex with `shell: false`, exact repository `cwd`, one secret-free task reference, and a minimal environment, then monitors revocation/policy/handoff/inventory state. POSIX process groups are terminated on withdrawal; Windows Job Object/equivalent descendant containment remains a release blocker. |
 | Prompt/data separation | MCP instructions tell agents to treat design text and metadata as untrusted data rather than instructions. |
 
 These controls reduce risk but do not by themselves close the release gates.
@@ -84,6 +90,12 @@ stored-policy operation does not retain that bootstrap exception.
 
 Server mode now refuses incomplete HTTPS/public-URL, trusted-proxy,
 Host/Origin, identity, CSRF, CSP/security-header, and MCP-auth configuration.
+Every non-health server request must also arrive from an allowlisted raw socket
+peer with the separate `x-formaspec-proxy-secret` hop credential. The value is
+compared through fixed-size digests, must not reuse `DESIGNER_TOKEN`, is never a
+browser/agent credential, and must be stripped and overwritten by the reverse
+proxy. Exact minimal health probes remain credential-free after raw-peer and
+Host validation.
 Per-project authorization, scoped grants, and audit exist. Treat the mode as an
 implemented foundation, not enterprise readiness, until the real
 reverse-proxy/direct-port matrix and all role/scope cases pass.
@@ -108,12 +120,12 @@ chat transcripts.
 | High | Preview commit was not exact/fully atomic | **Implemented foundation:** exact content-addressed snapshots commit inside one immediate transaction and publish afterward. | Extend fault injection, concurrent CAS, restart, and corruption evidence. |
 | High | Destructive approval boundary was bypassable | **Implemented foundation:** ordinary commits reject archive operations; archive has separate preview/commit paths. | Finish negative coverage and client approval annotations. |
 | High | Server trust mode was not fail-closed | **Implemented foundation:** strict local/server modes, HTTPS/public URL, proxy ranges, Host/Origin/CSRF, and security headers exist. | Prove the real reverse-proxy/direct-port deployment matrix. |
-| High | Renderer lacked an egress/process boundary | **Implemented foundation:** Docker uses a separate non-root worker, bounded Unix-socket IPC, `network_mode: none`, read-only root, dropped capabilities, per-job contexts, resource/time limits, and fail-closed production-volume mount validation. | Add named-pipe/native packaging, canary egress automation, persisted jobs, stress/crash/recovery evidence, and server deployment proof. |
+| High | Renderer lacked an egress/process boundary | **Implemented foundation:** Docker uses a separate non-root worker, bounded Unix-socket IPC, `network_mode: none`, read-only root, dropped capabilities, per-job contexts, resource/time limits, fail-closed production-volume mount validation, and migration-11 persistent bounded job lifecycle metadata. | Add real named-pipe/native packaging, canary egress automation, stress/crash/recovery evidence, retention operations/UI, and server deployment proof. |
 | Medium | Raster files were not normalized | Full PNG/JPEG/WebP decode now runs through the pinned Chromium renderer worker; APNG/animated WebP/MPO/SVG/malformed input is rejected, EXIF orientation is applied, metadata is stripped, output is deterministic PNG, API/worker limits are versioned and matched, and content-addressed storage plus legacy-BLOB fallback is verified. The same full-decode verifier is required by backup creation/verification, restore preflight, safety-backup verification, and final cutover. | Add operator-approved legacy quarantine cleanup, a larger malformed corpus, and upload-storm/queue evidence. |
 | Medium | CSRF/CSP/security header policy was missing | Origin/Host/CSRF intent and CSP/framing/MIME/referrer/transport headers now exist. | Complete browser and reverse-proxy coverage. |
 | Medium | MCP schemas have permissive fallbacks | Generic passthrough output and record-shaped temporary operation fallback reduce schema strictness. | Strict discriminated input/output schemas for each tool. |
 | Medium | Audit and revocation were absent | Append-only audit events plus expiring/revocable scoped grants and Agent Connections controls exist. Managed re-authorization atomically rotates exact matching connections, production authentication checks the owning connection, Codex scope/expiry/project restrictions come from policy, and restart/rollback tests cover invalidation. Audit retention now uses an admin-only exact preview/commit, minimum-policy cutoff, bounded batches, atomic temporary delete permits, restart-safe idempotency, retained audit/outbox evidence, and an immutable SHA-256 run chain. | Complete stable managed-connection identity, scheduled retention supervision/alerting, administration UX, and the full lifecycle matrix. |
-| Medium | Backups were not integrity verified | Online checksummed bundles, strict V1/V2 document and asset ownership/reference verification, descriptor-pinned verify/download/restore bytes, whole-workflow capacity preflight, post-trigger credential revocation checks, audit, source-local restore, and externally supervised launcher-local Docker restore exist. An isolated A-only then A+B safety-restore exercise preserved IDs/revisions and revoked restored credentials. | Add server-mode external-supervisor evidence, approved signing/provenance, OS-native no-replace cutover support, broader recovery fixtures, and the full release E2E. |
+| Medium | Backups were not integrity verified | Online checksummed bundles, strict V1/V2 document and asset ownership/reference verification, descriptor-pinned verify/download/restore bytes, whole-workflow capacity preflight, post-trigger credential revocation checks, audit, source-local restore, and externally supervised launcher-pinned Docker/server planned restore exist. Runtime volume identity is revalidated live and recovery/lock/health failure paths fail closed. An isolated A-only then A+B safety-restore exercise preserved IDs/revisions and revoked restored credentials. | Add a separately authorized offline disaster-recovery path, clean server planned-restore evidence, approved signing/provenance, OS-native no-replace cutover support, broader recovery fixtures, and the full release E2E. |
 
 ## Required security invariants
 
@@ -127,7 +139,8 @@ only in route handlers:
 - Object IDs are never treated as authorization.
 - Local mode binds to loopback and ignores all proxy identity headers.
 - Server mode refuses startup without a public HTTPS URL, trusted proxy ranges,
-  Host/Origin allowlists, identity mapping, CSP/security headers, and MCP auth.
+  a separate internal proxy secret, Host/Origin allowlists, identity mapping,
+  CSP/security headers, and MCP auth.
 - Browser state-changing requests have CSRF protection appropriate to the
   identity mechanism.
 - MCP grants have explicit scopes, optional project restrictions, expiry,

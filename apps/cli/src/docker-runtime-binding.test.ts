@@ -198,6 +198,7 @@ function fixtureRunner(state: RuntimeFixtureState, calls: string[][], projectRoo
     expect(options?.env?.DOCKER_CONTEXT).toBeUndefined();
     expect(options?.env?.DESIGNER_TOKEN).toBeUndefined();
     expect(options?.env?.FORMASPEC_MCP_TOKEN).toBeUndefined();
+    expect(options?.env?.FORMASPEC_PROXY_SECRET).toBeUndefined();
     if (args[0] === "context" && args[1] === "show") {
       return { exitCode: 0, stdout: `${state.context}\n`, stderr: "" };
     }
@@ -287,6 +288,7 @@ describe("Docker runtime binding", () => {
         DOCKER_CONTEXT: context,
         DESIGNER_TOKEN: secret,
         FORMASPEC_MCP_TOKEN: secret,
+        FORMASPEC_PROXY_SECRET: proxySecret,
       },
       now: () => new Date("2026-07-20T01:03:04.000Z"),
     });

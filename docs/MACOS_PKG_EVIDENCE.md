@@ -4,13 +4,16 @@ Last verified: 2026-07-20
 
 Release decision: **NO-GO**
 
-Current-workspace parity: **VERIFIED — integrity only**
+Current-workspace parity: **STALE — schema-10 checkpoint only**
 
-The candidate below was rebuilt from the current schema-10 workspace after the
+The candidate below was rebuilt from the schema-10 workspace after the
 portable-import, product-specification persistence, revision-inspect, launcher,
 and Docker hardening changes. Exact workspace equality and artifact integrity
-pass. Do not install it as part of verification without separate explicit
-operator approval; the release decision remains NO-GO.
+passed for that checkpoint. Migration 11 and later source changes mean it no
+longer matches the current workspace. Do not install or present it as current;
+do not install any replacement as part of verification without separate
+explicit operator approval immediately beforehand. The release decision remains
+NO-GO.
 
 FormaSpec can produce and inspect an unsigned macOS PKG without a network
 scanner, Apple account, signing identity, notarization credential, or external

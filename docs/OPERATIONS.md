@@ -64,6 +64,20 @@ supported by the source launcher. Docker Desktop/Engine and Compose v2 must
 already be installed for Docker mode; the launcher can start an installed
 daemon but does not install Docker itself.
 
+Engineering-only native builder entry points are:
+
+```bash
+pnpm package:linux:deb
+pnpm package:linux:rpm
+```
+
+Run those only on the matching native Linux target with `dpkg-deb` or
+`rpmbuild` available. On native Windows, `pnpm package:windows:msi -- <required
+arguments>` invokes the unvalidated WiX foundation described in
+[WINDOWS_PACKAGING.md](./WINDOWS_PACKAGING.md); it requires caller-supplied
+application/service-host/WiX inputs and does not prove MSI validity or lifecycle.
+None of these commands produces a release-approved artifact by itself.
+
 The Compose file passes the strict mode variables, uses an explicit
 `FORMASPEC_CONTAINER_LOCAL` exception for an API container whose host-published
 port remains loopback-only, mounts data/backup/socket volumes, and runs a
@@ -403,9 +417,10 @@ Important variables:
 | `PUBLIC_BASE_URL` | derived from host/port | Must be a loopback URL locally and HTTPS in server mode. |
 | `AUTH_MODE` | `none` | Server mode requires `trusted-header`. |
 | `DESIGNER_TOKEN` | unset | Minimum 16 characters when token/trusted-header mode is used. Never commit it. |
+| `FORMASPEC_PROXY_SECRET` | unset | Required only in server trusted-proxy mode; 32–256 safe characters, separate from `DESIGNER_TOKEN`, injected as `x-formaspec-proxy-secret`, and never sent by browsers or agents. |
 | `TRUSTED_USER_HEADER` | `x-designer-user` | Must be stripped from client input and set only by the trusted proxy. |
 | `FORMASPEC_ALLOWED_HOSTS` | public URL host | Comma-separated exact `Host` values. |
-| `FORMASPEC_TRUSTED_PROXIES` | unset | Required in server mode; use only verified proxy addresses/ranges. |
+| `FORMASPEC_TRUSTED_PROXIES` | unset | Required in server mode; use only verified proxy addresses/ranges. Raw-peer trust is insufficient without the internal proxy secret. |
 | `DESIGNER_CORS_ORIGINS` | local origins | Comma-separated exact browser origins. |
 | `FORMASPEC_CSRF_HEADER` | `x-formaspec-csrf` | Browser API writes require value `1`. The web app sends it. |
 | `MAX_UPLOAD_BYTES` | 5 MiB | Multipart upload limit. |

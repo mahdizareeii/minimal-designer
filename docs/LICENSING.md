@@ -58,11 +58,13 @@ one step, retain the directory as a build artifact, and then run the gate.
 ## Current verified result
 
 On 2026-07-20, after replacing Sharp/libvips with the pinned Playwright
-Chromium raster worker, the current Darwin ARM64 installation produced 342
+Chromium raster worker, the schema-10 Darwin ARM64 checkpoint produced 342
 distinct third-party package/version components. The deterministic generator,
 its eight focused tests, and the strict permissive-only policy all pass with
-zero violations. `apps/server/package.json`, `pnpm-lock.yaml`, and the rebuilt
-`formaspec/server:local` image manifests contain no Sharp or libvips package.
+zero violations. `apps/server/package.json`, `pnpm-lock.yaml`, and that rebuilt
+`formaspec/server:local` image manifest contain no Sharp or libvips package.
+Migration 11 and later source changes require a fresh source-workspace evidence
+run; the recorded 342-component result is not current-tree artifact evidence.
 
 Linux and Windows release targets must still generate and retain their own
 evidence because native optional dependencies and OS payloads are
@@ -71,9 +73,10 @@ a container or native installer artifact.
 
 ## Verified unsigned macOS artifact
 
-The exact unsigned Darwin ARM64 package
+The earlier exact unsigned Darwin ARM64 package
 `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
-now has offline, artifact-specific inventory and integrity evidence. Its
+has offline, artifact-specific inventory and integrity evidence for the
+schema-10 checkpoint. Its
 SHA-256 is
 `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`.
 The verifier expanded the package, reconciled all 20,349 BOM/payload entries,
@@ -83,7 +86,7 @@ missing, unknown, or manifest-mismatched packages; the build-only
 `@formaspec/installer` workspace is explicitly excluded.
 
 Artifact evidence schema 2 additionally compares all 429 entries and 408 files
-across seven packaged workspace trees against the current core/server/web/CLI/
+across seven packaged workspace trees against the checkpoint core/server/web/CLI/
 bridge build outputs and managed CLI assets. Their combined content hash is
 `4f380a609426526562cab60560ede54290de93e9434fdcb0445752bbf56b3785`,
 with no missing, extra, type-mismatched, or content-mismatched entry. This
@@ -97,8 +100,9 @@ is not allowlisted by the permissive-only release policy. Consequently the
 artifact gate fails closed with
 `CHROMIUM_RUNTIME_CONTAINS_LGPL_NOTICES`. Signing, notarization,
 reproducibility, and vulnerability-scan evidence are also absent, producing
-exactly five current artifact blockers. This exact artifact therefore remains
-**NO-GO** for distribution.
+exactly five artifact blockers. This artifact is also stale relative to the
+schema-11 source and remains **NO-GO** for distribution. Do not install or
+present it as the current candidate.
 
 See [Unsigned macOS PKG evidence](./MACOS_PKG_EVIDENCE.md) for the artifact
 hashes, runtime evidence, verification procedure, and complete blocker list.
@@ -106,7 +110,14 @@ hashes, runtime evidence, verification procedure, and complete blocker list.
 ## Boundaries still requiring release work
 
 The source-workspace foundation does not prove a Docker image, Windows MSI, or
-Linux DEB/RPM artifact. The macOS evidence proves the bytes and component
+Linux DEB/RPM artifact. Deterministic Linux DEB/RPM and native-Windows-only WiX
+source builders now exist, but no target artifact, target-specific SBOM/license
+report, or native lifecycle evidence has been produced. The Windows builder
+requires an externally supplied service host plus caller-supplied service-host
+and WiX provenance; current checks prove internal consistency, not a trust
+anchor or real WiX compile. It does not discover, download, fabricate, or sign
+them. The
+macOS evidence proves the bytes and component
 linkage of one exact unsigned PKG only; it does not approve Chromium's
 composite notices, scan operating-system packages or binaries for known
 vulnerabilities, establish reproducibility, exercise a native lifecycle

@@ -7,8 +7,9 @@ Last audited: 2026-07-20
 FormaSpec is **not ready for production or public deployment**. The repository
 can be used for local development and controlled, access-restricted evaluation,
 and the hardened local Docker API/renderer split plus externally supervised
-Docker/server restore command foundation exist, but native packages, clean
-server restore/reverse-proxy evidence, installer matrix, signed backup
+Docker/server planned-restore command foundation exist, but release-qualified
+native packages, clean server planned-restore/reverse-proxy evidence, offline
+disaster recovery, installer matrix, signed backup
 provenance, and complete release evidence do not exist yet. One isolated local-Docker A/B restore and
 safety-restore exercise has passed; it does not qualify the server deployment
 path.
@@ -73,6 +74,13 @@ capabilities dropped, no-new-privileges, PID/memory/CPU limits, tmpfs scratch,
 a new deterministic browser context per job, bounded queue/concurrency/IPC,
 and no production software fallback.
 
+Migration 11 persists bounded API-owned render and raster-normalization job
+metadata across process restarts. Jobs use owner leases and heartbeats and
+recover only expired owners. Rows contain hashes, versions, dimensions, bounded
+warnings, and safe errors—not documents, assets, PNG bytes, paths, or filenames.
+The renderer remains database-free, and exact 30-day terminal retention requires
+scoped delete permits.
+
 Compose publishes container port 4310 to `127.0.0.1` by default, mounts named
 volumes at `/data`, `/backups`, and `/run/formaspec`, allocates renderer shared
 memory, and uses `restart: unless-stopped`. It passes the strict-mode,
@@ -86,7 +94,7 @@ survived API restart. The installed default volume subsequently migrated from
 schema 7 to schema 8 while preserving its project, 31 revisions, representative
 asset, and worker render. Current gaps include:
 
-- no Windows named-pipe/native worker packaging or persisted render jobs;
+- no release-qualified Windows named-pipe/native worker/service-host packaging;
 - no continuous canary-egress, crash, saturation, or long-running load proof;
 - no installed schedule supervisor; online create/list/verify/download and
   supervisor-callable schedule/prune use the mounted backup volume;
@@ -94,6 +102,9 @@ asset, and worker render. Current gaps include:
   launcher-recorded local-Docker/server runtime, but the disposable A/B
   exercise covers only local Docker and no server deployment automation or
   alerting has been qualified;
+- the Docker/server restore capability is `HEALTHY_PLANNED_RESTORE_ONLY`; it
+  requires a healthy current API/database for backup-ID resolution and preflight
+  and is not offline disaster recovery;
 - no release evidence proving the strict server-mode reverse-proxy path,
   upgrade, restore, or multi-user long-duration behavior.
 
@@ -155,6 +166,7 @@ BACKUP_DIR=/srv/formaspec/backups
 PUBLIC_BASE_URL=https://designer.company.example
 AUTH_MODE=trusted-header
 DESIGNER_TOKEN=replace-with-a-long-random-compatibility-secret
+FORMASPEC_PROXY_SECRET=replace-with-a-separate-32-plus-character-random-hop-secret
 TRUSTED_USER_HEADER=x-company-identity
 FORMASPEC_ALLOWED_HOSTS=designer.company.example
 FORMASPEC_TRUSTED_PROXIES=127.0.0.1
@@ -177,10 +189,13 @@ server requirements must still be met.
 - the public base URL is HTTPS;
 - browser identity uses `AUTH_MODE=trusted-header`;
 - the compatibility MCP token exists;
+- a separate bounded internal proxy credential exists and does not reuse the MCP token;
 - at least one trusted proxy is configured.
 
-At request time it also enforces the Host allowlist, exact CORS origin, trusted
-identity header, and—for `POST`, `PUT`, `PATCH`, and `DELETE` under `/api/`—an
+At request time it also enforces the raw socket peer and the constant-time
+`x-formaspec-proxy-secret` hop credential before accepting any non-health
+request, plus the Host allowlist, exact CORS origin, trusted identity header,
+and—for `POST`, `PUT`, `PATCH`, and `DELETE` under `/api/`—an
 exact trusted Origin plus `x-formaspec-csrf: 1`. Security responses include
 CSP, HSTS, `X-Frame-Options: DENY`, no-sniff, no-referrer, and a restrictive
 permissions policy.
@@ -198,6 +213,9 @@ An HTTPS reverse proxy for a controlled server-mode test must:
 - authenticate the user before proxying browser/UI/API/SSE traffic;
 - remove any client-supplied trusted identity header, then set it from the
   verified identity;
+- remove any client-supplied `x-formaspec-proxy-secret`, then overwrite it with
+  the separate server-generated hop secret on every proxied browser, API, SSE,
+  asset, and MCP request;
 - preserve the original allowed `Host` and HTTPS scheme;
 - pass browser `Origin` unchanged;
 - pass `Authorization` for MCP without logging it;
@@ -209,7 +227,10 @@ An HTTPS reverse proxy for a controlled server-mode test must:
   `FORMASPEC_TRUSTED_PROXIES`.
 
 Illustrative Nginx configuration after an authentication layer has established
-`$remote_user`:
+`$remote_user`. Retrieve the generated hop credential only during operator
+configuration with `./designer proxy-secret`; do not put it in source control,
+shell history, proxy access logs, or client-visible configuration. Replace the
+placeholder below through the proxy's secret-delivery mechanism:
 
 ```nginx
 location / {
@@ -219,6 +240,7 @@ location / {
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Company-Identity $remote_user;
+    proxy_set_header X-FormaSpec-Proxy-Secret "REPLACE_FROM_SECURE_SECRET_STORE";
     proxy_set_header Authorization $http_authorization;
 }
 
@@ -229,11 +251,19 @@ location ~ ^/(events|api/events)$ {
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Company-Identity $remote_user;
+    proxy_set_header X-FormaSpec-Proxy-Secret "REPLACE_FROM_SECURE_SECRET_STORE";
     proxy_buffering off;
     proxy_cache off;
     proxy_read_timeout 1h;
 }
 ```
+
+Nginx `proxy_set_header` overwrites the inbound header; equivalent proxies must
+also replace rather than append. Direct requests from an allowlisted raw peer
+without the hop credential are accepted only for the exact minimal health
+probe routes (`/health`, `/ready`, `/health/live`, `/health/ready`, and
+`/health/render`). Raw-peer allowlisting by itself is not browser or API
+authentication.
 
 The example is incomplete without the company's authentication configuration,
 network policy, certificate management, secret delivery, and trusted-proxy
@@ -344,17 +374,27 @@ pnpm formaspecctl backup restore clear-stale-lock --yes
 The path-based source-local command deliberately refuses Docker/server data.
 The ID-based command accepts only the launcher's recorded local-Docker or
 server runtime; it refuses direct/unknown Compose projects, custom project
-names, arbitrary paths, bind-mounted data, and guessed volumes.
+names, arbitrary paths, and guessed volumes.
 Install/start/restart record a mode-`0600` exact runtime
 binding at `.designer/run/docker-runtime-binding.json`; restore revalidates its
 Docker context/daemon, image digest, container and Compose identities/project
 path, named volumes, renderer isolation, loopback-published port, runtime mode,
-secret-redacted environment identity SHA-256, and exact health `Host`. The binding never stores
+secret-redacted environment identity SHA-256, and exact health `Host`. Every
+capture and verification live-inspects data, backup, and renderer-socket volumes
+and requires local driver/scope, no options, bounded absolute mountpoints, and
+distinct backing identities; plugin, NFS, bind-backed, and aliased volumes fail
+closed. The binding never stores
 the bearer value, and the one-shot worker receives no application bearer
 credential.
 
-The Docker/server supervisor holds the launcher lock, stops the bridge, performs
-a read-only target preflight before maintenance, writes a fixed path-free marker
+This capability is `HEALTHY_PLANNED_RESTORE_ONLY`. It cannot resolve a backup
+ID or complete preflight when the current API/database is stopped or corrupt,
+even if a valid bundle exists. Offline disaster recovery requires a separate
+authorization and operator workflow.
+
+The Docker/server supervisor requires a healthy current API/database, holds the
+launcher lock, stops the bridge, performs a read-only target preflight before
+maintenance, writes a fixed path-free marker
 under `/backups/.formaspec`, stops only the API, and uses hardened direct
 `docker run` to launch the network-disabled one-shot worker with the exact
 pinned image and volumes. The worker verifies the target, creates a verified
@@ -366,6 +406,12 @@ agent grants, connections, and pairing nonces atomically. The API restarts
 while still fenced, and maintenance clears only after a durable terminal result
 and health verification. Codex therefore requires a fresh
 `formaspecctl agent connect codex --yes` authorization after success.
+
+Health probes have independent absolute deadlines. Symlinked or unexpected
+launcher lock state fails closed without recursively removing an unvalidated
+path. If a pre-cutover resume or rollback worker fails after maintenance abort,
+the supervisor restarts and verifies the unchanged API; concurrent worker and
+restart failures are preserved together.
 
 The worker and API share the non-expiring
 `/backups/.formaspec/restore-worker.lock.json` fence. The API refuses to open
@@ -401,8 +447,8 @@ the safety restore returned A and B; original IDs/revisions were preserved; one
 grant, connection, and nonce were revoked; the connection remained revoked; and
 the disposable containers, volumes, and network were deleted.
 
-That is local-Docker evidence, not server-mode evidence. Native
-installer/service integration is absent. Restore now opens a source with
+That is local-Docker evidence, not server-mode evidence. Native package-builder
+foundations exist, but installed service integration is unverified. Restore now opens a source with
 `O_NOFOLLOW`; the Docker worker copies and hashes it into private mode-`0700`
 staging on `/backups`, makes the pinned file mode `0400`, verifies the expected
 managed size/SHA-256, and uses only those pinned bytes through journal matching,
@@ -445,10 +491,12 @@ migration fixtures, operator-approved cleanup, and rollback evidence exist.
 
 Production deployment remains **NO-GO** until evidence exists for all of these:
 
-- Windows/native renderer IPC packaging plus continuous egress, crash,
+- Windows native service-host/named-pipe renderer IPC, ACL/process-tree
+  packaging plus continuous egress, crash,
   saturation, and load evidence beyond the verified local Docker worker;
-- strict server-mode proxy/direct-port, supervised restore/rollback, upgrade,
-  alerting, and long-running Compose evidence;
+- strict server-mode proxy/direct-port, `HEALTHY_PLANNED_RESTORE_ONLY`/
+  rollback, upgrade, alerting, and long-running Compose evidence, plus a
+  separately authorized offline disaster-recovery path;
 - broader local-Docker V1/V2, asset/hash/render and historical-fixture recovery
   evidence beyond the isolated A/B exercise, signed provenance, durable `/data`
   and `/backups` operational proof, and complete scheduling/retention/pruning
@@ -462,12 +510,13 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
   performance budgets;
 - full organization/role/scope/revocation/CSRF/Host/Origin/archive/asset/
   traversal/decompression/renderer-egress/secret-exclusion security suites;
-- self-contained macOS PKG, Windows MSI, Linux DEB/RPM, service supervision,
+- current self-contained macOS PKG, Windows MSI, Linux DEB/RPM, service supervision,
   autostart, protocol registration, clean install/upgrade/uninstall/reinstall,
   signing, and notarization workflows;
 - real packaged Windows DPAPI service/ACL/lifecycle verification;
-- framework-aware Workspace Bridge mapping upload, selected-workspace Codex
-  launch, diff review, and approval-gated implementation handoff; connected
+- framework-aware Workspace Bridge mapping upload and the broader approved
+  plan/diff/validation/commit/PR workflow around the implemented selected-
+  workspace Codex launch; connected
   grants already persist bounded path-free inventories automatically;
 - complete Redesign Studio and product-manager workflow UI beyond the passing
   20-step PM-to-backup-restore integration scenario;

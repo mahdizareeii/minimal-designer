@@ -295,6 +295,12 @@ run_static_contract_tests() {
       ;;
     *) fail_test "Compose bounds the API service PID, memory, and CPU resources" ;;
   esac
+  case "$designer_service" in
+    *'FORMASPEC_PROXY_SECRET: ${FORMASPEC_PROXY_SECRET:-}'*)
+      pass_test "Compose propagates the internal proxy secret only through the managed environment"
+      ;;
+    *) fail_test "Compose propagates the internal proxy secret only through the managed environment" ;;
+  esac
 }
 
 run_location_and_read_only_tests() {
@@ -552,6 +558,15 @@ run_server_security_tests() {
   capture env DESIGNER_RUNTIME_DIR="$generated_runtime" bash "$LAUNCHER" proxy-secret
   expect_status 0 "explicit operator proxy-secret retrieval succeeds"
   expect_equal "$generated_proxy_secret" "$CAPTURE_OUTPUT" "proxy-secret prints only the stored operator credential"
+
+  local legacy_runtime="$TMP_ROOT/legacy-server-without-proxy-secret"
+  mkdir -p "$legacy_runtime/env"
+  grep -v '^FORMASPEC_PROXY_SECRET=' "$generated_env" >"$legacy_runtime/env/server.env"
+  chmod 600 "$legacy_runtime/env/server.env"
+  capture env DESIGNER_RUNTIME_DIR="$legacy_runtime" bash "$LAUNCHER" codex-config server
+  expect_status 1 "existing trusted-proxy server.env without the new hop secret fails closed"
+  expect_contains "requires a separate FORMASPEC_PROXY_SECRET" "legacy server.env validation gives an actionable migration error"
+  expect_not_contains "$generated_proxy_secret" "legacy server.env validation never prints the generated credential"
 
   local ssh_runtime="$TMP_ROOT/generated-ssh-runtime"
   capture env DESIGNER_RUNTIME_DIR="$ssh_runtime" DESIGNER_NO_OPEN=1 bash "$LAUNCHER" server init --ssh-only --force

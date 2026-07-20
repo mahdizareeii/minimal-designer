@@ -42,6 +42,7 @@ export function buildUnsignedWindowsMsiFromApplication(options: WindowsApplicati
       wixExecutable: options.wixExecutable,
       wixProvenance: options.wixProvenance,
       ...(options.commandRunner === undefined ? {} : { commandRunner: options.commandRunner }),
+      ...(options.environment === undefined ? {} : { environment: options.environment }),
       platform,
     });
   } finally {
