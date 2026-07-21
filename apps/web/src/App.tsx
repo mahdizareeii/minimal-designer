@@ -5,6 +5,7 @@ import { Administration } from "./components/Administration";
 import { Editor } from "./components/Editor";
 import { InspectView } from "./components/InspectView";
 import { RedesignStudio } from "./components/RedesignStudio";
+import { SessionAuthentication } from "./components/SessionAuthentication";
 import { useDesignerStore } from "./store/designer-store";
 
 interface ApplicationRoute {
@@ -31,7 +32,7 @@ export function navigate(path: string): void {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-export function App() {
+function AuthenticatedApplication() {
   const [route, setRoute] = useState(routeFromLocation);
 
   useEffect(() => {
@@ -70,4 +71,8 @@ export function App() {
   if (route.kind === "redesign" && route.assessmentId) return <RedesignStudio assessmentId={route.assessmentId} />;
   if (route.kind === "design" && route.designId) return <Editor designId={route.designId} />;
   return <Dashboard />;
+}
+
+export function App() {
+  return <SessionAuthentication><AuthenticatedApplication /></SessionAuthentication>;
 }

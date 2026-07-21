@@ -679,10 +679,10 @@ describe("verified FormaSpec backups", () => {
 
   it("accepts and restores genuine schema-7 through schema-12 migration-prefix fixtures", async () => {
     const root = await temporaryDirectory();
-    const schemaThirteen = await createVerifiedBundle(root);
-    await expect(verifyBackupBundle(schemaThirteen)).resolves.toMatchObject({
+    const currentSchema = await createVerifiedBundle(root);
+    await expect(verifyBackupBundle(currentSchema)).resolves.toMatchObject({
       valid: true,
-      manifest: { databaseSchemaVersion: 13 },
+      manifest: { databaseSchemaVersion: 14 },
     });
     for (const sourceVersion of [7, 8, 9, 10, 11, 12] as const) {
       const historical = await createHistoricalVerifiedBundle(root, sourceVersion);
@@ -701,8 +701,8 @@ describe("verified FormaSpec backups", () => {
       });
       const upgraded = new DesignerDatabase(path.join(restored, "designer.sqlite"));
       try {
-        expect(upgraded.schemaVersion()).toBe(13);
-        expect(upgraded.metadata("database_schema_version")).toBe("13");
+        expect(upgraded.schemaVersion()).toBe(14);
+        expect(upgraded.metadata("database_schema_version")).toBe("14");
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_retention_runs'",
         ).get()).toEqual({ name: "audit_retention_runs" });
@@ -1255,7 +1255,7 @@ describe("verified FormaSpec backups", () => {
           DROP TRIGGER schema_migrations_immutable_update;
           DROP TRIGGER schema_migrations_immutable_delete;
           INSERT INTO schema_migrations(version, name, applied_at)
-          VALUES (14, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
+          VALUES (15, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
         `);
         manifest.databaseSchemaVersion = 14;
       },
@@ -1272,7 +1272,7 @@ describe("verified FormaSpec backups", () => {
       manifest.databaseSchemaVersion = 7;
       rewriteManifest(entries, manifest);
     });
-    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 13/);
+    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 14/);
   });
 
   it("rejects snapshot, revision-chain, and project-head integrity tampering", async () => {

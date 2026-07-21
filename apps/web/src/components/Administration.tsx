@@ -66,6 +66,21 @@ async function copyText(value: string): Promise<void> {
   await navigator.clipboard.writeText(value);
 }
 
+export function managedBackupRestoreCommand(backupId: string): string {
+  if (!/^backup_[a-f0-9]{40}$/.test(backupId)) {
+    throw new Error("The managed backup ID is not safe to use in a restore command.");
+  }
+  return `pnpm formaspecctl backup restore --backup-id ${backupId} --yes`;
+}
+
+export function codexPairingCommand(challenge: AgentPairingChallenge): string {
+  if (!/^fspair_[A-Za-z0-9_-]{43}$/.test(challenge.nonce)
+    || !/^connection_[a-f0-9]{32}$/.test(challenge.connection.id)) {
+    throw new Error("The Codex pairing challenge is not safe to place in a command.");
+  }
+  return `./designer --yes agent connect codex --pairing-nonce ${challenge.nonce} --connection-id ${challenge.connection.id}`;
+}
+
 function openPairingChallenge(challenge: AgentPairingChallenge): string {
   const url = new URL("formaspec://connect-agent");
   url.searchParams.set("connection", challenge.connection.id);
@@ -87,6 +102,7 @@ export function Administration() {
   const [portableFile, setPortableFile] = useState<File | null>(null);
   const [portableImportMode, setPortableImportMode] = useState<PortableImportMode>("conflict_fail");
   const [pairingLink, setPairingLink] = useState<string | null>(null);
+  const [pairingCommand, setPairingCommand] = useState<string | null>(null);
   const [organizationPolicy, setOrganizationPolicy] = useState<OrganizationPolicyRecord | null>(null);
   const [canAdministerOrganization, setCanAdministerOrganization] = useState<boolean | null>(null);
 
@@ -150,6 +166,7 @@ export function Administration() {
     if (!window.confirm("Authorize Codex for 24 hours with scoped access to organization policy, editor context, designs, product specifications, planning and tasks, design-system reads, workspace inventories, handoffs, and redesign planning/design? Approval, implementation completion, and cancellation remain human-only.")) return;
     await run("connect-codex", async () => {
       const challenge = await createCodexConnection();
+      setPairingCommand(codexPairingCommand(challenge));
       setPairingLink(openPairingChallenge(challenge));
       setNotice("The one-time Codex pairing request was opened. If no handler opens, use the installer command shown below.");
       await refresh();
@@ -172,12 +189,16 @@ export function Administration() {
         <div className="administration-grid">
           {canAdministerOrganization !== false && <section className="administration-card">
             <div className="administration-card-heading">
-              <div><span><DatabaseBackup size={18} /></span><div><h2>Verified backups</h2><p>SQLite online snapshots, assets, manifests, and checksums.</p></div></div>
+              <div><span><DatabaseBackup size={18} /></span><div><h2>Managed backups &amp; recovery</h2><p>Verified SQLite snapshots, assets, manifests, and checksums. Restore uses an opaque backup ID, never a server path.</p></div></div>
               <button className="button button-primary" disabled={busy !== null} onClick={() => void run("create-backup", async () => {
                 const backup = await createBackup();
                 setBackups((current) => [backup, ...current.filter((item) => item.id !== backup.id)]);
                 setNotice(`Backup ${backup.filename} was created and verified.`);
               })}>{busy === "create-backup" ? <LoaderCircle size={14} className="spin" /> : <DatabaseBackup size={14} />} Create backup</button>
+            </div>
+            <div className="backup-recovery-note">
+              <ShieldCheck size={16} />
+              <div><strong>Safe restore workflow</strong><span>Verify the managed record, download an off-host copy if needed, then copy the restore command. FormaSpec performs maintenance mode, pre-restore backup, integrity checks, and rollback through <code>formaspecctl</code>.</span></div>
             </div>
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading backup records…</div> : backups.length === 0 ? (
@@ -197,6 +218,10 @@ export function Administration() {
                       setNotice(`${verified.filename} passed verification.`);
                     })}>{busy === `verify-${backup.id}` ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}</button>
                     {backup.status === "valid" && <a className="icon-button" href={backupDownloadUrl(backup.id)} title="Download verified backup"><Download size={14} /></a>}
+                    {backup.status === "valid" && <button className="icon-button" title="Copy managed restore command" aria-label={`Copy restore command for ${backup.filename}`} disabled={busy !== null} onClick={() => void run(`restore-command-${backup.id}`, async () => {
+                      await copyText(managedBackupRestoreCommand(backup.id));
+                      setNotice(`Restore command copied for ${backup.filename}. Run it on the FormaSpec host after reviewing the selected backup ID.`);
+                    })}>{busy === `restore-command-${backup.id}` ? <LoaderCircle size={14} className="spin" /> : <Copy size={14} />}</button>}
                   </div>
                 </article>
               ))}
@@ -208,11 +233,11 @@ export function Administration() {
               <div><span><Bot size={18} /></span><div><h2>Agent Connections</h2><p>Scoped, expiring, revocable machine identities.</p></div></div>
               <button className="button button-primary" disabled={busy !== null} onClick={() => void connectCodex()}>{busy === "connect-codex" ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />} Connect Codex</button>
             </div>
-            <div className="agent-install-command">
-              <code>pnpm formaspecctl --yes agent connect codex</code>
-              <button className="icon-button" title="Copy installer command" onClick={() => void copyText("pnpm formaspecctl --yes agent connect codex").then(() => setNotice("Codex connection command copied."))}><Copy size={14} /></button>
-            </div>
-            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>One-time pairing link issued. It expires quickly and contains no bearer grant.</span></div>}
+            {pairingCommand ? <div className="agent-install-command">
+              <code>{pairingCommand}</code>
+              <button className="icon-button" title="Copy one-time pairing command" aria-label="Copy one-time Codex pairing command" onClick={() => void copyText(pairingCommand).then(() => setNotice("One-time Codex pairing command copied."))}><Copy size={14} /></button>
+            </div> : <div className="pairing-link"><KeyRound size={13} /><span>Choose Connect Codex to issue the short-lived pairing command required by authenticated FormaSpec.</span></div>}
+            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>One-time pairing link issued. The fallback command above expires with it and contains no bearer grant.</span></div>}
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading agent connections…</div> : connections.length === 0 ? (
                 <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@Minimal UI](plugin://minimal-ui@formaspec).</span></div>
@@ -228,6 +253,7 @@ export function Administration() {
                   <div className="administration-row-actions">
                     {connection.status !== "revoked" && <button className="icon-button" title="Reconnect" disabled={busy !== null} onClick={() => void run(`reconnect-${connection.id}`, async () => {
                       const challenge = await reconnectAgentConnection(connection.id);
+                      setPairingCommand(codexPairingCommand(challenge));
                       setPairingLink(openPairingChallenge(challenge));
                       setNotice("A new one-time pairing request was opened.");
                       await refresh();
@@ -259,7 +285,7 @@ export function Administration() {
                 });
                 setDesignSystems((current) => [created, ...current]);
                 setDesignSystemName("Company Design System");
-                setNotice(`${created.name} was created. Add versioned tokens/components, then publish an immutable release through the API or Minimal UI tools.`);
+                setNotice(`${created.name} was created. Add versioned tokens/components, then publish an immutable release through the API or FormaSpec agent tools.`);
               })}>{busy === "create-system" ? <LoaderCircle size={14} className="spin" /> : <Plus size={14} />} Create</button>
             </div>}
             <div className="administration-list">
@@ -304,9 +330,9 @@ export function Administration() {
 
         <DesignSystemComponentAuthoring designSystems={designSystems.filter((system) => system.status === "active")} />
 
-        {canAdministerOrganization !== false && <section className="administration-card import-validator-card">
+        {canAdministerOrganization !== false && <section className="administration-card import-validator-card" aria-labelledby="project-recovery-title">
           <div className="administration-card-heading">
-            <div><span><Upload size={18} /></span><div><h2>Portable project import</h2><p>Validate first, then preserve IDs with atomic conflict failure or create a deterministic clone.</p></div></div>
+            <div><span><Upload size={18} /></span><div><h2 id="project-recovery-title">Import &amp; project recovery</h2><p>Choose a local .formaspec.zip bundle, validate it without mutation, then preserve IDs or create a deterministic clone.</p></div></div>
             <label className={`button button-secondary ${busy ? "is-disabled" : ""}`}><Upload size={14} /> Select .formaspec.zip<input type="file" accept=".zip,.formaspec.zip,application/zip" hidden disabled={busy !== null} onChange={(event) => {
               const file = event.target.files?.[0];
               event.currentTarget.value = "";
@@ -320,6 +346,7 @@ export function Administration() {
               });
             }} /></label>
           </div>
+          <div className="safe-import-boundary"><ShieldCheck size={16} /><div><strong>File-picker only</strong><span>FormaSpec reads only the archive you select and applies bounded archive validation. This screen never accepts or sends an arbitrary server filesystem path.</span></div></div>
           {busy === "validate-import" && <div className="administration-empty"><LoaderCircle size={20} className="spin" /> Validating the bounded archive…</div>}
           {validation && <div className="validation-summary">
             <ShieldCheck size={22} />

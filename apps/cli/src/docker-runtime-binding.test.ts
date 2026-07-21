@@ -434,6 +434,24 @@ describe("Docker runtime binding", () => {
     });
   });
 
+  it("pins a password-session server runtime with a hashed one-time bootstrap authorization", async () => {
+    const root = serverProjectFixture(4325, "https://session.example.test");
+    const environmentFile = path.join(root, ".designer", "env", "server.env");
+    const sessionEnvironment = fs.readFileSync(environmentFile, "utf8")
+      .replace("AUTH_MODE=trusted-header", "AUTH_MODE=session")
+      .replace(/^DESIGNER_TOKEN=.*$/m, "DESIGNER_TOKEN=")
+      .concat(`FORMASPEC_BOOTSTRAP_TOKEN_HASH=${"a".repeat(64)}\n`);
+    fs.writeFileSync(environmentFile, sessionEnvironment, { mode: 0o600 });
+
+    await expect(captureDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(defaultState(4325), [], root),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+    })).resolves.toMatchObject({
+      runtime: { mode: "server", serverAccess: "proxy", healthHostHeader: "session.example.test" },
+    });
+  });
+
   it("rejects unsafe trusted identity header names before persisting a runtime binding", async () => {
     for (const header of [
       "host",

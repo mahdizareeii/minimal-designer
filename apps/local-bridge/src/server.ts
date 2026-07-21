@@ -61,6 +61,12 @@ export interface BridgeServerOptions {
   pairingStore?: PairingNonceStore;
   instanceId?: string;
   fetchImplementation?: typeof fetch;
+  allowLegacySelfCreate?: boolean;
+}
+
+export interface AgentPairingTicket {
+  nonce: string;
+  connectionId?: string;
 }
 
 export interface RunningBridge {
@@ -154,6 +160,33 @@ interface StoredGrantAuthorizationContext {
   projectIds: string[];
 }
 
+class BridgeControlError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BridgeControlError";
+  }
+}
+
+function validatePairingTicket(value: unknown): AgentPairingTicket {
+  const ticket = recordValue(value);
+  if (ticket === null
+    || Object.keys(ticket).some((key) => key !== "nonce" && key !== "connectionId")
+    || typeof ticket.nonce !== "string"
+    || !/^fspair_[A-Za-z0-9_-]{43}$/.test(ticket.nonce)
+    || (ticket.connectionId !== undefined
+      && (typeof ticket.connectionId !== "string" || !/^connection_[a-f0-9]{32}$/.test(ticket.connectionId)))) {
+    throw new BridgeControlError(422, "INVALID_PAIRING_TICKET", "The one-time pairing ticket is invalid.");
+  }
+  return {
+    nonce: ticket.nonce,
+    ...(typeof ticket.connectionId === "string" ? { connectionId: ticket.connectionId } : {}),
+  };
+}
+
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
   const leftSet = new Set(left);
   const rightSet = new Set(right);
@@ -190,6 +223,39 @@ async function readStoredGrantAuthorizationContext(
     return { role: "agent", scopes, projectIds };
   } catch {
     return null;
+  }
+}
+
+async function probeMcpGrant(
+  upstream: URL,
+  token: string,
+  fetchImplementation: typeof fetch,
+): Promise<boolean> {
+  try {
+    const probe = await fetchImplementation(upstream, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "formaspec-bridge-probe",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "formaspec-local-bridge", version: "0.2.0" },
+        },
+      }),
+      redirect: "error",
+    });
+    const valid = probe.ok;
+    await probe.body?.cancel();
+    return valid;
+  } catch {
+    return false;
   }
 }
 
@@ -325,27 +391,7 @@ async function authorizeAgentConnection(
     existingToken = null;
   }
   if (existingToken) {
-    const probe = await fetchImplementation(upstream, {
-      method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        authorization: `Bearer ${existingToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "formaspec-bridge-probe",
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "formaspec-local-bridge", version: "0.2.0" },
-        },
-      }),
-      redirect: "error",
-    });
-    if (probe.ok) {
-      await probe.body?.cancel();
+    if (await probeMcpGrant(upstream, existingToken, fetchImplementation)) {
       const authorizationContext = await readStoredGrantAuthorizationContext(
         apiOrigin,
         existingToken,
@@ -365,10 +411,6 @@ async function authorizeAgentConnection(
       await credentialStore.clear();
       existingToken = null;
     } else {
-      await probe.body?.cancel();
-      if (probe.status !== 401 && probe.status !== 403 && probe.status !== 410) {
-        throw new Error("The stored FormaSpec grant could not be verified.");
-      }
       await credentialStore.clear();
       existingToken = null;
     }
@@ -417,6 +459,90 @@ async function authorizeAgentConnection(
   };
 }
 
+async function reuseStoredAgentConnection(
+  upstream: URL,
+  credentialStore: CredentialStore,
+  fetchImplementation: typeof fetch,
+): Promise<Record<string, unknown> | null> {
+  const token = await credentialStore.read();
+  if (!token || !/^fsg_[A-Za-z0-9_-]+$/.test(token)) {
+    if (token) await credentialStore.clear();
+    return null;
+  }
+  const authorizationContext = await readStoredGrantAuthorizationContext(
+    new URL(upstream.origin),
+    token,
+    fetchImplementation,
+  );
+  if (authorizationContext === null || !await probeMcpGrant(upstream, token, fetchImplementation)) {
+    await credentialStore.clear();
+    return null;
+  }
+  return {
+    connectionId: "stored",
+    status: "active",
+    expiresAt: null,
+    credentialStored: true,
+    reused: true,
+    verified: true,
+  };
+}
+
+async function pairIssuedAgentConnection(
+  upstream: URL,
+  credentialStore: CredentialStore,
+  fetchImplementation: typeof fetch,
+  ticket: AgentPairingTicket,
+): Promise<Record<string, unknown>> {
+  const apiOrigin = new URL(upstream.origin);
+  const pairResponse = await fetchImplementation(new URL("/api/agent-connections/pair", apiOrigin), {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-formaspec-csrf": "1" },
+    body: JSON.stringify({ nonce: ticket.nonce }),
+    redirect: "error",
+  });
+  if (!pairResponse.ok) {
+    await pairResponse.body?.cancel();
+    throw new BridgeControlError(409, "PAIRING_TICKET_REJECTED", "FormaSpec rejected the one-time pairing ticket.");
+  }
+  const paired = await pairResponse.json() as {
+    connection?: { id?: unknown; status?: unknown; expiresAt?: unknown };
+    grant?: { token?: unknown; scopes?: unknown; projectIds?: unknown };
+  };
+  const connectionId = paired.connection?.id;
+  const token = paired.grant?.token;
+  const scopes = stringArray(paired.grant?.scopes);
+  const projectIds = stringArray(paired.grant?.projectIds);
+  if (typeof connectionId !== "string"
+    || !/^connection_[a-f0-9]{32}$/.test(connectionId)
+    || paired.connection?.status !== "active"
+    || typeof paired.connection.expiresAt !== "string"
+    || typeof token !== "string"
+    || !/^fsg_[A-Za-z0-9_-]+$/.test(token)
+    || scopes === null
+    || projectIds === null) {
+    throw new BridgeControlError(502, "INVALID_PAIRED_GRANT", "FormaSpec returned an invalid scoped agent grant.");
+  }
+  if (ticket.connectionId !== undefined && ticket.connectionId !== connectionId) {
+    throw new BridgeControlError(409, "PAIRING_CONNECTION_MISMATCH", "The pairing ticket activated a different connection.");
+  }
+  const verifiedContext = await readStoredGrantAuthorizationContext(apiOrigin, token, fetchImplementation);
+  if (!await probeMcpGrant(upstream, token, fetchImplementation)
+    || verifiedContext === null
+    || !sameStringSet(verifiedContext.scopes, scopes)
+    || !sameStringSet(verifiedContext.projectIds, projectIds)) {
+    throw new BridgeControlError(502, "PAIRED_GRANT_VERIFICATION_FAILED", "The paired grant could not be verified.");
+  }
+  await credentialStore.write(token);
+  return {
+    connectionId,
+    status: "active",
+    expiresAt: paired.connection.expiresAt,
+    credentialStored: true,
+    verified: true,
+  };
+}
+
 export async function startBridgeServer(options: BridgeServerOptions): Promise<RunningBridge> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4312;
@@ -429,6 +555,7 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
   const pairingStore = options.pairingStore ?? new PairingNonceStore();
   const instanceId = options.instanceId ?? randomUUID();
   const fetchImplementation = options.fetchImplementation ?? fetch;
+  const allowLegacySelfCreate = options.allowLegacySelfCreate === true;
   const serializeAgentAuthorization = createSerialExecutor();
   let shuttingDown = false;
 
@@ -489,13 +616,31 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
         return;
       }
       if (request.method === "POST" && requestUrl.pathname === "/_control/authorize-agent") {
-        const body = JSON.parse((await readBody(request, 4096)).toString("utf8")) as { instanceId?: unknown };
+        const body = JSON.parse((await readBody(request, 4096)).toString("utf8")) as {
+          instanceId?: unknown;
+          pairing?: unknown;
+        };
         if (body.instanceId !== instanceId) {
           sendJson(response, 403, { error: "CONTROL_AUTHORIZATION_FAILED" });
           return;
         }
+        const pairing = body.pairing === undefined ? undefined : validatePairingTicket(body.pairing);
         const result = await serializeAgentAuthorization(
-          () => authorizeAgentConnection(upstream, credentialStore, fetchImplementation),
+          async () => {
+            if (pairing !== undefined) {
+              return pairIssuedAgentConnection(upstream, credentialStore, fetchImplementation, pairing);
+            }
+            if (allowLegacySelfCreate) {
+              return authorizeAgentConnection(upstream, credentialStore, fetchImplementation);
+            }
+            const reused = await reuseStoredAgentConnection(upstream, credentialStore, fetchImplementation);
+            if (reused !== null) return reused;
+            throw new BridgeControlError(
+              409,
+              "PAIRING_TICKET_REQUIRED",
+              "A browser-issued one-time pairing ticket is required.",
+            );
+          },
         );
         sendJson(response, 200, result);
         return;
@@ -512,6 +657,8 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
       }
       if (error instanceof Error && error.message === "REQUEST_TOO_LARGE") {
         sendJson(response, 413, { error: "PAYLOAD_TOO_LARGE" });
+      } else if (error instanceof BridgeControlError) {
+        sendJson(response, error.statusCode, { error: error.code });
       } else {
         sendJson(response, 502, { error: "BRIDGE_REQUEST_FAILED" });
       }

@@ -36,6 +36,11 @@ const optionalNonEmptyString = z.preprocess(
   z.string().min(1).optional(),
 );
 
+const optionalSha256 = z.preprocess(
+  (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().regex(/^[a-f0-9]{64}$/).optional(),
+);
+
 const envSchema = z.object({
   APP_MODE: z.enum(["local", "server"]).default("local"),
   HOST: z.string().default("127.0.0.1"),
@@ -43,7 +48,7 @@ const envSchema = z.object({
   DATA_DIR: z.string().default("data"),
   BACKUP_DIR: z.string().optional(),
   PUBLIC_BASE_URL: z.string().url().optional(),
-  AUTH_MODE: z.enum(["none", "token", "trusted-header"]).default("none"),
+  AUTH_MODE: z.enum(["none", "token", "trusted-header", "session"]).default("none"),
   DESIGNER_TOKEN: optionalToken,
   TRUSTED_USER_HEADER: z.string().regex(/^[A-Za-z0-9-]+$/).default("x-designer-user"),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().max(MAX_RASTER_NORMALIZATION_BYTES)
@@ -61,6 +66,7 @@ const envSchema = z.object({
   FORMASPEC_ALLOWED_HOSTS: z.string().optional(),
   FORMASPEC_TRUSTED_PROXIES: z.string().optional(),
   FORMASPEC_PROXY_SECRET: optionalNonEmptyString,
+  FORMASPEC_BOOTSTRAP_TOKEN_HASH: optionalSha256,
   FORMASPEC_CSRF_HEADER: z.string().regex(/^[A-Za-z0-9-]+$/).default("x-formaspec-csrf"),
   FORMASPEC_RENDER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(15_000),
   FORMASPEC_RENDER_MAX_PIXELS: z.coerce.number().int().positive().max(MAX_RASTER_NORMALIZATION_PIXELS)
@@ -84,7 +90,7 @@ export interface ServerConfig {
   backupDir: string;
   databasePath: string;
   publicBaseUrl: string;
-  authMode: "none" | "token" | "trusted-header";
+  authMode: "none" | "token" | "trusted-header" | "session";
   authToken?: string;
   trustedUserHeader: string;
   corsOrigins: string[];
@@ -96,6 +102,7 @@ export interface ServerConfig {
   trustedProxies: string[];
   isTrustedProxyAddress: TrustedProxyMatcher;
   proxySecret?: string;
+  bootstrapTokenHash?: string;
   csrfHeader: string;
   renderTimeoutMs: number;
   renderMaxPixels: number;
@@ -148,6 +155,9 @@ export function loadConfig(
     if (parsed.FORMASPEC_PROXY_SECRET !== undefined) {
       throw new Error("FORMASPEC_PROXY_SECRET is server-only and must not be configured in APP_MODE=local");
     }
+    if (parsed.FORMASPEC_BOOTSTRAP_TOKEN_HASH !== undefined) {
+      throw new Error("FORMASPEC_BOOTSTRAP_TOKEN_HASH is server-only and must not be configured in APP_MODE=local");
+    }
     const containerHost = parsed.FORMASPEC_CONTAINER_LOCAL
       && ["0.0.0.0", "::"].includes(parsed.HOST.trim().toLowerCase().replace(/^\[|\]$/g, ""));
     if ((!isLoopbackHost(parsed.HOST) && !containerHost) || !isLoopbackHost(publicUrl.hostname)) {
@@ -159,8 +169,11 @@ export function loadConfig(
   } else {
     if (parsed.FORMASPEC_CONTAINER_LOCAL) throw new Error("FORMASPEC_CONTAINER_LOCAL cannot be enabled in server mode");
     if (publicUrl.protocol !== "https:") throw new Error("APP_MODE=server requires an HTTPS PUBLIC_BASE_URL");
-    if (authMode !== "trusted-header") {
-      throw new Error("APP_MODE=server requires AUTH_MODE=trusted-header for browser identity and scoped MCP authentication");
+    if (authMode !== "trusted-header" && authMode !== "session") {
+      throw new Error("APP_MODE=server requires AUTH_MODE=trusted-header or session for browser identity and scoped MCP authentication");
+    }
+    if (authMode !== "session" && parsed.FORMASPEC_BOOTSTRAP_TOKEN_HASH) {
+      throw new Error("FORMASPEC_BOOTSTRAP_TOKEN_HASH is only valid with AUTH_MODE=session");
     }
   }
 
@@ -218,6 +231,9 @@ export function loadConfig(
     trustedProxies,
     isTrustedProxyAddress,
     ...(proxySecret ? { proxySecret } : {}),
+    ...(parsed.FORMASPEC_BOOTSTRAP_TOKEN_HASH
+      ? { bootstrapTokenHash: parsed.FORMASPEC_BOOTSTRAP_TOKEN_HASH }
+      : {}),
     csrfHeader: parsed.FORMASPEC_CSRF_HEADER.toLowerCase(),
     renderTimeoutMs: parsed.FORMASPEC_RENDER_TIMEOUT_MS,
     renderMaxPixels: parsed.FORMASPEC_RENDER_MAX_PIXELS,

@@ -21,6 +21,7 @@ ENV_FILE_RECORD="$RUN_DIR/env-file"
 LOCK_DIR="$RUN_DIR/launcher.lock"
 DOCKER_ENV="$ENV_DIR/docker.env"
 SERVER_ENV="$ENV_DIR/server.env"
+BOOTSTRAP_TOKEN_FILE="$ENV_DIR/bootstrap-token"
 COMPOSE_PROJECT="minimalappdesigner"
 NODE_MIN_MAJOR=24
 PNPM_MAJOR=11
@@ -600,6 +601,23 @@ generate_token() {
   else od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; fi
 }
 
+sha256_value() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'
+  else
+    die "A SHA-256 tool (shasum, sha256sum, or openssl) is required for secure server bootstrap."
+  fi
+}
+
+validate_sha256() {
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in *[!a-f0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
 validate_public_url() {
   local url="$1" authority host port="" suffix="" bracketed=0
   case "$url" in https://*) ;; *) return 1 ;; esac
@@ -672,7 +690,7 @@ server_env_mode() {
 }
 
 validate_server_env_file() {
-  local file="$1" access app_mode container_local bind port public_url auth_mode token proxy_secret header mode trusted_proxies allowed_hosts cors_origins
+  local file="$1" access app_mode container_local bind port public_url auth_mode token proxy_secret bootstrap_hash header mode trusted_proxies allowed_hosts cors_origins
   SERVER_ENV_ERROR=""
   if [ ! -f "$file" ]; then SERVER_ENV_ERROR="Server configuration is missing: $file"; return 1; fi
   mode="$(server_env_mode "$file")"
@@ -689,6 +707,7 @@ validate_server_env_file() {
   auth_mode="$(env_value "$file" AUTH_MODE || true)"
   token="$(env_value "$file" DESIGNER_TOKEN || true)"
   proxy_secret="$(env_value "$file" FORMASPEC_PROXY_SECRET || true)"
+  bootstrap_hash="$(env_value "$file" FORMASPEC_BOOTSTRAP_TOKEN_HASH || true)"
   header="$(env_value "$file" TRUSTED_USER_HEADER || true)"
   trusted_proxies="$(env_value "$file" FORMASPEC_TRUSTED_PROXIES || true)"
   allowed_hosts="$(env_value "$file" FORMASPEC_ALLOWED_HOSTS || true)"
@@ -699,11 +718,14 @@ validate_server_env_file() {
   if ! validate_header "$header"; then SERVER_ENV_ERROR="TRUSTED_USER_HEADER is missing or invalid."; return 1; fi
   if [ "$access" = "proxy" ]; then
     if { [ -n "$app_mode" ] && [ "$app_mode" != "server" ]; } || { [ -n "$container_local" ] && [ "$container_local" != "false" ]; }; then SERVER_ENV_ERROR="Proxy mode requires APP_MODE=server and FORMASPEC_CONTAINER_LOCAL=false."; return 1; fi
-    if [ "$auth_mode" != "trusted-header" ]; then SERVER_ENV_ERROR="Proxy mode requires AUTH_MODE=trusted-header."; return 1; fi
+    case "$auth_mode" in session|trusted-header) ;; *) SERVER_ENV_ERROR="Proxy mode requires AUTH_MODE=session or trusted-header."; return 1 ;; esac
     if ! validate_public_url "$public_url"; then SERVER_ENV_ERROR="Proxy mode requires PUBLIC_BASE_URL to be a valid HTTPS origin."; return 1; fi
-    if ! validate_token "$token"; then SERVER_ENV_ERROR="Proxy mode requires a valid bearer token of at least 16 safe characters."; return 1; fi
+    if [ "$auth_mode" = "trusted-header" ] && ! validate_token "$token"; then SERVER_ENV_ERROR="Trusted-header proxy mode requires a valid MCP bearer token of at least 16 safe characters."; return 1; fi
+    if [ -n "$token" ] && ! validate_token "$token"; then SERVER_ENV_ERROR="The optional MCP bearer token must contain at least 16 safe characters."; return 1; fi
+    if [ "$auth_mode" = "session" ] && [ -n "$bootstrap_hash" ] && ! validate_sha256 "$bootstrap_hash"; then SERVER_ENV_ERROR="FORMASPEC_BOOTSTRAP_TOKEN_HASH must be a lowercase SHA-256 digest."; return 1; fi
+    if [ "$auth_mode" != "session" ] && [ -n "$bootstrap_hash" ]; then SERVER_ENV_ERROR="FORMASPEC_BOOTSTRAP_TOKEN_HASH is valid only in session mode."; return 1; fi
     if ! validate_proxy_secret "$proxy_secret"; then SERVER_ENV_ERROR="Proxy mode requires a separate FORMASPEC_PROXY_SECRET with 32 to 256 safe characters. Re-run server init with --force."; return 1; fi
-    if [ "$proxy_secret" = "$token" ]; then SERVER_ENV_ERROR="FORMASPEC_PROXY_SECRET must not reuse DESIGNER_TOKEN."; return 1; fi
+    if [ -n "$token" ] && [ "$proxy_secret" = "$token" ]; then SERVER_ENV_ERROR="FORMASPEC_PROXY_SECRET must not reuse DESIGNER_TOKEN."; return 1; fi
     if [ -n "$trusted_proxies$allowed_hosts$cors_origins" ] && { [ -z "$trusted_proxies" ] || [ -z "$allowed_hosts" ] || [ "$cors_origins" != "$public_url" ]; }; then SERVER_ENV_ERROR="Proxy mode requires explicit trusted proxies, allowed hosts, and matching CORS origin."; return 1; fi
   else
     if { [ -n "$app_mode" ] && [ "$app_mode" != "local" ]; } || { [ -n "$container_local" ] && [ "$container_local" != "true" ]; }; then SERVER_ENV_ERROR="SSH-only mode requires APP_MODE=local and FORMASPEC_CONTAINER_LOCAL=true."; return 1; fi
@@ -737,14 +759,24 @@ write_docker_env() {
 }
 
 write_server_env() {
-  local access="$1" port="$2" public_url="$3" token="$4" proxy_secret="$5" header="$6" force="$7"
+  local access="$1" port="$2" public_url="$3" token="$4" proxy_secret="$5" header="$6" force="$7" auth_mode="${8:-none}" bootstrap_hash="${9:-}"
   validate_port "$port" || die "Invalid port: $port"
   validate_header "$header" || die "Invalid trusted identity header: $header"
   if [ "$access" = "proxy" ]; then
     validate_public_url "$public_url" || die "Public server URL must be a true HTTPS origin without userinfo, path, query, or fragment. Example: https://designer.company.example"
-    validate_token "$token" || die "Server token must be at least 16 characters and contain only letters, digits, dot, underscore, or hyphen."
+    case "$auth_mode" in session|trusted-header) ;; *) die "Public server authentication must be session or trusted-header." ;; esac
+    if [ "$auth_mode" = "trusted-header" ]; then
+      validate_token "$token" || die "Trusted-header mode requires an MCP token with at least 16 safe characters."
+    elif [ -n "$token" ]; then
+      validate_token "$token" || die "The optional MCP token must contain at least 16 safe characters."
+    fi
+    if [ "$auth_mode" = "session" ]; then
+      validate_sha256 "$bootstrap_hash" || die "Session mode requires an installer-generated bootstrap-token SHA-256 digest."
+    elif [ -n "$bootstrap_hash" ]; then
+      die "A bootstrap-token hash is valid only in session mode."
+    fi
     validate_proxy_secret "$proxy_secret" || die "Internal proxy secret must contain 32 to 256 safe characters."
-    [ "$proxy_secret" != "$token" ] || die "The internal proxy secret must be separate from the MCP bearer token."
+    if [ -n "$token" ]; then [ "$proxy_secret" != "$token" ] || die "The internal proxy secret must be separate from the MCP bearer token."; fi
   fi
   if [ "$DRY_RUN" = "1" ]; then
     info "Would write a mode-0600 $access server configuration to $SERVER_ENV (secret redacted)."
@@ -763,9 +795,10 @@ write_server_env() {
       printf 'APP_MODE=server\n'
       printf 'FORMASPEC_CONTAINER_LOCAL=false\n'
       printf 'PUBLIC_BASE_URL=%s\n' "$public_url"
-      printf 'AUTH_MODE=trusted-header\n'
+      printf 'AUTH_MODE=%s\n' "$auth_mode"
       printf 'DESIGNER_TOKEN=%s\n' "$token"
       printf 'FORMASPEC_PROXY_SECRET=%s\n' "$proxy_secret"
+      if [ -n "$bootstrap_hash" ]; then printf 'FORMASPEC_BOOTSTRAP_TOKEN_HASH=%s\n' "$bootstrap_hash"; fi
       printf 'FORMASPEC_ALLOWED_HOSTS=%s\n' "${public_url#https://}"
       printf 'FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12\n'
       printf 'DESIGNER_CORS_ORIGINS=%s\n' "$public_url"
@@ -971,13 +1004,15 @@ start_docker_local() {
 }
 
 server_init() {
-  local public_url="" port="$DEFAULT_API_PORT" token="" proxy_secret="" header="x-designer-user" force=0 ssh_only=0 public_url_set=0
+  local public_url="" port="$DEFAULT_API_PORT" token="" proxy_secret="" bootstrap_token="" bootstrap_hash="" header="x-designer-user" force=0 ssh_only=0 public_url_set=0 auth_mode="session"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --public-url) [ "$#" -ge 2 ] || usage_error "--public-url needs a value"; public_url="$2"; public_url_set=1; shift 2 ;;
       --port) [ "$#" -ge 2 ] || usage_error "--port needs a value"; port="$2"; shift 2 ;;
       --token) [ "$#" -ge 2 ] || usage_error "--token needs a value"; token="$2"; shift 2 ;;
       --identity-header) [ "$#" -ge 2 ] || usage_error "--identity-header needs a value"; header="$2"; shift 2 ;;
+      --session-auth) auth_mode="session"; shift ;;
+      --trusted-header) auth_mode="trusted-header"; shift ;;
       --ssh-only) ssh_only=1; shift ;;
       --force) force=1; shift ;;
       *) usage_error "Unknown server init option: $1" ;;
@@ -993,14 +1028,15 @@ server_init() {
     usage_error "--token requires trusted-proxy mode with --public-url"
   fi
   if [ "$ssh_only" = "1" ] || [ -z "$public_url" ]; then
-    write_server_env "ssh" "$port" "" "" "" "$header" "$force"
+    write_server_env "ssh" "$port" "" "" "" "$header" "$force" "none" ""
+    if [ "$DRY_RUN" != "1" ]; then rm -f "$BOOTSTRAP_TOKEN_FILE"; fi
     say
     say "SSH-only server mode keeps the app on loopback with no public exposure."
     say "After starting it, connect from your computer with:"
     say "  ssh -L $port:127.0.0.1:$port user@your-server"
     say "Then open http://127.0.0.1:$port"
   else
-    if [ -z "$token" ]; then
+    if [ "$auth_mode" = "trusted-header" ] && [ -z "$token" ]; then
       if [ "$DRY_RUN" = "1" ]; then token="dry-run-token-placeholder"
       else token="$(generate_token)"
       fi
@@ -1010,10 +1046,30 @@ server_init() {
       proxy_secret="$(generate_token)"
       while [ "$proxy_secret" = "$token" ]; do proxy_secret="$(generate_token)"; done
     fi
-    write_server_env "proxy" "$port" "$public_url" "$token" "$proxy_secret" "$header" "$force"
+    if [ "$auth_mode" = "session" ]; then
+      if [ "$DRY_RUN" = "1" ]; then bootstrap_token="dry-run-bootstrap-token-placeholder-000000000000"; else bootstrap_token="$(generate_token)"; fi
+      bootstrap_hash="$(sha256_value "$bootstrap_token")"
+    fi
+    write_server_env "proxy" "$port" "$public_url" "$token" "$proxy_secret" "$header" "$force" "$auth_mode" "$bootstrap_hash"
+    if [ "$DRY_RUN" != "1" ]; then
+      if [ "$auth_mode" = "session" ]; then
+        umask 077
+        printf '%s\n' "$bootstrap_token" >"$BOOTSTRAP_TOKEN_FILE.tmp.$$"
+        mv "$BOOTSTRAP_TOKEN_FILE.tmp.$$" "$BOOTSTRAP_TOKEN_FILE"
+        chmod 600 "$BOOTSTRAP_TOKEN_FILE"
+      else
+        rm -f "$BOOTSTRAP_TOKEN_FILE"
+      fi
+    fi
     say
-    say "The app port remains loopback-only. Configure your HTTPS/SSO reverse proxy using docs/deployment.md."
-    say "The MCP bearer secret is stored with mode 0600; run '$SCRIPT_PATH token' when configuring Codex."
+    if [ "$auth_mode" = "session" ]; then
+      say "The app port remains loopback-only. Configure HTTPS proxying, then open $public_url to create the first administrator."
+      if [ "$DRY_RUN" != "1" ]; then say "One-time setup URL: ${public_url%/}/setup#bootstrap=$bootstrap_token"; fi
+      say "Connect Codex afterward from Agent Connections so it receives a scoped, revocable grant."
+    else
+      say "The app port remains loopback-only. Configure your HTTPS/SSO reverse proxy using docs/deployment.md."
+      say "The MCP bearer secret is stored with mode 0600; run '$SCRIPT_PATH token' when configuring Codex."
+    fi
   fi
 }
 
@@ -1021,11 +1077,12 @@ start_server() {
   local no_build="$1"
   [ -f "$SERVER_ENV" ] || die "Server configuration is missing. Run '$SCRIPT_PATH server init --ssh-only' or '$SCRIPT_PATH server init --public-url https://designer.company.example'."
   validate_server_env_file "$SERVER_ENV" || die "$SERVER_ENV_ERROR"
-  local port access public_url header proxy_secret="" health_host=""
+  local port access public_url header proxy_secret="" health_host="" auth_mode=""
   port="$(env_value "$SERVER_ENV" PORT)"
   access="$(env_value "$SERVER_ENV" DESIGNER_SERVER_ACCESS)"
   public_url="$(env_value "$SERVER_ENV" PUBLIC_BASE_URL)"
   header="$(env_value "$SERVER_ENV" TRUSTED_USER_HEADER)"
+  auth_mode="$(env_value "$SERVER_ENV" AUTH_MODE)"
   proxy_secret="$(env_value "$SERVER_ENV" FORMASPEC_PROXY_SECRET || true)"
   if [ "$access" = "proxy" ]; then
     health_host="${public_url#https://}"
@@ -1050,14 +1107,28 @@ start_server() {
     die "Server container did not become ready."
   }
   if [ "$access" = "proxy" ]; then
-    if ! printf 'header = "%s: %s"\n' "$PROXY_SECRET_HEADER" "$proxy_secret" \
-      | curl -fsS --max-time 5 --config - -H "Host: $health_host" -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
+    if [ "$auth_mode" = "trusted-header" ]; then
+      if ! printf 'header = "%s: %s"\n' "$PROXY_SECRET_HEADER" "$proxy_secret" \
+        | curl -fsS --max-time 5 --config - -H "Host: $health_host" -H "$header: launcher-health-check" "http://127.0.0.1:$port/api/designs" >/dev/null; then
+        compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
+        compose "$SERVER_ENV" down >/dev/null 2>&1 || true
+        clear_runtime_state
+        die "The authenticated server API check failed. Inspect the container logs above."
+      fi
+    elif ! printf 'header = "%s: %s"\n' "$PROXY_SECRET_HEADER" "$proxy_secret" \
+      | curl -fsS --max-time 5 --config - -H "Host: $health_host" "http://127.0.0.1:$port/api/auth/status" >/dev/null; then
       compose "$SERVER_ENV" logs --tail 100 designer >&2 || true
       compose "$SERVER_ENV" down >/dev/null 2>&1 || true
       clear_runtime_state
-      die "The trusted-header API check failed. Inspect the container logs above."
+      die "The authenticated server API check failed. Inspect the container logs above."
     fi
     pass "Server is ready behind the reverse proxy at $public_url"
+    if [ "$auth_mode" = "session" ] && [ -f "$BOOTSTRAP_TOKEN_FILE" ]; then
+      local bootstrap_token=""
+      bootstrap_token="$(cat "$BOOTSTRAP_TOKEN_FILE")"
+      validate_token "$bootstrap_token" || die "The stored one-time bootstrap token is invalid. Re-run server init with --force."
+      say "One-time setup URL: ${public_url%/}/setup#bootstrap=$bootstrap_token"
+    fi
   else
     pass "SSH-only server is ready on 127.0.0.1:$port"
     say "Tunnel command: ssh -L $port:127.0.0.1:$port user@your-server"
@@ -1399,7 +1470,8 @@ Usage:
   ./designer start local [--port 4310] [--no-open]
   ./designer start docker [--port 4310] [--no-open] [--no-build]
   ./designer server init [--ssh-only | --public-url https://host] [--port 4310]
-                         [--token SECRET] [--identity-header HEADER] [--force]
+                         [--session-auth | --trusted-header] [--token SECRET]
+                         [--identity-header HEADER] [--force]
   ./designer start server [--no-build]
   ./designer status | logs [--follow] | stop | restart | open
   ./designer --yes agent connect codex

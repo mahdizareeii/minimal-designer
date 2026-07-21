@@ -242,7 +242,7 @@ test("product manager to verified backup restore completes through browser, MCP,
   await page.addInitScript(() => {
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click() {
-      if (this.protocol === "formaspec:") {
+      if (this.protocol === "formaspec:" || this.protocol === "codex:") {
         (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink = this.href;
         return;
       }
@@ -266,7 +266,7 @@ test("product manager to verified backup restore completes through browser, MCP,
 
     await step("Start an isolated local FormaSpec workspace and pass readiness", async () => {
       const health = await api<{ ok: boolean; migrations: number; render: { ok: boolean } }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 13, render: { ok: true } });
+      expect(health).toMatchObject({ ok: true, migrations: 14, render: { ok: true } });
     });
 
     await step("Create the product from the dashboard in a real browser", async () => {
@@ -331,8 +331,13 @@ test("product manager to verified backup restore completes through browser, MCP,
       const tasks = await api<{ tasks: AgentTask[] }>(baseURL, `/api/designs/${encodeURIComponent(designId)}/agent-tasks`);
       task = tasks.tasks[0]!;
       expect(task).toMatchObject({ designId, baseVersion: 2, status: "queued", expectedOutput: "design_preview" });
-      expect(await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink))
-        .toBe(`formaspec://connect-agent?task=${encodeURIComponent(task.id)}`);
+      const taskLink = await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink);
+      expect(taskLink).toBeTruthy();
+      const parsedTaskLink = new URL(taskLink!);
+      expect(parsedTaskLink.protocol).toBe("codex:");
+      expect(parsedTaskLink.hostname).toBe("new");
+      expect(parsedTaskLink.searchParams.get("prompt")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+      expect(parsedTaskLink.searchParams.get("prompt")).toContain(task.id);
       const specification = await api<{ version: number; naturalLanguageBrief: string }>(
         baseURL,
         `/api/designs/${encodeURIComponent(designId)}/product-specification`,
@@ -784,7 +789,7 @@ test("product manager to verified backup restore completes through browser, MCP,
       application = await startApplication(config);
 
       const health = await api<{ ok: boolean; migrations: number }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 13 });
+      expect(health).toMatchObject({ ok: true, migrations: 14 });
       const projects = await api<{ designs: Array<{ id: string; version: number }> }>(baseURL, "/api/designs?limit=100");
       expect(projects.designs.some((project) => project.id === sentinel.document.id)).toBe(false);
       expect(projects.designs).toEqual(expect.arrayContaining([expect.objectContaining({ id: designId, version: 6 })]));

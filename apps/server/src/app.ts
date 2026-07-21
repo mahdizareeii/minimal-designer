@@ -40,6 +40,11 @@ import { SqliteRenderJobStore } from "./render-job-store.js";
 import { RedesignStudioService } from "./redesign-studio-service.js";
 import { RestoreOperationStore } from "./restore-operation-store.js";
 import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
+import {
+  isPublicSessionAuthenticationWritePath,
+  registerSessionAuthenticationRoutes,
+  SessionAuthenticationService,
+} from "./session-auth.js";
 import { DesignerService } from "./service.js";
 import { WorkspaceHandoffService } from "./workspace-handoff-service.js";
 import {
@@ -54,6 +59,12 @@ function isMinimalHealthRequest(url: string): boolean {
     || pathOnly === "/health/live"
     || pathOnly === "/health/ready"
     || pathOnly === "/health/render";
+}
+
+function isSessionPairingNonceWrite(method: string, url: string, authMode: ServerConfig["authMode"]): boolean {
+  return authMode === "session"
+    && method === "POST"
+    && (url.split("?", 1)[0] ?? url) === "/api/agent-connections/pair";
 }
 
 export interface DesignerApplication {
@@ -73,6 +84,7 @@ export interface DesignerApplication {
   operations: OperationsService;
   policies: OrganizationPolicyService;
   maintenance: MaintenanceStore;
+  sessions: SessionAuthenticationService;
   registeredProtectedNonMcpRoutes: ReadonlySet<ProtectedNonMcpRouteKey>;
 }
 
@@ -148,6 +160,16 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   });
   const assetStore = new ContentAddressedRasterStore(config.dataDir);
   const database = new DesignerDatabase(config.databasePath);
+  let sessions: SessionAuthenticationService;
+  try {
+    sessions = new SessionAuthenticationService(database, {
+      ...(config.bootstrapTokenHash ? { bootstrapTokenHash: config.bootstrapTokenHash } : {}),
+      requireBootstrapCredential: config.appMode === "server" && config.authMode === "session",
+    });
+  } catch (error) {
+    database.close();
+    throw error;
+  }
   const events = new EventHub();
   const renderJobs = new SqliteRenderJobStore(database.sqlite);
   renderJobs.recoverExpired();
@@ -221,11 +243,37 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
         if (forwarded || request.headers[config.trustedUserHeader] !== undefined) {
           throw new DomainError("FORBIDDEN", "Container-local mode rejects proxy and caller identity headers.", 403);
         }
+        if (config.authMode === "session"
+          && request.url.startsWith("/api/")
+          && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)
+          && !isSessionPairingNonceWrite(request.method, request.url, config.authMode)) {
+          const origin = request.headers.origin;
+          if (!origin || !config.corsOrigins.includes(origin)) {
+            throw new DomainError("FORBIDDEN", "A trusted Origin is required for browser writes.", 403);
+          }
+          if (isPublicSessionAuthenticationWritePath(request.url)
+            && request.headers[config.csrfHeader] !== "1") {
+            throw new DomainError("FORBIDDEN", `Missing CSRF intent header ${config.csrfHeader}.`, 403);
+          }
+        }
         return;
       }
       const address = request.ip.replace(/^::ffff:/, "");
       if (address !== "127.0.0.1" && address !== "::1") {
         throw new DomainError("FORBIDDEN", "Local mode accepts loopback requests only.", 403);
+      }
+      if (config.authMode === "session"
+        && request.url.startsWith("/api/")
+        && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)
+        && !isSessionPairingNonceWrite(request.method, request.url, config.authMode)) {
+        const origin = request.headers.origin;
+        if (!origin || !config.corsOrigins.includes(origin)) {
+          throw new DomainError("FORBIDDEN", "A trusted Origin is required for browser writes.", 403);
+        }
+        if (isPublicSessionAuthenticationWritePath(request.url)
+          && request.headers[config.csrfHeader] !== "1") {
+          throw new DomainError("FORBIDDEN", `Missing CSRF intent header ${config.csrfHeader}.`, 403);
+        }
       }
       return;
     }
@@ -254,11 +302,17 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
       throw new DomainError("FORBIDDEN", "Host is not allowed.", 403);
     }
     if (request.url.startsWith("/api/") && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      if (isSessionPairingNonceWrite(request.method, request.url, config.authMode)) return;
       const origin = request.headers.origin;
       if (!origin || !config.corsOrigins.includes(origin)) {
         throw new DomainError("FORBIDDEN", "A trusted Origin is required for browser writes.", 403);
       }
-      if (request.headers[config.csrfHeader] !== "1") {
+      const publicSessionAuthenticationWrite = config.authMode === "session"
+        && isPublicSessionAuthenticationWritePath(request.url);
+      if (publicSessionAuthenticationWrite && request.headers[config.csrfHeader] !== "1") {
+        throw new DomainError("FORBIDDEN", `Missing CSRF intent header ${config.csrfHeader}.`, 403);
+      }
+      if (config.authMode !== "session" && request.headers[config.csrfHeader] !== "1") {
         throw new DomainError("FORBIDDEN", `Missing CSRF intent header ${config.csrfHeader}.`, 403);
       }
     }
@@ -296,7 +350,8 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     limits: { fileSize: config.maxAssetBytes, files: 1, fields: 8 },
   });
 
-  registerAuthentication(app, config, database);
+  registerAuthentication(app, config, database, sessions);
+  registerSessionAuthenticationRoutes(app, config, database, sessions);
   registerMaintenanceStatusRoute(app, maintenance);
   registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance, operations });
   registerEnterpriseHttpRoutes(app, enterprise);
@@ -369,6 +424,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     operations,
     policies,
     maintenance,
+    sessions,
     registeredProtectedNonMcpRoutes,
   };
 }

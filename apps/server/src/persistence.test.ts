@@ -116,7 +116,7 @@ describe("content-addressed persistence", () => {
 
     const opened = openService(filename);
     try {
-      expect(opened.database.schemaVersion()).toBe(13);
+      expect(opened.database.schemaVersion()).toBe(14);
       expect(opened.database.sqlite.prepare(
         "SELECT version, name FROM schema_migrations ORDER BY version",
       ).all()).toEqual([
@@ -133,8 +133,9 @@ describe("content-addressed persistence", () => {
         { version: 11, name: "render_job_persistence" },
         { version: 12, name: "handoff_execution_decisions" },
         { version: 13, name: "component_source_persistence" },
+        { version: 14, name: "browser_session_authentication" },
       ]);
-      expect(opened.database.metadata("database_schema_version")).toBe("13");
+      expect(opened.database.metadata("database_schema_version")).toBe("14");
       expect(DEFAULT_RUNTIME_VERSIONS).toMatchObject({
         commandEngine: ENGINE_VERSIONS.commandEngine,
         renderer: ENGINE_VERSIONS.renderer,
@@ -269,7 +270,7 @@ describe("content-addressed persistence", () => {
       const inspected = new Database(filename, { readonly: true });
       try {
         expect(inspected.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
-          .toEqual({ version: 13 });
+          .toEqual({ version: 14 });
       } finally {
         inspected.close();
       }

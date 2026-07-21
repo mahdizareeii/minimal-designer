@@ -76,7 +76,7 @@ describe("RestoreOperationStore", () => {
       result: {
         auditEventId: 42,
         outboxEventId: 74,
-        revoked: { grants: 1, connections: 2, nonces: 3 },
+        revoked: { grants: 1, connections: 2, nonces: 3, sessions: 4 },
       },
       errorCode: null,
       updatedAt: "2026-07-20T00:02:00.000Z",

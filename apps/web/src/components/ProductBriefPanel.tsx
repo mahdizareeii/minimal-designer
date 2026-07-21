@@ -7,7 +7,6 @@ import {
   FileCheck2,
   LoaderCircle,
   MessageSquareText,
-  Play,
   Send,
   Sparkles,
   WandSparkles,
@@ -19,6 +18,7 @@ import {
   commitDesignPreview,
   commitProductSpecification,
   createAgentTask,
+  listAgentConnections,
   listAgentTasks,
   previewProductSpecification,
   readDesign,
@@ -28,6 +28,7 @@ import {
   taskPreviewId,
   transitionAgentTask,
   type AgentTaskRecord,
+  type AgentConnectionRecord,
   type DesignPreviewRecord,
   type ProductSpecificationRecord,
 } from "../lib/api";
@@ -37,13 +38,54 @@ import type { ActivityPanelTab } from "../lib/editor-information-architecture";
 import { PlanningInterview } from "./PlanningInterview";
 import { EngineeringHandoffPanel } from "./EngineeringHandoffPanel";
 import {
+  AgentTaskWorkflowCard,
   AgentPreviewReviewDialog,
   PreviewDiagnosticsSummary,
   PreviewRevisionSummary,
+  agentTaskInstruction,
+  codexTaskLaunchUrl,
+  type AgentConnectionViewState,
 } from "./AgentPreviewReview";
 import type { DesignDocument } from "../domain";
 
 type SpecView = "brief" | "structured";
+
+export interface CodexConnectionSummary {
+  state: AgentConnectionViewState;
+  message: string;
+}
+
+export function summarizeCodexConnection(
+  connections: readonly AgentConnectionRecord[],
+  error: unknown,
+  loading: boolean,
+  now = Date.now(),
+): CodexConnectionSummary {
+  if (loading) return { state: "loading", message: "Checking the Codex connection…" };
+  if (error instanceof ApiError && error.status === 403) {
+    return { state: "restricted", message: "Connection details require an organization administrator. Task claim status remains visible here." };
+  }
+  if (error) return { state: "error", message: error instanceof Error ? error.message : "Codex connection status could not be read." };
+  const codex = connections.filter((connection) => connection.adapter === "codex");
+  const usable = codex.find((connection) => connection.status === "active"
+    && (connection.expiresAt === null || new Date(connection.expiresAt).getTime() > now));
+  if (usable) {
+    return {
+      state: "active",
+      message: usable.lastUsedAt ? `Connected · last used ${new Date(usable.lastUsedAt).toLocaleString()}` : "Connected and ready to claim tasks.",
+    };
+  }
+  if (codex.some((connection) => connection.status === "pending")) {
+    return { state: "pending", message: "Pairing is waiting for Codex. Finish the one-time authorization or reconnect." };
+  }
+  if (codex.some((connection) => connection.status === "error")) {
+    return { state: "error", message: "The Codex connection is in an error state. Reconnect it before expecting task claims." };
+  }
+  if (codex.length > 0) {
+    return { state: "unavailable", message: "The previous Codex connection is expired or revoked. Reconnect to process queued tasks." };
+  }
+  return { state: "unavailable", message: "No Codex connection is active. The task can be queued, but it will wait until Codex is connected." };
+}
 
 const contextualActions = [
   "Improve the current selection while preserving its intent.",
@@ -72,10 +114,10 @@ function specificationCounts(specification: Record<string, unknown> | null): Arr
   return labels.map(([key, label]) => [label, Array.isArray(specification[key]) ? specification[key].length : 0]);
 }
 
-function openSecretFreeTaskLink(url: string): void {
+function openExternalAppLink(url: string, protocol: "formaspec:" | "codex:", hostname: "connect-agent" | "new"): void {
   const parsed = new URL(url);
-  if (parsed.protocol !== "formaspec:" || parsed.username || parsed.password) {
-    throw new Error("The agent task link is not a valid secret-free FormaSpec URL.");
+  if (parsed.protocol !== protocol || parsed.hostname !== hostname || parsed.username || parsed.password || parsed.port || parsed.hash) {
+    throw new Error(`The ${protocol.slice(0, -1)} application link is invalid.`);
   }
   const anchor = document.createElement("a");
   anchor.href = parsed.href;
@@ -106,6 +148,9 @@ export function ProductBriefPanel() {
   const [loading, setLoading] = useState(false);
   const [savingSpec, setSavingSpec] = useState(false);
   const [startingAgent, setStartingAgent] = useState(false);
+  const [agentConnections, setAgentConnections] = useState<AgentConnectionRecord[]>([]);
+  const [connectionLoading, setConnectionLoading] = useState(true);
+  const [connectionError, setConnectionError] = useState<unknown>(null);
   const [latestTask, setLatestTask] = useState<AgentTaskRecord | null>(null);
   const [reviewTask, setReviewTask] = useState<AgentTaskRecord | null>(null);
   const [reviewPreview, setReviewPreview] = useState<DesignPreviewRecord | null>(null);
@@ -116,6 +161,7 @@ export function ProductBriefPanel() {
   const [planningOpen, setPlanningOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshSequence = useRef(0);
+  const displayedPreviewId = useRef<string | null>(null);
   const previewCommitKeys = useRef(new Map<string, string>());
 
   const designId = document?.id;
@@ -154,8 +200,21 @@ export function ProductBriefPanel() {
     if (!designId) return;
     const sequence = ++refreshSequence.current;
     try {
-      const tasks = await listAgentTasks(designId);
+      const [tasksResult, connectionsResult] = await Promise.allSettled([
+        listAgentTasks(designId),
+        listAgentConnections(),
+      ]);
       if (sequence !== refreshSequence.current) return;
+      setConnectionLoading(false);
+      if (connectionsResult.status === "fulfilled") {
+        setAgentConnections(connectionsResult.value);
+        setConnectionError(null);
+      } else {
+        setAgentConnections([]);
+        setConnectionError(connectionsResult.reason);
+      }
+      if (tasksResult.status === "rejected") throw tasksResult.reason;
+      const tasks = tasksResult.value;
       const newestDesignTask = tasks.find((task) => task.expectedOutput === "design_preview") ?? null;
       setLatestTask(newestDesignTask ?? tasks[0] ?? null);
       const previewId = taskPreviewId(newestDesignTask);
@@ -176,6 +235,12 @@ export function ProductBriefPanel() {
       setReviewPreview(preview);
       setReviewBaseDocument(baseDocument);
       setReviewError(null);
+      if (displayedPreviewId.current !== preview.previewId) {
+        displayedPreviewId.current = preview.previewId;
+        setCollapsed(false);
+        setPanelTab("activity");
+        setNotice(`Minimal UI returned preview ${preview.previewId}. Review it below, then commit or discard it.`);
+      }
     } catch (cause) {
       if (sequence !== refreshSequence.current) return;
       setReviewError(cause instanceof Error ? cause.message : "Could not load the agent preview.");
@@ -186,8 +251,11 @@ export function ProductBriefPanel() {
     if (!designId) return;
     void refreshAgentActivity();
     const unsubscribe = subscribeToEvents((event) => {
-      if (event.designId !== designId) return;
-      if (event.type === "agent_task.transitioned" || event.type === "design.updated") {
+      if (event.type === "agent_connection.changed") {
+        void refreshAgentActivity();
+        return;
+      }
+      if (event.designId === designId && (event.type === "agent_task.transitioned" || event.type === "design.updated")) {
         void refreshAgentActivity();
       }
     });
@@ -201,6 +269,10 @@ export function ProductBriefPanel() {
 
   const counts = useMemo(() => specificationCounts(specification?.specification ?? null), [specification]);
   const briefChanged = brief !== loadedBrief;
+  const connectionSummary = useMemo(
+    () => summarizeCodexConnection(agentConnections, connectionError, connectionLoading),
+    [agentConnections, connectionError, connectionLoading],
+  );
 
   const persistBrief = async (): Promise<ProductSpecificationRecord> => {
     if (!designId) throw new Error("Open a project before saving its product specification.");
@@ -261,8 +333,9 @@ export function ProductBriefPanel() {
       setReviewBaseDocument(null);
       setReviewOpen(false);
       setPanelTab("activity");
-      setNotice(`Agent task ${task.id} queued. Opening Minimal UI in Codex…`);
-      openSecretFreeTaskLink(task.launchUrl);
+      setNotice(`Agent task ${task.id} queued. Codex opened with the Minimal UI instruction prefilled; review it and press Send.${connectionSummary.state === "active" ? "" : " Codex may ask you to finish the connection first."}`);
+      openExternalAppLink(codexTaskLaunchUrl(task), "codex:", "new");
+      await refreshAgentActivity();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not create the Codex task.");
     } finally {
@@ -273,6 +346,30 @@ export function ProductBriefPanel() {
   const appendAction = (action: string) => {
     setBrief((current) => `${current.trim()}${current.trim() ? "\n\n" : ""}${action}`);
     setSpecView("brief");
+  };
+
+  const copyAgentInstruction = async () => {
+    if (!latestTask) return;
+    try {
+      await navigator.clipboard.writeText(agentTaskInstruction(latestTask));
+      setNotice(`Copied the Codex instruction for task ${latestTask.id}.`);
+    } catch {
+      setReviewError("The browser could not copy the instruction. In Codex, say “Use Minimal UI” and include the task ID shown here.");
+    }
+  };
+
+  const openAgentConnection = () => {
+    window.location.assign("/administration/agents");
+  };
+
+  const openTaskInCodex = () => {
+    if (!latestTask) return;
+    try {
+      openExternalAppLink(codexTaskLaunchUrl(latestTask), "codex:", "new");
+      setNotice(`Opened Codex with task ${latestTask.id} prefilled. Review the instruction, then press Send.`);
+    } catch (cause) {
+      setReviewError(cause instanceof Error ? cause.message : "Codex could not be opened for this task.");
+    }
   };
 
   const commitAgentPreview = async () => {
@@ -367,7 +464,7 @@ export function ProductBriefPanel() {
   if (!document) return null;
 
   return (
-    <section className={`product-workspace-panel ${collapsed ? "is-collapsed" : ""}`} aria-label="Product specification and agent activity">
+    <section className={`product-workspace-panel ${collapsed ? "is-collapsed" : ""} ${latestTask ? "has-agent-task" : ""} ${reviewPreview ? "has-agent-preview" : ""}`} aria-label="Product specification and agent activity">
       <header className="product-panel-header">
         <nav aria-label="Workspace activity panels">
           <button className={panelTab === "activity" ? "is-active" : ""} aria-pressed={panelTab === "activity"} onClick={() => setPanelTab("activity")}><Sparkles size={11} /> Agent activity</button>
@@ -416,17 +513,31 @@ export function ProductBriefPanel() {
             </div>
           </div>
 
-          <aside className="agent-task-summary">
-            <div><Play size={14} /><strong>Minimal UI workflow</strong></div>
-            <ol>
-              <li>Save the typed product specification.</li>
-              <li>Create an immutable task at design version {baseVersion}.</li>
-              <li>Codex reads context and selection.</li>
-              <li>Preview, render, lint, then commit with approval.</li>
-            </ol>
-            <button className="button button-secondary" onClick={() => setPlanningOpen(true)}><Clipboard size={12} /> Open 22-section interview</button>
-            <small>No OpenAI API key is stored in FormaSpec. The local bridge handles the authorized Codex connection.</small>
-          </aside>
+          <AgentTaskWorkflowCard
+            connectionState={connectionSummary.state}
+            connectionMessage={connectionSummary.message}
+            task={latestTask}
+            preview={reviewPreview}
+            busy={reviewBusy}
+            actionError={reviewError}
+            canCommit={Boolean(reviewTask && reviewPreview
+              && reviewTask.status === "awaiting_approval"
+              && reviewPreview.canCommit
+              && reviewPreview.status === "ready"
+              && baseVersion === reviewPreview.rootBaseVersion
+              && pendingCount === 0
+              && !savingDesign
+              && !archiveReview)}
+            canDiscard={Boolean(reviewTask && reviewPreview && reviewTask.status === "awaiting_approval")}
+            onCopyInstruction={() => void copyAgentInstruction()}
+            onOpenCodex={openTaskInCodex}
+            onConnect={openAgentConnection}
+            onRetry={() => void refreshAgentActivity()}
+            onOpenReview={() => setReviewOpen(true)}
+            onCommit={() => void commitAgentPreview()}
+            onDiscard={() => void discardAgentPreview()}
+            onOpenPlanning={() => setPlanningOpen(true)}
+          />
         </div>
       )}
 

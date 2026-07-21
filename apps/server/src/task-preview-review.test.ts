@@ -131,6 +131,32 @@ describe("task-scoped agent preview review", () => {
       data: { previewId: preview.id },
     });
 
+    const listed = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${designId}/agent-tasks`,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json<{ tasks: Array<{
+      id: string;
+      status: string;
+      claimedBy: string | null;
+      transitions: Array<{ toStatus: string; data: Record<string, unknown> }>;
+    }> }>().tasks[0]).toMatchObject({
+      id: task.id,
+      status: "awaiting_approval",
+      claimedBy: expect.stringMatching(/^principal_/),
+      transitions: expect.arrayContaining([
+        expect.objectContaining({ toStatus: "awaiting_approval", data: { previewId: preview.id } }),
+      ]),
+    });
+    expect(application.database.sqlite.prepare(
+      `SELECT event_type, payload_json FROM event_outbox
+       WHERE event_type = 'agent_task.transitioned' ORDER BY id DESC LIMIT 1`,
+    ).get()).toMatchObject({
+      event_type: "agent_task.transitioned",
+      payload_json: expect.stringContaining(`"taskId":"${task.id}"`),
+    });
+
     const hiddenWithoutTask = await application.app.inject({
       method: "GET",
       url: `/api/designs/${designId}/previews/${preview.id}`,

@@ -1,11 +1,17 @@
 import {
   AlertTriangle,
+  Bot,
   CheckCircle2,
+  Clock3,
   Columns2,
+  Copy,
   Eye,
+  ExternalLink,
   GitCompareArrows,
   LoaderCircle,
   Maximize2,
+  Play,
+  RefreshCcw,
   ShieldAlert,
   Trash2,
   X,
@@ -125,6 +131,156 @@ function diagnosticIcon(severity: string) {
   if (severity === "error") return <XCircle size={12} />;
   if (severity === "warning") return <AlertTriangle size={12} />;
   return <CheckCircle2 size={12} />;
+}
+
+export type AgentConnectionViewState = "loading" | "active" | "pending" | "unavailable" | "restricted" | "error";
+
+export function agentTaskInstruction(task: AgentTaskRecord): string {
+  return `[@Minimal UI](plugin://minimal-ui@formaspec)\n\nUse Minimal UI. Claim FormaSpec task ${task.id}, read its project context and selection, preview the requested design, inspect the rendered result, run linting, and return the exact persisted preview for website approval.`;
+}
+
+export function codexTaskLaunchUrl(task: AgentTaskRecord): string {
+  const url = new URL("codex://new");
+  url.searchParams.set("prompt", agentTaskInstruction(task));
+  if (url.protocol !== "codex:" || url.hostname !== "new" || url.username || url.password || url.port || url.hash
+    || [...url.searchParams.keys()].some((key) => key !== "prompt") || url.searchParams.getAll("prompt").length !== 1) {
+    throw new Error("Could not create a strict Codex task link.");
+  }
+  return url.toString();
+}
+
+export function agentTaskStatusMessage(task: AgentTaskRecord | null): string {
+  if (!task) return "Submit a design command to create an immutable agent task.";
+  const latestMessage = task.transitions.at(-1)?.message?.trim();
+  switch (task.status) {
+    case "queued": return "Task created. Codex has not claimed it yet.";
+    case "claimed": return `Claimed${task.claimedBy ? ` by ${task.claimedBy}` : " by Codex"}; waiting for design work to start.`;
+    case "in_progress": return latestMessage || "Codex is reading the brief and preparing an exact design preview.";
+    case "awaiting_approval": return "Codex returned a persisted preview. Review it below, then commit or discard it.";
+    case "completed": return "The exact preview was approved and the task is complete.";
+    case "failed": return latestMessage || "The agent reported that it could not complete this task.";
+    case "cancelled": return latestMessage || "This task was cancelled without changing design history.";
+    case "expired": return latestMessage || "This task expired before it was completed.";
+  }
+}
+
+function taskStageState(task: AgentTaskRecord | null, stage: "queued" | "claimed" | "preview"): "idle" | "current" | "complete" | "error" {
+  if (!task) return "idle";
+  if (["failed", "cancelled", "expired"].includes(task.status)) return stage === "queued" ? "complete" : "error";
+  if (stage === "queued") return task.status === "queued" ? "current" : "complete";
+  if (stage === "claimed") {
+    if (task.status === "claimed" || task.status === "in_progress") return "current";
+    return ["awaiting_approval", "completed"].includes(task.status) ? "complete" : "idle";
+  }
+  if (task.status === "awaiting_approval") return "current";
+  return task.status === "completed" ? "complete" : "idle";
+}
+
+export function AgentTaskWorkflowCard({
+  connectionState,
+  connectionMessage,
+  task,
+  preview,
+  busy,
+  actionError,
+  canCommit,
+  canDiscard,
+  onCopyInstruction,
+  onOpenCodex,
+  onConnect,
+  onRetry,
+  onOpenReview,
+  onCommit,
+  onDiscard,
+  onOpenPlanning,
+}: {
+  connectionState: AgentConnectionViewState;
+  connectionMessage: string;
+  task: AgentTaskRecord | null;
+  preview: DesignPreviewRecord | null;
+  busy: boolean;
+  actionError: string | null;
+  canCommit: boolean;
+  canDiscard: boolean;
+  onCopyInstruction: () => void;
+  onOpenCodex: () => void;
+  onConnect: () => void;
+  onRetry: () => void;
+  onOpenReview: () => void;
+  onCommit: () => void;
+  onDiscard: () => void;
+  onOpenPlanning: () => void;
+}) {
+  const waiting = task && ["queued", "claimed", "in_progress"].includes(task.status);
+  const terminalError = task && ["failed", "cancelled", "expired"].includes(task.status);
+  return (
+    <aside className={`agent-task-workflow is-${task?.status ?? "idle"}`} aria-label="Agent task workflow">
+      <header>
+        <div><Bot size={15} /><span><strong>Minimal UI agent</strong><small>{connectionMessage}</small></span></div>
+        <span className={`agent-connection-state is-${connectionState}`}>{connectionState.replaceAll("_", " ")}</span>
+      </header>
+
+      <div className="agent-task-stage-track" aria-label="Agent task progress">
+        <span className={connectionState === "active" ? "is-complete" : connectionState === "loading" ? "is-current" : "is-error"}><i>1</i>Connected</span>
+        <span className={`is-${taskStageState(task, "queued")}`}><i>2</i>Queued</span>
+        <span className={`is-${taskStageState(task, "claimed")}`}><i>3</i>Claimed</span>
+        <span className={`is-${taskStageState(task, "preview")}`}><i>4</i>Preview</span>
+      </div>
+
+      {!task ? (
+        <div className="agent-task-empty">
+          <Play size={18} />
+          <strong>Ready for a design command</strong>
+          <span>Submitting creates a durable task. FormaSpec never calls an AI API itself; an authorized Codex connection claims the task through MCP.</span>
+          <div>
+            {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect Codex</button>}
+            <button className="button button-secondary" onClick={onOpenPlanning}>Open PM interview</button>
+          </div>
+        </div>
+      ) : (
+        <div className="agent-task-current">
+          <div className="agent-task-current-heading">
+            <span className={`is-${task.status}`}><Clock3 size={12} /> {task.status.replaceAll("_", " ")}</span>
+            <code>{task.id}</code>
+          </div>
+          <p className={terminalError ? "is-error" : ""}>{agentTaskStatusMessage(task)}</p>
+
+          {preview ? (
+            <div className="agent-task-inline-preview">
+              <figure>
+                <img
+                  src={previewRenderUrl(preview.designId, preview.previewId, 720, task.id)}
+                  alt="Minimal UI rendered preview"
+                  data-testid="agent-rendered-preview"
+                />
+                <figcaption>Version {preview.rootBaseVersion} → {preview.proposedVersion} · {preview.changedNodeIds.length} changed layer{preview.changedNodeIds.length === 1 ? "" : "s"}</figcaption>
+              </figure>
+              <div className="agent-task-preview-actions" role="group" aria-label="Agent preview approval actions">
+                <button className="button button-secondary" disabled={busy || !canDiscard} onClick={onDiscard}><Trash2 size={12} /> Discard</button>
+                <button className={`button ${preview.destructive ? "button-danger" : "button-primary"}`} disabled={busy || !canCommit} onClick={onCommit}>
+                  {busy ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={13} />} Commit exact preview
+                </button>
+              </div>
+              <button className="agent-task-review-link" disabled={busy} onClick={onOpenReview}><GitCompareArrows size={12} /> Review before / after and diagnostics</button>
+            </div>
+          ) : waiting ? (
+            <div className="agent-task-waiting"><LoaderCircle size={15} className="spin" /><span>The website will show the rendered preview here as soon as the agent requests approval.</span></div>
+          ) : null}
+
+          {actionError && <div className="agent-task-action-error"><AlertTriangle size={12} /><span>{actionError}</span><button onClick={onRetry}><RefreshCcw size={11} /> Retry</button></div>}
+
+          {!preview && (
+            <div className="agent-task-current-actions">
+              <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open in Codex</button>
+              {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect or repair Codex</button>}
+              <button className="button button-secondary" onClick={onCopyInstruction}><Copy size={12} /> Copy Codex instruction</button>
+              <button className="button button-secondary" onClick={onRetry}><RefreshCcw size={12} /> Refresh status</button>
+            </div>
+          )}
+        </div>
+      )}
+    </aside>
+  );
 }
 
 export function AgentPreviewReviewDialog({

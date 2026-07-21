@@ -1641,6 +1641,139 @@ function addComponentSourcePersistence(sqlite: Database.Database): void {
   `);
 }
 
+function addBrowserSessionAuthentication(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS password_accounts (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+      principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+      login_name TEXT NOT NULL CHECK(length(login_name) BETWEEN 3 AND 128),
+      login_name_normalized TEXT NOT NULL CHECK(length(login_name_normalized) BETWEEN 3 AND 128),
+      password_hash TEXT NOT NULL CHECK(length(password_hash) BETWEEN 80 AND 512),
+      bootstrap_account INTEGER NOT NULL DEFAULT 1 CHECK(bootstrap_account = 1),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(organization_id, login_name_normalized),
+      UNIQUE(principal_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS password_accounts_single_bootstrap
+      ON password_accounts(bootstrap_account) WHERE bootstrap_account = 1;
+
+    CREATE TABLE IF NOT EXISTS browser_sessions (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+      account_id TEXT NOT NULL REFERENCES password_accounts(id) ON DELETE RESTRICT,
+      principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+      token_hash TEXT NOT NULL UNIQUE CHECK(
+        length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'
+      ),
+      csrf_token_hash TEXT NOT NULL CHECK(
+        length(csrf_token_hash) = 64 AND csrf_token_hash NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      idle_expires_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      CHECK(idle_expires_at <= expires_at),
+      CHECK(last_used_at >= created_at),
+      CHECK(revoked_at IS NULL OR revoked_at >= created_at)
+    );
+    CREATE INDEX IF NOT EXISTS browser_sessions_principal_active
+      ON browser_sessions(principal_id, revoked_at, idle_expires_at);
+
+    CREATE TABLE IF NOT EXISTS login_attempts (
+      identity_hash TEXT PRIMARY KEY CHECK(
+        length(identity_hash) = 64 AND identity_hash NOT GLOB '*[^0-9a-f]*'
+      ),
+      failure_count INTEGER NOT NULL CHECK(failure_count BETWEEN 1 AND 1000),
+      window_started_at TEXT NOT NULL,
+      locked_until TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS bootstrap_credentials (
+      id TEXT PRIMARY KEY CHECK(id = 'initial_admin'),
+      token_hash TEXT NOT NULL CHECK(
+        length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at TEXT NOT NULL,
+      consumed_at TEXT,
+      consumed_by TEXT REFERENCES principals(id) ON DELETE RESTRICT,
+      CHECK(
+        (consumed_at IS NULL AND consumed_by IS NULL)
+        OR (consumed_at IS NOT NULL AND consumed_by IS NOT NULL)
+      )
+    );
+
+    CREATE TRIGGER IF NOT EXISTS password_accounts_require_bootstrap_admin
+    BEFORE INSERT ON password_accounts
+    WHEN NEW.bootstrap_account != 1
+      OR NOT EXISTS (
+        SELECT 1 FROM principals p
+        JOIN memberships m
+          ON m.organization_id = p.organization_id AND m.principal_id = p.id
+        WHERE p.id = NEW.principal_id
+          AND p.organization_id = NEW.organization_id
+          AND p.kind = 'human'
+          AND p.disabled_at IS NULL
+          AND m.role = 'organization_admin'
+      )
+    BEGIN SELECT RAISE(ABORT, 'password account requires one enabled bootstrap organization administrator'); END;
+
+    CREATE TRIGGER IF NOT EXISTS password_accounts_identity_immutable
+    BEFORE UPDATE ON password_accounts
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.organization_id IS NOT OLD.organization_id
+      OR NEW.principal_id IS NOT OLD.principal_id
+      OR NEW.login_name IS NOT OLD.login_name
+      OR NEW.login_name_normalized IS NOT OLD.login_name_normalized
+      OR NEW.bootstrap_account IS NOT OLD.bootstrap_account
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN SELECT RAISE(ABORT, 'password account bootstrap identity is immutable'); END;
+
+    CREATE TRIGGER IF NOT EXISTS password_accounts_immutable_delete
+    BEFORE DELETE ON password_accounts
+    BEGIN SELECT RAISE(ABORT, 'password accounts cannot be deleted'); END;
+
+    CREATE TRIGGER IF NOT EXISTS browser_sessions_require_account_principal
+    BEFORE INSERT ON browser_sessions
+    WHEN NOT EXISTS (
+      SELECT 1 FROM password_accounts a
+      WHERE a.id = NEW.account_id
+        AND a.organization_id = NEW.organization_id
+        AND a.principal_id = NEW.principal_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'browser session account and principal must match'); END;
+
+    CREATE TRIGGER IF NOT EXISTS browser_sessions_identity_immutable
+    BEFORE UPDATE ON browser_sessions
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.organization_id IS NOT OLD.organization_id
+      OR NEW.account_id IS NOT OLD.account_id
+      OR NEW.principal_id IS NOT OLD.principal_id
+      OR NEW.token_hash IS NOT OLD.token_hash
+      OR NEW.csrf_token_hash IS NOT OLD.csrf_token_hash
+      OR NEW.created_at IS NOT OLD.created_at
+      OR NEW.expires_at IS NOT OLD.expires_at
+    BEGIN SELECT RAISE(ABORT, 'browser session identity and absolute expiry are immutable'); END;
+
+    CREATE TRIGGER IF NOT EXISTS bootstrap_credentials_consume_once
+    BEFORE UPDATE ON bootstrap_credentials
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.created_at IS NOT OLD.created_at
+      OR OLD.consumed_at IS NOT NULL
+      OR OLD.consumed_by IS NOT NULL
+      OR (NEW.consumed_at IS NULL) != (NEW.consumed_by IS NULL)
+      OR (NEW.consumed_at IS NOT NULL AND NEW.token_hash IS NOT OLD.token_hash)
+    BEGIN SELECT RAISE(ABORT, 'bootstrap credential can be consumed exactly once'); END;
+
+    CREATE TRIGGER IF NOT EXISTS bootstrap_credentials_immutable_delete
+    BEFORE DELETE ON bootstrap_credentials
+    BEGIN SELECT RAISE(ABORT, 'bootstrap credentials cannot be deleted'); END;
+  `);
+}
+
 const migrations: Migration[] = [
   { version: 1, name: "baseline_v1", up: (sqlite) => sqlite.exec(baselineSql) },
   { version: 2, name: "content_addressed_persistence", up: addPersistenceIntegrity },
@@ -1655,6 +1788,7 @@ const migrations: Migration[] = [
   { version: 11, name: "render_job_persistence", up: addRenderJobPersistence },
   { version: 12, name: "handoff_execution_decisions", up: addHandoffExecutionDecisions },
   { version: 13, name: "component_source_persistence", up: addComponentSourcePersistence },
+  { version: 14, name: "browser_session_authentication", up: addBrowserSessionAuthentication },
 ];
 
 const migrationNames = new Set<string>();
@@ -2069,6 +2203,111 @@ const requiredEnterpriseMigrationShapes: readonly RequiredMigrationShape[] = [
           "new.result_snapshot_hash is not old.result_snapshot_hash",
           "raise(abort",
         ],
+      },
+    ],
+  },
+  {
+    version: 14,
+    tables: [
+      {
+        name: "password_accounts",
+        columns: [
+          "id", "organization_id", "principal_id", "login_name", "login_name_normalized",
+          "password_hash", "bootstrap_account", "created_at", "updated_at",
+        ],
+        sqlFragments: [
+          "bootstrap_account integer not null default 1 check(bootstrap_account = 1)",
+          "unique(organization_id, login_name_normalized)",
+          "unique(principal_id)",
+        ],
+      },
+      {
+        name: "browser_sessions",
+        columns: [
+          "id", "organization_id", "account_id", "principal_id", "token_hash", "csrf_token_hash",
+          "created_at", "last_used_at", "idle_expires_at", "expires_at", "revoked_at",
+        ],
+        sqlFragments: [
+          "token_hash text not null unique",
+          "check(idle_expires_at <= expires_at)",
+          "check(revoked_at is null or revoked_at >= created_at)",
+        ],
+      },
+      {
+        name: "login_attempts",
+        columns: [
+          "identity_hash", "failure_count", "window_started_at", "locked_until", "updated_at",
+        ],
+        sqlFragments: ["failure_count integer not null check(failure_count between 1 and 1000)"],
+      },
+      {
+        name: "bootstrap_credentials",
+        columns: ["id", "token_hash", "created_at", "consumed_at", "consumed_by"],
+        sqlFragments: [
+          "id text primary key check(id = 'initial_admin')",
+          "length(token_hash) = 64",
+          "consumed_at is null and consumed_by is null",
+        ],
+      },
+    ],
+    indexes: [
+      {
+        name: "password_accounts_single_bootstrap",
+        table: "password_accounts",
+        columns: [{ name: "bootstrap_account" }],
+      },
+      {
+        name: "browser_sessions_principal_active",
+        table: "browser_sessions",
+        columns: [{ name: "principal_id" }, { name: "revoked_at" }, { name: "idle_expires_at" }],
+      },
+    ],
+    triggers: [
+      {
+        name: "password_accounts_require_bootstrap_admin",
+        table: "password_accounts",
+        sqlFragments: [
+          "before insert on password_accounts",
+          "p.kind = 'human'",
+          "m.role = 'organization_admin'",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "password_accounts_identity_immutable",
+        table: "password_accounts",
+        sqlFragments: ["before update on password_accounts", "new.principal_id is not old.principal_id", "raise(abort"],
+      },
+      {
+        name: "password_accounts_immutable_delete",
+        table: "password_accounts",
+        sqlFragments: ["before delete on password_accounts", "raise(abort"],
+      },
+      {
+        name: "browser_sessions_require_account_principal",
+        table: "browser_sessions",
+        sqlFragments: ["before insert on browser_sessions", "password_accounts", "raise(abort"],
+      },
+      {
+        name: "browser_sessions_identity_immutable",
+        table: "browser_sessions",
+        sqlFragments: ["before update on browser_sessions", "new.token_hash is not old.token_hash", "raise(abort"],
+      },
+      {
+        name: "bootstrap_credentials_consume_once",
+        table: "bootstrap_credentials",
+        sqlFragments: [
+          "before update on bootstrap_credentials",
+          "old.consumed_at is not null",
+          "new.consumed_at is null) != (new.consumed_by is null",
+          "new.consumed_at is not null and new.token_hash is not old.token_hash",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "bootstrap_credentials_immutable_delete",
+        table: "bootstrap_credentials",
+        sqlFragments: ["before delete on bootstrap_credentials", "raise(abort"],
       },
     ],
   },

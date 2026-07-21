@@ -79,6 +79,10 @@ describe("protected non-MCP public route contract", () => {
     for (const routePath of PROTECTED_NON_MCP_ROUTE_EXCLUSIONS.health) {
       expect(isProtectedNonMcpRoute("GET", routePath)).toBe(false);
     }
+    for (const routePath of PROTECTED_NON_MCP_ROUTE_EXCLUSIONS.authentication) {
+      expect(isProtectedNonMcpRoute(routePath.endsWith("status") || routePath.endsWith("session") ? "GET" : "POST", routePath))
+        .toBe(false);
+    }
     for (const method of ["GET", "POST", "DELETE"]) {
       expect(isProtectedNonMcpRoute(method, "/mcp")).toBe(false);
     }

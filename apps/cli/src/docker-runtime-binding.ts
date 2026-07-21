@@ -618,12 +618,19 @@ function readRecordedDockerEnvironment(projectRoot: string): RecordedDockerEnvir
 
   const bearerToken = values.get("DESIGNER_TOKEN") ?? "";
   const proxySecret = values.get("FORMASPEC_PROXY_SECRET") ?? "";
+  const authMode = values.get("AUTH_MODE");
+  const bootstrapTokenHash = values.get("FORMASPEC_BOOTSTRAP_TOKEN_HASH") ?? "";
+  const trustedHeaderCredentialsValid = authMode === "trusted-header"
+    && bearerTokenPattern.test(bearerToken)
+    && bootstrapTokenHash === "";
+  const sessionCredentialsValid = authMode === "session"
+    && (bearerToken === "" || bearerTokenPattern.test(bearerToken))
+    && (bootstrapTokenHash === "" || sha256Pattern.test(bootstrapTokenHash));
   if (values.get("APP_MODE") !== "server" || values.get("FORMASPEC_CONTAINER_LOCAL") !== "false"
-    || values.get("AUTH_MODE") !== "trusted-header"
-    || !bearerTokenPattern.test(bearerToken)
+    || (!trustedHeaderCredentialsValid && !sessionCredentialsValid)
     || !proxySecretPattern.test(proxySecret)
-    || proxySecret === bearerToken) {
-    throw new Error("Managed trusted-proxy server environment is incomplete or unsafe.");
+    || (bearerToken !== "" && proxySecret === bearerToken)) {
+    throw new Error("Managed authenticated-proxy server environment is incomplete or unsafe.");
   }
   const publicBaseUrl = values.get("PUBLIC_BASE_URL");
   let publicUrl: URL;

@@ -91,6 +91,47 @@ export function AccessibilityIdentityEditor({
   );
 }
 
+export function TextTypographyEditor({
+  node,
+  updateNode,
+}: {
+  node: Extract<DesignNode, { type: "text" }>;
+  updateNode: (patch: UpdateNodePatch) => void;
+}) {
+  const typography = node.style.typography ?? {};
+  const fontFamily = rawString(typography.font_family, "Inter");
+  const color = rawString(node.style.color, "#111827");
+  const setStyle = (patch: Partial<DesignNode["style"]>) => updateNode({ style: { ...node.style, ...patch } });
+  const setTypography = (patch: typeof typography) => setStyle({ typography: { ...typography, ...patch } });
+
+  return (
+    <div className="inspector-section">
+      <div className="inspector-section-title"><span>Typography</span><span>Persian / RTL ready</span></div>
+      <label className="inspector-field textarea-field wide"><textarea value={node.content} dir={node.direction ?? "auto"} onChange={(event) => updateNode({ content: event.target.value })} /></label>
+      <div className="typography-font-presets" role="group" aria-label="Bundled font family presets">
+        <button className={fontFamily === "Inter" ? "is-active" : ""} type="button" onClick={() => setTypography({ font_family: "Inter" })}><strong>Inter</strong><small>Latin UI</small></button>
+        <button className={fontFamily === "Vazirmatn" ? "is-active" : ""} type="button" onClick={() => setTypography({ font_family: "Vazirmatn" })}><strong>Vazirmatn</strong><small lang="fa" dir="rtl">فارسی و عربی</small></button>
+      </div>
+      <label className="inspector-field wide typography-font-field"><span>Font</span><input aria-label="Font family" value={fontFamily} onChange={(event) => setTypography({ font_family: event.target.value })} /></label>
+      <div className="inspector-grid" style={{ marginTop: 7 }}>
+        <NumberField label="Sz" value={rawNumber(typography.font_size, 16)} min={1} onChange={(font_size) => setTypography({ font_size })} />
+        <NumberField label="Wt" value={typeof typography.font_weight === "number" ? typography.font_weight : 500} min={1} onChange={(font_weight) => setTypography({ font_weight })} />
+        <label className="inspector-field wide"><span>Dir</span><select aria-label="Text direction" value={node.direction ?? "auto"} onChange={(event) => updateNode({ direction: event.target.value as "auto" | "ltr" | "rtl" })}><option value="auto">Automatic mixed direction</option><option value="ltr">Left to right</option><option value="rtl">Right to left</option></select></label>
+      </div>
+      <p className="inspector-note typography-direction-note">For Persian or Arabic, choose Vazirmatn. Automatic direction follows the first strong character and keeps mixed Persian/English content deterministic; choose RTL when the whole text block must stay right-to-left.</p>
+      <div className="segmented-control" style={{ marginTop: 7 }}>
+        <button className={typography.text_align === "left" ? "is-active" : ""} onClick={() => setTypography({ text_align: "left" })}><AlignLeft size={12} /></button>
+        <button className={typography.text_align === "center" ? "is-active" : ""} onClick={() => setTypography({ text_align: "center" })}><AlignCenter size={12} /></button>
+        <button className={typography.text_align === "right" ? "is-active" : ""} onClick={() => setTypography({ text_align: "right" })}><AlignRight size={12} /></button>
+      </div>
+      <div className="color-row" style={{ marginTop: 7 }}>
+        <label className="color-swatch"><input type="color" value={color.startsWith("#") ? color : "#111827"} onChange={(event) => setStyle({ color: event.target.value })} /></label>
+        <input className="plain-input" value={color} onChange={(event) => setStyle({ color: event.target.value })} aria-label="Text color" />
+      </div>
+    </div>
+  );
+}
+
 function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspectorTab }) {
   const document = useDesignerStore((state) => state.document)!;
   const updateNode = useDesignerStore((state) => state.updateNode);
@@ -99,9 +140,7 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
   const deleteSelection = useDesignerStore((state) => state.deleteSelection);
   const reparentSelection = useDesignerStore((state) => state.reparentSelection);
   const uploadImage = useDesignerStore((state) => state.uploadImage);
-  const typography = node.style.typography ?? {};
   const fill = rawString(node.style.fill, "#ffffff");
-  const color = rawString(node.style.color, "#111827");
   const radius = node.style.radius && typeof node.style.radius === "object" && !("token_id" in node.style.radius)
     ? rawNumber(node.style.radius.top_left, 0)
     : rawNumber(node.style.radius, 0);
@@ -111,7 +150,6 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
     ? existingLink.action.page_id
     : "";
   const setStyle = (patch: Partial<DesignNode["style"]>) => updateNode(node.id, { style: { ...node.style, ...patch } });
-  const setTypography = (patch: typeof typography) => setStyle({ typography: { ...typography, ...patch } });
   const currentParent = parentOf(document, node.id);
   const parentValue = currentParent
     ? "node_id" in currentParent ? `node:${currentParent.node_id}` : `page:${currentParent.page_id}`
@@ -194,27 +232,7 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
       </div>
       </>}
 
-      {tab === "content" && node.type === "text" && (
-        <div className="inspector-section">
-          <div className="inspector-section-title"><span>Typography</span><span>Mixed / RTL</span></div>
-          <label className="inspector-field textarea-field wide"><textarea value={node.content} dir={node.direction ?? "auto"} onChange={(event) => updateNode(node.id, { content: event.target.value })} /></label>
-          <div className="inspector-grid" style={{ marginTop: 7 }}>
-            <label className="inspector-field"><span>F</span><input value={rawString(typography.font_family, "Inter")} onChange={(event) => setTypography({ font_family: event.target.value })} /></label>
-            <NumberField label="Sz" value={rawNumber(typography.font_size, 16)} min={1} onChange={(font_size) => setTypography({ font_size })} />
-            <NumberField label="Wt" value={typeof typography.font_weight === "number" ? typography.font_weight : 500} min={1} onChange={(font_weight) => setTypography({ font_weight })} />
-            <label className="inspector-field"><span>Dir</span><select value={node.direction ?? "auto"} onChange={(event) => updateNode(node.id, { direction: event.target.value as "auto" | "ltr" | "rtl" })}><option value="auto">Auto</option><option value="ltr">LTR</option><option value="rtl">RTL</option></select></label>
-          </div>
-          <div className="segmented-control" style={{ marginTop: 7 }}>
-            <button className={typography.text_align === "left" ? "is-active" : ""} onClick={() => setTypography({ text_align: "left" })}><AlignLeft size={12} /></button>
-            <button className={typography.text_align === "center" ? "is-active" : ""} onClick={() => setTypography({ text_align: "center" })}><AlignCenter size={12} /></button>
-            <button className={typography.text_align === "right" ? "is-active" : ""} onClick={() => setTypography({ text_align: "right" })}><AlignRight size={12} /></button>
-          </div>
-          <div className="color-row" style={{ marginTop: 7 }}>
-            <label className="color-swatch"><input type="color" value={color.startsWith("#") ? color : "#111827"} onChange={(event) => setStyle({ color: event.target.value })} /></label>
-            <input className="plain-input" value={color} onChange={(event) => setStyle({ color: event.target.value })} aria-label="Text color" />
-          </div>
-        </div>
-      )}
+      {tab === "content" && node.type === "text" && <TextTypographyEditor node={node} updateNode={(patch) => updateNode(node.id, patch)} />}
 
       {tab === "content" && node.type === "image" && (
         <div className="inspector-section">
@@ -311,6 +329,7 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
           {node.type === "text" && <div className="inspector-section">
             <div className="inspector-section-title"><span>Text direction</span><span>{node.direction ?? "auto"}</span></div>
             <label className="inspector-field wide"><span>Dir</span><select value={node.direction ?? "auto"} onChange={(event) => updateNode(node.id, { direction: event.target.value as "auto" | "ltr" | "rtl" })}><option value="auto">Automatic mixed direction</option><option value="ltr">Left to right</option><option value="rtl">Right to left</option></select></label>
+            <p className="inspector-note">Vazirmatn is bundled for Persian and Arabic. Set it in Content → Typography; automatic direction remains the safest default for mixed-language text.</p>
           </div>}
         </>
       )}

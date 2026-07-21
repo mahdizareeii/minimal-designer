@@ -45,6 +45,42 @@ function parseJsonArray(value: string): string[] {
 }
 
 export function resolveAccess(sqlite: Database.Database, actorId: string): AccessContext {
+  if (actorId.startsWith("session:")) {
+    const parts = actorId.split(":");
+    const sessionId = parts[1] ?? "";
+    const principalId = parts[2] ?? "";
+    if (parts.length !== 3
+      || !/^session_[A-Za-z0-9_-]{8,180}$/.test(sessionId)
+      || !/^principal_[A-Za-z0-9_-]{8,180}$/.test(principalId)) {
+      throw new DomainError("AUTH_REQUIRED", "The browser session principal is invalid.", 401);
+    }
+    const now = new Date().toISOString();
+    const row = sqlite.prepare(
+      `SELECT p.organization_id, p.disabled_at, m.role
+       FROM browser_sessions s
+       JOIN principals p ON p.id = s.principal_id AND p.organization_id = s.organization_id
+       JOIN memberships m ON m.organization_id = p.organization_id AND m.principal_id = p.id
+       WHERE s.id = ? AND s.principal_id = ?
+         AND s.revoked_at IS NULL AND s.idle_expires_at > ? AND s.expires_at > ?
+         AND p.kind = 'human'`,
+    ).get(sessionId, principalId, now, now) as {
+      organization_id: string;
+      disabled_at: string | null;
+      role: OrganizationRole;
+    } | undefined;
+    if (!row || row.disabled_at) {
+      throw new DomainError("AUTH_REQUIRED", "The browser session principal is disabled or unavailable.", 401);
+    }
+    return {
+      actorId,
+      principalId,
+      organizationId: row.organization_id,
+      role: row.role,
+      scopes: ["*"],
+      projectIds: [],
+    };
+  }
+
   if (actorId.startsWith("grant_")) {
     const now = new Date().toISOString();
     const row = sqlite.prepare(
@@ -336,6 +372,7 @@ function boundedBackupEventDetails(action: string, details: Record<string, unkno
       addInteger("revokedGrants");
       addInteger("revokedConnections");
       addInteger("revokedNonces");
+      addInteger("revokedBrowserSessions");
       break;
     case "backup.restore_rolled_back":
       addString("operationId", 120, /^restore_[A-Za-z0-9][A-Za-z0-9_-]+$/);

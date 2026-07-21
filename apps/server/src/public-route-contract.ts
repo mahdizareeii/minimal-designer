@@ -39,11 +39,18 @@ export interface ProtectedNonMcpRouteContract extends ProtectedNonMcpRouteContra
 
 /**
  * These surfaces are intentionally outside the protected non-MCP route
- * contract. Health endpoints have their own minimal public contract and MCP
- * has a separate executable tool/resource contract matrix.
+ * contract. Health and browser-authentication endpoints have their own narrow
+ * executable contracts, and MCP has a separate tool/resource contract matrix.
  */
 export const PROTECTED_NON_MCP_ROUTE_EXCLUSIONS = Object.freeze({
   health: Object.freeze(["/health", "/health/live", "/ready", "/health/ready", "/health/render"]),
+  authentication: Object.freeze([
+    "/api/auth/status",
+    "/api/auth/bootstrap",
+    "/api/auth/login",
+    "/api/auth/session",
+    "/api/auth/logout",
+  ]),
   mcp: Object.freeze(["/mcp"]),
 });
 
@@ -67,11 +74,17 @@ function isMcpContractExclusion(path: string): boolean {
   return path === "/mcp" || path.startsWith("/mcp/");
 }
 
+function isAuthenticationContractExclusion(path: string): boolean {
+  return path === "/api/auth" || path.startsWith("/api/auth/");
+}
+
 export function isProtectedNonMcpRoute(method: string, path: string): method is ProtectedNonMcpMethod {
   const normalizedMethod = method.toUpperCase();
   if (!protectedMethodSet.has(normalizedMethod)) return false;
   const normalizedPath = normalizeRoutePath(path);
-  if (isHealthContractExclusion(normalizedPath) || isMcpContractExclusion(normalizedPath)) return false;
+  if (isHealthContractExclusion(normalizedPath)
+    || isAuthenticationContractExclusion(normalizedPath)
+    || isMcpContractExclusion(normalizedPath)) return false;
   return normalizedPath === "/api"
     || normalizedPath.startsWith("/api/")
     || normalizedPath === "/events"

@@ -142,6 +142,51 @@ export const memberships = sqliteTable("memberships", {
   createdAt: text("created_at").notNull(),
 }, (table) => [primaryKey({ columns: [table.organizationId, table.principalId] })]);
 
+export const passwordAccounts = sqliteTable("password_accounts", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  principalId: text("principal_id").notNull(),
+  loginName: text("login_name").notNull(),
+  loginNameNormalized: text("login_name_normalized").notNull(),
+  passwordHash: text("password_hash").notNull(),
+  bootstrapAccount: integer("bootstrap_account", { mode: "boolean" }).notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("password_accounts_org_login").on(table.organizationId, table.loginNameNormalized),
+  uniqueIndex("password_accounts_principal").on(table.principalId),
+]);
+
+export const browserSessions = sqliteTable("browser_sessions", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  accountId: text("account_id").notNull(),
+  principalId: text("principal_id").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  csrfTokenHash: text("csrf_token_hash").notNull(),
+  createdAt: text("created_at").notNull(),
+  lastUsedAt: text("last_used_at").notNull(),
+  idleExpiresAt: text("idle_expires_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  revokedAt: text("revoked_at"),
+});
+
+export const loginAttempts = sqliteTable("login_attempts", {
+  identityHash: text("identity_hash").primaryKey(),
+  failureCount: integer("failure_count").notNull(),
+  windowStartedAt: text("window_started_at").notNull(),
+  lockedUntil: text("locked_until"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const bootstrapCredentials = sqliteTable("bootstrap_credentials", {
+  id: text("id").primaryKey(),
+  tokenHash: text("token_hash").notNull(),
+  createdAt: text("created_at").notNull(),
+  consumedAt: text("consumed_at"),
+  consumedBy: text("consumed_by"),
+});
+
 export const agentGrants = sqliteTable("agent_grants", {
   id: text("id").primaryKey(),
   organizationId: text("organization_id").notNull(),

@@ -27,9 +27,14 @@ export interface BridgeStatus {
 
 export interface BridgeController {
   ensureStarted(): Promise<BridgeStatus>;
-  authorizeAgent(): Promise<{ connectionId: string; status: string; expiresAt: string | null }>;
+  authorizeAgent(pairing?: AgentPairingTicket): Promise<{ connectionId: string; status: string; expiresAt: string | null }>;
   stop(): Promise<boolean>;
   status(): Promise<BridgeStatus>;
+}
+
+export interface AgentPairingTicket {
+  nonce: string;
+  connectionId?: string;
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -56,6 +61,51 @@ function readApiPort(runtimeDirectory: string): number {
   } catch (error) {
     throw new Error(`Recorded API port is invalid: ${portFile}`, { cause: error });
   }
+}
+
+type UpstreamAuthMode = "none" | "session" | "trusted-header" | "token" | "unknown";
+
+function normalizedAuthMode(value: string | undefined): UpstreamAuthMode | null {
+  return value === "none" || value === "session" || value === "trusted-header" || value === "token" || value === "unknown"
+    ? value
+    : null;
+}
+
+function readBoundedRegularFile(filename: string, maximumBytes: number): string | null {
+  try {
+    const stat = fs.lstatSync(filename);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximumBytes) return null;
+    return fs.readFileSync(filename, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function authModeFromEnvironmentFile(filename: string): UpstreamAuthMode | null {
+  const contents = readBoundedRegularFile(filename, 16 * 1024);
+  if (contents === null) return null;
+  const values = contents.split(/\r?\n/).flatMap((line) => {
+    const match = /^AUTH_MODE=(none|session|trusted-header|token)$/.exec(line.trim());
+    return match ? [match[1]!] : [];
+  });
+  if (values.length !== 1) return null;
+  return normalizedAuthMode(values[0]);
+}
+
+function recordedUpstreamAuthMode(runtimeDirectory: string, environment: NodeJS.ProcessEnv): UpstreamAuthMode {
+  const explicit = normalizedAuthMode(environment.FORMASPEC_UPSTREAM_AUTH_MODE);
+  if (explicit !== null) return explicit;
+  const runDirectory = path.join(runtimeDirectory, "run");
+  const mode = readBoundedRegularFile(path.join(runDirectory, "mode"), 64)?.trim();
+  if (mode === "local" || mode === "dev") return "none";
+  if (mode === "docker" || mode === "server") {
+    const environmentFile = readBoundedRegularFile(path.join(runDirectory, "env-file"), 4096)?.trim();
+    if (environmentFile && path.isAbsolute(environmentFile)) {
+      const recorded = authModeFromEnvironmentFile(environmentFile);
+      if (recorded !== null) return recorded;
+    }
+  }
+  return normalizedAuthMode(environment.AUTH_MODE) ?? "unknown";
 }
 
 async function bridgeHealth(url: string): Promise<BridgeHealthProbe> {
@@ -188,6 +238,7 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
           FORMASPEC_BRIDGE_INSTANCE_ID: instanceId,
           FORMASPEC_BRIDGE_BUILD_ID: runtime.buildId,
           FORMASPEC_UPSTREAM_MCP_URL: upstreamMcpUrl,
+          FORMASPEC_UPSTREAM_AUTH_MODE: recordedUpstreamAuthMode(runtimeDirectory, environment),
         },
       });
       fs.closeSync(log);
@@ -213,14 +264,17 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
       throw new Error(`The local bridge did not become healthy. Inspect ${logPath}.`);
     },
 
-    async authorizeAgent(): Promise<{ connectionId: string; status: string; expiresAt: string | null }> {
+    async authorizeAgent(pairing?: AgentPairingTicket): Promise<{ connectionId: string; status: string; expiresAt: string | null }> {
       await this.ensureStarted();
       const state = readState(statePath);
       if (state === null) throw new Error("The owned bridge state is unavailable; refusing to authorize an unowned process.");
       const response = await fetch(`${state.url}/_control/authorize-agent`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ instanceId: state.instanceId }),
+        body: JSON.stringify({
+          instanceId: state.instanceId,
+          ...(pairing === undefined ? {} : { pairing }),
+        }),
         signal: AbortSignal.timeout(15_000),
       });
       if (!response.ok) {

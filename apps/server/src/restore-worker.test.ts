@@ -28,6 +28,7 @@ import {
 } from "./restore-worker.js";
 import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
 import { RestoreOperationStore } from "./restore-operation-store.js";
+import { SessionAuthenticationService } from "./session-auth.js";
 import { DesignerService } from "./service.js";
 
 const temporaryDirectories: string[] = [];
@@ -35,6 +36,7 @@ const onePixelPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=",
   "base64",
 );
+const RESTORED_BROWSER_SESSION_TOKEN = "restore_browser_session_token_0123456789abc";
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -147,6 +149,39 @@ function installActiveAgent(database: DesignerDatabase): void {
   ).run(createHash("sha256").update("restore-pairing-nonce").digest("hex"), now);
 }
 
+function installActiveBrowserSession(database: DesignerDatabase): void {
+  const now = "2026-07-20T00:00:00.000Z";
+  database.sqlite.prepare(
+    `INSERT INTO principals (id, organization_id, kind, display_name, external_id, created_at)
+     VALUES ('principal_restore_browser', 'organization_legacy', 'human',
+             'Restore browser administrator', 'password:restore-admin', ?)`,
+  ).run(now);
+  database.sqlite.prepare(
+    `INSERT INTO memberships (organization_id, principal_id, role, created_at)
+     VALUES ('organization_legacy', 'principal_restore_browser', 'organization_admin', ?)`,
+  ).run(now);
+  database.sqlite.prepare(
+    `INSERT INTO password_accounts
+       (id, organization_id, principal_id, login_name, login_name_normalized,
+        password_hash, bootstrap_account, created_at, updated_at)
+     VALUES ('account_restore_browser', 'organization_legacy', 'principal_restore_browser',
+             'restore-admin', 'restore-admin', ?, 1, ?, ?)`,
+  ).run(`scrypt$1$16384$8$1$${"a".repeat(22)}$${"b".repeat(43)}`, now, now);
+  database.sqlite.prepare(
+    `INSERT INTO browser_sessions
+       (id, organization_id, account_id, principal_id, token_hash, csrf_token_hash,
+        created_at, last_used_at, idle_expires_at, expires_at, revoked_at)
+     VALUES ('session_restore_browser', 'organization_legacy', 'account_restore_browser',
+             'principal_restore_browser', ?, ?, ?, ?,
+             '2099-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z', NULL)`,
+  ).run(
+    createHash("sha256").update(RESTORED_BROWSER_SESSION_TOKEN).digest("hex"),
+    createHash("sha256").update("restore-browser-csrf").digest("hex"),
+    now,
+    now,
+  );
+}
+
 async function createRestoreFixture(
   label: string,
   beforeTargetBackup?: (database: DesignerDatabase) => void,
@@ -165,6 +200,7 @@ async function createRestoreFixture(
     idempotencyKey: `restore-retained-${label}-0001`,
   });
   installActiveAgent(database);
+  installActiveBrowserSession(database);
   beforeTargetBackup?.(database);
 
   const target = await new BackupManager(database, dataDirectory, backupDirectory).create();
@@ -514,7 +550,7 @@ describe("one-shot restore worker", () => {
       status: "verified",
       backupId: fixture.targetBackupId,
       organizationId: "organization_legacy",
-      databaseSchemaVersion: 13,
+      databaseSchemaVersion: 14,
       documentSchemaVersion: 2,
     });
     expect(result.sizeBytes).toBeGreaterThan(0);
@@ -764,9 +800,9 @@ describe("one-shot restore worker", () => {
       status: "restored",
       backupId: fixture.targetBackupId,
       operationId: fixture.operationId,
-      schemaVersion: 13,
+      schemaVersion: 14,
       renderedDesignId: fixture.retainedDesignId,
-      revoked: { grants: 1, connections: 1, nonces: 1 },
+      revoked: { grants: 1, connections: 1, nonces: 1, sessions: 1 },
       maintenancePhase: "verification",
     });
     expect(result.safetyBackupId).toMatch(/^backup_[a-f0-9]{40}$/);
@@ -799,6 +835,13 @@ describe("one-shot restore worker", () => {
         "SELECT revoked_at FROM pairing_nonces WHERE connection_id = 'connection_restore_agent'",
       ).get()).toMatchObject({ revoked_at: "2026-07-20T00:03:00.000Z" });
       expect(restored.sqlite.prepare(
+        "SELECT revoked_at FROM browser_sessions WHERE id = 'session_restore_browser'",
+      ).get()).toMatchObject({ revoked_at: "2026-07-20T00:03:00.000Z" });
+      const sessions = new SessionAuthenticationService(restored);
+      expect(() => sessions.requireSession({
+        headers: { cookie: `formaspec_session=${RESTORED_BROWSER_SESSION_TOKEN}` },
+      } as Parameters<SessionAuthenticationService["requireSession"]>[0])).toThrow(/invalid or expired/);
+      expect(restored.sqlite.prepare(
         "SELECT action, target_id FROM audit_events WHERE id = ?",
       ).get(result.auditEventId)).toEqual({ action: "backup.restore_commit", target_id: fixture.targetBackupId });
       const outbox = restored.sqlite.prepare(
@@ -812,10 +855,11 @@ describe("one-shot restore worker", () => {
           operationId: fixture.operationId,
           targetBackupId: fixture.targetBackupId,
           safetyBackupId: result.safetyBackupId,
-          schemaVersion: 13,
+          schemaVersion: 14,
           revokedGrants: 1,
           revokedConnections: 1,
           revokedNonces: 1,
+          revokedBrowserSessions: 1,
         },
       });
     } finally {
@@ -844,6 +888,7 @@ describe("one-shot restore worker", () => {
           UPDATE agent_grants SET revoked_at = NULL WHERE id = 'grant_restore_agent';
           UPDATE agent_connections SET status = 'active' WHERE id = 'connection_restore_agent';
           UPDATE pairing_nonces SET revoked_at = NULL WHERE connection_id = 'connection_restore_agent';
+          UPDATE browser_sessions SET revoked_at = NULL WHERE id = 'session_restore_browser';
         END;
       `);
     });
@@ -853,7 +898,7 @@ describe("one-shot restore worker", () => {
       now: () => new Date("2026-07-20T00:03:30.000Z"),
     })).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      message: "Restored agent access could not be revoked completely; reconciliation was rolled back.",
+      message: "Restored agent or browser access could not be revoked completely; reconciliation was rolled back.",
     });
 
     const original = new DesignerDatabase(fixture.databasePath);
@@ -870,6 +915,9 @@ describe("one-shot restore worker", () => {
       ).get()).toEqual({ status: "active" });
       expect(original.sqlite.prepare(
         "SELECT revoked_at FROM pairing_nonces WHERE connection_id = 'connection_restore_agent'",
+      ).get()).toEqual({ revoked_at: null });
+      expect(original.sqlite.prepare(
+        "SELECT revoked_at FROM browser_sessions WHERE id = 'session_restore_browser'",
       ).get()).toEqual({ revoked_at: null });
       expect((original.sqlite.prepare(
         "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'backup.restore_commit'",
@@ -1004,7 +1052,7 @@ describe("one-shot restore worker", () => {
     expect(resumed).toMatchObject({
       status: "restored",
       safetyBackupId: cutoverState.safety.id,
-      revoked: { grants: 1, connections: 1, nonces: 1 },
+      revoked: { grants: 1, connections: 1, nonces: 1, sessions: 1 },
     });
     expect(resumeRenderer).toMatchObject({ healthCalls: 0, renderCalls: 0, closeCalls: 0 });
     expect((await fs.promises.readdir(fixture.backupDirectory)).filter((filename) => filename.endsWith(".tar")).sort())
@@ -1064,7 +1112,7 @@ describe("one-shot restore worker", () => {
     expect(resumed).toMatchObject({
       status: "restored",
       backupId: fixture.targetBackupId,
-      revoked: { grants: 1, connections: 1, nonces: 1 },
+      revoked: { grants: 1, connections: 1, nonces: 1, sessions: 1 },
     });
     expect(resumedRenderer).toMatchObject({ healthCalls: 1, renderCalls: 1, closeCalls: 1 });
     expect(fs.existsSync(journalPath)).toBe(false);

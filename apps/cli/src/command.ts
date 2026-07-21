@@ -143,7 +143,7 @@ Usage:
   formaspecctl backup restore clear-stale-lock --yes [--json]
   formaspecctl audit retention preview|list [--json]
   formaspecctl audit retention execute --preview-id <id> --plan-hash <sha256> --yes [--idempotency-key <key>] [--json]
-  formaspecctl agent connect codex [--yes]
+  formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]
   formaspecctl agent config generic [--format all|json|toml] [--snippet-only]
   formaspecctl support-bundle preview [--json]
   formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]
@@ -341,13 +341,21 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");
         return;
       }
-      reportCodexConnection(await connectCodex({
-        environment,
-        commandRunner: runner,
-        bridge: bridge(),
-        confirm,
-        assumeYes: true,
-      }));
+      try {
+        reportCodexConnection(await connectCodex({
+          environment,
+          commandRunner: runner,
+          bridge: bridge(),
+          confirm,
+          assumeYes: true,
+        }));
+      } catch (cause) {
+        if (cause instanceof Error && cause.message.includes("PAIRING_TICKET_REQUIRED")) {
+          io.stdout("Codex needs a one-time pairing ticket in authenticated mode. Open FormaSpec Administration and choose Connect Codex.");
+          return;
+        }
+        throw cause;
+      }
     };
 
     if (command === "install") {
@@ -1050,8 +1058,31 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           ...(hasExplicitUrl ? [] : ["--url", `${status.url}/mcp`]),
         ], io);
       }
-      if (agentCommand !== "connect" || arguments_.shift() !== "codex" || arguments_.length > 0) {
-        throw new Error("Use: formaspecctl agent connect codex [--yes] | agent config generic [options]");
+      if (agentCommand !== "connect" || arguments_.shift() !== "codex") {
+        throw new Error("Use: formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes] | agent config generic [options]");
+      }
+      let pairingNonce: string | undefined;
+      let connectionId: string | undefined;
+      while (arguments_.length > 0) {
+        const option = arguments_.shift();
+        if (option === "--pairing-nonce") {
+          if (pairingNonce !== undefined) throw new Error("--pairing-nonce may be specified only once.");
+          pairingNonce = arguments_.shift();
+          if (pairingNonce === undefined || !/^fspair_[A-Za-z0-9_-]{43}$/.test(pairingNonce)) {
+            throw new Error("--pairing-nonce requires an exact one-time FormaSpec pairing nonce.");
+          }
+        } else if (option === "--connection-id") {
+          if (connectionId !== undefined) throw new Error("--connection-id may be specified only once.");
+          connectionId = arguments_.shift();
+          if (connectionId === undefined || !/^connection_[a-f0-9]{32}$/.test(connectionId)) {
+            throw new Error("--connection-id requires an exact FormaSpec connection ID.");
+          }
+        } else {
+          throw new Error(`Unexpected Codex connection option: ${option}`);
+        }
+      }
+      if (connectionId !== undefined && pairingNonce === undefined) {
+        throw new Error("--connection-id may be used only with --pairing-nonce.");
       }
       const result = await connectCodex({
         environment,
@@ -1059,6 +1090,12 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         bridge: bridge(),
         confirm,
         assumeYes,
+        ...(pairingNonce === undefined ? {} : {
+          pairing: {
+            nonce: pairingNonce,
+            ...(connectionId === undefined ? {} : { connectionId }),
+          },
+        }),
       });
       reportCodexConnection(result);
       return 0;

@@ -379,3 +379,130 @@ test("pinned components preview exactly and commit through the ordinary revision
   expect(committed).toMatchObject({ version: 3, schemaVersion: 2 });
   expect(Object.values(committed.document.nodes).some((node) => node.type === "instance" && !node.archived)).toBe(true);
 });
+
+test("website design commands expose connection and claim state, then show the exact agent preview with approval actions", async ({ page, request }) => {
+  const fixture = await createEditorFixture(request);
+  await page.addInitScript(() => {
+    const originalClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function click() {
+      if (this.protocol === "codex:" || this.protocol === "formaspec:") {
+        (window as unknown as { __formaspecExternalLink?: string }).__formaspecExternalLink = this.href;
+        return;
+      }
+      originalClick.call(this);
+    };
+  });
+  const challengeResponse = await request.post("/api/agent-connections", {
+    data: {
+      adapter: "codex",
+      displayName: "Editor workflow Codex",
+      scopes: ["design:read", "design:preview", "design:write", "task:read", "task:claim", "task:update"],
+      projectIds: [fixture.designId],
+      expiresInSeconds: 3_600,
+    },
+  });
+  expect(challengeResponse.ok(), await challengeResponse.text()).toBe(true);
+  const challenge = await challengeResponse.json() as { nonce: string; connection: { status: string } };
+  expect(challenge.connection.status).toBe("pending");
+  const pairResponse = await request.post("/api/agent-connections/pair", { data: { nonce: challenge.nonce } });
+  expect(pairResponse.ok(), await pairResponse.text()).toBe(true);
+  const paired = await pairResponse.json() as { connection: { status: string }; grant: { token: string } };
+  expect(paired.connection.status).toBe("active");
+  let mcpRequestId = 1;
+  const callTool = async <T extends Record<string, unknown>>(name: string, arguments_: Record<string, unknown>): Promise<T & { ok: true }> => {
+    const response = await request.post("/mcp", {
+      headers: {
+        authorization: `Bearer ${paired.grant.token}`,
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      data: { jsonrpc: "2.0", id: mcpRequestId++, method: "tools/call", params: { name, arguments: arguments_ } },
+    });
+    expect(response.ok(), await response.text()).toBe(true);
+    const envelope = await response.json() as {
+      error?: { message?: string };
+      result?: { structuredContent?: T & { ok?: boolean; error?: { code?: string; message?: string } } };
+    };
+    expect(envelope.error?.message).toBeUndefined();
+    const structured = envelope.result?.structuredContent;
+    expect(structured?.ok, structured?.error?.message).toBe(true);
+    return structured as T & { ok: true };
+  };
+
+  await page.goto(
+    `/design/${encodeURIComponent(fixture.designId)}?page=${encodeURIComponent(fixture.pageId)}&node=${encodeURIComponent(fixture.frameId)}`,
+  );
+  const productWorkspace = page.getByRole("region", { name: "Product specification and agent activity" });
+  const workflow = productWorkspace.getByRole("complementary", { name: "Agent task workflow" });
+  await expect(workflow.getByText("active", { exact: true })).toBeVisible();
+  await expect(workflow.getByText("Connected and ready to claim tasks.", { exact: true })).toBeVisible();
+
+  await productWorkspace.getByRole("textbox", { name: "Describe the product, business logic, and constraints" }).fill(
+    "Design a professional dispatch overview with a clear urgent-order state, accessible actions, and RTL-safe content.",
+  );
+  await productWorkspace.getByRole("button", { name: "Start with Codex" }).click();
+  await expect(workflow.getByText("Task created. Codex has not claimed it yet.", { exact: true })).toBeVisible();
+
+  const tasksResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`);
+  expect(tasksResponse.ok(), await tasksResponse.text()).toBe(true);
+  const tasks = await tasksResponse.json() as { tasks: Array<{ id: string; status: string }> };
+  const task = tasks.tasks[0]!;
+  expect(task.status).toBe("queued");
+  const codexLink = await page.evaluate(() => (window as unknown as { __formaspecExternalLink?: string }).__formaspecExternalLink);
+  expect(codexLink).toBeTruthy();
+  const parsedCodexLink = new URL(codexLink!);
+  expect(parsedCodexLink.protocol).toBe("codex:");
+  expect(parsedCodexLink.hostname).toBe("new");
+  expect(parsedCodexLink.searchParams.get("prompt")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+  expect(parsedCodexLink.searchParams.get("prompt")).toContain(task.id);
+  await expect(workflow.getByRole("button", { name: "Open in Codex" })).toBeVisible();
+  await expect(workflow.getByRole("button", { name: "Copy Codex instruction" })).toBeVisible();
+
+  const claimed = await callTool<{ task: { status: string } }>("task_claim", { task_id: task.id });
+  expect(claimed.task.status).toBe("claimed");
+  const progressed = await callTool<{ task: { status: string } }>("task_transition", {
+    task_id: task.id,
+    expected_status: "claimed",
+    to_status: "in_progress",
+    message: "Building the requested dispatch overview.",
+  });
+  expect(progressed.task.status).toBe("in_progress");
+  await expect(workflow.getByText("Building the requested dispatch overview.", { exact: true })).toBeVisible();
+
+  const previewed = await callTool<{ preview: { id: string; canCommit: boolean } }>("design_preview_changes", {
+    design_id: fixture.designId,
+    base_version: 1,
+    max_size: 720,
+    operations: [{
+      type: "update_node",
+      node_id: fixture.frameId,
+      patch: { name: "Agent-designed dispatch overview", metadata: { agent_workflow_e2e: true } },
+    }],
+  });
+  expect(previewed.preview.canCommit).toBe(true);
+  const approval = await callTool<{ task: { status: string } }>("task_transition", {
+    task_id: task.id,
+    expected_status: "in_progress",
+    to_status: "awaiting_approval",
+    message: "Rendered preview is ready for product-manager approval.",
+    data: { previewId: previewed.preview.id },
+  });
+  expect(approval.task.status).toBe("awaiting_approval");
+
+  const renderedPreview = workflow.getByRole("img", { name: "Minimal UI rendered preview" });
+  await expect(renderedPreview).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => renderedPreview.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+  const approvalActions = workflow.getByRole("group", { name: "Agent preview approval actions" });
+  await expect(approvalActions.getByRole("button", { name: "Discard" })).toBeVisible();
+  await expect(approvalActions.getByRole("button", { name: "Commit exact preview" })).toBeEnabled();
+
+  await approvalActions.getByRole("button", { name: "Commit exact preview" }).click();
+  await expect(page.locator(".document-title")).toContainText("Version 2", { timeout: 15_000 });
+  await expect(workflow.getByText("The exact preview was approved and the task is complete.", { exact: true })).toBeVisible();
+  const committedResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
+  expect(committedResponse.ok(), await committedResponse.text()).toBe(true);
+  expect(await committedResponse.json()).toMatchObject({
+    version: 2,
+    document: { nodes: { [fixture.frameId]: { name: "Agent-designed dispatch overview" } } },
+  });
+});

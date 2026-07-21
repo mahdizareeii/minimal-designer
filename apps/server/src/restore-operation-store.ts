@@ -36,6 +36,7 @@ const resultSchema = z.object({
     grants: z.number().int().nonnegative(),
     connections: z.number().int().nonnegative(),
     nonces: z.number().int().nonnegative(),
+    sessions: z.number().int().nonnegative().default(0),
   }).strict(),
 }).strict();
 const recoverySchema = z.object({

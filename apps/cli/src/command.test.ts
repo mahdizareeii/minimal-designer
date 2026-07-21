@@ -24,17 +24,24 @@ function temporaryDirectory(): string {
   return directory;
 }
 
-function fakeBridge(): BridgeController & { starts: number; stops: number; authorizations: number } {
+function fakeBridge(): BridgeController & {
+  starts: number;
+  stops: number;
+  authorizations: number;
+  pairingTickets: Array<{ nonce: string; connectionId?: string } | undefined>;
+} {
   return {
     starts: 0,
     stops: 0,
     authorizations: 0,
+    pairingTickets: [],
     async ensureStarted() {
       this.starts += 1;
       return { running: true, url: "http://127.0.0.1:4312", owned: true };
     },
-    async authorizeAgent() {
+    async authorizeAgent(pairing) {
       this.authorizations += 1;
+      this.pairingTickets.push(pairing);
       return { connectionId: "connection_test", status: "active", expiresAt: "2099-01-01T00:00:00.000Z" };
     },
     async stop() { this.stops += 1; return true; },
@@ -216,6 +223,60 @@ describe("formaspecctl", () => {
     expect(reconnectedConfig.match(/default_tools_approval_mode = "writes"/g)).toHaveLength(1);
   });
 
+  it("passes a validated browser-issued pairing ticket to the bridge without printing it", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    fs.mkdirSync(path.join(root, ".codex"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), 'model = "test-model"\n');
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    const nonce = `fspair_${"n".repeat(43)}`;
+    const connectionId = `connection_${"a".repeat(32)}`;
+
+    const result = await runCli([
+      "--yes", "agent", "connect", "codex",
+      "--pairing-nonce", nonce,
+      "--connection-id", connectionId,
+    ], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    });
+
+    expect(result).toBe(0);
+    expect(bridge.pairingTickets).toEqual([{ nonce, connectionId }]);
+    expect([...io.output, ...io.errors].join("\n")).not.toContain(nonce);
+  });
+
+  it("rejects malformed pairing options before starting the bridge or changing Codex", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bridge = fakeBridge();
+    const io = collectingIo();
+
+    expect(await runCli([
+      "--yes", "agent", "connect", "codex", "--pairing-nonce", "fspair_short",
+    ], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+    })).toBe(1);
+    expect(await runCli([
+      "--yes", "agent", "connect", "codex", "--connection-id", `connection_${"a".repeat(32)}`,
+    ], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+    })).toBe(1);
+    expect(bridge.starts).toBe(0);
+    expect(bridge.authorizations).toBe(0);
+  });
+
   it("does not overwrite an unmanaged Minimal UI skill", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
@@ -356,6 +417,7 @@ describe("formaspecctl", () => {
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(11, "render_job_persistence", "2026-01-11T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(12, "handoff_execution_decisions", "2026-01-12T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(13, "component_source_persistence", "2026-01-13T00:00:00.000Z");
+    sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(14, "browser_session_authentication", "2026-01-14T00:00:00.000Z");
     sqlite.close();
     const io = collectingIo();
     const result = await runCli(["migrate", "status", "--json"], { projectRoot: root, bridge: fakeBridge(), io });

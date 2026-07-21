@@ -525,7 +525,7 @@ run_server_security_tests() {
 
   local generated_runtime="$TMP_ROOT/generated-server-runtime"
   local generated_env="$generated_runtime/env/server.env"
-  local generated_proxy_secret generated_token generated_mode
+  local generated_proxy_secret generated_token generated_mode generated_auth_mode generated_bootstrap_hash generated_bootstrap_token generated_bootstrap_mode computed_bootstrap_hash
   capture env \
     DESIGNER_RUNTIME_DIR="$generated_runtime" \
     DESIGNER_NO_OPEN=1 \
@@ -536,7 +536,16 @@ run_server_security_tests() {
   expect_status 0 "server init generates a separate internal proxy secret"
   generated_proxy_secret="$(awk -F= '$1 == "FORMASPEC_PROXY_SECRET" { print substr($0, index($0, "=") + 1) }' "$generated_env")"
   generated_token="$(awk -F= '$1 == "DESIGNER_TOKEN" { print substr($0, index($0, "=") + 1) }' "$generated_env")"
+  generated_auth_mode="$(awk -F= '$1 == "AUTH_MODE" { print substr($0, index($0, "=") + 1) }' "$generated_env")"
+  generated_bootstrap_hash="$(awk -F= '$1 == "FORMASPEC_BOOTSTRAP_TOKEN_HASH" { print substr($0, index($0, "=") + 1) }' "$generated_env")"
+  generated_bootstrap_token="$(cat "$generated_runtime/env/bootstrap-token")"
   generated_mode="$(stat -c '%a' "$generated_env" 2>/dev/null || stat -f '%Lp' "$generated_env" 2>/dev/null || true)"
+  generated_bootstrap_mode="$(stat -c '%a' "$generated_runtime/env/bootstrap-token" 2>/dev/null || stat -f '%Lp' "$generated_runtime/env/bootstrap-token" 2>/dev/null || true)"
+  if command -v shasum >/dev/null 2>&1; then
+    computed_bootstrap_hash="$(printf '%s' "$generated_bootstrap_token" | shasum -a 256 | awk '{print $1}')"
+  else
+    computed_bootstrap_hash="$(printf '%s' "$generated_bootstrap_token" | sha256sum | awk '{print $1}')"
+  fi
   case "$generated_proxy_secret" in
     ''|*[!A-Za-z0-9._-]*) fail_test "generated proxy secret is bounded and header-safe" ;;
     *)
@@ -553,6 +562,10 @@ run_server_security_tests() {
     fail_test "generated proxy secret never reuses DESIGNER_TOKEN"
   fi
   expect_equal "600" "$generated_mode" "generated server.env remains mode 0600"
+  expect_equal "session" "$generated_auth_mode" "fresh public server initialization defaults to password sessions"
+  expect_equal "600" "$generated_bootstrap_mode" "one-time bootstrap token is stored with mode 0600"
+  expect_equal "$generated_bootstrap_hash" "$computed_bootstrap_hash" "server.env stores only the matching bootstrap-token hash"
+  expect_file_not_contains "$generated_env" "$generated_bootstrap_token" "server.env never stores the plaintext bootstrap token"
   expect_not_contains "$generated_proxy_secret" "normal server init output never prints the generated proxy secret"
 
   capture env DESIGNER_RUNTIME_DIR="$generated_runtime" bash "$LAUNCHER" proxy-secret

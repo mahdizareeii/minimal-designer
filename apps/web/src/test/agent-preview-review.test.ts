@@ -1,8 +1,18 @@
 import { createRectangleNode, createStarterDocument } from "@designer/core";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { changedNodeSummaries } from "../components/AgentPreviewReview";
 import {
+  AgentTaskWorkflowCard,
+  agentTaskInstruction,
+  agentTaskStatusMessage,
+  changedNodeSummaries,
+  codexTaskLaunchUrl,
+} from "../components/AgentPreviewReview";
+import { summarizeCodexConnection } from "../components/ProductBriefPanel";
+import {
+  ApiError,
   commitDesignPreview,
   previewRenderUrl,
   readDesignPreview,
@@ -53,6 +63,108 @@ afterEach(() => {
 });
 
 describe("agent before/after review", () => {
+  it("turns connection and task lifecycle state into actionable website guidance", () => {
+    const activeConnection = {
+      id: "connection_codex_0001",
+      adapter: "codex" as const,
+      displayName: "Codex — Minimal UI",
+      status: "active" as const,
+      scopes: ["task:claim"],
+      projectIds: [],
+      principalId: "principal_codex_0001",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      lastUsedAt: null,
+      createdAt: "2026-07-20T09:00:00.000Z",
+      updatedAt: "2026-07-20T09:00:00.000Z",
+    };
+    expect(summarizeCodexConnection([activeConnection], null, false, Date.parse("2026-07-20T09:00:00.000Z"))).toEqual({
+      state: "active",
+      message: "Connected and ready to claim tasks.",
+    });
+    expect(summarizeCodexConnection([], new ApiError("Forbidden", { status: 403, code: "FORBIDDEN" }), false).state).toBe("restricted");
+    expect(agentTaskStatusMessage(task({ status: "queued" }))).toContain("not claimed");
+    expect(agentTaskInstruction(task())).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+    expect(agentTaskInstruction(task())).toContain("Claim FormaSpec task task_review_0001");
+    const launchUrl = new URL(codexTaskLaunchUrl(task()));
+    expect(launchUrl.protocol).toBe("codex:");
+    expect(launchUrl.hostname).toBe("new");
+    expect([...launchUrl.searchParams.keys()]).toEqual(["prompt"]);
+    expect(launchUrl.searchParams.get("prompt")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+    expect(launchUrl.searchParams.get("prompt")).toContain("task_review_0001");
+    expect(codexTaskLaunchUrl(task())).toContain("%40Minimal+UI");
+  });
+
+  it("renders the returned PNG with Commit and Discard directly beneath it", () => {
+    const document = createStarterDocument({ preset: "phone", name: "Inline review" });
+    const preview = {
+      previewId: "preview_review_0001",
+      designId: document.id,
+      rootBaseVersion: document.revision,
+      proposedVersion: document.revision + 1,
+      baseRevisionId: "revision_base",
+      baseSnapshotHash: "a".repeat(64),
+      operationHash: "b".repeat(64),
+      resultSnapshotHash: "c".repeat(64),
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      canCommit: true,
+      destructive: false,
+      kind: "ordinary" as const,
+      status: "ready" as const,
+      committedRevisionId: null,
+      changedNodeIds: [document.pages[0]!.children[0]!],
+      versions: { commandEngine: "2", renderer: "3", fontBundle: "1" },
+      diagnostics: [],
+      document,
+    };
+    const markup = renderToStaticMarkup(createElement(AgentTaskWorkflowCard, {
+      connectionState: "active",
+      connectionMessage: "Connected",
+      task: task(),
+      preview,
+      busy: false,
+      actionError: null,
+      canCommit: true,
+      canDiscard: true,
+      onCopyInstruction: () => undefined,
+      onOpenCodex: () => undefined,
+      onConnect: () => undefined,
+      onRetry: () => undefined,
+      onOpenReview: () => undefined,
+      onCommit: () => undefined,
+      onDiscard: () => undefined,
+      onOpenPlanning: () => undefined,
+    }));
+    expect(markup).toContain("Minimal UI rendered preview");
+    expect(markup).toContain("Agent preview approval actions");
+    expect(markup).toContain("Commit exact preview");
+    expect(markup).toContain("Discard");
+    expect(markup.indexOf("Minimal UI rendered preview")).toBeLessThan(markup.indexOf("Commit exact preview"));
+  });
+
+  it("keeps task launch available when connection visibility is restricted", () => {
+    const markup = renderToStaticMarkup(createElement(AgentTaskWorkflowCard, {
+      connectionState: "restricted",
+      connectionMessage: "Connection details require an administrator.",
+      task: task({ status: "queued" }),
+      preview: null,
+      busy: false,
+      actionError: null,
+      canCommit: false,
+      canDiscard: false,
+      onCopyInstruction: () => undefined,
+      onOpenCodex: () => undefined,
+      onConnect: () => undefined,
+      onRetry: () => undefined,
+      onOpenReview: () => undefined,
+      onCommit: () => undefined,
+      onDiscard: () => undefined,
+      onOpenPlanning: () => undefined,
+    }));
+    expect(markup).toContain("Open in Codex");
+    expect(markup).toContain("Connect or repair Codex");
+    expect(markup).toContain("Copy Codex instruction");
+  });
+
   it("resolves only the newest persisted design preview reference from task transitions", () => {
     const record = task({
       transitions: [

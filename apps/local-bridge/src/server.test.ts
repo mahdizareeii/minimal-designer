@@ -122,6 +122,127 @@ describe("FormaSpec local bridge", () => {
     expect(upstreamRequests).toBe(0);
   });
 
+  it("requires a browser-issued ticket when legacy unauthenticated self-creation is disabled", async () => {
+    let upstreamRequests = 0;
+    const upstream = await startUpstream((_request, response) => {
+      upstreamRequests += 1;
+      response.writeHead(500).end();
+    });
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "authenticated-mode-bridge",
+    });
+    bridges.push(bridge);
+
+    const missing = await fetch(`${bridge.url}/_control/authorize-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "authenticated-mode-bridge" }),
+    });
+    const malformed = await fetch(`${bridge.url}/_control/authorize-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        instanceId: "authenticated-mode-bridge",
+        pairing: { nonce: "fspair_short", connectionId: `connection_${"a".repeat(32)}` },
+      }),
+    });
+
+    expect(missing.status).toBe(409);
+    expect(await missing.json()).toEqual({ error: "PAIRING_TICKET_REQUIRED" });
+    expect(malformed.status).toBe(422);
+    expect(await malformed.json()).toEqual({ error: "INVALID_PAIRING_TICKET" });
+    expect(upstreamRequests).toBe(0);
+  });
+
+  it("pairs the exact issued connection, verifies its grant, and never self-creates in authenticated mode", async () => {
+    const nonce = `fspair_${"n".repeat(43)}`;
+    const connectionId = `connection_${"a".repeat(32)}`;
+    const scopes = ["design:read", "design:preview", "task:read"];
+    const projectIds = ["document_alpha"];
+    const apiPosts: string[] = [];
+    let pairBody: unknown;
+    let verifiedAuthorization: string | undefined;
+    const upstream = await startUpstream((request, response) => {
+      if (request.method === "POST" && request.url?.startsWith("/api/")) apiPosts.push(request.url);
+      if (request.url === "/api/agent-connections/pair" && request.method === "POST") {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          pairBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({
+            connection: { id: connectionId, status: "active", expiresAt: "2099-01-01T00:00:00.000Z" },
+            grant: {
+              token: "fsg_browser-issued-secret",
+              scopes,
+              projectIds,
+            },
+          }));
+        });
+        return;
+      }
+      if (request.url === "/api/agent-authorization-context" && request.method === "GET") {
+        verifiedAuthorization = request.headers.authorization;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ role: "agent", scopes: [...scopes].reverse(), projectIds }));
+        return;
+      }
+      if (request.url === "/mcp" && request.method === "POST") {
+        verifiedAuthorization = request.headers.authorization;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"jsonrpc":"2.0","result":{}}');
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    const credentialStore = new MemoryCredentialStore();
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "ticket-pairing-bridge",
+      credentialStore,
+    });
+    bridges.push(bridge);
+
+    const authorization = await fetch(`${bridge.url}/_control/authorize-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        instanceId: "ticket-pairing-bridge",
+        pairing: { nonce, connectionId },
+      }),
+    });
+
+    expect(authorization.status).toBe(200);
+    expect(await authorization.json()).toEqual({
+      connectionId,
+      status: "active",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      credentialStored: true,
+      verified: true,
+    });
+    expect(pairBody).toEqual({ nonce });
+    expect(apiPosts).toEqual(["/api/agent-connections/pair"]);
+    expect(verifiedAuthorization).toBe("Bearer fsg_browser-issued-secret");
+    expect(await credentialStore.read()).toBe("fsg_browser-issued-secret");
+
+    const reused = await fetch(`${bridge.url}/_control/authorize-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "ticket-pairing-bridge" }),
+    });
+    expect(reused.status).toBe(200);
+    expect(await reused.json()).toMatchObject({
+      status: "active",
+      reused: true,
+      verified: true,
+      credentialStored: true,
+    });
+    expect(apiPosts).toEqual(["/api/agent-connections/pair"]);
+  });
+
   it("rejects hostile Host, browser-origin, fetch-metadata, and no-cors content types before proxying", async () => {
     let upstreamRequests = 0;
     const upstream = await startUpstream((_request, response) => {
@@ -248,6 +369,7 @@ describe("FormaSpec local bridge", () => {
       upstreamMcpUrl: upstream.url,
       instanceId: "owned-bridge-instance",
       credentialStore,
+      allowLegacySelfCreate: true,
     });
     bridges.push(bridge);
 
@@ -293,6 +415,7 @@ describe("FormaSpec local bridge", () => {
       upstreamMcpUrl: upstream.url,
       instanceId: "restarted-owned-bridge",
       credentialStore,
+      allowLegacySelfCreate: true,
     });
     bridges.push(restarted);
     const reused = await fetch(`${restarted.url}/_control/authorize-agent`, {
@@ -369,6 +492,7 @@ describe("FormaSpec local bridge", () => {
       upstreamMcpUrl: upstream.url,
       instanceId: "policy-restricted-bridge",
       credentialStore,
+      allowLegacySelfCreate: true,
     });
     bridges.push(bridge);
 
@@ -523,6 +647,7 @@ describe("FormaSpec local bridge", () => {
       upstreamMcpUrl: upstream.url,
       instanceId: "scope-upgrade-bridge",
       credentialStore,
+      allowLegacySelfCreate: true,
     });
     bridges.push(bridge);
 
@@ -599,6 +724,7 @@ describe("FormaSpec local bridge", () => {
       upstreamMcpUrl: upstream.url,
       instanceId: "policy-denied-bridge",
       credentialStore,
+      allowLegacySelfCreate: true,
     });
     bridges.push(bridge);
 
@@ -646,6 +772,7 @@ describe("FormaSpec local bridge", () => {
       port: 0,
       upstreamMcpUrl: upstream.url,
       instanceId: "project-restricted-bridge",
+      allowLegacySelfCreate: true,
     });
     bridges.push(bridge);
 

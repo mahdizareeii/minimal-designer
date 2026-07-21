@@ -200,7 +200,7 @@ export interface RestoreWorkerResult {
   outboxEventId: number;
   schemaVersion: number;
   renderedDesignId: string | null;
-  revoked: { grants: number; connections: number; nonces: number };
+  revoked: { grants: number; connections: number; nonces: number; sessions: number };
   maintenancePhase: "verification";
 }
 
@@ -1626,10 +1626,11 @@ function ensureSequenceAtLeast(
   else database.sqlite.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(table, minimum);
 }
 
-function activeAgentCredentialCounts(database: DesignerDatabase): {
+function activeCredentialCounts(database: DesignerDatabase): {
   grants: number;
   connections: number;
   nonces: number;
+  sessions: number;
 } {
   return {
     grants: (database.sqlite.prepare(
@@ -1641,17 +1642,21 @@ function activeAgentCredentialCounts(database: DesignerDatabase): {
     nonces: (database.sqlite.prepare(
       "SELECT COUNT(*) AS count FROM pairing_nonces WHERE revoked_at IS NULL",
     ).get() as { count: number }).count,
+    sessions: (database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM browser_sessions WHERE revoked_at IS NULL",
+    ).get() as { count: number }).count,
   };
 }
 
-function requireAllAgentCredentialsRevoked(database: DesignerDatabase): void {
-  const remainingActive = activeAgentCredentialCounts(database);
+function requireAllCredentialsRevoked(database: DesignerDatabase): void {
+  const remainingActive = activeCredentialCounts(database);
   if (remainingActive.grants === 0
     && remainingActive.connections === 0
-    && remainingActive.nonces === 0) return;
+    && remainingActive.nonces === 0
+    && remainingActive.sessions === 0) return;
   throw new DomainError(
     "VALIDATION_FAILED",
-    "Restored agent access could not be revoked completely; reconciliation was rolled back.",
+    "Restored agent or browser access could not be revoked completely; reconciliation was rolled back.",
     422,
     { details: { remainingActive } },
   );
@@ -1760,7 +1765,13 @@ function existingReconciliation(
   ).get(target.record.organizationId, config.operationId) as { id: number; details_json: string } | undefined;
   if (!audit) return null;
   const details = JSON.parse(audit.details_json) as Record<string, unknown>;
-  const counts = [details.revokedGrants, details.revokedConnections, details.revokedNonces];
+  const revokedBrowserSessions = details.revokedBrowserSessions ?? 0;
+  const counts = [
+    details.revokedGrants,
+    details.revokedConnections,
+    details.revokedNonces,
+    revokedBrowserSessions,
+  ];
   if (details.targetBackupId !== target.record.id || details.safetyBackupId !== safety.id
     || details.schemaVersion !== smoke.schemaVersion
     || !counts.every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
@@ -1780,6 +1791,7 @@ function existingReconciliation(
       grants: details.revokedGrants as number,
       connections: details.revokedConnections as number,
       nonces: details.revokedNonces as number,
+      sessions: revokedBrowserSessions as number,
     },
   };
 }
@@ -1829,7 +1841,10 @@ function reconcileAfterRestore(
       const nonces = database.sqlite.prepare(
         "UPDATE pairing_nonces SET revoked_at = COALESCE(revoked_at, ?) WHERE revoked_at IS NULL",
       ).run(completedAt).changes;
-      requireAllAgentCredentialsRevoked(database);
+      const sessions = database.sqlite.prepare(
+        "UPDATE browser_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE revoked_at IS NULL",
+      ).run(completedAt).changes;
+      requireAllCredentialsRevoked(database);
       const auditEventId = appendAuditEvent(
         database.sqlite,
         systemAccess(target.record.organizationId),
@@ -1846,6 +1861,7 @@ function reconcileAfterRestore(
           revokedGrants: grants,
           revokedConnections: connections,
           revokedNonces: nonces,
+          revokedBrowserSessions: sessions,
         },
       );
       const outbox = database.sqlite.prepare(
@@ -1859,13 +1875,13 @@ function reconcileAfterRestore(
       // The restored database may contain hostile audit/outbox triggers. Make
       // this the final database check in the transaction so a trigger cannot
       // reactivate credentials after the initial revocation and still commit.
-      requireAllAgentCredentialsRevoked(database);
+      requireAllCredentialsRevoked(database);
       result = {
         auditEventId,
         outboxEventId: outbox.id,
         schemaVersion: smoke.schemaVersion,
         renderedDesignId: smoke.renderedDesignId,
-        revoked: { grants, connections, nonces },
+        revoked: { grants, connections, nonces, sessions },
       };
     });
     transaction.immediate();

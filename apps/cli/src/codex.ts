@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BridgeController } from "./bridge-lifecycle.js";
+import type { AgentPairingTicket, BridgeController } from "./bridge-lifecycle.js";
 import { findExecutable, type CommandRunner } from "./process.js";
 
 const MANAGED_MARKER = ".formaspec-managed.json";
@@ -26,6 +26,7 @@ export interface ConnectCodexOptions {
   bridge: BridgeController;
   confirm: (message: string) => Promise<boolean>;
   assumeYes: boolean;
+  pairing?: AgentPairingTicket;
 }
 
 export interface ConnectCodexResult {
@@ -248,7 +249,7 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   }
 
   const bridge = await options.bridge.ensureStarted();
-  await options.bridge.authorizeAgent();
+  await options.bridge.authorizeAgent(options.pairing);
   const mcpUrl = `${bridge.url}/mcp`;
   const existing = await options.commandRunner(codexPath, ["mcp", "get", "formaspec", "--json"], {
     env: options.environment,

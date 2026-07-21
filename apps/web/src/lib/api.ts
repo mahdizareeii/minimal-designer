@@ -19,6 +19,13 @@ import { normalizeConflictRecoveryOperations } from "./conflict-recovery";
 import type { OrganizationPolicy } from "./organization-policy";
 
 const API_ROOT = "/api";
+export const AUTHENTICATION_REQUIRED_EVENT = "formaspec:authentication-required";
+
+let browserCsrfToken = "1";
+
+function rememberBrowserCsrfToken(value: string | undefined): void {
+  browserCsrfToken = value && value.length >= 32 ? value : "1";
+}
 
 export class ApiError extends Error {
   readonly code: string;
@@ -41,9 +48,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(`${API_ROOT}${path}`, {
       ...init,
+      credentials: "same-origin",
       headers: {
         ...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
-        "x-formaspec-csrf": "1",
+        "x-formaspec-csrf": browserCsrfToken,
         ...init?.headers,
       },
     });
@@ -62,6 +70,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       body = undefined;
     }
     const domain = body as { error?: { code?: string; message?: string; retryable?: boolean; details?: unknown } } | undefined;
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT));
+    }
     throw new ApiError(domain?.error?.message ?? `Request failed with status ${response.status}.`, {
       code: domain?.error?.code,
       retryable: domain?.error?.retryable,
@@ -74,6 +85,61 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) return response as unknown as T;
   return response.json() as Promise<T>;
+}
+
+export type BrowserAuthenticationMode = "local" | "none" | "session" | "trusted-header" | "token";
+
+export interface BrowserAuthenticationStatus {
+  mode: BrowserAuthenticationMode;
+  bootstrapRequired: boolean;
+  bootstrapTokenRequired?: boolean;
+  authenticated: boolean;
+  csrfToken?: string;
+  account?: {
+    principalId: string;
+    organizationId: string;
+    loginName: string;
+    displayName: string;
+    role: string;
+  };
+}
+
+function rememberAuthentication(status: BrowserAuthenticationStatus): BrowserAuthenticationStatus {
+  rememberBrowserCsrfToken(status.mode === "session" && status.authenticated ? status.csrfToken : undefined);
+  return status;
+}
+
+export async function readBrowserAuthentication(): Promise<BrowserAuthenticationStatus> {
+  return rememberAuthentication(await request<BrowserAuthenticationStatus>("/auth/status"));
+}
+
+export async function bootstrapBrowserAdministrator(input: {
+  loginName: string;
+  displayName?: string;
+  password: string;
+  bootstrapToken?: string;
+}): Promise<BrowserAuthenticationStatus> {
+  return rememberAuthentication(await request<BrowserAuthenticationStatus>("/auth/bootstrap", {
+    method: "POST",
+    headers: { "x-formaspec-csrf": "1" },
+    body: JSON.stringify(input),
+  }));
+}
+
+export async function loginBrowserAdministrator(input: {
+  loginName: string;
+  password: string;
+}): Promise<BrowserAuthenticationStatus> {
+  return rememberAuthentication(await request<BrowserAuthenticationStatus>("/auth/login", {
+    method: "POST",
+    headers: { "x-formaspec-csrf": "1" },
+    body: JSON.stringify(input),
+  }));
+}
+
+export async function logoutBrowserAdministrator(): Promise<void> {
+  await request<void>("/auth/logout", { method: "POST", body: JSON.stringify({}) });
+  rememberBrowserCsrfToken(undefined);
 }
 
 function asProjectSummary(input: unknown): DesignProjectSummary {

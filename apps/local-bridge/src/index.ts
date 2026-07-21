@@ -14,12 +14,17 @@ const port = parsePort(process.env.FORMASPEC_BRIDGE_PORT, 4312);
 const upstreamMcpUrl = process.env.FORMASPEC_UPSTREAM_MCP_URL ?? "http://127.0.0.1:4310/mcp";
 validateLoopbackMcpUrl(upstreamMcpUrl);
 const buildId = process.env.FORMASPEC_BRIDGE_BUILD_ID ?? "development";
+const upstreamAuthMode = process.env.FORMASPEC_UPSTREAM_AUTH_MODE ?? "unknown";
+if (!["none", "session", "trusted-header", "token", "unknown"].includes(upstreamAuthMode)) {
+  throw new Error("The upstream authentication mode is invalid.");
+}
 
 const bridge = await startBridgeServer({
   host,
   port,
   upstreamMcpUrl,
   buildId,
+  allowLegacySelfCreate: upstreamAuthMode === "none",
   credentialStore: createSystemCredentialStore(upstreamMcpUrl),
   ...(process.env.FORMASPEC_BRIDGE_INSTANCE_ID === undefined
     ? {}

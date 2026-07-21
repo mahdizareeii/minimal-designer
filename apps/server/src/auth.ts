@@ -7,6 +7,10 @@ import type { DesignerDatabase } from "./db/database.js";
 import { resolveAccess } from "./authorization.js";
 import { DomainError } from "./errors.js";
 import { actorIdFromToken } from "./ids.js";
+import {
+  isPublicSessionAuthenticationPath,
+  type SessionAuthenticationService,
+} from "./session-auth.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -37,6 +41,17 @@ function isEventStreamPath(url: string): boolean {
 
 function isPairingNoncePath(url: string): boolean {
   return requestPath(url) === "/api/agent-connections/pair";
+}
+
+function isPairingNonceRequest(request: FastifyRequest): boolean {
+  return request.method === "POST" && isPairingNoncePath(request.url);
+}
+
+function isPublicBrowserApplicationRequest(request: FastifyRequest): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  const path = requestPath(request.url);
+  return !["/api", "/events", "/mcp", "/health", "/ready"].some((prefix) =>
+    path === prefix || path.startsWith(`${prefix}/`));
 }
 
 function actorIdFromScopedGrant(database: DesignerDatabase, token: string): string | undefined {
@@ -84,6 +99,7 @@ export function registerAuthentication(
   app: FastifyInstance,
   config: ServerConfig,
   database: DesignerDatabase,
+  sessions: SessionAuthenticationService,
 ): void {
   app.decorateRequest("actorId", "local");
   app.addHook("onRequest", async (request) => {
@@ -161,11 +177,30 @@ export function registerAuthentication(
       throw new DomainError("AUTH_REQUIRED", "A valid bearer token is required for MCP.", 401);
     }
 
-    if (config.appMode === "local") {
+    if (config.appMode === "local" && config.authMode !== "session") {
       // Local browser requests deliberately ignore identity headers. Trusting a
       // caller-supplied header on loopback would let any local web page
       // impersonate a user when the browser reaches the service.
       request.actorId = "local";
+      return;
+    }
+
+    if (config.authMode === "session") {
+      if (isPairingNonceRequest(request)) {
+        request.actorId = "anonymous";
+        return;
+      }
+      if (isPublicSessionAuthenticationPath(request.url) || isPublicBrowserApplicationRequest(request)) {
+        request.actorId = "anonymous";
+        return;
+      }
+      const session = sessions.requireSession(request);
+      resolveAccess(database.sqlite, session.actorId);
+      if (requestPath(request.url).startsWith("/api/")
+        && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+        sessions.requireCsrf(request, session, config.csrfHeader);
+      }
+      request.actorId = session.actorId;
       return;
     }
 

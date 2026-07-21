@@ -164,7 +164,10 @@ function request(port: number, route: string, headers: OutgoingHttpHeaders): Pro
   });
 }
 
-async function startApplication(label: string): Promise<{ application: DesignerApplication; port: number }> {
+async function startApplication(
+  label: string,
+  authMode: "none" | "session" = "none",
+): Promise<{ application: DesignerApplication; port: number }> {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `formaspec-sse-http-${label}-`));
   temporaryDirectories.push(root);
   const application = await buildApplication(loadConfig({
@@ -175,7 +178,7 @@ async function startApplication(label: string): Promise<{ application: DesignerA
     BACKUP_DIR: path.join(root, "backups"),
     DESIGNER_DATABASE_PATH: ":memory:",
     PUBLIC_BASE_URL: "http://127.0.0.1:4310",
-    AUTH_MODE: "none",
+    AUTH_MODE: authMode,
     FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     DESIGNER_LOG_LEVEL: "silent",
   }));
@@ -220,6 +223,38 @@ function installForeignGrant(application: DesignerApplication, id: string): stri
 }
 
 describe("SSE HTTP authorization boundary", () => {
+  it("closes a cookie-authenticated stream as soon as logout revokes its token-bound session actor", async () => {
+    const { application, port } = await startApplication("browser-session-logout", "session");
+    const session = await application.sessions.bootstrap({
+      loginName: "admin@example.test",
+      displayName: "SSE session administrator",
+      password: "correct horse battery staple 2026",
+    });
+    const cookie = `formaspec_session=${session.sessionToken}`;
+    const capture = await openSse(port, "/events", { cookie, accept: "text/event-stream" });
+    expect(capture.statusCode).toBe(200);
+    await capture.waitFor((stream) => stream.raw.includes(": connected"));
+
+    const logout = await fetch(`http://127.0.0.1:${port}/api/auth/logout`, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: "http://127.0.0.1:4310",
+        "x-formaspec-csrf": session.csrfToken,
+      },
+    });
+    expect(logout.status).toBe(204);
+    application.service.createDesign("local", {
+      name: "Session revocation close signal",
+      preset: "web",
+      idempotencyKey: "sse-session-revocation-signal-0001",
+    });
+    await capture.waitForClose();
+
+    const rejected = await request(port, "/events", { cookie, accept: "text/event-stream" });
+    expect(rejected.statusCode).toBe(401);
+  });
+
   it.each(["/events", "/api/events"])(
     "filters replay/live events and closes %s immediately when its scoped grant is revoked",
     async (route) => {
