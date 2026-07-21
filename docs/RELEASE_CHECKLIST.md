@@ -68,14 +68,15 @@ insertion 4/4, selection 12/12, handoff 1/1, visual 7/7, revision inspect 1/1,
 the 20-step release scenario 1/1, and the 1,000-node budget 1/1. Current Docker
 restart/egress, Firefox/WebKit 12/12, and copied-bundle recovery pass locally.
 Temporary current-source SBOM/license generation/checking passes with 342
-components and zero violations, but it predates the subsequent lock-only
-upgrade from linked `drizzle-orm` 0.44.7 to declared 0.45.2. The updated lock
-passes offline frozen validation; audit reports info 0, low 0, moderate 2,
-high 0, critical 0 across 416 dependencies. No packages were installed, so all
-678 tests and browser/Docker/recovery runs still exercised 0.44.7. A fresh
-frozen install, full rerun, and regenerated SBOM are mandatory. No current
-native macOS package, hosted provenance, image/OS scans, or real server-mode/
-off-site release evidence exists.
+components and zero violations against the final linked `drizzle-orm` 0.45.2
+tree. Installed/link verification, application 678/678, launcher 212/212, all
+seven typechecks/builds, Docker restart/egress, Firefox/WebKit 12/12, and
+copied-bundle recovery were rerun after the dependency update. Audit currently
+reports info 0, low 0, moderate 2, high 0, critical 0 across 416 dependencies;
+the remaining advisories are under remediation. The broad Chrome Playwright
+matrix still needs a post-update rerun. No current native macOS package, hosted
+provenance, image/OS scans, or real server-mode/off-site release evidence
+exists.
 Release remains `NO-GO`. The separate disposable recovery exercise below
 proves one local Docker recovery path but not the complete enterprise release
 matrix.
@@ -215,13 +216,14 @@ Do not start a production rollout or V2 head migration until every item passes:
   and legacy assets, design-system data, historical customer fixtures, failure
   injection, reconnect/revocation lifecycle, and cross-platform artifact
   comparison.
-- [x] The current schema-13 isolated 20-step Playwright scenario covers browser-created product
+- [x] The schema-13 pre-0.45.2 isolated 20-step Playwright scenario covers browser-created product
   context, backup-gated V1→V2 migration,
   all 22 planning sections, a scoped MCP
   task, multi-screen preview/lint/render/commit, human correction, selection
   refinement, immutable history restore, canonical/portable export, verified
   source-local backup, stopped-database restore, restart, exact hashes, product
-  specification, planning/task state, drift removal, and PNG smoke.
+  specification, planning/task state, drift removal, and PNG smoke. Rerun
+  against linked 0.45.2.
 - [x] Managed restore opens the source with `O_NOFOLLOW`, copies/hashes it into
   private mode-`0700` staging on `/backups`, changes the pinned file to mode
   `0400`, validates expected managed size/SHA-256, and uses only those pinned
@@ -273,10 +275,9 @@ Do not start a production rollout or V2 head migration until every item passes:
   a valid backup;
   installed external invocation and alert delivery remain open.
 - [ ] No critical or high security finding remains in the installed/tested
-  candidate. The lockfile fixes GHSA-gpj5-g38j-94v9 with `drizzle-orm` 0.45.2
-  and audit reports zero high/critical findings, but installed modules and all
-  runtime tests still used 0.44.7; fresh frozen install and full verification
-  are required.
+  candidate. Installed `drizzle-orm` 0.45.2 fixes GHSA-gpj5-g38j-94v9 and the
+  audit reports zero high/critical findings, but two moderate advisories remain
+  under active remediation and target-artifact/image/OS scans are incomplete.
 
 ## Phase 2 gate
 
@@ -312,15 +313,16 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [x] All 22 interview sections persist, resume, edit, and version correctly in
   service/integration tests and in the integrated browser release E2E.
 - [x] Enterprise editor navigation, panels, administration, click-through
-  prototype behavior, and exact manual component insertion pass the current
-  4/4 browser gate for Pages/Layers/
+  prototype behavior, and exact manual component insertion passed the schema-13
+  pre-0.45.2 4/4 browser gate for Pages/Layers/
   Components/Assets,
   Canvas/Prototype/Before-After, Design/Content/Component/Logic/Prototype/
   Accessibility, activity/diagnostics/revision/handoff navigation, and
   click-to-frame navigation without document mutation. The insertion case
   verifies backup-gated V1→V2 migration, exact Foundation catalog loading,
   isolated rendered preview without head mutation, ordinary CAS commit,
-  version-3 reload, and an active projected instance.
+  version-3 reload, and an active projected instance. Rerun this gate against
+  linked 0.45.2.
 - [x] Revision-pinned inspect API/view remains on the requested immutable
   revision when the project head changes and exposes integrity hashes, resolved
   tokens, assets, components, rules, acceptance criteria, implementation
@@ -441,9 +443,11 @@ Do not start a production rollout or V2 head migration until every item passes:
 
 ## Phase 6 delivery gate
 
-- [ ] Perform a fresh frozen install from the lockfile with `drizzle-orm`
-  0.45.2, then rerun all 678 application tests, launcher, typecheck/build,
-  browser, Docker/egress, Firefox/WebKit, recovery, and SBOM/license gates.
+- [ ] Complete the post-dependency-update rerun. Fresh installed/linked
+  `drizzle-orm` 0.45.2 passes application 678/678, launcher 212/212, all seven
+  typechecks/builds, Docker/egress, Firefox/WebKit, recovery, and exact SBOM/
+  license gates. Rerun the broad Chrome editor/selection/handoff/visual/inspect/
+  performance/20-step matrix and resolve remaining advisories.
 - [x] Strict versioned organization-policy read/update through the guided
   12-section Administration form and Expert JSON, MCP read/resource,
   secret-free YAML export, optimistic configuration-hash concurrency,
@@ -479,16 +483,17 @@ Do not start a production rollout or V2 head migration until every item passes:
   services and the profiled one-shot restore worker passes non-root,
   capability, filesystem, migration, readiness, restart, restore, and egress
   tests.
-- [x] Fresh disposable schema-13 project `formaspeccischema13da9af9d064` used
-  image `sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`,
-  reached readiness, rendered the same 512×339 PNG hash before/after API
-  restart, denied DNS/TCP/non-loopback egress, and cleaned up. The same image
-  passed Firefox/WebKit 12/12 and source-to-clean-target copied-bundle recovery
-  with exact snapshot/revision/asset/render/SQLite/FK comparisons. Docker,
-  cross-browser, and recovery summary SHA-256 values are respectively
-  `13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`,
-  `c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`,
-  and `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
+- [x] Dependency-linked schema-13 project `formaspeccischema1369037dfc8a`
+  used image
+  `sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`,
+  rendered deterministic PNG SHA-256
+  `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`
+  before/after restart, denied egress, and cleaned up. The same image passed
+  Firefox/WebKit 12/12 and copied-bundle recovery. Docker, cross-browser, and
+  recovery summary SHA-256 values are respectively
+  `8e0d3baa22b934f90d7e6f36022365a825f5b6457ca6bb6e51f993a1fb59caed`,
+  `a4c16b03a094abba6abd2144c9ed0af78684897c97956c77789526f57eb6f41c`,
+  and `198f93aace5caf60f550e95436711b10107433acc7d85b9175fce8d4722dcc6d`.
   This is local `NO-GO` evidence, not hosted provenance or native lifecycle
   qualification.
 - [x] The prior schema-12 disposable project `formaspeccischema118e2818fed6`, built from
@@ -531,7 +536,13 @@ Do not start a production rollout or V2 head migration until every item passes:
   generation, stale-evidence checking, and focused tests exist.
 - [x] Current Darwin ARM64 source-workspace evidence passes the
   permissive-only gate: 342 third-party components, zero violations, and no
-  Sharp/libvips dependency.
+  Sharp/libvips dependency. Exact linked-0.45.2 evidence SHA-256 values are
+  `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8`
+  (`SHA256SUMS`),
+  `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a`
+  (CDX), and
+  `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0`
+  (licenses). This remains temporary local `NO-GO` evidence.
 - [x] The earlier unsigned macOS ARM64 PKG candidate at
   `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
   has checkpoint offline evidence: SHA-256
@@ -696,12 +707,12 @@ pass a budget.
 - [x] Representative 1,000-node budgets pass.
 - [ ] No critical/high security defects remain.
 - [x] Source-workspace production dependencies comply with the approved
-  license policy in the temporary pre-lock-update schema-13 evidence. The
+  license policy in the exact linked-0.45.2 schema-13 evidence. The
   schema-12 macOS PKG matches
   its frozen packaged workspace outputs and passes private extracted-runtime
   checks, but it predates schema 13 and the 52-tool/108-route interface. The
-  lock now declares `drizzle-orm` 0.45.2; regenerate the SBOM/license evidence
-  after a fresh frozen install. Chromium legal
+  installed tree uses `drizzle-orm` 0.45.2; the current 342-component report
+  has zero policy violations. Chromium legal
   approval, reproducibility, signing/notarization, vulnerability scans, and
   privileged lifecycle evidence remain required; container/Windows/Linux
   artifact evidence is also incomplete.

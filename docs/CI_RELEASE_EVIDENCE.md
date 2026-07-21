@@ -76,18 +76,14 @@ install/upgrade/uninstall behavior or process-level renderer egress denial.
 The schema-13 source checkpoint passed 678/678 application tests, launcher
 212/212, and typecheck/build for all seven workspaces. Direct protected-route
 authorization is 108/108 with zero uncovered; the MCP inventory is 52 tools and
-25 resources. Chrome editor/admin/component insertion passed 4/4, selection
+25 resources. Installed/link verification confirms `drizzle-orm` 0.45.2;
+application 678/678, launcher 212/212, all seven typechecks/builds, Docker/
+egress, Firefox/WebKit, recovery, and exact SBOM/license gates pass against it.
+Audit currently reports zero high/critical findings; remaining advisories are
+under remediation. Chrome editor/admin/component insertion 4/4, selection
 12/12, handoff 1/1, visual 7/7, revision inspect 1/1, the 20-step release
-scenario 1/1, and the 1,000-node budget 1/1. The disposable Docker/browser/
-recovery evidence below was built from that source checkpoint.
-
-Dependency caveat: those passing runtime gates used linked `drizzle-orm`
-0.44.7. The source declaration and lockfile now select 0.45.2 to eliminate
-GHSA-gpj5-g38j-94v9. The lock-only update passes offline frozen validation and
-audit reports info 0, low 0, moderate 2, high 0, critical 0 across 416
-dependencies, but no packages were installed. A fresh frozen install and full
-source/browser/Docker/recovery/SBOM rerun is mandatory; existing evidence is
-not an exact dependency-candidate result.
+scenario 1/1, and the 1,000-node budget 1/1 passed immediately before the
+dependency update and require an exact-current rerun.
 
 The Docker smoke can be run separately on a disposable local Docker daemon:
 
@@ -128,39 +124,38 @@ always writes `releaseStatus: NO-GO`.
 
 ## Current local schema-13 checkpoint (`NO-GO`)
 
-Disposable Compose project `formaspeccischema13da9af9d064` used image
-`sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`,
+Disposable Compose project `formaspeccischema1369037dfc8a` used image
+`sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`,
 reached schema 13, created design
-`document_e171c68c7a4c4b3b80a5493a6180e28f` at revision
-`revision_85e2776ca3874f1c98097b6917bc3649`, and produced the same 512×339
+`document_c304f0d8e19d449fa450b335e79c182e` at revision
+`revision_b71067ccd8e548b1b5385c366dabb263`, and produced the same 512×339
 PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`
 before and after API restart. The egress canary returned DNS `EAI_AGAIN`, TCP
 `ENETUNREACH`, and zero external interfaces; cleanup passed. Summary:
-`/private/tmp/formaspec-docker-schema13-20260721-current/summary.json`, SHA-256
-`13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`.
+`/private/tmp/formaspec-docker-schema13-drizzle0452-20260721-current/summary.json`,
+SHA-256 `8e0d3baa22b934f90d7e6f36022365a825f5b6457ca6bb6e51f993a1fb59caed`.
 
 The same image passed Firefox/WebKit alignment 12/12 with complete cleanup.
-Summary: `/private/tmp/formaspec-cross-browser-schema13-20260721-current/summary.json`,
-SHA-256 `c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`.
+Summary SHA-256:
+`a4c16b03a094abba6abd2144c9ed0af78684897c97956c77789526f57eb6f41c`.
 
-Same-image copied-bundle recovery ran from `formaspecdrsource3af2259e48` to
-`formaspecdrtarget3af2259e48`, preserving design
-`document_68bf4f18628b43ed9c5ac98300420bca` at revision
-`revision_08f233c763154b3da1611ba0f57f0d4c`. Bundle SHA-256 was
-`b87d44e7b0584dd0a14e5b47d07cf447490a683ab512f983feb4e2a19c0a6ef3`;
+Same-image copied-bundle recovery ran from `formaspecdrsource8878ef1a23` to
+`formaspecdrtarget8878ef1a23`, preserving design
+`document_34da61e488444c48b144646e778f7edc` at revision
+`revision_5da62614cff8498db21be8d9346eb34a`. Bundle SHA-256 was
+`3fcba430b476f1dc2ce943405af418a1b1fdc629876f1e8407b8cf5b725c2fef`;
 snapshot, revision, asset, render, SQLite integrity, and foreign-key
 comparisons all passed and cleanup was complete. The `NO-GO` summary SHA-256
-is `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
+is `198f93aace5caf60f550e95436711b10107433acc7d85b9175fce8d4722dcc6d`.
 
-Temporary source SBOM/license evidence generated before the dependency lock
-change reported 342 components and zero policy violations. Its directory is
-`/private/tmp/formaspec-release-evidence-schema13-20260721-current`; SHA-256
-values are `36d81db7feb77c4afbd12f2e8f7576e3abff1c6425714129792f8a49330cd136`
-for `SHA256SUMS`, `571b39478f99c3ffdb3ff761c79e58c420f09296741961807cc13a06420c513a`
+Exact linked-0.45.2 source SBOM/license evidence reports 342 components and
+zero policy violations. Its directory is
+`/private/tmp/formaspec-release-evidence-schema13-drizzle0452-20260721-current`;
+SHA-256 values are `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8`
+for `SHA256SUMS`, `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a`
 for `formaspec.cdx.json`, and
-`6ecc9a43fdd37beae32e9c6995503a71a175e40dffbf93672083eaf6de9c80bb`
-for `licenses.json`. Because it predates the 0.45.2 lock update, regenerate it
-after the required fresh frozen install.
+`d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0`
+for `licenses.json`.
 
 All current results are temporary local `NO-GO` evidence, not retained hosted
 artifacts, provenance, scanning, or an independently reproducible candidate.

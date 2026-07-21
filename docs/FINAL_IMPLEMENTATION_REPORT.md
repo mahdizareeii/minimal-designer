@@ -394,13 +394,13 @@ still temporary `NO-GO` evidence rather than hosted provenance.
 | Typecheck | All seven buildable workspace packages passed |
 | Production build | Core, server, web, CLI, local bridge, Workspace Bridge, and installer passed |
 | Launcher | 212/212 passed after proxy-secret lifecycle hardening |
-| Enterprise editor and administration | 4/4 schema-13 browser checks passed for navigation/workspaces/inspectors/activity, click-to-frame prototype navigation, the guided policy form, and exact manual component insertion. The insertion case verifies backup-gated V1→V2 migration, exact Foundation catalog loading, isolated rendered preview without head mutation, ordinary CAS commit, version-3 reload, and an active projected instance. |
-| Selection alignment | Current schema-13 Playwright passed 12/12 at DPR 1/2 across 12/25/50/100/149/150/200/320% zoom, fractional pan, LTR/RTL/mixed, image/frame/ellipse, rotated selection, hidden/locked exclusion, nested scroll/font/image invalidation, exact group drag, auto-layout reorder/reparent, and resize, within 0.75 CSS px. |
-| Revision inspect | Current schema-13 immutability E2E passed 1/1 after the head-change fixture was corrected to edit the active root frame instead of an immutable detached component master. |
-| Visual regression | Current schema-13 baselines passed 7/7: desktop, phone, tablet, Persian RTL, typography, clipping, image. |
+| Enterprise editor and administration | The schema-13 pre-0.45.2 browser checkpoint passed 4/4, including exact manual component insertion; rerun against linked 0.45.2. |
+| Selection alignment | The schema-13 pre-0.45.2 Playwright checkpoint passed 12/12 within 0.75 CSS px; rerun against linked 0.45.2. |
+| Revision inspect | The schema-13 pre-0.45.2 immutability E2E passed 1/1 after correcting the head-change fixture; rerun against linked 0.45.2. |
+| Visual regression | The schema-13 pre-0.45.2 baselines passed 7/7; rerun against linked 0.45.2. |
 | 1,000-node foundation | Validation 20.43 ms p95; apply 49.65 ms p95; preview persistence 134.43 ms p95; render 116.83 ms p95 |
-| 1,000-node browser gate | Current schema-13 budgets passed 1/1: 230.70 ms p95 load; 20.50 ms selection; 16.70 ms gesture p95/maximum; 273.20 ms autosave; 17.60 ms history; 280.48 ms preview validation; 221.37 ms 1440×900 render. |
-| Integrated release scenario | Current schema-13 Playwright passed the complete 20-step PM→MCP→human correction→history→export→backup/restore/restart scenario 1/1. |
+| 1,000-node browser gate | The schema-13 pre-0.45.2 budget passed 1/1 (230.70/20.50/16.70/273.20/17.60/280.48/221.37 ms p95 metrics); rerun against linked 0.45.2. |
+| Integrated release scenario | The schema-13 pre-0.45.2 20-step scenario passed 1/1; rerun against linked 0.45.2. |
 | Historical migration/restore fixtures | Genuine schema 1 and schema 7–11 prefixes previously passed through schema 12. Current schema-13 tests upgrade a genuine schema-12 fixture without synthesizing component source or exact upgrade-preview metadata, and same-image copied-bundle recovery passes. Broader server-mode/off-site/native restore evidence remains open. |
 | Dependency/security gate | `drizzle-orm` moved from 0.44.7 to installed/linked 0.45.2 after GHSA-gpj5-g38j-94v9. Audit reports info 0, low 0, moderate 2, high 0, critical 0 across 416 dependencies; the remaining advisories are under active remediation. |
 | Current SBOM/license evidence | Exact linked-tree evidence at `/private/tmp/formaspec-release-evidence-schema13-drizzle0452-20260721-current` reports 342 components and zero policy violations. SHA-256 values: `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8` (`SHA256SUMS`), `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a` (CDX), `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0` (licenses). Local temporary `NO-GO`, not hosted provenance. |

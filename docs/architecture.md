@@ -21,7 +21,7 @@ The repository is an incremental pnpm TypeScript workspace:
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
 | Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; `formaspecctl` configures token-free Codex MCP plus the managed Minimal UI plugin/skill. |
 | Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
-| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. A fresh disposable schema-13 image (`sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`) passes deterministic API restart rendering, egress denial, Firefox/WebKit 12/12, and same-image copied-bundle recovery locally. It is not a retained/signed/scanned release artifact. The retained unsigned macOS ARM64 schema-12 checkpoint is `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` (SHA-256 `9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`, 185,279,180 bytes); its frozen checks cover schema-12 health and the historical 51-tool/25-resource inventory, and it predates the current schema-13 52-tool/108-route interface. It was not installed, and a same-host repeat changed the outer PKG bytes. All evidence remains `NO-GO`; Linux DEB/RPM and Windows WiX source-builder foundations still lack release-qualified native lifecycle proof. |
+| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. The dependency-linked schema-13 image (`sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`) passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery locally with installed `drizzle-orm` 0.45.2. It is not a retained/signed/scanned release artifact. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; native macOS/Linux/Windows lifecycle proof is missing. |
 
 ```mermaid
 flowchart LR
@@ -42,9 +42,9 @@ six explicit exceptions. The current application suite verifies exact
 inventory/route closure, generated authentication rejection, and direct
 behavioral authorization across all 108 routes with zero uncovered.
 
-Local schema-13 runtime evidence uses disposable Compose project
-`formaspeccischema13da9af9d064`. Image
-`sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`
+Local dependency-linked schema-13 runtime evidence uses disposable Compose
+project `formaspeccischema1369037dfc8a`. Image
+`sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`
 produced the same 512×339 PNG hash before and after API restart, denied DNS/
 direct-TCP/non-loopback egress, passed Firefox/WebKit 12/12, and passed
 source-to-clean-target copied-bundle recovery with exact database, snapshot,
@@ -52,13 +52,11 @@ revision, asset, render, integrity, and foreign-key comparisons. Cleanup passed
 for every disposable project. These are local `NO-GO` results, not hosted
 provenance or a release image.
 
-Those runtime results used the previously linked `drizzle-orm` 0.44.7. The
-source declaration and lockfile now select 0.45.2 to eliminate
-GHSA-gpj5-g38j-94v9; the offline frozen-lock check passes and audit has zero
-high/critical findings. Because the change was lock-only and no install was
-performed, a fresh frozen install and complete application/browser/Docker/
-recovery/SBOM rerun is required before the runtime architecture can be called
-current-dependency evidence.
+Installed/link verification confirms `drizzle-orm` 0.45.2. Application,
+typecheck/build, launcher, Docker/egress, Firefox/WebKit, recovery, and exact
+SBOM/license gates were rerun against it. Audit currently has zero high/
+critical findings; remaining advisories are under remediation. The broad Chrome
+Playwright matrix still needs a post-update rerun.
 
 ### Current authoritative data flow
 
