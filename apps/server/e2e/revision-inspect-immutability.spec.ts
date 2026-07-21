@@ -310,7 +310,7 @@ test("revision inspect remains pinned after the head changes and exposes exact e
               metadata: {},
             },
           },
-          { type: "update_node", node_id: label.id, patch: { name: "Latest pay label", content: "Latest pay now" } },
+          { type: "update_node", node_id: rootFrameId, patch: { name: "Latest checkout frame" } },
         ],
       },
     });
@@ -347,7 +347,7 @@ test("revision inspect remains pinned after the head changes and exposes exact e
     await expect(page.getByTestId("inspect-business-rules")).not.toContainText("Latest head-only rule");
     await expect(page.getByTestId("inspect-implementation-mappings")).toContainText("CheckoutButton");
     await expect(page.getByTestId("inspect-implementation-mappings")).not.toContainText("LatestCheckoutButton");
-    await expect(page.locator(".inspect-node-list")).not.toContainText("Latest pay label");
+    await expect(page.locator(".inspect-node-list")).not.toContainText("Latest checkout frame");
 
     const reloadedInspect = await api<InspectEnvelope>(
       baseURL,

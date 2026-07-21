@@ -355,11 +355,16 @@ describe("formaspecctl", () => {
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(10, "portable_import_provenance", "2026-01-10T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(11, "render_job_persistence", "2026-01-11T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(12, "handoff_execution_decisions", "2026-01-12T00:00:00.000Z");
+    sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(13, "component_source_persistence", "2026-01-13T00:00:00.000Z");
     sqlite.close();
     const io = collectingIo();
     const result = await runCli(["migrate", "status", "--json"], { projectRoot: root, bridge: fakeBridge(), io });
     expect(result).toBe(0);
-    expect(JSON.parse(io.output[0]!)).toMatchObject({ latestAppliedVersion: 12, supportedVersion: 12, state: "current" });
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      supportedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      state: "current",
+    });
   });
 
   it("creates and lists managed backups through the credential-free loopback API", async () => {

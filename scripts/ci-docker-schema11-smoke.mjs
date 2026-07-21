@@ -7,7 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const MAX_COMMAND_OUTPUT = 32 * 1024 * 1024;
-const EXPECTED_SCHEMA_VERSION = 12;
+const EXPECTED_SCHEMA_VERSION = 13;
 const EXPECTED_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
 const EXPECTED_NANO_CPUS = 2_000_000_000;
 const EXPECTED_PIDS_LIMIT = 256;
@@ -15,7 +15,7 @@ const EXPECTED_PIDS_LIMIT = 256;
 function usage() {
   return `Usage: node scripts/ci-docker-schema11-smoke.mjs
 
-Builds a disposable Docker Compose project, proves schema-12 readiness,
+Builds a disposable Docker Compose project, proves schema-13 readiness,
 Playwright rendering, API-restart persistence, runtime isolation, and cleanup.
 Evidence is written under FORMASPEC_CI_EVIDENCE_DIR (default:
 artifacts/ci/docker-schema11). The script never uses production data or marks
@@ -246,7 +246,7 @@ async function main() {
 
   const evidenceDirectory = path.resolve(process.env.FORMASPEC_CI_EVIDENCE_DIR ?? "artifacts/ci/docker-schema11");
   mkdirSync(evidenceDirectory, { recursive: true, mode: 0o755 });
-  const project = `formaspeccischema11${randomBytes(5).toString("hex")}`;
+  const project = `formaspeccischema13${randomBytes(5).toString("hex")}`;
   const port = await reserveLoopbackPort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const environment = {
@@ -263,7 +263,7 @@ async function main() {
     FORMASPEC_PROXY_SECRET: "",
   };
   const summary = {
-    format: "formaspec-docker-schema11-ci-evidence",
+    format: "formaspec-docker-schema13-ci-evidence",
     schemaVersion: 1,
     releaseStatus: "NO-GO",
     verificationStatus: "FAILED",
@@ -332,7 +332,7 @@ async function main() {
     const created = await requestJson(`${baseUrl}/api/designs`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-formaspec-csrf": "1" },
-      body: JSON.stringify({ name: "Schema 12 Docker CI", preset: "web", idempotencyKey: "docker-schema12-ci-create-0001" }),
+      body: JSON.stringify({ name: "Schema 13 Docker CI", preset: "web", idempotencyKey: "docker-schema13-ci-create-0001" }),
     });
     const designId = created?.document?.id;
     assert(typeof designId === "string" && designId.length > 0, "Create-design response did not include a document ID.");
@@ -396,7 +396,7 @@ async function main() {
     writeJson(path.join(evidenceDirectory, "summary.json"), summary);
   }
   if (summary.verificationStatus !== "PASS") throw new Error(summary.error ?? "Docker smoke failed.");
-  process.stdout.write(`Docker schema-12 smoke passed; retained evidence: ${evidenceDirectory}\n`);
+  process.stdout.write(`Docker schema-13 smoke passed; retained evidence: ${evidenceDirectory}\n`);
 }
 
 main().catch((error) => {

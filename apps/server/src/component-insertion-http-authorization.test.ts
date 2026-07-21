@@ -110,6 +110,35 @@ describe("component insertion preview HTTP authorization", () => {
       "component-insertion-http-local",
     );
     const historyBefore = fixture.service.history("local", source.designId);
+    const libraryResponse = await fixture.app.inject({
+      method: "GET",
+      url: `/api/designs/${source.designId}/component-library`,
+    });
+    expect(libraryResponse.statusCode, libraryResponse.body).toBe(200);
+    const library = libraryResponse.json<{
+      library: {
+        baseVersion: number;
+        releaseId: string;
+        components: Array<{
+          definition: { id: string; name: string };
+          sourceHash: string;
+          insertable: boolean;
+        }>;
+      };
+    }>().library;
+    expect(library).toMatchObject({
+      baseVersion: 2,
+      releaseId: FORMASPEC_FOUNDATION_SYSTEM.release.id,
+    });
+    expect(library.components).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        definition: expect.objectContaining({ id: previewPayload(parentId).componentDefinitionId }),
+        sourceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        insertable: true,
+      }),
+    ]));
+    expect(fixture.service.history("local", source.designId)).toEqual(historyBefore);
+
     const response = await fixture.app.inject({
       method: "POST",
       url: `/api/designs/${source.designId}/component-insertion-previews`,
@@ -186,6 +215,23 @@ describe("component insertion preview HTTP authorization", () => {
     fixture.database.sqlite.prepare(
       "UPDATE designs SET organization_id = 'organization_component_insertion_foreign' WHERE id = ?",
     ).run(denied.designId);
+
+    const allowedLibraryResponse = await fixture.app.inject({
+      method: "GET",
+      url: `/api/designs/${allowed.designId}/component-library`,
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(ADMIN_IDENTITY),
+    });
+    expect(allowedLibraryResponse.statusCode, allowedLibraryResponse.body).toBe(200);
+
+    const restrictedLibraryResponse = await fixture.app.inject({
+      method: "GET",
+      url: `/api/designs/${denied.designId}/component-library`,
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(ADMIN_IDENTITY),
+    });
+    expect(restrictedLibraryResponse.statusCode, restrictedLibraryResponse.body).toBe(404);
+    expect(restrictedLibraryResponse.json<{ error: { code: string } }>().error.code).toBe("NOT_FOUND");
 
     const allowedResponse = await fixture.app.inject({
       method: "POST",

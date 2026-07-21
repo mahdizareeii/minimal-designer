@@ -55,9 +55,32 @@ commit tools. V1 never auto-merges a `VERSION_CONFLICT`.
 Implemented families cover design discovery/preview/commit/render/lint/history,
 strict organization-policy reads, product specifications, planning sessions,
 tasks, agent connections, the bundled Foundation System, persisted organization
-design systems/releases/pins, path-free repository inventories,
+design systems/releases/pins, exact pinned-release component insertion, path-free repository inventories,
 immutable design/spec/source mappings, revision-pinned handoffs, and the
 seven-stage Redesign Studio.
+
+`design_system_component_insert_preview` is the only public agent path for
+linked component insertion. It requires a strict V2 project, an exact base
+version, a component selected by that project's pinned release, and agent
+scopes `design:preview`, `design:read`, and `design_system:read`. The server
+resolves and verifies the immutable component source, hydrates its release-token
+dependencies, materializes deterministic archived/locked component masters,
+creates an exact prepared preview, and returns PNG feedback plus permanent IDs
+and source/release metadata. Commit that exact preview with
+`design_commit_preview`; do not construct `insert_component_instance` through
+`design_preview_changes`. Generic MCP operations reject that server-only
+operation so callers cannot supply unverified component source trees.
+
+The browser uses the separately authorized
+`GET /api/designs/:id/component-library` route to list only the exact pinned
+release, including verified-source and asset-copy blockers. The browser then
+uses the same insertion-preview endpoint and ordinary preview commit contract
+as agents; it does not introduce a second mutation path.
+
+Component insertion currently fails closed when the source depends on assets;
+content-hash asset copying is not implemented. Upgrade previews also block
+instances with non-empty properties or slots because the current component
+contract has no property-to-node or slot-anchor visual binding model.
 
 `design_system_revision_release_read` and
 `formaspec://designs/{designId}/revisions/{revisionId}/design-system-release`
@@ -89,11 +112,18 @@ SVG.
 ## Contract and authorization evidence
 
 The executable contract inventory in
-`apps/server/src/mcp-contract.ts` covers all 51 registered tools and all 25
+`apps/server/src/mcp-contract.ts` covers all 52 registered tools and all 25
 registered resources. For each capability it records the read/preview/write/
 destructive classification, agent scope rule, permitted human-role set,
 project boundary, and enforcing service path. Registration fails when a tool's
 annotations contradict that inventory.
+
+The corresponding protected non-MCP source manifest contains 108 routes: 54
+project-scoped, 48 organization-scoped, and six explicit exceptions. The
+current 678-test application run covers exact MCP/resource inventory, route
+closure, generated authentication rejection, and direct behavioral
+authorization across all 108 routes with zero uncovered, including the
+component library/insertion interfaces.
 
 Every advertised tool input is now a strict top-level object and rejects
 unknown fields at runtime. Product-specification and handoff inputs advertise
@@ -101,7 +131,7 @@ their full typed schemas rather than generic records. The focused MCP contract
 suite also proves exact inventory equality, annotation equality, static agent-
 scope denial for every applicable tool, the secondary `design:read` gate on
 preview/commit/restore tools, and authorization for all 22 scoped resources.
-Every one of the 51 tools now advertises a real strict union: exact required
+Every one of the 52 tools now advertises a real strict union: exact required
 `ok: true` success fields for that tool, or only `ok: false` plus the strict
 structured domain error. Variant tools publish separate exact branches for
 policy JSON/YAML, V1/V2 design creation and reads, subtree reads, and single/

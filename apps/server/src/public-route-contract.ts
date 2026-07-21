@@ -221,6 +221,7 @@ export const PROTECTED_NON_MCP_ROUTE_CONTRACTS = defineProtectedNonMcpRouteContr
   project("enterprise_domain", "GET", "/api/designs/:id/design-system-pin"),
   project("enterprise_domain", "PUT", "/api/designs/:id/design-system-pin"),
   project("enterprise_domain", "POST", "/api/designs/:id/design-system-upgrade-previews"),
+  project("enterprise_domain", "GET", "/api/designs/:id/component-library"),
   project("enterprise_domain", "POST", "/api/designs/:id/component-insertion-previews"),
   project("enterprise_domain", "GET", "/api/design-system-upgrade-previews/:previewId"),
   project("enterprise_domain", "POST", "/api/design-system-upgrade-previews/:previewId/commit"),

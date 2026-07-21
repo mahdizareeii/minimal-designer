@@ -23,6 +23,10 @@ interface PrototypeFixture extends EditorFixture {
   targetFrameId: string;
 }
 
+interface V2EditorFixture extends EditorFixture {
+  version: number;
+}
+
 async function createEditorFixture(request: APIRequestContext): Promise<EditorFixture> {
   const name = `Enterprise editor IA ${Date.now()}`;
   const response = await request.post("/api/designs", {
@@ -145,6 +149,28 @@ async function createPrototypeFixture(request: APIRequestContext): Promise<Proto
     targetPageId,
     targetFrameId,
   };
+}
+
+async function createV2EditorFixture(request: APIRequestContext): Promise<V2EditorFixture> {
+  const fixture = await createEditorFixture(request);
+  const backupResponse = await request.post("/api/backups", { data: {} });
+  expect(backupResponse.ok(), await backupResponse.text()).toBe(true);
+  const backup = await backupResponse.json() as { backup: { id: string; status: string } };
+  expect(backup.backup.status).toBe("valid");
+  const migrationResponse = await request.post(
+    `/api/designs/${encodeURIComponent(fixture.designId)}/migrations/v2`,
+    {
+      data: {
+        expectedBaseVersion: 1,
+        backupId: backup.backup.id,
+        idempotencyKey: `editor-component-migration-${crypto.randomUUID()}`,
+      },
+    },
+  );
+  expect(migrationResponse.ok(), await migrationResponse.text()).toBe(true);
+  const migrated = await migrationResponse.json() as { version: number; schemaVersion: number };
+  expect(migrated).toMatchObject({ version: 2, schemaVersion: 2 });
+  return { ...fixture, version: migrated.version };
 }
 
 async function expectPressed(button: Locator, pressed: boolean): Promise<void> {
@@ -310,4 +336,46 @@ test("prototype click actions navigate to the linked frame without mutating the 
   const after = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
   expect(after.ok(), await after.text()).toBe(true);
   expect(await after.json()).toMatchObject({ version: beforeBody.version, revisionId: beforeBody.revisionId });
+});
+
+test("pinned components preview exactly and commit through the ordinary revision workflow", async ({ page, request }) => {
+  const fixture = await createV2EditorFixture(request);
+  await page.goto(
+    `/design/${encodeURIComponent(fixture.designId)}?page=${encodeURIComponent(fixture.pageId)}&node=${encodeURIComponent(fixture.frameId)}`,
+  );
+
+  const projectNavigation = page.getByRole("navigation", { name: "Project structure" });
+  await projectNavigation.getByRole("button", { name: "components", exact: true }).click();
+  const library = page.getByRole("region", { name: "Pinned component library" });
+  await expect(library).toBeVisible();
+  await expect(library.getByText(/FormaSpec Foundation/)).toBeVisible();
+  const componentSelect = library.locator("label", { hasText: "Component" }).locator("select").first();
+  const parentSelect = library.locator("label", { hasText: "Insert into" }).locator("select");
+  await expect(componentSelect).toBeEnabled();
+  await expect(parentSelect).toHaveValue(`node:${fixture.frameId}`);
+
+  await library.getByRole("button", { name: "Create exact preview" }).click();
+  const preview = library.locator(".component-insertion-preview");
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("Ready to commit", { exact: true })).toBeVisible();
+  await expect(preview.locator("img")).toBeVisible();
+
+  const isolatedHead = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
+  expect(isolatedHead.ok(), await isolatedHead.text()).toBe(true);
+  expect(await isolatedHead.json()).toMatchObject({ version: fixture.version, schemaVersion: 2 });
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await preview.getByRole("button", { name: "Commit insertion" }).click();
+  await expect(page.locator(".document-title")).toContainText("Version 3");
+  await expect(page.locator(".toast")).toContainText(/Inserted .+ in revision 3\./);
+
+  const committedHead = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
+  expect(committedHead.ok(), await committedHead.text()).toBe(true);
+  const committed = await committedHead.json() as {
+    version: number;
+    schemaVersion: number;
+    document: { nodes: Record<string, { type: string; archived: boolean }> };
+  };
+  expect(committed).toMatchObject({ version: 3, schemaVersion: 2 });
+  expect(Object.values(committed.document.nodes).some((node) => node.type === "instance" && !node.archived)).toBe(true);
 });

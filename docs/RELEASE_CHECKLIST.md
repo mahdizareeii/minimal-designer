@@ -31,7 +31,8 @@ pnpm build
 docker compose config --quiet
 ```
 
-The current-source checkpoint on 2026-07-21 passed core 47/47 across 8 files,
+The last broad checkpoint on 2026-07-21, before schema 13 and source-backed
+component insertion, passed core 47/47 across 8 files,
 server 437/437 across 78 files, web 69/69 across 17 files, CLI 89/89 across 9
 files, local bridge 18/18 across 2 files, Workspace Bridge 37/37 across 4 files,
 installer 62/62 across 5 files, and launcher 212/212. All seven workspace
@@ -42,7 +43,7 @@ alignment 12/12, revision inspect 1/1, visual regression 7/7, the complete
 source evidence passes with 342 components and zero policy violations. Workflow
 contracts pass 8/8, cross-browser runner tests pass 2/2, off-host simulation
 tests pass 7/7, release-evidence tests pass 8/8, macOS package-evidence tests
-pass 12/12, and macOS runtime-smoke tests pass 10/10. The exact-current local-
+pass 12/12, and macOS runtime-smoke tests pass 10/10. The then-current local-
 uncommitted schema-12
 image passed the Docker smoke, renderer-egress canary, same-host copied-bundle
 restore, and Firefox/WebKit 12/12 once. The immediately prior fit-sync image
@@ -54,6 +55,17 @@ same-host repeat changed the outer PKG bytes despite identical payload and
 workspace trees. It is not reproducible, signed, notarized, scanned, installed,
 or lifecycle-qualified. The preserved schema-11 and schema-10 packages are
 historical.
+
+Current source is database schema 13, command engine 2, renderer 3, renderer
+IPC protocol 2, with 52 MCP tools, 25 resources, and 108 protected non-MCP
+routes. Focused current gates include core build/typecheck, server/web
+typecheck, component-source/design-system/insertion tests, component-library/
+insertion server 16/16, browser component-library 6/6, CLI command 23/23, MCP
+contract 5/5, and route contract/coverage 12/12. Current Docker/off-host/macOS
+smoke scripts now require schema 13, and the macOS smoke requires all 52 tools
+including `design_system_component_insert_preview`; those current gates have
+now passed for disposable Docker and copied-bundle recovery, while no current
+native macOS package or hosted retained run exists.
 Release remains `NO-GO`. The separate disposable recovery exercise below
 proves one local Docker recovery path but not the complete enterprise release
 matrix.
@@ -102,27 +114,32 @@ Do not start a production rollout or V2 head migration until every item passes:
   genuine migration prefix, lock reviewed schema/data digests, preserve V1
   revision/asset/hash and enterprise-row evidence through schema 12, and prove
   migration 12 creates decision integrity without fabricating decisions.
-- [x] `formaspecctl` recognizes server database schema 12 for migration status,
+  Focused schema-13 tests also upgrade a genuine schema-12 fixture without
+  fabricating component sources or exact upgrade-preview metadata.
+- [x] `formaspecctl` source recognizes server database schema 13 for migration status,
   backup compatibility, restore compatibility, and support-bundle reporting.
-- [x] Startup, backup verification, restore preflight, and restore control fail
-  closed when migration-9/10/11/12 ledger rows lack required tables, columns,
+- [x] Startup, backup verification, restore preflight, and restore control source
+  checks fail closed when migration-9/10/11/12/13 ledger rows lack required tables, columns,
   indexes, triggers, normalized schema SQL, or forbidden-trigger removal.
+  Full current backup/restore and operator-suite verification remains pending.
 - [ ] Legacy data is backfilled into one organization without ID loss.
 - [ ] Role/scope/project/expiry/revocation authorization matrix passes for
   REST, SSE, MCP, assets, previews, revisions, and contexts. Focused
   project-scoped REST/MCP/SSE isolation and fail-closed trusted-identity tests
-  pass. A declarative manifest and build-time route collector now prove exact
-  closure of all 106 protected non-MCP routes (52 project, 48 organization, six
-  explicit exceptions). Missing/malformed identities are rejected before
-  parsing or mutation on all 106 routes; unmapped/disabled trusted identities
-  are rejected on all 105 non-pairing routes; and nonce consumption/replay is
-  tested on the pairing exception. The ten previously uncovered opaque-ID
+  pass. A declarative manifest and build-time route collector prove exact
+  closure of all 108 protected non-MCP routes (54 project, 48 organization, six
+  explicit exceptions). The current application suite rejects missing/
+  malformed identities before parsing or mutation, exercises mapped/disabled
+  identities and pairing nonce replay, and provides direct behavioral
+  authorization across all 108 routes with zero uncovered. The ten previously
+  uncovered opaque-ID
   routes, all four product-specification routes, all twelve handoff routes,
   implementation-mapping creation, all six Redesign assessment routes, Agent
   Connections, Repository Inventory, backup artifact control, and organization
   policy/audit retention now have direct HTTP role/foreign-ID/swapped-ID/non-
   leak/no-mutation coverage plus project-scoped agent service/MCP and
-  revocation probes across all 106 protected routes, with zero uncovered.
+  revocation probes remain covered, and the schema-13 component-library/
+  insertion interfaces are included.
   Both
   actual SSE routes pass real HTTP replay/live filtering and immediate
   revocation/401 reconnect tests. The broader human-role/project/parent-child
@@ -188,13 +205,14 @@ Do not start a production rollout or V2 head migration until every item passes:
   and legacy assets, design-system data, historical customer fixtures, failure
   injection, reconnect/revocation lifecycle, and cross-platform artifact
   comparison.
-- [x] The isolated 20-step Playwright scenario covers browser-created product
+- [x] The prior isolated 20-step Playwright scenario covers browser-created product
   context, backup-gated V1→V2 migration with assertions pinned to schema 12,
   all 22 planning sections, a scoped MCP
   task, multi-screen preview/lint/render/commit, human correction, selection
   refinement, immutable history restore, canonical/portable export, verified
   source-local backup, stopped-database restore, restart, exact hashes, product
   specification, planning/task state, drift removal, and PNG smoke.
+  A schema-13 rerun with source-backed component library/insertion remains open.
 - [x] Managed restore opens the source with `O_NOFOLLOW`, copies/hashes it into
   private mode-`0700` staging on `/backups`, changes the pinned file to mode
   `0400`, validates expected managed size/SHA-256, and uses only those pinned
@@ -228,7 +246,7 @@ Do not start a production rollout or V2 head migration until every item passes:
   passed real schema-11 design/PNG restore from corrupt live bytes, credential
   revocation, exact forensic byte rollback, durable offline state, and cleanup.
   A subsequent real unique-project `formaspecctl` smoke validates the persisted
-  Compose identity end to end. The exact-current image also passed a second
+  Compose identity end to end. That schema-12 image also passed a second
   same-machine source-to-clean-target copied-bundle simulation with independent
   projects/volumes, exact bundle/snapshot/revision/asset/render equality,
   SQLite integrity/foreign-key checks, verified local Docker context, non-root
@@ -258,12 +276,25 @@ Do not start a production rollout or V2 head migration until every item passes:
   diagnostics.
 - [ ] Foundation token layers and light/dark/high-contrast LTR/RTL contexts pass.
 - [x] Component contracts, instances, lifecycle, releases, pinning, and upgrade
-  preview tests pass. Project pin controls clear stale state, and assigning or
-  upgrading a pin atomically synchronizes one V2 head revision while leaving
-  V1 heads unchanged; rollback and existing-pin migration coverage pass. An
+  preview tests pass. New versions require an authorized immutable V2 source,
+  persist canonical detached state trees plus SHA-256, and legacy null-source
+  versions remain readable but cannot enter a new release. Project pin controls
+  clear stale state, and assigning or upgrading a pin atomically synchronizes
+  one V2 head revision while leaving V1 heads unchanged. Schema-13 V2 upgrade
+  previews persist and commit the exact result snapshot, materialize target
+  tokens/component masters, and block removed states, missing dependencies,
+  asset copying, legacy sources, and unsupported property/slot bindings. An
   exact project/revision-bound REST, MCP-tool, and MCP-resource read returns the
   release used by an authorized historical revision without exposing the
   organization catalog.
+- [x] Exact pinned-release insertion exists through the read-only component
+  library, REST preview, MCP PNG preview, and ordinary preview commit. The
+  Components tab requires a clean matching V2 head, exposes source/asset
+  blockers, lets a reviewer select state/parent/position/name, renders
+  diagnostics and the result hash, and explicitly commits or discards. Focused
+  server 16/16 and web 6/6 pass. Property-to-node/slot bindings, content-hash
+  asset copying, and broader accessibility/conflict/backup/export/restore
+  evidence remain open.
 - [x] Product specification natural-language/structured synchronization passes.
 - [x] All 22 interview sections persist, resume, edit, and version correctly in
   service/integration tests and in the integrated browser release E2E.
@@ -309,7 +340,7 @@ Do not start a production rollout or V2 head migration until every item passes:
   `formaspec://`, and the safe workflow is self-contained in the first 512
   instruction characters.
 - [x] Every MCP tool has a strict schema, correct annotations, and scoped
-  authorization. The executable 51-tool/25-resource matrix now proves strict
+  authorization. The executable 52-tool/25-resource matrix now proves strict
   top-level inputs; exact strict `ok:true` success and `ok:false,error` output
   branches; annotations; every static agent scope; secondary design-read gates;
   and all scoped resources. Temporary-ID preview operations mirror the strict
@@ -318,6 +349,11 @@ Do not start a production rollout or V2 head migration until every item passes:
   nested DTO with ID/hash/version/state correlations; structured
   `error.details` is the only bounded generic JSON envelope. Dynamic
   handoff/redesign scopes have dedicated focused coverage.
+  `design_system_component_insert_preview` resolves only the exact pinned
+  release, returns PNG plus source/release/instance metadata, and commits only
+  through `design_commit_preview`; generic operations reject the server-only
+  insertion record. The current 108-route application authorization run passes
+  with zero uncovered.
 - [x] Agent task inputs are immutable and transitions are append-only.
 - [x] Claim/progress/complete/cancel/expiry/base-version/output validation pass
   in service and HTTP/MCP integration tests.
@@ -423,7 +459,19 @@ Do not start a production rollout or V2 head migration until every item passes:
   services and the profiled one-shot restore worker passes non-root,
   capability, filesystem, migration, readiness, restart, restore, and egress
   tests.
-- [x] Fresh exact-current disposable project `formaspeccischema118e2818fed6`, built from
+- [x] Fresh disposable schema-13 project `formaspeccischema13da9af9d064` used
+  image `sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`,
+  reached readiness, rendered the same 512×339 PNG hash before/after API
+  restart, denied DNS/TCP/non-loopback egress, and cleaned up. The same image
+  passed Firefox/WebKit 12/12 and source-to-clean-target copied-bundle recovery
+  with exact snapshot/revision/asset/render/SQLite/FK comparisons. Docker,
+  cross-browser, and recovery summary SHA-256 values are respectively
+  `13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`,
+  `c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`,
+  and `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
+  This is local `NO-GO` evidence, not hosted provenance or native lifecycle
+  qualification.
+- [x] The prior schema-12 disposable project `formaspeccischema118e2818fed6`, built from
   the `local-uncommitted-final437-eventauth-sqlbounded-cli` checkpoint,
   reached migration 12 Playwright-worker
   readiness without fallback, created design
@@ -440,10 +488,10 @@ Do not start a production rollout or V2 head migration until every item passes:
   zero external interfaces. Independent cleanup verification found no remaining disposable
   containers, volumes, or networks. The summary in
   `/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json` is
-  exact-current local `NO-GO` evidence with SHA-256
+  historical local `NO-GO` evidence with SHA-256
   `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`, not
   retained-CI, provenance, scanning, or independent-reproducibility proof.
-- [x] The final reviewed image passed Firefox/WebKit alignment 12/12 once in a
+- [x] That schema-12 reviewed image passed Firefox/WebKit alignment 12/12 once in a
   network-disabled, read-only, non-root disposable Linux runner with all
   capabilities dropped and complete cleanup. Its summary is
   `/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json`
@@ -513,7 +561,8 @@ Do not start a production rollout or V2 head migration until every item passes:
   but has no hosted result yet.
 - [x] Five repository-native least-privilege workflows cover frozen source gates,
   Chromium plus Firefox/WebKit alignment, Chromium visual/performance/release
-  suites, schema-12 Docker smoke under the compatibility filename,
+  suites, a Docker smoke workflow under the compatibility filename (current
+  source requires schema 13),
   dependency-audit JSON, deterministic source SBOM/license evidence, and
   unsigned Linux DEB/RPM evidence. The main/manual macOS workflow also builds the
   unsigned package and exercises privately expanded runtime bytes without
@@ -526,6 +575,12 @@ Do not start a production rollout or V2 head migration until every item passes:
   cross-browser runner tests pass 2/2, off-host simulation tests pass 7/7,
   release-evidence tests pass 8/8, macOS package-evidence tests pass 12/12,
   and macOS runtime-smoke tests pass 10/10.
+- [ ] Retain the updated schema-13 Docker/off-host gates on hosted runners and
+  build a current macOS package for the extracted-runtime gate. Local Docker,
+  Firefox/WebKit, and off-host-simulation executions pass; current scripts
+  require schema 13, and the macOS smoke requires all 52 tools including
+  `design_system_component_insert_preview`, but no schema-13 native package has
+  satisfied it.
 - [ ] Retain successful GitHub-hosted runs and real Ubuntu DEB/RPM artifacts;
   current workflow presence and local contracts are not hosted release evidence.
 - [ ] Signing/notarization uses real operator credentials or artifacts are
@@ -536,6 +591,9 @@ Do not start a production rollout or V2 head migration until every item passes:
 ## Release performance budgets
 
 Representative projects must contain at least 1,000 nodes.
+The measurements below passed on the preceding schema-12 tree and remain useful
+regression evidence; the schema-13 Chrome performance project has not yet been
+rerun.
 
 | Measurement | Required p95 / hard limit | Current evidence |
 | --- | --- | --- |
@@ -568,7 +626,7 @@ pass a budget.
   repository-inventory text remains bounded data and cannot create task/archive
   side effects or expand authority. Real connected-agent semantic-resistance
   and approval-flow evidence remains open.
-- [x] The exact-current renderer egress canary cannot resolve or connect
+- [x] The current schema-13 renderer egress canary cannot resolve or connect
   externally: DNS returns `EAI_AGAIN`, direct TCP returns `ENETUNREACH`, and no
   external interfaces are visible. Hosted and native-package evidence remains
   open.
@@ -602,7 +660,7 @@ pass a budget.
 - [x] Product managers complete the step-by-step interview.
 - [ ] AI screens use organization tokens/components by default.
 - [ ] Linked components and instances are versioned/manageable.
-- [x] Selection controls remain within 0.75 CSS px in the current Chrome DPR 1/2 matrix.
+- [x] Selection controls remained within 0.75 CSS px in the preceding Chrome DPR 1/2 matrix; a schema-13 rerun remains required for release.
 - [x] Concurrent same-base writes yield one success/one conflict.
 - [x] Retried commits create no duplicate revision.
 - [x] Persisted previews survive restart until expiry.
@@ -618,8 +676,10 @@ pass a budget.
 - [x] Representative 1,000-node budgets pass.
 - [ ] No critical/high security defects remain.
 - [x] Source-workspace production dependencies comply with the approved
-  license policy. The schema-12 macOS PKG matches current packaged workspace
-  outputs and passes private extracted-runtime checks, but Chromium legal
+  license policy at the preceding checkpoint. The schema-12 macOS PKG matches
+  its frozen packaged workspace outputs and passes private extracted-runtime
+  checks, but it predates schema 13 and the 52-tool/108-route interface. A
+  current SBOM/license refresh, Chromium legal
   approval, reproducibility, signing/notarization, vulnerability scans, and
   privileged lifecycle evidence remain required; container/Windows/Linux
   artifact evidence is also incomplete.

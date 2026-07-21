@@ -39,9 +39,9 @@ test("pins the current extracted native runtime contract", () => {
   assert.deepEqual(MACOS_RUNTIME_SMOKE_CONTRACT, {
     nodeVersion: "v24.14.0",
     playwrightRevision: "1228",
-    schemaVersion: 12,
+    schemaVersion: 13,
     mcpProtocolVersion: "2025-06-18",
-    mcpToolCount: 51,
+    mcpToolCount: 52,
     mcpResourceCount: 25,
     maximumPackageBytes: 8 * 1024 * 1024 * 1024,
     maximumCommandOutputBytes: 16 * 1024 * 1024,
@@ -49,8 +49,8 @@ test("pins the current extracted native runtime contract", () => {
     startupTimeoutMs: 120_000,
     commandTimeoutMs: 180_000,
   });
-  assert.equal(EXPECTED_MCP_TOOL_NAMES.length, 51);
-  assert.equal(new Set(EXPECTED_MCP_TOOL_NAMES).size, 51);
+  assert.equal(EXPECTED_MCP_TOOL_NAMES.length, 52);
+  assert.equal(new Set(EXPECTED_MCP_TOOL_NAMES).size, 52);
   assert.equal(EXPECTED_FIXED_RESOURCES.length, 4);
   assert.equal(EXPECTED_RESOURCE_TEMPLATES.length, 21);
   assert.equal(

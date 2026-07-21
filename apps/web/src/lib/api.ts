@@ -1,8 +1,9 @@
-import type {
-  AnyDesignDocument,
-  ComponentDefinition,
-  RedesignStageArtifact,
-  RedesignStageArtifactMap,
+import {
+  ComponentDefinitionSchema,
+  type AnyDesignDocument,
+  type ComponentDefinition,
+  type RedesignStageArtifact,
+  type RedesignStageArtifactMap,
 } from "@designer/core";
 
 import type {
@@ -10,6 +11,7 @@ import type {
   DesignOperation,
   DesignProjectSummary,
   DevicePreset,
+  ParentReference,
   RevisionSummary,
 } from "../domain";
 import { createClientKey, normalizeDocument, normalizeOperations } from "../domain";
@@ -995,6 +997,206 @@ function asDesignPreviewRecord(input: unknown): DesignPreviewRecord {
     },
     diagnostics,
     document: normalizeDocument(value.document),
+  };
+}
+
+export interface ComponentLibraryBlocker {
+  code: "NO_VERIFIED_SOURCE" | "ASSET_COPY_UNAVAILABLE";
+  message: string;
+}
+
+export interface ComponentLibraryItem {
+  definition: ComponentDefinition;
+  sourceHash: string | null;
+  sourceNodeCount: number;
+  prototypeLinkCount: number;
+  tokenDependencyIds: string[];
+  assetDependencyIds: string[];
+  insertable: boolean;
+  blockers: ComponentLibraryBlocker[];
+}
+
+export interface ComponentLibraryRecord {
+  designId: string;
+  baseVersion: number;
+  designSystemId: string;
+  releaseId: string;
+  releaseVersion: number;
+  releaseName: string;
+  components: ComponentLibraryItem[];
+}
+
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  }
+  return value.map(String);
+}
+
+function asComponentLibraryRecord(input: unknown, expectedDesignId: string): ComponentLibraryRecord {
+  const envelope = requiredExactRecord(input, ["library"], "Component library response");
+  const library = requiredExactRecord(
+    envelope.library,
+    ["designId", "baseVersion", "designSystemId", "releaseId", "releaseVersion", "releaseName", "components"],
+    "Component library",
+  );
+  const designId = requiredOpaqueId(library.designId, "Component library project ID");
+  if (designId !== expectedDesignId) {
+    throw new ApiError("Component library does not belong to the requested project.", { code: "INVALID_RESPONSE" });
+  }
+  if (!Array.isArray(library.components)) {
+    throw new ApiError("Component library entries are invalid.", { code: "INVALID_RESPONSE" });
+  }
+  const components = library.components.map((candidate, index) => {
+    const item = requiredExactRecord(
+      candidate,
+      ["definition", "sourceHash", "sourceNodeCount", "prototypeLinkCount", "tokenDependencyIds", "assetDependencyIds", "insertable", "blockers"],
+      `Component library entry ${index + 1}`,
+    );
+    const sourceHash = item.sourceHash === null
+      ? null
+      : requiredHash(item.sourceHash, `Component library entry ${index + 1} source hash`);
+    if (typeof item.insertable !== "boolean" || !Array.isArray(item.blockers)) {
+      throw new ApiError(`Component library entry ${index + 1} availability is invalid.`, { code: "INVALID_RESPONSE" });
+    }
+    const blockers = item.blockers.map((candidateBlocker, blockerIndex) => {
+      const blocker = requiredExactRecord(
+        candidateBlocker,
+        ["code", "message"],
+        `Component library entry ${index + 1} blocker ${blockerIndex + 1}`,
+      );
+      const code = requiredString(blocker.code, "Component library blocker code");
+      if (code !== "NO_VERIFIED_SOURCE" && code !== "ASSET_COPY_UNAVAILABLE") {
+        throw new ApiError("Component library blocker code is invalid.", { code: "INVALID_RESPONSE" });
+      }
+      return {
+        code: code as ComponentLibraryBlocker["code"],
+        message: requiredString(blocker.message, "Component library blocker message"),
+      };
+    });
+    if (item.insertable === (blockers.length > 0)) {
+      throw new ApiError(`Component library entry ${index + 1} availability is inconsistent.`, { code: "INVALID_RESPONSE" });
+    }
+    return {
+      definition: ComponentDefinitionSchema.parse(item.definition),
+      sourceHash,
+      sourceNodeCount: requiredNonnegativeInteger(item.sourceNodeCount, "Component source node count"),
+      prototypeLinkCount: requiredNonnegativeInteger(item.prototypeLinkCount, "Component prototype-link count"),
+      tokenDependencyIds: stringArray(item.tokenDependencyIds, "Component token dependencies"),
+      assetDependencyIds: stringArray(item.assetDependencyIds, "Component asset dependencies"),
+      insertable: item.insertable,
+      blockers,
+    } satisfies ComponentLibraryItem;
+  });
+  return {
+    designId,
+    baseVersion: requiredPositiveInteger(library.baseVersion, "Component library base version"),
+    designSystemId: requiredOpaqueId(library.designSystemId, "Component library design-system ID"),
+    releaseId: requiredOpaqueId(library.releaseId, "Component library release ID"),
+    releaseVersion: requiredPositiveInteger(library.releaseVersion, "Component library release version"),
+    releaseName: requiredString(library.releaseName, "Component library release name"),
+    components,
+  };
+}
+
+export async function readComponentLibrary(designId: string): Promise<ComponentLibraryRecord> {
+  return asComponentLibraryRecord(
+    await request<unknown>(`/designs/${encodeURIComponent(designId)}/component-library`),
+    designId,
+  );
+}
+
+export interface ComponentInsertionPreviewRecord extends DesignPreviewRecord {
+  component: {
+    designSystemId: string;
+    releaseId: string;
+    releaseVersion: number;
+    componentDefinitionId: string;
+    componentVersion: number;
+    sourceHash: string;
+    activeState: ComponentDefinition["states"][number]["key"];
+    instanceId: string;
+    nodeIdMapping: Record<string, string>;
+  };
+}
+
+export async function createComponentInsertionPreview(input: {
+  designId: string;
+  baseVersion: number;
+  componentDefinitionId: string;
+  parent: ParentReference;
+  activeState?: ComponentDefinition["states"][number]["key"];
+  index?: number;
+  position?: { x: number; y: number };
+  name?: string;
+}): Promise<ComponentInsertionPreviewRecord> {
+  const response = await request<unknown>(
+    `/designs/${encodeURIComponent(input.designId)}/component-insertion-previews`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        baseVersion: input.baseVersion,
+        componentDefinitionId: input.componentDefinitionId,
+        parent: input.parent,
+        ...(input.activeState === undefined ? {} : { activeState: input.activeState }),
+        ...(input.index === undefined ? {} : { index: input.index }),
+        ...(input.position === undefined ? {} : { position: input.position }),
+        ...(input.name === undefined ? {} : { name: input.name }),
+      }),
+    },
+  );
+  const value = requiredRecord(response, "Component insertion preview response");
+  const component = requiredExactRecord(
+    value.component,
+    ["designSystemId", "releaseId", "releaseVersion", "componentDefinitionId", "componentVersion", "sourceHash", "activeState", "instanceId", "nodeIdMapping"],
+    "Component insertion preview metadata",
+  );
+  const nodeIdMapping = requiredRecord(component.nodeIdMapping, "Component insertion node-ID mapping");
+  const activeState = requiredString(component.activeState, "Component insertion active state");
+  if (!["default", "hover", "pressed", "focused", "disabled", "loading", "error", "selected"].includes(activeState)) {
+    throw new ApiError("Component insertion active state is invalid.", { code: "INVALID_RESPONSE" });
+  }
+  return {
+    ...asDesignPreviewRecord(value),
+    component: {
+      designSystemId: requiredOpaqueId(component.designSystemId, "Component insertion design-system ID"),
+      releaseId: requiredOpaqueId(component.releaseId, "Component insertion release ID"),
+      releaseVersion: requiredPositiveInteger(component.releaseVersion, "Component insertion release version"),
+      componentDefinitionId: requiredOpaqueId(component.componentDefinitionId, "Component insertion definition ID"),
+      componentVersion: requiredPositiveInteger(component.componentVersion, "Component insertion component version"),
+      sourceHash: requiredHash(component.sourceHash, "Component insertion source hash"),
+      activeState: activeState as ComponentInsertionPreviewRecord["component"]["activeState"],
+      instanceId: requiredOpaqueId(component.instanceId, "Component insertion instance ID"),
+      nodeIdMapping: Object.fromEntries(Object.entries(nodeIdMapping).map(([sourceId, targetId]) => [
+        sourceId,
+        requiredOpaqueId(targetId, `Component insertion node mapping for ${sourceId}`),
+      ])),
+    },
+  };
+}
+
+export async function commitComponentInsertionPreview(input: {
+  designId: string;
+  previewId: string;
+  expectedBaseVersion: number;
+  idempotencyKey: string;
+  message?: string;
+}): Promise<CommitResult> {
+  const result = await request<Record<string, unknown>>(
+    `/designs/${encodeURIComponent(input.designId)}/previews/${encodeURIComponent(input.previewId)}/commit`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedBaseVersion: input.expectedBaseVersion,
+        idempotencyKey: input.idempotencyKey,
+        message: input.message ?? "Insert verified design-system component",
+      }),
+    },
+  );
+  return {
+    version: Number(result.version ?? result.revision ?? input.expectedBaseVersion + 1),
+    ...(result.revisionId || result.revision_id ? { revisionId: String(result.revisionId ?? result.revision_id) } : {}),
+    ...(result.document ? { document: normalizeDocument(result.document) } : {}),
   };
 }
 

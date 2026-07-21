@@ -260,6 +260,13 @@ export function registerEnterpriseDomainHttpRoutes(
     }) });
   });
 
+  app.get("/api/designs/:id/component-library", async (request) => {
+    componentInsertions.authorizeLibraryRead(request.actorId, String(rawParameter(request.params, "id") ?? ""));
+    const { id } = designParams.parse(request.params);
+    emptyQuery.parse(request.query);
+    return { library: componentInsertions.library(request.actorId, id) };
+  });
+
   app.post("/api/designs/:id/component-insertion-previews", async (request, reply) => {
     componentInsertions.authorizePreview(request.actorId, String(rawParameter(request.params, "id") ?? ""));
     const { id } = designParams.parse(request.params);

@@ -7,7 +7,7 @@ import {
 } from "@designer/core";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { resolvePinnedComponentRelease } from "./component-release-resolver.js";
+import { listPinnedComponentRelease, resolvePinnedComponentRelease } from "./component-release-resolver.js";
 import { DesignerDatabase } from "./db/database.js";
 
 const databases: DesignerDatabase[] = [];
@@ -45,5 +45,21 @@ describe("pinned component release resolution", () => {
       expect(resolved.sourceHash).toMatch(/^[a-f0-9]{64}$/);
       expect(resolved.source.nodes.length).toBeGreaterThan(0);
     }
+
+    const catalog = listPinnedComponentRelease(database, "organization_legacy", document);
+    expect(catalog).toMatchObject({
+      designSystemId: FORMASPEC_FOUNDATION_SYSTEM.id,
+      releaseId: FORMASPEC_FOUNDATION_RELEASE_ID,
+      releaseVersion: FORMASPEC_FOUNDATION_SYSTEM.release.version,
+      releaseName: FORMASPEC_FOUNDATION_SYSTEM.release.name,
+    });
+    expect(catalog.components).toHaveLength(FORMASPEC_FOUNDATION_SYSTEM.release.component_versions.length);
+    expect(catalog.components.every((component) => component.insertable
+      && component.sourceHash?.match(/^[a-f0-9]{64}$/)
+      && component.sourceNodeCount > 0
+      && component.blockers.length === 0)).toBe(true);
+    expect(catalog.components.map((component) => component.definition.name)).toEqual(
+      [...catalog.components.map((component) => component.definition.name)].sort((left, right) => left.localeCompare(right)),
+    );
   });
 });

@@ -1,4 +1,4 @@
-name: Docker schema 11 smoke
+name: Docker schema 13 smoke
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   docker-smoke:
-    name: Disposable schema-12 topology and cross-browser smoke
+    name: Disposable schema-13 topology and cross-browser smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:

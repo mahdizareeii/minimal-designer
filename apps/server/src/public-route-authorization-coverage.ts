@@ -171,6 +171,7 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["PUT", "/api/designs/:id/design-system-pin"],
   ]),
   ...evidence("apps/server/src/component-insertion-http-authorization.test.ts", [
+    ["GET", "/api/designs/:id/component-library"],
     ["POST", "/api/designs/:id/component-insertion-previews"],
   ]),
   ...evidence("apps/server/src/organization-context-maintenance-http-authorization.test.ts", [

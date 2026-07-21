@@ -49,6 +49,30 @@ export interface ResolvedPinnedComponentRelease {
   releaseTokens: Record<string, DesignSystemToken>;
 }
 
+export interface PinnedComponentCatalogBlocker {
+  code: "NO_VERIFIED_SOURCE" | "ASSET_COPY_UNAVAILABLE";
+  message: string;
+}
+
+export interface PinnedComponentCatalogItem {
+  definition: ComponentDefinition;
+  sourceHash: string | null;
+  sourceNodeCount: number;
+  prototypeLinkCount: number;
+  tokenDependencyIds: string[];
+  assetDependencyIds: string[];
+  insertable: boolean;
+  blockers: PinnedComponentCatalogBlocker[];
+}
+
+export interface PinnedComponentReleaseCatalog {
+  designSystemId: string;
+  releaseId: string;
+  releaseVersion: number;
+  releaseName: string;
+  components: PinnedComponentCatalogItem[];
+}
+
 function collectTokenReferences(value: unknown, tokenIds: Set<string>): void {
   if (isTokenReference(value)) {
     tokenIds.add(value.token_id);
@@ -132,6 +156,133 @@ function verifiedSource(
     throw new DomainError("INTERNAL_ERROR", "Pinned component source integrity verification failed.", 500);
   }
   return { source, sourceHash: hash };
+}
+
+function catalogItem(
+  definition: ComponentDefinition,
+  source: { source: ComponentSourceBundle; sourceHash: string } | null,
+): PinnedComponentCatalogItem {
+  if (!source) {
+    const blockers: PinnedComponentCatalogBlocker[] = [{
+      code: "NO_VERIFIED_SOURCE",
+      message: "This historical component version has no verified immutable source bundle.",
+    }];
+    return {
+      definition,
+      sourceHash: null,
+      sourceNodeCount: 0,
+      prototypeLinkCount: 0,
+      tokenDependencyIds: [],
+      assetDependencyIds: [],
+      insertable: false,
+      blockers,
+    };
+  }
+  const assetDependencyIds = [...source.source.dependencies.asset_ids].sort();
+  const blockers: PinnedComponentCatalogBlocker[] = assetDependencyIds.length > 0 ? [{
+    code: "ASSET_COPY_UNAVAILABLE",
+    message: "Insertion is blocked until every normalized asset dependency can be copied by content hash.",
+  }] : [];
+  return {
+    definition,
+    sourceHash: source.sourceHash,
+    sourceNodeCount: source.source.nodes.length,
+    prototypeLinkCount: source.source.prototype_links.length,
+    tokenDependencyIds: [...source.source.dependencies.token_ids].sort(),
+    assetDependencyIds,
+    insertable: blockers.length === 0,
+    blockers,
+  };
+}
+
+export function listPinnedComponentRelease(
+  database: DesignerDatabase,
+  organizationId: string,
+  document: DesignDocumentV2,
+): PinnedComponentReleaseCatalog {
+  const pin = document.design_system;
+  if (pin.release_id === FORMASPEC_FOUNDATION_RELEASE_ID) {
+    if (pin.design_system_id !== FORMASPEC_FOUNDATION_SYSTEM.id
+      || pin.release_version !== FORMASPEC_FOUNDATION_SYSTEM.release.version) {
+      throw new DomainError("INTERNAL_ERROR", "FormaSpec Foundation pin metadata is inconsistent.", 500);
+    }
+    const components = FORMASPEC_FOUNDATION_SYSTEM.release.component_versions.map((selection) => {
+      const definition = FORMASPEC_FOUNDATION_SYSTEM.components[selection.component_definition_id];
+      if (!definition || definition.version !== selection.version) {
+        throw new DomainError("INTERNAL_ERROR", "FormaSpec Foundation component selection is incomplete.", 500);
+      }
+      const source = foundationComponentSource(definition);
+      const sourceHash = createHash("sha256").update(canonicalComponentSourceBundleBytes(source)).digest("hex");
+      return catalogItem(definition, { source, sourceHash });
+    }).sort((left, right) => left.definition.name.localeCompare(right.definition.name)
+      || left.definition.id.localeCompare(right.definition.id));
+    return {
+      designSystemId: pin.design_system_id,
+      releaseId: pin.release_id,
+      releaseVersion: pin.release_version,
+      releaseName: FORMASPEC_FOUNDATION_SYSTEM.release.name,
+      components,
+    };
+  }
+
+  const releaseRow = database.sqlite.prepare(
+    `SELECT release.id, release.design_system_id, release.version, release.status, release.release_json
+     FROM design_system_releases release
+     JOIN design_systems system ON system.id = release.design_system_id
+     WHERE release.id = ? AND release.design_system_id = ? AND release.version = ?
+       AND system.organization_id = ?`,
+  ).get(pin.release_id, pin.design_system_id, pin.release_version, organizationId) as {
+    id: string;
+    design_system_id: string;
+    version: number;
+    status: "draft" | "published" | "deprecated";
+    release_json: string;
+  } | undefined;
+  if (!releaseRow) throw new DomainError("NOT_FOUND", "Pinned design-system release not found.", 404);
+  if (releaseRow.status === "draft") {
+    throw new DomainError("VALIDATION_FAILED", "Draft design-system releases cannot supply project components.", 422);
+  }
+  const envelope = releaseEnvelopeSchema.parse(JSON.parse(releaseRow.release_json) as unknown);
+  if (canonicalJson(envelope) !== releaseRow.release_json
+    || envelope.release.id !== releaseRow.id
+    || envelope.release.design_system_id !== releaseRow.design_system_id
+    || envelope.release.version !== releaseRow.version
+    || envelope.release.status !== releaseRow.status) {
+    throw new DomainError("INTERNAL_ERROR", "Pinned design-system release integrity verification failed.", 500);
+  }
+  const components = envelope.component_versions.map((selection) => {
+    const componentRow = database.sqlite.prepare(
+      `SELECT definition_json, source_json, source_hash
+       FROM component_definitions
+       WHERE design_system_id = ? AND component_id = ? AND version = ?`,
+    ).get(pin.design_system_id, selection.component_definition_id, selection.version) as {
+      definition_json: string;
+      source_json: string | null;
+      source_hash: string | null;
+    } | undefined;
+    if (!componentRow) throw new DomainError("INTERNAL_ERROR", "Pinned release component row is missing.", 500);
+    const definition = ComponentDefinitionSchema.parse(JSON.parse(componentRow.definition_json) as unknown);
+    if (canonicalJson(definition) !== componentRow.definition_json
+      || definition.id !== selection.component_definition_id
+      || definition.version !== selection.version) {
+      throw new DomainError("INTERNAL_ERROR", "Pinned component definition integrity verification failed.", 500);
+    }
+    if (componentRow.source_json === null && componentRow.source_hash === null) return catalogItem(definition, null);
+    return catalogItem(definition, verifiedSource(
+      definition,
+      selection.version,
+      componentRow.source_json,
+      componentRow.source_hash,
+    ));
+  }).sort((left, right) => left.definition.name.localeCompare(right.definition.name)
+    || left.definition.id.localeCompare(right.definition.id));
+  return {
+    designSystemId: pin.design_system_id,
+    releaseId: pin.release_id,
+    releaseVersion: pin.release_version,
+    releaseName: envelope.release.name,
+    components,
+  };
 }
 
 export function resolvePinnedComponentRelease(

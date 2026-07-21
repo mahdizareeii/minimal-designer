@@ -34,6 +34,7 @@ import {
 } from "../domain";
 import { LEFT_PANEL_TABS, type LeftPanelTab } from "../lib/editor-information-architecture";
 import { activePage, useDesignerStore } from "../store/designer-store";
+import { ComponentLibraryPanel } from "./ComponentLibraryPanel";
 
 function TypeIcon({ node }: { node: DesignNode }) {
   const props = { size: 12, strokeWidth: 1.7 };
@@ -201,9 +202,11 @@ export function LayersPanel() {
       )}
 
       {tab === "components" && (
-        <div className="sidebar-pane">
-          <div className="sidebar-pane-intro"><PanelsTopLeft size={14} /><div><strong>Components</strong><small>Project-local definitions and pinned instances.</small></div></div>
-          <div className="entity-list">
+        <div className="sidebar-pane component-sidebar-pane">
+          <div className="sidebar-pane-intro"><PanelsTopLeft size={14} /><div><strong>Components</strong><small>Insert exact pinned-release components, then inspect project-local sources and instances.</small></div></div>
+          <ComponentLibraryPanel />
+          <div className="sidebar-section-heading"><span>Project sources</span><span>{components.length}</span></div>
+          <div className="entity-list component-project-entities">
             {components.map((node) => (
               <button key={node.id} onClick={() => document && selectNodeAcrossPages(document, node.id, setActivePage, select)} className={selectedIds.includes(node.id) ? "is-active" : ""}>
                 <TypeIcon node={node} />

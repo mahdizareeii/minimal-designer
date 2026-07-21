@@ -9,7 +9,11 @@ import {
 } from "@designer/core";
 
 import { prepareComponentInstanceInsertion } from "./component-insertion.js";
-import { resolvePinnedComponentRelease } from "./component-release-resolver.js";
+import {
+  listPinnedComponentRelease,
+  resolvePinnedComponentRelease,
+  type PinnedComponentReleaseCatalog,
+} from "./component-release-resolver.js";
 import { assertScope, resolveAccess } from "./authorization.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
@@ -41,11 +45,25 @@ export interface ComponentInsertionPreviewResult {
   };
 }
 
+export interface ComponentInsertionLibraryResult extends PinnedComponentReleaseCatalog {
+  designId: string;
+  baseVersion: number;
+}
+
 export class ComponentInsertionService {
   constructor(
     readonly database: DesignerDatabase,
     readonly designer: DesignerService,
   ) {}
+
+  authorizeLibraryRead(actorId: string, designId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") {
+      assertScope(access, "design:read");
+      assertScope(access, "design_system:read");
+    }
+    this.designer.authorizeDesignRead(actorId, designId);
+  }
 
   authorizePreview(actorId: string, designId: string): void {
     const access = resolveAccess(this.database.sqlite, actorId);
@@ -54,6 +72,24 @@ export class ComponentInsertionService {
       assertScope(access, "design_system:read");
     }
     this.designer.authorizePreviewCreation(actorId, designId);
+  }
+
+  library(actorId: string, designId: string): ComponentInsertionLibraryResult {
+    this.authorizeLibraryRead(actorId, designId);
+    const current = this.designer.getDesign(actorId, designId);
+    if (current.canonicalDocument.schema_version !== 2) {
+      throw new DomainError("VALIDATION_FAILED", "Component insertion requires a strict V2 project revision.", 422);
+    }
+    const document = DesignDocumentV2Schema.parse(current.canonicalDocument);
+    const design = this.database.sqlite.prepare(
+      "SELECT organization_id FROM designs WHERE id = ?",
+    ).get(designId) as { organization_id: string } | undefined;
+    if (!design) throw new DomainError("NOT_FOUND", "Design not found.", 404);
+    return {
+      designId,
+      baseVersion: current.revision.version,
+      ...listPinnedComponentRelease(this.database, design.organization_id, document),
+    };
   }
 
   preview(
