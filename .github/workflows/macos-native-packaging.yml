@@ -1,0 +1,115 @@
+name: Unsigned macOS package evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-native-packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unsigned-macos-package:
+    name: Extracted unsigned PKG foundation
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          test "$(node --version)" = "v24.14.0"
+          test "$(pnpm --version)" = "11.9.0"
+      - name: Frozen dependency installation
+        run: pnpm install --frozen-lockfile --strict-peer-dependencies
+      - name: Install Playwright 1.61.1 Chromium
+        run: pnpm --filter @designer/server exec playwright install chromium
+      - name: Record exact macOS build toolchain
+        run: |
+          mkdir -p artifacts/ci/macos-native
+          sw_vers > artifacts/ci/macos-native/toolchain.txt
+          uname -a >> artifacts/ci/macos-native/toolchain.txt
+          node --version >> artifacts/ci/macos-native/toolchain.txt
+          pnpm --version >> artifacts/ci/macos-native/toolchain.txt
+          pnpm --filter @designer/server exec playwright --version >> artifacts/ci/macos-native/toolchain.txt
+          shasum -a 256 /usr/bin/pkgbuild /usr/bin/productbuild /usr/sbin/pkgutil >> artifacts/ci/macos-native/toolchain.txt
+      - name: Test macOS artifact and extracted-runtime evidence contracts
+        run: |
+          pnpm test:macos-pkg-evidence
+          pnpm test:macos-pkg-runtime-smoke
+      - name: Build every workspace package
+        run: pnpm -r build
+      - name: Resolve architecture-bound evidence paths
+        run: |
+          ARCH="$(node --print process.arch)"
+          VERSION="$(node --print "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          echo "FORMASPEC_PKG=artifacts/ci/macos-native/installers/FormaSpec-${VERSION}-macos-${ARCH}-unsigned.pkg" >> "$GITHUB_ENV"
+          echo "FORMASPEC_PKG_EVIDENCE=artifacts/ci/macos-native/package-evidence/FormaSpec-${VERSION}-macos-${ARCH}-unsigned" >> "$GITHUB_ENV"
+      - name: Build unsigned macOS PKG from exact workspace output
+        run: |
+          node apps/installer/dist/build-macos.js \
+            --output artifacts/ci/macos-native/installers \
+            --node "$(command -v node)" \
+            --playwright-browsers "$PLAYWRIGHT_BROWSERS_PATH"
+      - name: Generate and verify exact source evidence
+        run: |
+          node scripts/release-evidence.mjs generate --output artifacts/ci/macos-native/source-evidence
+          node scripts/release-evidence.mjs check --output artifacts/ci/macos-native/source-evidence
+      - name: Generate and verify exact package evidence
+        run: |
+          node scripts/macos-pkg-evidence.mjs generate \
+            --pkg "$FORMASPEC_PKG" \
+            --source-evidence artifacts/ci/macos-native/source-evidence \
+            --output "$FORMASPEC_PKG_EVIDENCE"
+          node scripts/macos-pkg-evidence.mjs verify \
+            --pkg "$FORMASPEC_PKG" \
+            --source-evidence artifacts/ci/macos-native/source-evidence \
+            --output "$FORMASPEC_PKG_EVIDENCE"
+      - name: Require the exact unsigned engineering blockers
+        run: |
+          node --input-type=module --eval '
+            import fs from "node:fs";
+            import path from "node:path";
+            const verification = JSON.parse(fs.readFileSync(path.join(process.env.FORMASPEC_PKG_EVIDENCE, "verification.json"), "utf8"));
+            const actual = verification.blockers.map((entry) => entry.code).sort();
+            const expected = [
+              "CHROMIUM_RUNTIME_CONTAINS_LGPL_NOTICES",
+              "NOTARIZATION_EVIDENCE_MISSING",
+              "PACKAGE_UNSIGNED",
+              "REPRODUCIBILITY_EVIDENCE_MISSING",
+              "VULNERABILITY_SCAN_MISSING",
+            ].sort();
+            if (verification.integrityStatus !== "pass" || verification.releaseDecision !== "no-go" || JSON.stringify(actual) !== JSON.stringify(expected)) {
+              throw new Error(`Unexpected unsigned package gate: ${JSON.stringify({ integrityStatus: verification.integrityStatus, releaseDecision: verification.releaseDecision, actual })}`);
+            }
+          '
+      - name: Exercise only privately extracted package bytes
+        run: |
+          node scripts/ci-macos-pkg-runtime-smoke.mjs \
+            --pkg "$FORMASPEC_PKG" \
+            --output artifacts/ci/macos-native/runtime-smoke
+      - name: Retain unsigned macOS package and NO-GO evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-unsigned-macos-foundation-${{ github.sha }}
+          path: artifacts/ci/macos-native/
+          if-no-files-found: warn
+          retention-days: 30

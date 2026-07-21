@@ -1,0 +1,33 @@
+{
+  "format": "formaspec-macos-same-host-reproducibility-diagnostic",
+  "schemaVersion": 1,
+  "releaseStatus": "NO-GO",
+  "verificationStatus": "FAILED",
+  "comparisonScope": "two unsigned builds from the same frozen worktree on one macOS host",
+  "finalCandidate": {
+    "filename": "FormaSpec-0.2.0-macos-arm64-unsigned.pkg",
+    "sha256": "9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18",
+    "sizeBytes": 185279180
+  },
+  "comparisonBuild": {
+    "filename": "FormaSpec-0.2.0-macos-arm64-unsigned.pkg",
+    "sha256": "2c49f45a6840218b995cc969576f4209d0c94802a160c679ad02483ed5ba4dd0",
+    "sizeBytes": 185279075
+  },
+  "checks": {
+    "outerPackageBytesEqual": false,
+    "payloadTreeEqual": true,
+    "payloadTreeSha256": "375daa2689cebdac26c1bd88322e3ea124e30c4c234f364faab4880a65b1d110",
+    "workspaceTreesEqual": true,
+    "workspaceTreesSha256": "5478d6e03ab5ac6bac4fe57e2f26c4bf78802c1c5424da9ef5eb7f77617329c1",
+    "sourceEvidenceEqual": true,
+    "sourceSbomSha256": "571b39478f99c3ffdb3ff761c79e58c420f09296741961807cc13a06420c513a",
+    "sourceLicensesSha256": "6ecc9a43fdd37beae32e9c6995503a71a175e40dffbf93672083eaf6de9c80bb"
+  },
+  "conclusion": "The installed payload and packaged workspace trees are identical, but the outer PKG bytes and sizes differ. Reproducibility is not achieved.",
+  "blockers": [
+    "The macOS builder has no verified SOURCE_DATE_EPOCH or deterministic pkgbuild/productbuild metadata contract.",
+    "This same-host comparison is not an independent rebuild on separate infrastructure.",
+    "Release provenance, signing, notarization, and vulnerability scanning remain absent."
+  ]
+}

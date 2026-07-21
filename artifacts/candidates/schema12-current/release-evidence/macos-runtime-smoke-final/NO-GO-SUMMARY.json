@@ -1,0 +1,300 @@
+{
+  "artifact": {
+    "architecture": "arm64",
+    "checksumSidecarStatus": "pass",
+    "filename": "FormaSpec-0.2.0-macos-arm64-unsigned.pkg",
+    "sha256": "9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18",
+    "signed": false,
+    "sizeBytes": 185279180,
+    "version": "0.2.0"
+  },
+  "blockers": [
+    "Artifact-specific vulnerability and operating-system scanning remain absent.",
+    "Chromium composite third-party license and LGPL notice policy still requires approval.",
+    "Clean install, automatic startup, protocol registration, upgrade, uninstall, and reinstall were not exercised.",
+    "Independent reproducibility, publisher signing, and Apple notarization remain absent.",
+    "This smoke runs extracted bytes with workstation-user privileges and does not prove native service isolation or renderer egress denial."
+  ],
+  "checks": {
+    "cli": {
+      "backup": {
+        "createdStatus": "valid",
+        "listedCount": 1,
+        "privateBackupDirectoryResolved": true
+      },
+      "migration": {
+        "latestAppliedVersion": 12,
+        "privateDataDirectoryResolved": true,
+        "state": "current",
+        "supportedVersion": 12
+      },
+      "supportBundle": {
+        "previewEntryCount": 5,
+        "previewEntryPaths": [
+          "diagnostics/config-keys.json",
+          "diagnostics/migration-status.json",
+          "diagnostics/runtime-state.json",
+          "diagnostics/versions.json",
+          "logs/local.log"
+        ],
+        "privateLogDirectoryResolved": true,
+        "privateSupportDirectoryResolved": true
+      }
+    },
+    "extraction": {
+      "method": "pkgutil --expand-full",
+      "payload": {
+        "contentTreeSha256": "375daa2689cebdac26c1bd88322e3ea124e30c4c234f364faab4880a65b1d110",
+        "directoryCount": 2561,
+        "entryCount": 20449,
+        "logicalBytes": 560587257,
+        "regularFileCount": 17001,
+        "symlinkCount": 887
+      },
+      "privateDirectoryMode": "0700"
+    },
+    "health": {
+      "live": {
+        "ok": true,
+        "service": "formaspec-api"
+      },
+      "ready": {
+        "database": "ready",
+        "migrations": 12,
+        "ok": true,
+        "render": {
+          "contract": {
+            "ipcProtocolVersion": 2,
+            "maxBytes": 5242880,
+            "maxMessageBytes": 100663296,
+            "maxPixels": 32000000,
+            "rasterNormalizerVersion": "1",
+            "rendererVersion": "2"
+          },
+          "mode": "worker",
+          "ok": true,
+          "renderer": "playwright",
+          "softwareFallback": false,
+          "warnings": []
+        }
+      },
+      "render": {
+        "contract": {
+          "ipcProtocolVersion": 2,
+          "maxBytes": 5242880,
+          "maxMessageBytes": 100663296,
+          "maxPixels": 32000000,
+          "rasterNormalizerVersion": "1",
+          "rendererVersion": "2"
+        },
+        "mode": "worker",
+        "ok": true,
+        "renderer": "playwright",
+        "softwareFallback": false,
+        "warnings": []
+      }
+    },
+    "mcp": {
+      "minimalUiWorkflowPresent": true,
+      "protocolVersion": "2025-06-18",
+      "resourceCount": 25,
+      "resources": [
+        {
+          "name": "agent-task",
+          "uri": "formaspec://tasks/{taskId}"
+        },
+        {
+          "name": "design-head",
+          "uri": "formaspec://designs/{designId}/head"
+        },
+        {
+          "name": "design-history",
+          "uri": "formaspec://designs/{designId}/history"
+        },
+        {
+          "name": "design-node-subtree",
+          "uri": "formaspec://designs/{designId}/versions/{version}/nodes/{nodeId}"
+        },
+        {
+          "name": "design-render",
+          "uri": "formaspec://designs/{designId}/versions/{version}/render.png"
+        },
+        {
+          "name": "design-system-project-pin",
+          "uri": "formaspec://designs/{designId}/design-system-pin"
+        },
+        {
+          "name": "design-system-release",
+          "uri": "formaspec://design-system-releases/{releaseId}"
+        },
+        {
+          "name": "design-system-revision-release",
+          "uri": "formaspec://designs/{designId}/revisions/{revisionId}/design-system-release"
+        },
+        {
+          "name": "design-system-upgrade-preview",
+          "uri": "formaspec://design-system-upgrade-previews/{previewId}"
+        },
+        {
+          "name": "design-tokens",
+          "uri": "formaspec://designs/{designId}/versions/{version}/tokens"
+        },
+        {
+          "name": "design-version",
+          "uri": "formaspec://designs/{designId}/versions/{version}"
+        },
+        {
+          "name": "engineering-handoff",
+          "uri": "formaspec://handoffs/{handoffId}"
+        },
+        {
+          "name": "formaspec-schema-v1",
+          "uri": "formaspec://schema/v1"
+        },
+        {
+          "name": "formaspec-schema-v2",
+          "uri": "formaspec://schema/v2"
+        },
+        {
+          "name": "foundation-design-system",
+          "uri": "formaspec://design-systems/foundation/1"
+        },
+        {
+          "name": "handoff-execution-decisions",
+          "uri": "formaspec://handoffs/{handoffId}/execution-decisions"
+        },
+        {
+          "name": "implementation-mapping",
+          "uri": "formaspec://implementation-mappings/{mappingId}"
+        },
+        {
+          "name": "organization-policy",
+          "uri": "formaspec://organizations/current/policy"
+        },
+        {
+          "name": "planning-session",
+          "uri": "formaspec://planning-sessions/{sessionId}"
+        },
+        {
+          "name": "preview-render",
+          "uri": "formaspec://designs/{designId}/previews/{previewId}/render.png"
+        },
+        {
+          "name": "product-specification",
+          "uri": "formaspec://designs/{designId}/product-specification/{version}"
+        },
+        {
+          "name": "product-specification-preview",
+          "uri": "formaspec://designs/{designId}/product-specification/previews/{previewId}"
+        },
+        {
+          "name": "redesign-assessment",
+          "uri": "formaspec://redesign-assessments/{assessmentId}"
+        },
+        {
+          "name": "redesign-stage-artifact",
+          "uri": "formaspec://redesign-assessments/{assessmentId}/stages/{stage}/artifact"
+        },
+        {
+          "name": "repository-inventory",
+          "uri": "formaspec://repository-inventories/{inventoryId}"
+        }
+      ],
+      "serverName": "formaspec",
+      "serverVersion": "0.2.0",
+      "toolCount": 51,
+      "toolNames": [
+        "context_get",
+        "design_commit_archive_preview",
+        "design_commit_preview",
+        "design_create",
+        "design_history",
+        "design_lint",
+        "design_list",
+        "design_preview_archive_nodes",
+        "design_preview_changes",
+        "design_read",
+        "design_render",
+        "design_restore_revision",
+        "design_system_list",
+        "design_system_project_pin_read",
+        "design_system_read",
+        "design_system_release_read",
+        "design_system_revision_release_read",
+        "design_system_upgrade_commit",
+        "design_system_upgrade_preview",
+        "handoff_create",
+        "handoff_execution_decision_record",
+        "handoff_execution_decisions_read",
+        "handoff_list",
+        "handoff_read",
+        "handoff_submit_review",
+        "handoff_update",
+        "implementation_mapping_create",
+        "implementation_mapping_read",
+        "node_search",
+        "organization_policy_read",
+        "planning_session_create",
+        "planning_session_list",
+        "planning_session_read",
+        "planning_session_save_answer",
+        "product_spec_commit_preview",
+        "product_spec_preview",
+        "product_spec_read",
+        "redesign_assessment_create",
+        "redesign_assessment_read",
+        "redesign_stage_artifact_read",
+        "redesign_stage_artifact_write",
+        "redesign_stage_revise",
+        "redesign_stage_transition",
+        "repository_inventory_list",
+        "repository_inventory_persist",
+        "repository_inventory_read",
+        "task_claim",
+        "task_create",
+        "task_list",
+        "task_read",
+        "task_transition"
+      ]
+    },
+    "rendering": {
+      "height": 339,
+      "renderer": "playwright",
+      "sha256": "cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf",
+      "sizeBytes": 1303,
+      "width": 512
+    },
+    "runtime": {
+      "browser": {
+        "contentTreeSha256": "a1ecc9078d239f9ef51d050b47ab355759d23677fa3face75686f414624550e4",
+        "directory": "chromium_headless_shell-1228",
+        "entryCount": 26,
+        "executableRelativePath": "chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+        "logicalBytes": 201473747,
+        "revision": "1228"
+      },
+      "nodeVersion": "v24.14.0"
+    },
+    "signature": {
+      "exitCode": 1,
+      "status": "unsigned",
+      "tool": "pkgutil"
+    }
+  },
+  "format": "formaspec-macos-extracted-runtime-smoke",
+  "releaseStatus": "NO-GO",
+  "safety": {
+    "browserOpenerInvoked": false,
+    "childProcessGroupsTerminated": true,
+    "codexInvoked": false,
+    "installerInvoked": false,
+    "keychainInvoked": false,
+    "launchctlInvoked": false,
+    "packageInstalled": false,
+    "packageReceiptUnchanged": true,
+    "privateTemporaryDirectoryRemoved": true,
+    "systemInstallTargetsUnchanged": true
+  },
+  "schemaVersion": 1,
+  "verificationStatus": "PASS"
+}

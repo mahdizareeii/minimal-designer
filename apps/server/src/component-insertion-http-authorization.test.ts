@@ -1,0 +1,337 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { FORMASPEC_FOUNDATION_SYSTEM } from "@designer/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { buildApplication, type DesignerApplication } from "./app.js";
+import { loadConfig } from "./config.js";
+import { createComponentSourceRevisionFixture } from "../test-fixtures/component-source.js";
+
+const applications: DesignerApplication[] = [];
+const temporaryDirectories: string[] = [];
+const PROXY_SECRET = "component-insertion-proxy-secret-0123456789abcdef";
+const PUBLIC_ORIGIN = "https://design.example.test";
+const ADMIN_IDENTITY = "component-insertion-admin@example.test";
+const ADMIN_ACTOR = `trusted:${ADMIN_IDENTITY}`;
+
+afterEach(async () => {
+  await Promise.all(applications.splice(0).map((application) => application.app.close()));
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => fs.promises.rm(directory, { recursive: true, force: true })));
+});
+
+async function application(label: string, mode: "local" | "server"): Promise<DesignerApplication> {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `formaspec-component-insertion-http-${label}-`));
+  temporaryDirectories.push(root);
+  const app = await buildApplication(loadConfig(mode === "local" ? {
+    APP_MODE: "local",
+    HOST: "127.0.0.1",
+    PORT: "4310",
+    DATA_DIR: path.join(root, "data"),
+    BACKUP_DIR: path.join(root, "backups"),
+    DESIGNER_DATABASE_PATH: ":memory:",
+    DESIGNER_LOG_LEVEL: "silent",
+  } : {
+    APP_MODE: "server",
+    HOST: "0.0.0.0",
+    PORT: "4310",
+    DATA_DIR: path.join(root, "data"),
+    BACKUP_DIR: path.join(root, "backups"),
+    DESIGNER_DATABASE_PATH: ":memory:",
+    PUBLIC_BASE_URL: PUBLIC_ORIGIN,
+    AUTH_MODE: "trusted-header",
+    DESIGNER_TOKEN: "component-insertion-bootstrap-token-0001",
+    FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+    FORMASPEC_PROXY_SECRET: PROXY_SECRET,
+    DESIGNER_CORS_ORIGINS: PUBLIC_ORIGIN,
+    DESIGNER_LOG_LEVEL: "silent",
+  }));
+  applications.push(app);
+  await app.app.ready();
+  return app;
+}
+
+function serverHeaders(identity: string): Record<string, string> {
+  return {
+    host: "design.example.test",
+    origin: PUBLIC_ORIGIN,
+    "x-formaspec-csrf": "1",
+    "x-designer-user": identity,
+    "x-formaspec-proxy-secret": PROXY_SECRET,
+  };
+}
+
+function previewPayload(parentId: string) {
+  return {
+    baseVersion: 2,
+    componentDefinitionId: FORMASPEC_FOUNDATION_SYSTEM.release.component_versions[0]!.component_definition_id,
+    parent: { node_id: parentId },
+    activeState: "default",
+    position: { x: 28.5, y: 44.25 },
+  };
+}
+
+function mcpTool(
+  fixture: DesignerApplication,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+) {
+  return fixture.app.inject({
+    method: "POST",
+    url: "/mcp",
+    remoteAddress: "127.0.0.1",
+    headers: {
+      host: "design.example.test",
+      authorization: `Bearer ${token}`,
+      "x-formaspec-proxy-secret": PROXY_SECRET,
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+  });
+}
+
+describe("component insertion preview HTTP authorization", () => {
+  it("creates an isolated exact preview and commits it through the ordinary commit endpoint", async () => {
+    const fixture = await application("local", "local");
+    const parentId = "node_component_insertion_http_parent_01";
+    const source = createComponentSourceRevisionFixture(
+      fixture.database,
+      fixture.service,
+      "local",
+      [parentId],
+      "component-insertion-http-local",
+    );
+    const historyBefore = fixture.service.history("local", source.designId);
+    const response = await fixture.app.inject({
+      method: "POST",
+      url: `/api/designs/${source.designId}/component-insertion-previews`,
+      payload: previewPayload(parentId),
+    });
+    expect(response.statusCode, response.body).toBe(201);
+    const body = response.json<{
+      previewId: string;
+      rootBaseVersion: number;
+      resultSnapshotHash: string;
+      canCommit: boolean;
+      status: string;
+      component: { instanceId: string; sourceHash: string };
+    }>();
+    expect(body).toMatchObject({ rootBaseVersion: 2, canCommit: true, status: "ready" });
+    expect(body.component.sourceHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(fixture.service.history("local", source.designId)).toEqual(historyBefore);
+
+    const commit = await fixture.app.inject({
+      method: "POST",
+      url: `/api/designs/${source.designId}/previews/${body.previewId}/commit`,
+      payload: {
+        expectedBaseVersion: 2,
+        idempotencyKey: "component-insertion-http-commit-0001",
+        message: "Insert verified component",
+      },
+    });
+    expect(commit.statusCode, commit.body).toBe(200);
+    expect(commit.json<{ snapshotHash: string; version: number }>() ).toMatchObject({
+      snapshotHash: body.resultSnapshotHash,
+      version: 3,
+    });
+    const head = fixture.service.getDesign("local", source.designId).canonicalDocument;
+    if (head.schema_version !== 2) throw new Error("expected V2 head");
+    expect(head.nodes[body.component.instanceId]?.type).toBe("component_instance");
+  });
+
+  it("enforces trusted identity and hides cross-organization project IDs", async () => {
+    const fixture = await application("authorization", "server");
+    const warm = await fixture.app.inject({
+      method: "GET",
+      url: "/api/designs",
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(ADMIN_IDENTITY),
+    });
+    expect(warm.statusCode, warm.body).toBe(200);
+    const policy = fixture.policies.read(ADMIN_ACTOR);
+    const nextPolicy = structuredClone(policy.policy);
+    nextPolicy.identity.roleMappings = [{ claim: "identity", value: ADMIN_IDENTITY, role: "organization_admin" }];
+    fixture.policies.update(ADMIN_ACTOR, {
+      expectedConfigurationHash: policy.configurationHash,
+      policy: nextPolicy,
+    });
+    const allowedParentId = "node_component_insertion_http_allowed_01";
+    const deniedParentId = "node_component_insertion_http_denied_001";
+    const allowed = createComponentSourceRevisionFixture(
+      fixture.database,
+      fixture.service,
+      ADMIN_ACTOR,
+      [allowedParentId],
+      "component-insertion-http-allowed",
+    );
+    const denied = createComponentSourceRevisionFixture(
+      fixture.database,
+      fixture.service,
+      ADMIN_ACTOR,
+      [deniedParentId],
+      "component-insertion-http-denied",
+    );
+    const now = new Date().toISOString();
+    fixture.database.sqlite.prepare(
+      "INSERT INTO organizations (id, name, config_json, created_at, updated_at) VALUES ('organization_component_insertion_foreign', 'Foreign', '{}', ?, ?)",
+    ).run(now, now);
+    fixture.database.sqlite.prepare(
+      "UPDATE designs SET organization_id = 'organization_component_insertion_foreign' WHERE id = ?",
+    ).run(denied.designId);
+
+    const allowedResponse = await fixture.app.inject({
+      method: "POST",
+      url: `/api/designs/${allowed.designId}/component-insertion-previews`,
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(ADMIN_IDENTITY),
+      payload: previewPayload(allowedParentId),
+    });
+    expect(allowedResponse.statusCode, allowedResponse.body).toBe(201);
+
+    const restrictedResponse = await fixture.app.inject({
+      method: "POST",
+      url: `/api/designs/${denied.designId}/component-insertion-previews`,
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(ADMIN_IDENTITY),
+      payload: previewPayload(deniedParentId),
+    });
+    expect(restrictedResponse.statusCode, restrictedResponse.body).toBe(404);
+    expect(restrictedResponse.json<{ error: { code: string } }>().error.code).toBe("NOT_FOUND");
+
+    const missingIdentityResponse = await fixture.app.inject({
+      method: "POST",
+      url: `/api/designs/${allowed.designId}/component-insertion-previews`,
+      remoteAddress: "127.0.0.1",
+      headers: {
+        host: "design.example.test",
+        origin: PUBLIC_ORIGIN,
+        "x-formaspec-csrf": "1",
+        "x-formaspec-proxy-secret": PROXY_SECRET,
+      },
+      payload: previewPayload(allowedParentId),
+    });
+    expect(missingIdentityResponse.statusCode, missingIdentityResponse.body).toBe(401);
+    expect(missingIdentityResponse.json<{ error: { code: string } }>().error.code).toBe("AUTH_REQUIRED");
+  });
+
+  it("enforces MCP scopes, project grants, and revocation for the dedicated insertion tool", async () => {
+    const fixture = await application("mcp-authorization", "server");
+    const warm = await fixture.app.inject({
+      method: "GET",
+      url: "/api/designs",
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(ADMIN_IDENTITY),
+    });
+    expect(warm.statusCode, warm.body).toBe(200);
+    const policy = fixture.policies.read(ADMIN_ACTOR);
+    const nextPolicy = structuredClone(policy.policy);
+    nextPolicy.identity.roleMappings = [{ claim: "identity", value: ADMIN_IDENTITY, role: "organization_admin" }];
+    fixture.policies.update(ADMIN_ACTOR, {
+      expectedConfigurationHash: policy.configurationHash,
+      policy: nextPolicy,
+    });
+    const allowedParentId = "node_component_insertion_mcp_allowed_01";
+    const deniedParentId = "node_component_insertion_mcp_denied_001";
+    const allowed = createComponentSourceRevisionFixture(
+      fixture.database,
+      fixture.service,
+      ADMIN_ACTOR,
+      [allowedParentId],
+      "component-insertion-mcp-allowed",
+    );
+    const denied = createComponentSourceRevisionFixture(
+      fixture.database,
+      fixture.service,
+      ADMIN_ACTOR,
+      [deniedParentId],
+      "component-insertion-mcp-denied",
+    );
+    const allowedChallenge = fixture.enterprise.createAgentConnection(ADMIN_ACTOR, {
+      adapter: "codex",
+      displayName: "Component insertion MCP allowed",
+      scopes: ["design:preview", "design:read", "design_system:read"],
+      projectIds: [allowed.designId],
+      expiresInSeconds: 3_600,
+    });
+    const missingScopeChallenge = fixture.enterprise.createAgentConnection(ADMIN_ACTOR, {
+      adapter: "codex",
+      displayName: "Component insertion MCP missing scope",
+      scopes: ["design:preview", "design:read"],
+      projectIds: [allowed.designId],
+      expiresInSeconds: 3_600,
+    });
+    const allowedGrant = fixture.enterprise.pairAgentConnection(allowedChallenge.nonce).grant;
+    const missingScopeGrant = fixture.enterprise.pairAgentConnection(missingScopeChallenge.nonce).grant;
+    vi.spyOn(fixture.renderer, "render").mockResolvedValue({
+      png: Buffer.from("89504e470d0a1a0a", "hex"),
+      width: 160,
+      height: 44,
+      renderer: "playwright",
+      warnings: [],
+    });
+    const args = {
+      design_id: allowed.designId,
+      base_version: 2,
+      component_definition_id: FORMASPEC_FOUNDATION_SYSTEM.release.component_versions[0]!.component_definition_id,
+      parent: { node_id: allowedParentId },
+      position: { x: 20, y: 30 },
+    };
+    const allowedResponse = await mcpTool(
+      fixture,
+      allowedGrant.token,
+      "design_system_component_insert_preview",
+      args,
+    );
+    expect(allowedResponse.statusCode, allowedResponse.body).toBe(200);
+    const allowedBody = allowedResponse.json<{
+      result: { structuredContent: { ok: boolean; preview: { canCommit: boolean }; component: { instanceId: string } } };
+    }>();
+    expect(allowedBody.result, allowedResponse.body).toBeDefined();
+    expect(allowedBody.result.structuredContent, allowedResponse.body).toBeDefined();
+    expect(allowedBody.result.structuredContent).toMatchObject({
+      ok: true,
+      preview: { canCommit: true },
+      component: { instanceId: expect.stringMatching(/^node_/) },
+    });
+
+    const deniedResponse = await mcpTool(
+      fixture,
+      allowedGrant.token,
+      "design_system_component_insert_preview",
+      { ...args, design_id: denied.designId, parent: { node_id: deniedParentId } },
+    );
+    expect(deniedResponse.statusCode, deniedResponse.body).toBe(200);
+    expect(deniedResponse.json<{
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+
+    const missingScopeResponse = await mcpTool(
+      fixture,
+      missingScopeGrant.token,
+      "design_system_component_insert_preview",
+      args,
+    );
+    expect(missingScopeResponse.statusCode, missingScopeResponse.body).toBe(200);
+    expect(missingScopeResponse.json<{
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+
+    fixture.enterprise.revokeAgentConnection(ADMIN_ACTOR, allowedChallenge.connection.id);
+    const revokedResponse = await mcpTool(
+      fixture,
+      allowedGrant.token,
+      "design_system_component_insert_preview",
+      args,
+    );
+    expect(revokedResponse.statusCode, revokedResponse.body).toBe(401);
+    expect(revokedResponse.json<{ error: { code: string } }>().error.code).toBe("AUTH_REQUIRED");
+  });
+});
