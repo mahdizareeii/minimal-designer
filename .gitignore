@@ -11,6 +11,7 @@ playwright-report/
 test-results/
 artifacts/release-evidence/
 artifacts/installers/
+artifacts/candidates/*/installers/*.pkg
 artifacts/ci/
 *.log
 apps/web/public/fonts/*.woff2
