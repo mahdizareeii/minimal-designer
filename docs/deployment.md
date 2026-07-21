@@ -15,6 +15,13 @@ provenance, and complete release evidence do not exist yet. One isolated local-D
 safety-restore exercise has passed; it does not qualify the server deployment
 path.
 
+Current local schema-13 application, browser, Docker/egress, Firefox/WebKit,
+recovery, and temporary SBOM/license evidence passed before a lock-only
+dependency update. The lockfile now selects `drizzle-orm` 0.45.2 to eliminate
+GHSA-gpj5-g38j-94v9, but installed modules and runtime evidence still used
+0.44.7. A fresh frozen install and complete rerun is required before deployment
+qualification.
+
 Do not expose the current Compose port to a LAN or the internet. Do not declare
 an enterprise rollout complete from a successful source or Compose startup.
 Track the authoritative gaps in
@@ -82,6 +89,10 @@ warnings, and safe errors—not documents, assets, PNG bytes, paths, or filename
 The renderer remains database-free, and exact 30-day terminal retention requires
 scoped delete permits.
 
+Database schema 13 adds canonical component source JSON/SHA-256 persistence and
+exact design-system upgrade base/result snapshot references. The current
+command engine is 2, renderer 3, renderer IPC protocol 2, and font bundle 1.
+
 Compose publishes container port 4310 to `127.0.0.1` by default, mounts named
 volumes at `/data`, `/backups`, and `/run/formaspec`, allocates renderer shared
 memory, and uses `restart: unless-stopped`. It passes the strict-mode,
@@ -89,37 +100,29 @@ Host/Origin, trusted-proxy, CSRF, and container-local variables. The local MCP
 bridge is not in the image; the source CLI starts it as a separate host process on
 `127.0.0.1:4312`.
 
-The exact-current local source checkpoint was verified with project
-`formaspeccischema118e2818fed6`, built from source identity
-`local-uncommitted-final437-eventauth-sqlbounded-cli`: readiness reported
-migration 12, Playwright worker, and no fallback; design
-`document_0e6b4b61e3964110b9a4533ef2a63398` at revision
-`revision_aea2807b70cb4c8c9b6588c191de0218` rendered a real 512×339 PNG with
-SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`;
-and the same design/version survived API-only restart
-and rerendered identically. API/renderer ran as `pwuser` from identical image
-`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`,
-with read-only roots, capability drop, no-new-privileges, PID/memory/CPU bounds,
-and renderer networking disabled. The renderer-egress canary returned DNS
-`EAI_AGAIN`, TCP `ENETUNREACH`, and zero external interfaces. Data/backup/socket volumes were local/local
-with null options and distinct mountpoints; cleanup removed all containers and
-volumes. The temporary summary is
-`/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
-(SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`);
-it is exact-current local `NO-GO` evidence, not retained-CI or provenance
-evidence. This final reviewed image also passed Firefox/WebKit 12/12 once and a
-same-machine source-to-clean-target copied-bundle restore with independent
-volumes and exact state/render equality. The cross-browser summary is
-`/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json`
-(SHA-256 `2b723c3ddac0404bea7a1124559945ec78f69a6a6ced48923f9d170456c71b9b`).
-The immediately prior fit-sync image passed three consecutive 12/12 runs; its
-main, `-repeat2`, and `-repeat3` summaries are byte-identical with SHA-256
-`0b28b9a0f78ec5687496cd61a7b930fa00d0f276c5dfbb0c0901ce7410a9938b`.
-The final recovery summary is
-`/private/tmp/formaspec-offhost-restore-20260721-final437-eventauth-sqlbounded-cli/NO-GO-SUMMARY.json`
-(SHA-256 `2a7bf59d47579f4c5f6f20bf779976e9dd4a6260b6670e73f245753ef3abbdc9`).
-Neither is real remote-host/network/TLS/off-site recovery or hosted release
-evidence. The retained pre-current-SSE-authorization unsigned macOS checkpoint
+The current local schema-13 checkpoint used Compose project
+`formaspeccischema13da9af9d064` and image
+`sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`.
+Design `document_e171c68c7a4c4b3b80a5493a6180e28f` at revision
+`revision_85e2776ca3874f1c98097b6917bc3649` rendered the same 512×339 PNG
+SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`
+before and after API restart. The egress canary returned DNS `EAI_AGAIN`, TCP
+`ENETUNREACH`, and zero external interfaces; cleanup passed. Summary SHA-256 is
+`13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`.
+
+The same image passed Firefox/WebKit 12/12 (summary SHA-256
+`c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`)
+and copied-bundle recovery from `formaspecdrsource3af2259e48` to
+`formaspecdrtarget3af2259e48`. Bundle SHA-256 was
+`b87d44e7b0584dd0a14e5b47d07cf447490a683ab512f983feb4e2a19c0a6ef3`;
+snapshot/revision/asset/render/SQLite/FK comparisons and cleanup passed; the
+`NO-GO` summary SHA-256 is
+`1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
+
+These local results used linked `drizzle-orm` 0.44.7 and must be repeated after
+a fresh frozen install of the now-locked 0.45.2. They are not real remote-host/
+TLS/off-site or hosted release evidence. Prior `final437` schema-12 summaries
+remain historical regression evidence only. The retained unsigned macOS checkpoint
 under `artifacts/candidates/schema12-current/` retains passing frozen package-
 integrity and non-installing extracted-runtime evidence but was not installed;
 current-source verification records expected drift and same-host outer
@@ -130,7 +133,7 @@ schema 7 to schema 8 while preserving its project, 31 revisions, representative
 asset, and worker render. Current gaps include:
 
 - no release-qualified Windows named-pipe/native worker/service-host packaging;
-- the exact-current local Docker smoke passes DNS/direct-TCP/non-loopback
+- the local schema-13 Docker smoke passes DNS/direct-TCP/non-loopback
   renderer-egress canaries, but no retained hosted/native canary, crash,
   saturation, or long-running load proof exists;
 - no installed schedule supervisor or external alert delivery; online create/
@@ -578,9 +581,12 @@ migration fixtures, operator-approved cleanup, and rollback evidence exist.
 
 Production deployment remains **NO-GO** until evidence exists for all of these:
 
+- fresh frozen installation of locked `drizzle-orm` 0.45.2 followed by the
+  complete application/browser/Docker/recovery/SBOM verification set; current
+  passing runtime evidence used linked 0.44.7;
 - Windows native service-host/named-pipe renderer IPC, ACL/process-tree
   packaging plus retained hosted/native egress, crash, saturation, and load
-  evidence beyond the passing exact-current local Docker worker;
+  evidence beyond the passing local schema-13 Docker worker;
 - strict server-mode proxy/direct-port, managed-ID/offline restore and rollback,
   upgrade, installed scheduling, external alert delivery, and long-running
   Compose evidence; both restore command paths exist but lack clean server and
@@ -593,10 +599,9 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
 - release evidence for the implemented server-mode supervisor covering
   maintenance, safety backup, deterministic render smoke, audit/outbox
   reconciliation, rollback, revocation, crash recovery, and alerting;
-- browser E2E and visual-regression suites beyond the passing integrated local
-  scenario, proving the complete cross-platform selection/canvas matrix;
-- pinned cross-platform CI retention for the already-passing 1,000-node
-  performance budgets;
+- retained supported-OS/hosted evidence for the passing local schema-13
+  editor/admin/component-insertion 4/4, selection 12/12, handoff 1/1, visual
+  7/7, inspect 1/1, 20-step E2E 1/1, and 1,000-node budget 1/1;
 - full organization/role/scope/revocation/CSRF/Host/Origin/archive/asset/
   traversal/decompression/renderer-egress/secret-exclusion security suites;
 - release-qualified macOS PKG, Windows MSI, Linux DEB/RPM, service supervision,
@@ -613,6 +618,8 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
   20-step PM-to-backup-restore integration scenario;
 - artifact-specific container/native SBOMs, dependency/image/OS scanning,
   reproducibility, unsigned/signed artifact instructions, and zero unresolved
-  critical/high security findings. The current Sharp-free schema-12 source-
-  workspace gate passes with 342 components and zero policy violations but
-  never replaces target-artifact evidence.
+  critical/high security findings. Temporary schema-13 source evidence reported
+  342 components and zero license violations before the lock update. The
+  0.45.2 lock audits with zero high/critical findings, but a fresh install,
+  regenerated SBOM, and full verification remain mandatory and never replace
+  target-artifact evidence.

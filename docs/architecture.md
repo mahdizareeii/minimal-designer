@@ -52,6 +52,14 @@ revision, asset, render, integrity, and foreign-key comparisons. Cleanup passed
 for every disposable project. These are local `NO-GO` results, not hosted
 provenance or a release image.
 
+Those runtime results used the previously linked `drizzle-orm` 0.44.7. The
+source declaration and lockfile now select 0.45.2 to eliminate
+GHSA-gpj5-g38j-94v9; the offline frozen-lock check passes and audit has zero
+high/critical findings. Because the change was lock-only and no install was
+performed, a fresh frozen install and complete application/browser/Docker/
+recovery/SBOM rerun is required before the runtime architecture can be called
+current-dependency evidence.
+
 ### Current authoritative data flow
 
 1. The browser or MCP client reads a design and its current integer version.

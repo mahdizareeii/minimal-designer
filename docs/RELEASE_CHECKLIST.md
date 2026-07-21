@@ -39,8 +39,8 @@ installer 62/62 across 5 files, and launcher 212/212. All seven workspace
 typechecks and builds passed. Browser gates passed editor/prototype/
 administration behavior 3/3, selection
 alignment 12/12, revision inspect 1/1, visual regression 7/7, the complete
-20-step release scenario 1/1, and the 1,000-node performance gate 1/1. Current
-source evidence passes with 342 components and zero policy violations. Workflow
+20-step release scenario 1/1, and the 1,000-node performance gate 1/1. That
+checkpoint's source evidence passed with 342 components and zero policy violations. Workflow
 contracts pass 8/8, cross-browser runner tests pass 2/2, off-host simulation
 tests pass 7/7, release-evidence tests pass 8/8, macOS package-evidence tests
 pass 12/12, and macOS runtime-smoke tests pass 10/10. The then-current local-
@@ -61,11 +61,21 @@ IPC protocol 2, with 52 MCP tools, 25 resources, and 108 protected non-MCP
 routes. Focused current gates include core build/typecheck, server/web
 typecheck, component-source/design-system/insertion tests, component-library/
 insertion server 16/16, browser component-library 6/6, CLI command 23/23, MCP
-contract 5/5, and route contract/coverage 12/12. Current Docker/off-host/macOS
-smoke scripts now require schema 13, and the macOS smoke requires all 52 tools
-including `design_system_component_insert_preview`; those current gates have
-now passed for disposable Docker and copied-bundle recovery, while no current
-native macOS package or hosted retained run exists.
+contract 5/5, and route contract/coverage 12/12. The complete current
+application suite passes 678/678, launcher 212/212, and all seven workspaces
+pass typecheck/build. Schema-13 Playwright passes editor/admin/component
+insertion 4/4, selection 12/12, handoff 1/1, visual 7/7, revision inspect 1/1,
+the 20-step release scenario 1/1, and the 1,000-node budget 1/1. Current Docker
+restart/egress, Firefox/WebKit 12/12, and copied-bundle recovery pass locally.
+Temporary current-source SBOM/license generation/checking passes with 342
+components and zero violations, but it predates the subsequent lock-only
+upgrade from linked `drizzle-orm` 0.44.7 to declared 0.45.2. The updated lock
+passes offline frozen validation; audit reports info 0, low 0, moderate 2,
+high 0, critical 0 across 416 dependencies. No packages were installed, so all
+678 tests and browser/Docker/recovery runs still exercised 0.44.7. A fresh
+frozen install, full rerun, and regenerated SBOM are mandatory. No current
+native macOS package, hosted provenance, image/OS scans, or real server-mode/
+off-site release evidence exists.
 Release remains `NO-GO`. The separate disposable recovery exercise below
 proves one local Docker recovery path but not the complete enterprise release
 matrix.
@@ -205,14 +215,13 @@ Do not start a production rollout or V2 head migration until every item passes:
   and legacy assets, design-system data, historical customer fixtures, failure
   injection, reconnect/revocation lifecycle, and cross-platform artifact
   comparison.
-- [x] The prior isolated 20-step Playwright scenario covers browser-created product
-  context, backup-gated V1→V2 migration with assertions pinned to schema 12,
+- [x] The current schema-13 isolated 20-step Playwright scenario covers browser-created product
+  context, backup-gated V1→V2 migration,
   all 22 planning sections, a scoped MCP
   task, multi-screen preview/lint/render/commit, human correction, selection
   refinement, immutable history restore, canonical/portable export, verified
   source-local backup, stopped-database restore, restart, exact hashes, product
   specification, planning/task state, drift removal, and PNG smoke.
-  A schema-13 rerun with source-backed component library/insertion remains open.
 - [x] Managed restore opens the source with `O_NOFOLLOW`, copies/hashes it into
   private mode-`0700` staging on `/backups`, changes the pinned file to mode
   `0400`, validates expected managed size/SHA-256, and uses only those pinned
@@ -263,7 +272,11 @@ Do not start a production rollout or V2 head migration until every item passes:
   Failed or stalled attempts remain critical even when the current window has
   a valid backup;
   installed external invocation and alert delivery remain open.
-- [ ] No critical or high security finding remains.
+- [ ] No critical or high security finding remains in the installed/tested
+  candidate. The lockfile fixes GHSA-gpj5-g38j-94v9 with `drizzle-orm` 0.45.2
+  and audit reports zero high/critical findings, but installed modules and all
+  runtime tests still used 0.44.7; fresh frozen install and full verification
+  are required.
 
 ## Phase 2 gate
 
@@ -298,12 +311,16 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [x] Product specification natural-language/structured synchronization passes.
 - [x] All 22 interview sections persist, resume, edit, and version correctly in
   service/integration tests and in the integrated browser release E2E.
-- [x] Enterprise editor navigation, panels, administration, and click-through
-  prototype behavior pass the focused 3/3 browser gate for Pages/Layers/
+- [x] Enterprise editor navigation, panels, administration, click-through
+  prototype behavior, and exact manual component insertion pass the current
+  4/4 browser gate for Pages/Layers/
   Components/Assets,
   Canvas/Prototype/Before-After, Design/Content/Component/Logic/Prototype/
   Accessibility, activity/diagnostics/revision/handoff navigation, and
-  click-to-frame navigation without document mutation.
+  click-to-frame navigation without document mutation. The insertion case
+  verifies backup-gated V1→V2 migration, exact Foundation catalog loading,
+  isolated rendered preview without head mutation, ordinary CAS commit,
+  version-3 reload, and an active projected instance.
 - [x] Revision-pinned inspect API/view remains on the requested immutable
   revision when the project head changes and exposes integrity hashes, resolved
   tokens, assets, components, rules, acceptance criteria, implementation
@@ -424,6 +441,9 @@ Do not start a production rollout or V2 head migration until every item passes:
 
 ## Phase 6 delivery gate
 
+- [ ] Perform a fresh frozen install from the lockfile with `drizzle-orm`
+  0.45.2, then rerun all 678 application tests, launcher, typecheck/build,
+  browser, Docker/egress, Firefox/WebKit, recovery, and SBOM/license gates.
 - [x] Strict versioned organization-policy read/update through the guided
   12-section Administration form and Expert JSON, MCP read/resource,
   secret-free YAML export, optimistic configuration-hash concurrency,
@@ -591,19 +611,19 @@ Do not start a production rollout or V2 head migration until every item passes:
 ## Release performance budgets
 
 Representative projects must contain at least 1,000 nodes.
-The measurements below passed on the preceding schema-12 tree and remain useful
-regression evidence; the schema-13 Chrome performance project has not yet been
-rerun.
+The measurements below are from the schema-13 Chrome performance run before
+the lock-only `drizzle-orm` 0.45.2 update. They pass the budgets but must be
+repeated after a fresh frozen install.
 
 | Measurement | Required p95 / hard limit | Current evidence |
 | --- | --- | --- |
-| Initial interactive load | at most 2.5 seconds p95 | **Pass:** 225.90 ms p95, 20 cold samples |
-| Selection response | at most 50 ms p95 | **Pass:** 21.10 ms p95, 20 samples |
+| Initial interactive load | at most 2.5 seconds p95 | **Pass:** 230.70 ms p95, 20 cold samples |
+| Selection response | at most 50 ms p95 | **Pass:** 20.50 ms p95, 20 samples |
 | Gesture frames | at most 16.7 ms p95; no frame over 50 ms | **Pass:** 16.70 ms cadence-normalized p95 and 16.70 ms maximum across the measured gesture frames |
-| Local commit/autosave | at most 500 ms p95 | **Pass:** 255.00 ms p95, 20 samples |
-| History load | at most 1 second p95 | **Pass:** 16.10 ms p95, 20 samples |
-| 1440 by 900 render | at most 5 seconds p95; 15-second hard timeout | **Pass:** 217.78 ms p95, pinned Playwright Chromium, no fallback/warnings |
-| Preview validation excluding render | at most 1 second p95 | **Pass:** 205.02 ms p95, 20 samples; no render endpoint invoked |
+| Local commit/autosave | at most 500 ms p95 | **Pass:** 273.20 ms p95, 20 samples |
+| History load | at most 1 second p95 | **Pass:** 17.60 ms p95, 20 samples |
+| 1440 by 900 render | at most 5 seconds p95; 15-second hard timeout | **Pass:** 221.37 ms p95, pinned Playwright Chromium, no fallback/warnings |
+| Preview validation excluding render | at most 1 second p95 | **Pass:** 280.48 ms p95, 20 samples; no render endpoint invoked |
 
 The focused service benchmark also passes at 20.43 ms p95 validation, 49.65 ms
 p95 apply, 134.43 ms p95 preview persistence, and 116.83 ms p95 render.
@@ -676,10 +696,12 @@ pass a budget.
 - [x] Representative 1,000-node budgets pass.
 - [ ] No critical/high security defects remain.
 - [x] Source-workspace production dependencies comply with the approved
-  license policy at the preceding checkpoint. The schema-12 macOS PKG matches
+  license policy in the temporary pre-lock-update schema-13 evidence. The
+  schema-12 macOS PKG matches
   its frozen packaged workspace outputs and passes private extracted-runtime
-  checks, but it predates schema 13 and the 52-tool/108-route interface. A
-  current SBOM/license refresh, Chromium legal
+  checks, but it predates schema 13 and the 52-tool/108-route interface. The
+  lock now declares `drizzle-orm` 0.45.2; regenerate the SBOM/license evidence
+  after a fresh frozen install. Chromium legal
   approval, reproducibility, signing/notarization, vulnerability scans, and
   privileged lifecycle evidence remain required; container/Windows/Linux
   artifact evidence is also incomplete.

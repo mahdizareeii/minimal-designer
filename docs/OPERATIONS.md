@@ -29,6 +29,13 @@ lifecycle passes 1/1 for overwrite/strip, direct-peer denial, append rejection,
 and restart-bound secret rotation; it is not real Nginx/TLS/public-port proof. See
 [Release blockers](#release-blockers).
 
+Current local schema-13 application, browser, Docker/egress, Firefox/WebKit,
+copied-bundle recovery, and temporary SBOM/license gates passed before a
+lock-only dependency update. The lockfile now selects `drizzle-orm` 0.45.2 to
+eliminate GHSA-gpj5-g38j-94v9, but installed modules and all runtime evidence
+still used 0.44.7. Operators must perform a fresh frozen install and repeat the
+full verification set before treating those results as dependency-current.
+
 ## Fastest installation
 
 Run commands from the repository root.
@@ -93,39 +100,33 @@ The Compose file passes the strict mode variables, uses an explicit
 `FORMASPEC_CONTAINER_LOCAL` exception for an API container whose host-published
 port remains loopback-only, mounts data/backup/socket volumes, and runs a
 separate non-root, read-only, capability-free, network-disabled renderer with
-resource limits. Fresh exact-current disposable project
-`formaspeccischema118e2818fed6`, built from source identity
-`local-uncommitted-final437-eventauth-sqlbounded-cli`,
-reached migration 12 Playwright-worker readiness, preserved design
-`document_0e6b4b61e3964110b9a4533ef2a63398` at revision
-`revision_aea2807b70cb4c8c9b6588c191de0218` across API-only restart, and
-produced the same deterministic PNG SHA-256 before and after restart. API and
-renderer used identical image
-`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`;
-the renderer used `network_mode: none` with only `/run/formaspec` mounted and
-failed egress closed with DNS `EAI_AGAIN`, TCP `ENETUNREACH`, and zero external
-interfaces. Independent cleanup verification found no remaining disposable containers,
-volumes, or networks. The summary is
-`/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
-(SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`).
-Treat it as exact-current local `NO-GO` evidence, not retained CI, provenance,
-or a release artifact. A separate isolated local-Docker restore and
-safety-restore exercise passed. The final reviewed image also passed
-Firefox/WebKit 12/12 once
-(`/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json`,
-SHA-256 `2b723c3ddac0404bea7a1124559945ec78f69a6a6ced48923f9d170456c71b9b`).
-The immediately prior fit-sync image passed three consecutive 12/12 runs after
-the synchronous initial-fit fix; its main, `-repeat2`, and `-repeat3` summaries
-all hash to
-`0b28b9a0f78ec5687496cd61a7b930fa00d0f276c5dfbb0c0901ce7410a9938b`.
-The exact-current image also passed a same-machine copied-bundle restore from
-`formaspecdrsourcede20d670cd` into clean independent project
-`formaspecdrtargetde20d670cd`
-(`/private/tmp/formaspec-offhost-restore-20260721-final437-eventauth-sqlbounded-cli/NO-GO-SUMMARY.json`,
-SHA-256 `2a7bf59d47579f4c5f6f20bf779976e9dd4a6260b6670e73f245753ef3abbdc9`).
-Server-mode proxy/restore evidence, real remote-host/network/TLS/off-site
-recovery, broader fixtures, upgrade, saturation, and long-running security
-evidence remain incomplete. Do not weaken the host binding or publish the port.
+resource limits. Disposable schema-13 project
+`formaspeccischema13da9af9d064` used image
+`sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`,
+preserved design `document_e171c68c7a4c4b3b80a5493a6180e28f` at revision
+`revision_85e2776ca3874f1c98097b6917bc3649` across API restart, and produced
+the same 512×339 PNG SHA-256
+`cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`.
+The renderer failed egress closed with DNS `EAI_AGAIN`, TCP `ENETUNREACH`, and
+zero external interfaces; cleanup passed. Summary:
+`/private/tmp/formaspec-docker-schema13-20260721-current/summary.json`, SHA-256
+`13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`.
+
+The same image passed Firefox/WebKit 12/12; summary SHA-256
+`c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`.
+It also passed copied-bundle recovery from `formaspecdrsource3af2259e48` to
+`formaspecdrtarget3af2259e48` with exact snapshot/revision/asset/render/SQLite/
+foreign-key equality and complete cleanup. Bundle SHA-256 was
+`b87d44e7b0584dd0a14e5b47d07cf447490a683ab512f983feb4e2a19c0a6ef3`;
+the `NO-GO` summary SHA-256 was
+`1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
+
+These local runs predate the `drizzle-orm` 0.45.2 lock update and must be
+repeated after a fresh frozen install. Historical schema-12 summaries remain
+under the earlier `final437` temporary directories and are not current-source
+evidence. Server-mode proxy/restore, real remote-host/TLS/off-site recovery,
+broader fixtures, upgrade, saturation, and long-running security evidence
+remain incomplete. Do not weaken the host binding or publish the port.
 
 ## Source development
 
@@ -201,11 +202,13 @@ custom volumes, and orchestrators still require deployment-specific procedures. 
 supervisor installation/alerting, application autostart, native package
 install/upgrade/uninstall, approved backup signing/provenance, and a migration
 execution/rollback command are not implemented. The migration-status
-reader is synchronized at version 12. Migration 9 adds the preview/run ledger
+reader is synchronized at version 13. Migration 9 adds the preview/run ledger
 and guarded exact-delete contract; migration 10 adds immutable portable-import
 provenance; migration 11 adds persistent bounded render-job lifecycle records;
 migration 12 adds append-only handoff execution decisions with immutable CAS
-chains and independently scoped authorization.
+chains and independently scoped authorization. Migration 13 adds canonical
+component source JSON/hash persistence and exact design-system upgrade snapshot
+references without fabricating legacy values.
 None changes stored V1 revisions. The
 copied version-7-to-8 migration
 fixture preserves V1 revision bytes and hashes. A disposable local-Docker
@@ -881,9 +884,11 @@ fully cleaned up without touching the user's live project. It manually cleared
 the fence only for disposable cleanup; production semantics leave maintenance
 active and the API stopped. A subsequent real unique-project `formaspecctl`
 smoke validated the persisted Compose project across binding verification,
-offline preparation, worker execution, and cleanup. The exact-current image also
-passed a same-machine copied-bundle restore into an independently mounted clean
-target with exact state/render comparison and complete cleanup. Server-mode
+offline preparation, worker execution, and cleanup. The schema-13 image also
+passed same-machine copied-bundle restore from `formaspecdrsource3af2259e48`
+into `formaspecdrtarget3af2259e48` with exact state/render/asset/SQLite/FK
+comparison and complete cleanup. That run predates the `drizzle-orm` 0.45.2
+lock update and must be repeated after a fresh frozen install. Server-mode
 proxy, packaged runtime, real remote-host/network/TLS/off-site recovery, and
 supervised lifecycle evidence remains open, so this is
 not yet a release-qualified disaster-recovery service.
@@ -959,22 +964,23 @@ from later event IDs.
 Production readiness remains **NO-GO** until all of the following are resolved
 and evidenced:
 
+- perform a fresh frozen install with locked `drizzle-orm` 0.45.2, then rerun
+  application, browser, Docker/egress, Firefox/WebKit, recovery, and SBOM/
+  license gates; current passing runtime evidence used linked 0.44.7;
 - add real Windows named-pipe/native renderer/service-host/ACL/process-tree
   packaging and retained hosted egress/crash/saturation/load evidence beyond
-  the passing exact-current DNS/TCP/interface canary;
+  the passing local schema-13 DNS/TCP/interface canary;
 - finish and verify real Nginx/TLS server-mode reverse-proxy, public direct-port
   isolation, `HEALTHY_PLANNED_RESTORE_ONLY`/rollback, offline recovery,
   upgrade, alerting, and long-running Compose evidence; controlled actual-
   socket proxy behavior and both restore command paths exist but have not
   passed those deployment release matrices;
-- extend browser and visual-regression coverage beyond the passing 20-step
-  local scenario and zoom/pan/DPR/RTL alignment foundations to the full
-  invalidation, auto-layout, fractional-group, and cross-platform matrix;
-- run the already-passing 1,000-node browser budgets in pinned release CI
-  images across supported platforms and retain their reports/profiles;
+- retain the passing schema-13 editor/admin/component-insertion 4/4,
+  selection 12/12, handoff 1/1, visual 7/7, inspect 1/1, 20-step E2E 1/1, and
+  1,000-node budget 1/1 on pinned hosted/supported-OS release runners;
 - extend the recorded disposable local-Docker A/B restore exercise beyond the
   passing source-local 20-step V1/V2/product/task/hash/render scenario and
-  deterministic schema 1/schema 7–11 fixtures to the full asset/design-system/
+  deterministic schema 1/schema 7–12 fixtures to the full asset/design-system/
   anonymized-customer/failure-injection matrix;
   add trusted signing/provenance where required; and finish installed external
   scheduling, alert delivery, retention failure recovery, and packaged operator
@@ -1007,11 +1013,13 @@ and evidenced:
 - produce artifact-specific container/native SBOMs, dependency/image/OS scans,
   reproducibility, signed provenance, and release-artifact evidence with no
   unresolved critical/high findings. Repository-native source, browser,
-  schema-12 Docker-smoke, and unsigned Linux packaging workflows now exist.
+  schema-13 Docker-smoke, and unsigned Linux packaging workflows now exist.
   Five repository workflows are present. Local evidence helpers pass workflow
   contracts 8/8, cross-browser runner
   tests 2/2, off-host simulation tests 7/7, release-evidence tests 8/8, and
   macOS package-evidence tests 12/12 plus extracted-runtime-smoke tests 10/10,
   but no GitHub-hosted run or real Ubuntu package artifact has been retained.
-  The current Sharp-free schema-12 source-workspace gate passes with 342
-  installed third-party components and zero policy violations.
+  The temporary schema-13 source evidence reported 342 components and zero
+  license violations before the lock update. Audit now reports zero high/
+  critical findings for the 0.45.2 lock, but fresh installation, SBOM, and full
+  verification are still required.

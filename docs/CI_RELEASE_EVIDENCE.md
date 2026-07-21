@@ -22,7 +22,7 @@ notarize, publish a release, or fabricate service hosts or credentials.
 | --- | --- | --- |
 | `.github/workflows/source-ci.yml` | `NO-GO-source-sbom-license-*`, `NO-GO-dependency-audit-*` | Frozen install, fail-closed high-severity pnpm advisory audit with retained JSON, workflow contract tests, every package's typecheck/test/build, compatibility launcher, Compose configuration, deterministic CycloneDX/license/checksum evidence, and permissive-license gate |
 | `.github/workflows/browser-release-gates.yml` | `NO-GO-browser-*` | Selection alignment on pinned Chromium DPR 1/2 plus Firefox and WebKit DPR 1, editor/prototype behavior, deterministic Chromium visual baselines, 1,000-node performance budgets, and the product-manager-to-MCP-to-backup/restore release scenario |
-| `.github/workflows/docker-schema11-smoke.yml` | `NO-GO-docker-schema11-*`, `NO-GO-cross-browser-docker-*`, `NO-GO-offhost-restore-*` | Fresh schema 12 (the workflow filename is retained for compatibility), external Playwright worker with no fallback, real PNG, deterministic rerender and design persistence after API restart, non-root/read-only/capability/resource/network constraints, local distinct volumes, logs, full disposable cleanup, Firefox/WebKit alignment against the exact image produced by that job, and copied-bundle restore into an independently mounted clean project |
+| `.github/workflows/docker-schema11-smoke.yml` | `NO-GO-docker-schema11-*`, `NO-GO-cross-browser-docker-*`, `NO-GO-offhost-restore-*` | Fresh schema 13 (the workflow filename is retained for compatibility), external Playwright worker with no fallback, real PNG, deterministic rerender and design persistence after API restart, non-root/read-only/capability/resource/network constraints, local distinct volumes, logs, full disposable cleanup, Firefox/WebKit alignment against the exact image produced by that job, and copied-bundle restore into an independently mounted clean project |
 | `.github/workflows/linux-native-packaging.yml` | `NO-GO-unsigned-linux-foundation-*` | Deterministic unsigned DEB/RPM builds on Ubuntu 24.04 x64, exact toolchain capture, adjacent checksum validation, non-installing metadata inspection, and linkage to exact passing source SBOM/license evidence |
 | `.github/workflows/macos-native-packaging.yml` | `NO-GO-unsigned-macos-foundation-*` | Main/manual-only macOS build of the exact unsigned PKG, source/artifact evidence, exact known blocker enforcement, and a private extracted-byte API/renderer/MCP/CLI smoke without package installation, LaunchAgents, Keychain, Codex configuration, or browser opening |
 
@@ -65,19 +65,29 @@ artifact and output paths:
 node scripts/ci-macos-pkg-runtime-smoke.mjs --pkg <unsigned.pkg> --output <new-evidence-directory>
 ```
 
-It validates exact Node, Chromium, schema, MCP tool/resource-name, rendering,
+It validates exact Node, Chromium, schema 13, the 52-tool MCP inventory
+including `design_system_component_insert_preview`, resource names, rendering,
 backup, migration, and support-path contracts. It writes a checksum-bound,
 deterministically ordered `NO-GO-SUMMARY.json`, terminates extracted process
 groups, removes private temporary state, and proves known system installation
 targets and the package receipt did not change. It does not prove privileged
 install/upgrade/uninstall behavior or process-level renderer egress denial.
 
-The current consolidated source checkpoint passes core 47/47 across 8 files,
-server 437/437 across 78 files, web 69/69 across 17 files, CLI 89/89 across 9
-files, local bridge 18/18 across 2 files, Workspace Bridge 37/37 across 4 files,
-installer 62/62 across 5 files, and launcher 212/212. Direct protected-route authorization is
-106/106 with zero uncovered; the MCP inventory is 51 tools and 25 resources.
-The exact-current Docker evidence below was built from that checkpoint.
+The schema-13 source checkpoint passed 678/678 application tests, launcher
+212/212, and typecheck/build for all seven workspaces. Direct protected-route
+authorization is 108/108 with zero uncovered; the MCP inventory is 52 tools and
+25 resources. Chrome editor/admin/component insertion passed 4/4, selection
+12/12, handoff 1/1, visual 7/7, revision inspect 1/1, the 20-step release
+scenario 1/1, and the 1,000-node budget 1/1. The disposable Docker/browser/
+recovery evidence below was built from that source checkpoint.
+
+Dependency caveat: those passing runtime gates used linked `drizzle-orm`
+0.44.7. The source declaration and lockfile now select 0.45.2 to eliminate
+GHSA-gpj5-g38j-94v9. The lock-only update passes offline frozen validation and
+audit reports info 0, low 0, moderate 2, high 0, critical 0 across 416
+dependencies, but no packages were installed. A fresh frozen install and full
+source/browser/Docker/recovery/SBOM rerun is mandatory; existing evidence is
+not an exact dependency-candidate result.
 
 The Docker smoke can be run separately on a disposable local Docker daemon:
 
@@ -116,7 +126,48 @@ or pulls, and requires exact image IDs plus non-root runtime UIDs for every
 service/helper container. It is intentionally a same-machine simulation and
 always writes `releaseStatus: NO-GO`.
 
-The exact-current disposable local run on 2026-07-21 passed from source identity
+## Current local schema-13 checkpoint (`NO-GO`)
+
+Disposable Compose project `formaspeccischema13da9af9d064` used image
+`sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`,
+reached schema 13, created design
+`document_e171c68c7a4c4b3b80a5493a6180e28f` at revision
+`revision_85e2776ca3874f1c98097b6917bc3649`, and produced the same 512×339
+PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`
+before and after API restart. The egress canary returned DNS `EAI_AGAIN`, TCP
+`ENETUNREACH`, and zero external interfaces; cleanup passed. Summary:
+`/private/tmp/formaspec-docker-schema13-20260721-current/summary.json`, SHA-256
+`13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`.
+
+The same image passed Firefox/WebKit alignment 12/12 with complete cleanup.
+Summary: `/private/tmp/formaspec-cross-browser-schema13-20260721-current/summary.json`,
+SHA-256 `c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`.
+
+Same-image copied-bundle recovery ran from `formaspecdrsource3af2259e48` to
+`formaspecdrtarget3af2259e48`, preserving design
+`document_68bf4f18628b43ed9c5ac98300420bca` at revision
+`revision_08f233c763154b3da1611ba0f57f0d4c`. Bundle SHA-256 was
+`b87d44e7b0584dd0a14e5b47d07cf447490a683ab512f983feb4e2a19c0a6ef3`;
+snapshot, revision, asset, render, SQLite integrity, and foreign-key
+comparisons all passed and cleanup was complete. The `NO-GO` summary SHA-256
+is `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
+
+Temporary source SBOM/license evidence generated before the dependency lock
+change reported 342 components and zero policy violations. Its directory is
+`/private/tmp/formaspec-release-evidence-schema13-20260721-current`; SHA-256
+values are `36d81db7feb77c4afbd12f2e8f7576e3abff1c6425714129792f8a49330cd136`
+for `SHA256SUMS`, `571b39478f99c3ffdb3ff761c79e58c420f09296741961807cc13a06420c513a`
+for `formaspec.cdx.json`, and
+`6ecc9a43fdd37beae32e9c6995503a71a175e40dffbf93672083eaf6de9c80bb`
+for `licenses.json`. Because it predates the 0.45.2 lock update, regenerate it
+after the required fresh frozen install.
+
+All current results are temporary local `NO-GO` evidence, not retained hosted
+artifacts, provenance, scanning, or an independently reproducible candidate.
+
+## Historical schema-12 local checkpoint
+
+The prior disposable local run on 2026-07-21 passed from source identity
 `local-uncommitted-final437-eventauth-sqlbounded-cli` as Compose
 project `formaspeccischema118e2818fed6`. It reached schema 12 readiness,
 created design `document_0e6b4b61e3964110b9a4533ef2a63398` at revision
@@ -132,11 +183,11 @@ mounted only `/run/formaspec`, and failed the egress canary closed with DNS
 volume. The summary is
 `/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
 (SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`).
-Because the summary is in temporary local storage, this is exact-current local
-evidence but not retained CI, provenance, vulnerability-scan, or independent-
-reproducibility evidence.
+Because the summary is in temporary local storage, this is historical local
+schema-12 evidence, not retained CI, provenance, vulnerability scanning, or
+independent reproducibility.
 
-The final reviewed image then passed Firefox/WebKit 12/12 once. Its summary is
+That schema-12 reviewed image then passed Firefox/WebKit 12/12 once. Its summary is
 `/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json`
 (SHA-256 `2b723c3ddac0404bea7a1124559945ec78f69a6a6ced48923f9d170456c71b9b`).
 The immediately prior fit-sync image passed three consecutive 12/12 runs after
@@ -146,8 +197,8 @@ WebKit initial-fit race. Its main summary is
 the sibling `-repeat2` and `-repeat3` directories contain byte-identical
 summaries, all hashing to
 `0b28b9a0f78ec5687496cd61a7b930fa00d0f276c5dfbb0c0901ce7410a9938b`.
-Together these are exact-current pass evidence plus immediately prior repeated-
-flake evidence, not retained GitHub-hosted or cross-OS runs.
+Together these are historical schema-12 pass and repeated-flake evidence, not
+retained GitHub-hosted or cross-OS runs.
 
 The same image also passed a hardened same-machine copied-bundle recovery
 simulation. A verified bundle moved from source project
@@ -167,7 +218,8 @@ revision `revision_3b6cbf1a84f5421b9f57c370d4541db2`.
 It explicitly does not prove a real remote host, network transfer, TLS, object
 storage, remote credentials, or production recovery objectives.
 
-This exact-current Docker result is independent of native installer evidence. The
+The current schema-13 Docker result and this historical schema-12 result are
+independent of native installer evidence. The
 retained pre-current-SSE-authorization unsigned PKG under
 `artifacts/candidates/schema12-current/` has passing frozen package-integrity
 and extracted-runtime evidence, but current-source verification records expected

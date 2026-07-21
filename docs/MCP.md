@@ -154,4 +154,6 @@ workflows. Established nested service results and `error.details` are still
 represented as opaque object/array fields beneath the strict per-tool envelope;
 promoting those domain payloads to shared schemas remains incremental hardening.
 These residuals and the broader public-interface matrix keep the release gate
-at **NO-GO**.
+at **NO-GO**. In addition, the lockfile now selects `drizzle-orm` 0.45.2 after
+GHSA-gpj5-g38j-94v9, while the passing 678-test/MCP run still used linked
+0.44.7. A fresh frozen install and complete contract/runtime rerun is required.

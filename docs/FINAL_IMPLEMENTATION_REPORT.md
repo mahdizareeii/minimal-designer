@@ -17,14 +17,18 @@ Current source is now at database schema 13, command engine 2, renderer 3,
 renderer IPC protocol 2, and font bundle 1. The schema-13 delta adds canonical
 source-backed component versions, exact immutable design-system upgrade result
 snapshots, and exact pinned-release component insertion through REST and MCP.
-Focused source/component/MCP/route tests pass as recorded below, but the broad
-Chrome release/visual/performance browser matrix, native installers, current
-SBOM/license report, scans, and hosted release suites have not yet been rerun
-against this delta. Application suites pass 678/678, launcher 212/212, all
-seven workspaces pass typecheck/build, and a fresh disposable schema-13 image
-passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12,
-and same-image copied-bundle recovery. The retained macOS package remains
-schema-12 historical evidence.
+Application suites pass 678/678, launcher 212/212, all seven workspaces pass
+typecheck/build, and the current Chrome editor/selection/handoff/visual/inspect/
+performance/20-step matrix passes. A fresh disposable schema-13 image passes
+deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and same-
+image copied-bundle recovery. Installed/link verification now confirms
+`drizzle-orm` 0.45.2; application, build/typecheck, launcher, Docker/egress,
+Firefox/WebKit, recovery, and exact SBOM/license gates were rerun against it.
+Audit has zero high/critical findings; remaining advisories are still under
+remediation. The broad Chrome Playwright matrix passed immediately before the
+dependency update and needs an exact-current rerun. Native installers, image/OS
+scans, hosted provenance, and real server-mode/off-site recovery also remain
+open. The retained macOS package is schema-12 historical evidence.
 
 Production readiness is intentionally not declared. A retained pre-current-
 SSE-authorization unsigned schema-12 macOS ARM64 engineering checkpoint passes its original
@@ -39,10 +43,9 @@ scanning, independent reproducibility, a real Windows service host and ACL/
 process-tree/runtime proof, real Linux lifecycle proof, server-mode and packaged
 real remote-host/off-site disaster-recovery evidence, signed backup provenance,
 the comprehensive security/cross-platform browser matrices, and several
-advanced product/design-system workflows remain release blockers. The
-preceding source-workspace permissive-only license gate passed with 342 third-
-party components and zero policy violations; a current schema-13 refresh is
-still required.
+advanced product/design-system workflows remain release blockers. Exact local
+SBOM/license evidence now reflects the linked 0.45.2 dependency tree, but it is
+still temporary `NO-GO` evidence rather than hosted provenance.
 
 ## Implemented foundation
 
@@ -352,10 +355,12 @@ still required.
   V2 compatibility, and browser component-authoring tests pass in their focused
   suites. Source inventory is 52 MCP tools, 25 resources, and 108 protected
   non-MCP routes. Application suites now pass 678/678, launcher 212/212, and
-  all seven workspaces pass typecheck/build. Current disposable Docker,
-  Firefox/WebKit, and copied-bundle recovery gates also pass; native installer,
-  broad Chrome release/visual/performance, SBOM/license, scanning, and hosted
-  release evidence remain open.
+  all seven workspaces pass typecheck/build. Current Chrome release/selection/
+  editor/handoff/visual/inspect/performance, disposable Docker, Firefox/WebKit,
+  copied-bundle recovery, and exact SBOM/license gates now pass against linked
+  `drizzle-orm` 0.45.2. Audit has zero high/critical findings. The broad Chrome
+  Playwright matrix needs a post-update rerun; native installers, image/OS
+  scans, hosted provenance, and real server-mode/off-site evidence remain open.
 - Authorization: `enterprise-domain-http-routes.ts` and
   `workspace-handoff-service.ts` now preflight all four Repository Inventory
   routes; `operations-http-routes.ts` and `operations-service.ts` preflight
@@ -383,29 +388,30 @@ still required.
 
 | Gate | Result |
 | --- | --- |
-| Schema-13 application/source gate | Application suites pass 678/678; launcher passes 212/212; all seven workspaces pass typecheck and production build. Evidence includes component-library/insertion server 16/16, browser 6/6, CLI command 23/23, MCP contract 5/5, route contract/coverage 12/12, component source/materialization/release-resolution/upgrade cases, and generated/direct authorization across all 108 routes with zero uncovered. Source inventory is 52 MCP tools and 25 resources. Broad Chrome release/visual/performance remains open. |
+| Schema-13 application/source gate | Installed/link verification confirms `drizzle-orm` 0.45.2. Application suites pass 678/678, launcher 212/212, and all seven workspaces pass typecheck/build. MCP/resource/route authorization remains 52/25/108 with zero uncovered. Audit has zero high/critical findings. |
 | Prior schema-12 package checkpoint | Core 47/47 across 8 files, server 437/437 across 78 files, web 69/69 across 17 files, CLI 89/89 across 9 files, local bridge 18/18 across 2 files, Workspace Bridge 37/37 across 4 files, and installer 62/62 across 5 files passed. Coverage included all 51 then-registered MCP tools and all 106 then-protected routes with zero uncovered. This remains regression evidence, not current-source qualification. |
 | Exhaustive event authorization | 7/7 focused policy and real-HTTP tests pass across exactly 18 event families. The matrix proves per-family agent scopes, human-role allowlists, project/organization/optional/control boundaries, task-only access without design access, denial of task/handoff/Redesign/admin events to design-only agents, Organization-Administrator-only connection/backup/audit families, SQL replay filtering before limits/bounds/cursors, live/replay parity, and closure after policy removal or revocation. |
 | Typecheck | All seven buildable workspace packages passed |
 | Production build | Core, server, web, CLI, local bridge, Workspace Bridge, and installer passed |
 | Launcher | 212/212 passed after proxy-secret lifecycle hardening |
 | Enterprise editor and administration | 4/4 schema-13 browser checks passed for navigation/workspaces/inspectors/activity, click-to-frame prototype navigation, the guided policy form, and exact manual component insertion. The insertion case verifies backup-gated V1→V2 migration, exact Foundation catalog loading, isolated rendered preview without head mutation, ordinary CAS commit, version-3 reload, and an active projected instance. |
-| Selection alignment | 12/12 fresh Playwright checks passed at DPR 1/2 across 12/25/50/100/149/150/200/320% zoom, positive/negative fractional pan, LTR/RTL/mixed, normalized uploaded image, selectable frame/ellipse, rotated single/multi-selection, hidden/locked exclusion, nested scroll plus actual delayed-font/image invalidation, exact fractional group drag, vertical/wrapped/grid reorder/reparent, and 149% auto-layout resize, staying within 0.75 CSS px |
-| Revision inspect | 1/1 immutability E2E passed: the pinned revision remained exact after the project head changed and continued to expose engineering evidence |
-| Visual regression | 7/7 baselines passed: desktop, phone, tablet, Persian RTL, typography, clipping, image |
+| Selection alignment | Current schema-13 Playwright passed 12/12 at DPR 1/2 across 12/25/50/100/149/150/200/320% zoom, fractional pan, LTR/RTL/mixed, image/frame/ellipse, rotated selection, hidden/locked exclusion, nested scroll/font/image invalidation, exact group drag, auto-layout reorder/reparent, and resize, within 0.75 CSS px. |
+| Revision inspect | Current schema-13 immutability E2E passed 1/1 after the head-change fixture was corrected to edit the active root frame instead of an immutable detached component master. |
+| Visual regression | Current schema-13 baselines passed 7/7: desktop, phone, tablet, Persian RTL, typography, clipping, image. |
 | 1,000-node foundation | Validation 20.43 ms p95; apply 49.65 ms p95; preview persistence 134.43 ms p95; render 116.83 ms p95 |
-| 1,000-node browser gate | All budgets passed over the fresh 20-sample run: 225.90 ms p95 load; 21.10 ms p95 selection; 16.70 ms gesture p95 and maximum; 255.00 ms p95 commit/autosave; 16.10 ms p95 history; 205.02 ms p95 preview validation; 217.78 ms p95 for the 1440×900 pinned-Chromium render |
-| Prior integrated release scenario | The schema-12 Playwright project passed the complete 20-step PM→MCP→human correction→history→export→backup/restore/restart scenario 1/1. A schema-13 rerun is pending. |
-| Historical migration/restore fixtures | Genuine schema 1 and schema 7–11 prefixes previously passed migration plus verified-backup restore coverage through schema 12. Focused schema-13 tests upgrade a genuine schema-12 fixture without synthesizing component source or exact upgrade-preview metadata. Broader schema-13 restore evidence is pending. |
-| Release evidence | Current deterministic source evidence passes with 342 installed third-party components and zero policy violations. |
-| Retained-CI foundation | Five repository-native, least-privilege workflows cover frozen source gates, dependency audit, browser suites, Docker/egress/recovery, deterministic source evidence, unsigned Linux packages, and non-installing macOS runtime smoke. The current workflow source now requires schema 13 for Docker/off-host/macOS smoke, and the macOS smoke requires the 52-tool inventory including `design_system_component_insert_preview`; no current run has been retained. The preceding schema-12 image passed Docker, Firefox/WebKit 12/12, and copied-bundle recovery locally. No GitHub-hosted audit/cross-browser/recovery/native-package run or real Ubuntu artifact has yet been retained. |
+| 1,000-node browser gate | Current schema-13 budgets passed 1/1: 230.70 ms p95 load; 20.50 ms selection; 16.70 ms gesture p95/maximum; 273.20 ms autosave; 17.60 ms history; 280.48 ms preview validation; 221.37 ms 1440×900 render. |
+| Integrated release scenario | Current schema-13 Playwright passed the complete 20-step PM→MCP→human correction→history→export→backup/restore/restart scenario 1/1. |
+| Historical migration/restore fixtures | Genuine schema 1 and schema 7–11 prefixes previously passed through schema 12. Current schema-13 tests upgrade a genuine schema-12 fixture without synthesizing component source or exact upgrade-preview metadata, and same-image copied-bundle recovery passes. Broader server-mode/off-site/native restore evidence remains open. |
+| Dependency/security gate | `drizzle-orm` moved from 0.44.7 to installed/linked 0.45.2 after GHSA-gpj5-g38j-94v9. Audit reports info 0, low 0, moderate 2, high 0, critical 0 across 416 dependencies; the remaining advisories are under active remediation. |
+| Current SBOM/license evidence | Exact linked-tree evidence at `/private/tmp/formaspec-release-evidence-schema13-drizzle0452-20260721-current` reports 342 components and zero policy violations. SHA-256 values: `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8` (`SHA256SUMS`), `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a` (CDX), `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0` (licenses). Local temporary `NO-GO`, not hosted provenance. |
+| Retained-CI foundation | Repository-native workflows cover source, dependency audit, browser, Docker/egress/recovery, deterministic evidence, unsigned Linux, and non-installing macOS gates. Current local schema-13 Docker, Firefox/WebKit, off-host recovery, and workflow/runtime contract suites pass. No GitHub-hosted current run, current macOS package, or real Ubuntu artifact has been retained. |
 | Reverse-proxy lifecycle | Controlled actual TCP sockets pass 1/1 for caller-header replacement, direct-peer denial, ambiguous identity/secret append rejection, canonical principal bootstrap, and restart-bound secret rotation. This is not real Nginx/TLS or public-network proof. |
 | Unsigned macOS PKG checkpoint | `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`, SHA-256 `9724f2874c520b5b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`, size 185,279,180 bytes, is retained historical unsigned evidence and was not installed. Its frozen package/runtime checks cover schema-12 health and the 51-tool/25-resource inventory. It predates exhaustive event authorization, revision-bound release reads, migration 13, source-backed component authoring/library/insertion, and the 52-tool/108-route interface. The candidate-root checksum manifest and original evidence remain valid only for those frozen bytes. The preserved schema-11 and schema-10 candidates are older historical evidence. |
 | macOS reproducibility diagnostic | Same-host repeat artifact SHA-256 `2c49f45a6840218b995cc969576f4209d0c94802a160c679ad02483ed5ba4dd0`, size 185,279,075 bytes, differs from the current checkpoint's outer PKG while retaining identical payload and workspace-tree hashes. Reproducibility therefore failed. The checksum-bound diagnostic summary SHA-256 is `570d1fb98fb61bc8b2f56b75a4a4379575d7ef2c6bf10bb2a1000ad69a2de710`. Chromium LGPL policy approval, signing, notarization, independent reproducibility, vulnerability scanning, and clean privileged native lifecycle proof remain open. |
 | Compose | `docker compose config --quiet` passed |
-| Current schema-13 Docker smoke | Project `formaspeccischema13da9af9d064`, image `sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`, reached schema 13, created design `document_e171c68c7a4c4b3b80a5493a6180e28f` at revision `revision_85e2776ca3874f1c98097b6917bc3649`, and rendered the same 512×339 PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf` before and after API restart. DNS returned `EAI_AGAIN`, TCP `ENETUNREACH`, external interface count was zero, and cleanup passed. Summary `/private/tmp/formaspec-docker-schema13-20260721-current/summary.json`, SHA-256 `13c608ce5ddec282d8e0b8497d54f9971f4f20764d035122ea5e64dfd31f1e0f`. |
-| Current schema-13 cross-browser | The same image passed Firefox and WebKit alignment 12/12 with complete cleanup. Summary `/private/tmp/formaspec-cross-browser-schema13-20260721-current/summary.json`, SHA-256 `c128ee3f6a7341cd75189dba612d6b01d25abd2b57fb26db1970c152f1f665bc`. |
-| Current schema-13 copied-bundle recovery | Same-image recovery from `formaspecdrsource3af2259e48` to `formaspecdrtarget3af2259e48` preserved design `document_68bf4f18628b43ed9c5ac98300420bca` at revision `revision_08f233c763154b3da1611ba0f57f0d4c`; bundle SHA-256 was `b87d44e7b0584dd0a14e5b47d07cf447490a683ab512f983feb4e2a19c0a6ef3`. Snapshot, revision, asset, render, SQLite integrity, and foreign-key comparisons all passed, with complete cleanup. `NO-GO` summary SHA-256 `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`. |
+| Current dependency-linked Docker smoke | Project `formaspeccischema1369037dfc8a`, image `sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`, reached schema 13, created design `document_c304f0d8e19d449fa450b335e79c182e` at revision `revision_b71067ccd8e548b1b5385c366dabb263`, and rendered PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf` before/after restart. Egress and cleanup passed. Summary SHA-256 `8e0d3baa22b934f90d7e6f36022365a825f5b6457ca6bb6e51f993a1fb59caed`. |
+| Current dependency-linked cross-browser | The same image passed Firefox/WebKit 12/12 with cleanup. Summary SHA-256 `a4c16b03a094abba6abd2144c9ed0af78684897c97956c77789526f57eb6f41c`. |
+| Current dependency-linked copied-bundle recovery | Recovery from `formaspecdrsource8878ef1a23` to `formaspecdrtarget8878ef1a23` preserved design `document_34da61e488444c48b144646e778f7edc` at revision `revision_5da62614cff8498db21be8d9346eb34a`; bundle SHA-256 `3fcba430b476f1dc2ce943405af418a1b1fdc629876f1e8407b8cf5b725c2fef`. All comparisons/cleanup passed; summary SHA-256 `198f93aace5caf60f550e95436711b10107433acc7d85b9175fce8d4722dcc6d`. |
 | Prior schema-12 Docker smoke | Disposable project `formaspeccischema118e2818fed6` previously passed migration-12 readiness, deterministic restart rendering, non-root/read-only/capability/egress boundaries, and cleanup. Its summary remains historical regression evidence at `/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json` (SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`). |
 | Prior schema-12 cross-browser | The schema-12 image passed Firefox/WebKit alignment 12/12 once; its summary is `/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json` (SHA-256 `2b723c3ddac0404bea7a1124559945ec78f69a6a6ced48923f9d170456c71b9b`). The immediately prior fit-sync image `sha256:544a1c72cecaaf335a750a0fd4775f03a11f185e90ad441b1503dfdfa1b8ddeb` remains valid historical stability evidence: it passed three consecutive 12/12 runs after initial fitting was made synchronous in `useLayoutEffect`; its main, `-repeat2`, and `-repeat3` summaries are byte-identical with SHA-256 `0b28b9a0f78ec5687496cd61a7b930fa00d0f276c5dfbb0c0901ce7410a9938b`. |
 | Prior schema-12 offline recovery CLI evidence | A disposable worker/control stack recovered a schema-11 design/PNG from corrupt live SQLite, preserved forensic rollback, and validated persisted Compose identity through `formaspecctl`. The schema-12 copied-bundle summary remains historical at `/private/tmp/formaspec-offhost-restore-20260721-final437-eventauth-sqlbounded-cli/NO-GO-SUMMARY.json` (SHA-256 `2a7bf59d47579f4c5f6f20bf779976e9dd4a6260b6670e73f245753ef3abbdc9`). Server-mode, packaged native, real remote-host/TLS/off-site, and broader lifecycle evidence remain open. |
