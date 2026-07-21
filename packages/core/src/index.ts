@@ -15,3 +15,5 @@ export * from "./migration-v2.js";
 export * from "./compatibility-v2.js";
 export * from "./foundation-system.js";
 export * from "./token-export.js";
+export * from "./redesign.js";
+export * from "./component-source.js";

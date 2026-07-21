@@ -266,7 +266,7 @@ test("product manager to verified backup restore completes through browser, MCP,
 
     await step("Start an isolated local FormaSpec workspace and pass readiness", async () => {
       const health = await api<{ ok: boolean; migrations: number; render: { ok: boolean } }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 11, render: { ok: true } });
+      expect(health).toMatchObject({ ok: true, migrations: 13, render: { ok: true } });
     });
 
     await step("Create the product from the dashboard in a real browser", async () => {
@@ -622,6 +622,9 @@ test("product manager to verified backup restore completes through browser, MCP,
       await expect(page.locator(`.designer-node[data-node-id="${titleNodeId}"]`)).toBeVisible();
       const titleRow = page.locator(".layer-row").filter({ has: page.locator(".layer-name", { hasText: "Checkout title" }) });
       await titleRow.click();
+      await page.getByRole("navigation", { name: "Inspector workspace" })
+        .getByRole("button", { name: "content", exact: true })
+        .click();
       const content = page.locator(".inspector-field.textarea-field textarea");
       await content.fill("Review urgent dispatch — human verified");
       await expect(page.locator(".save-status")).toContainText(/Unsaved|Saving|Saved/);
@@ -687,7 +690,9 @@ test("product manager to verified backup restore completes through browser, MCP,
 
     await step("Restore the human revision through history and inspect immutable integrity metadata", async () => {
       await page.goto(`${baseURL}/design/${encodeURIComponent(designId)}`);
-      await page.getByRole("button", { name: "History" }).click();
+      await page.getByRole("navigation", { name: "Inspector utilities" })
+        .getByRole("button", { name: "history", exact: true })
+        .click();
       const manualRow = page.locator(".history-row").filter({ hasText: "Manual editor changes" }).first();
       await expect(manualRow).toBeVisible();
       await manualRow.getByRole("button", { name: "Restore" }).click();
@@ -779,7 +784,7 @@ test("product manager to verified backup restore completes through browser, MCP,
       application = await startApplication(config);
 
       const health = await api<{ ok: boolean; migrations: number }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 11 });
+      expect(health).toMatchObject({ ok: true, migrations: 13 });
       const projects = await api<{ designs: Array<{ id: string; version: number }> }>(baseURL, "/api/designs?limit=100");
       expect(projects.designs.some((project) => project.id === sentinel.document.id)).toBe(false);
       expect(projects.designs).toEqual(expect.arrayContaining([expect.objectContaining({ id: designId, version: 6 })]));

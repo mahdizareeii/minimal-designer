@@ -8,7 +8,7 @@ const BINDING_FORMAT = "formaspec-docker-runtime-binding";
 const LEGACY_BINDING_VERSION = 1;
 const BINDING_VERSION = 2;
 const BINDING_FILENAME = "docker-runtime-binding.json";
-const COMPOSE_PROJECT = "minimalappdesigner";
+export const DEFAULT_DOCKER_COMPOSE_PROJECT = "minimalappdesigner";
 const CONTAINER_PORT = 4310;
 const MAX_BINDING_BYTES = 16 * 1024;
 const MAX_DOCKER_OUTPUT_BYTES = 256 * 1024;
@@ -23,6 +23,7 @@ const INSPECT_FORMAT = [
 ].join("\n");
 
 const contextPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const composeProjectPattern = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const daemonIdPattern = /^[A-Za-z0-9][A-Za-z0-9:._-]{5,255}$/;
 const containerIdPattern = /^[a-f0-9]{64}$/;
 const imageIdPattern = /^sha256:[a-f0-9]{64}$/;
@@ -68,7 +69,7 @@ function isSafeTrustedIdentityHeader(value: string, csrfHeader = "x-formaspec-cs
 }
 
 export interface DockerComposeBindingLabels {
-  project: typeof COMPOSE_PROJECT;
+  project: string;
   service: BoundService;
   oneoff: "False";
   containerNumber: "1";
@@ -85,7 +86,7 @@ export interface DockerRuntimeBinding {
   capturedAt: string;
   context: string;
   daemonId: string;
-  composeProject: typeof COMPOSE_PROJECT;
+  composeProject: string;
   imageId: string;
   containers: {
     designer: string;
@@ -134,12 +135,14 @@ export interface DockerRuntimeBindingDependencies {
   environment?: NodeJS.ProcessEnv;
   dockerExecutable?: string;
   context?: string;
+  composeProject?: string;
   now?: () => Date;
 }
 
 export interface HardenedDockerRunOptions {
   containerName: string;
   command: readonly string[];
+  interactive?: boolean;
   renderTimeoutMs?: number;
   renderMaxPixels?: number;
   renderIpcMaxBytes?: number;
@@ -193,6 +196,10 @@ function strictString(value: unknown, pattern: RegExp, label: string): string {
   return value;
 }
 
+function parseComposeProject(value: unknown, label: string): string {
+  return strictString(value, composeProjectPattern, label);
+}
+
 function canonicalTimestamp(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length > 40) throw new Error(`${label} is invalid.`);
   const date = new Date(value);
@@ -219,6 +226,7 @@ function parseComposeLabels(
   value: unknown,
   service: BoundService,
   projectRoot: string,
+  expectedProject: string,
   _containerImageId: string,
 ): DockerComposeBindingLabels {
   if (!isRecord(value)) throw new Error(`Docker ${service} labels are invalid.`);
@@ -231,7 +239,7 @@ function parseComposeLabels(
   const workingDirectory = value["com.docker.compose.project.working_dir"];
   const configFile = value["com.docker.compose.project.config_files"];
   const composeVersion = value["com.docker.compose.version"];
-  if (project !== COMPOSE_PROJECT || actualService !== service || oneoff !== "False" || containerNumber !== "1") {
+  if (project !== expectedProject || actualService !== service || oneoff !== "False" || containerNumber !== "1") {
     throw new Error(`Docker ${service} does not have the required Compose ownership labels.`);
   }
   const expectedWorkingDirectory = path.resolve(projectRoot);
@@ -243,7 +251,7 @@ function parseComposeLabels(
     throw new Error(`Docker ${service} Compose labels do not bind to this project and image.`);
   }
   return {
-    project: COMPOSE_PROJECT,
+    project: expectedProject,
     service,
     oneoff: "False",
     containerNumber: "1",
@@ -255,13 +263,13 @@ function parseComposeLabels(
   };
 }
 
-function parsePersistedLabels(value: unknown, service: BoundService): DockerComposeBindingLabels {
+function parsePersistedLabels(value: unknown, service: BoundService, expectedProject: string): DockerComposeBindingLabels {
   if (!isRecord(value)) throw new Error(`Persisted Docker ${service} labels are invalid.`);
   assertExactKeys(value, [
     "project", "service", "oneoff", "containerNumber", "configHash", "imageId",
     "workingDirectory", "configFile", "composeVersion",
   ], `Persisted Docker ${service} labels`);
-  if (value.project !== COMPOSE_PROJECT || value.service !== service || value.oneoff !== "False"
+  if (value.project !== expectedProject || value.service !== service || value.oneoff !== "False"
     || value.containerNumber !== "1") {
     throw new Error(`Persisted Docker ${service} labels are invalid.`);
   }
@@ -277,7 +285,7 @@ function parsePersistedLabels(value: unknown, service: BoundService): DockerComp
     throw new Error(`Persisted Docker ${service} project labels are invalid.`);
   }
   return {
-    project: COMPOSE_PROJECT,
+    project: expectedProject,
     service,
     oneoff: "False",
     containerNumber: "1",
@@ -347,9 +355,12 @@ function parseBinding(
     "containers", "labels", "volumes", "renderer", "publicBinding", ...(legacy ? [] : ["runtime"]),
   ], "Persisted Docker runtime binding");
   if (value.format !== BINDING_FORMAT
-    || (version !== LEGACY_BINDING_VERSION && version !== BINDING_VERSION)
-    || value.composeProject !== COMPOSE_PROJECT) {
+    || (version !== LEGACY_BINDING_VERSION && version !== BINDING_VERSION)) {
     throw new Error("Persisted Docker runtime binding format is unsupported.");
+  }
+  const composeProject = parseComposeProject(value.composeProject, "Persisted Docker Compose project");
+  if (legacy && composeProject !== DEFAULT_DOCKER_COMPOSE_PROJECT) {
+    throw new Error("Legacy Docker runtime binding has an unsupported Compose project.");
   }
   if (legacy && legacyRuntime === undefined) {
     throw new Error("Legacy Docker runtime binding requires its recorded runtime environment.");
@@ -383,8 +394,8 @@ function parseBinding(
     rendererSocket: strictString(value.volumes.rendererSocket, volumeNamePattern, "Persisted renderer socket volume"),
   };
   if (new Set(Object.values(volumes)).size !== 3) throw new Error("Persisted Docker volumes must be distinct.");
-  const designerLabels = parsePersistedLabels(value.labels.designer, "designer") as DockerRuntimeBinding["labels"]["designer"];
-  const rendererLabels = parsePersistedLabels(value.labels.renderer, "renderer") as DockerRuntimeBinding["labels"]["renderer"];
+  const designerLabels = parsePersistedLabels(value.labels.designer, "designer", composeProject) as DockerRuntimeBinding["labels"]["designer"];
+  const rendererLabels = parsePersistedLabels(value.labels.renderer, "renderer", composeProject) as DockerRuntimeBinding["labels"]["renderer"];
   if (designerLabels.imageId !== rendererLabels.imageId) {
     throw new Error("Persisted Docker Compose image labels do not match each other.");
   }
@@ -399,7 +410,7 @@ function parseBinding(
     capturedAt: canonicalTimestamp(value.capturedAt, "Docker runtime capture timestamp"),
     context: strictString(value.context, contextPattern, "Persisted Docker context"),
     daemonId: strictString(value.daemonId, daemonIdPattern, "Persisted Docker daemon ID"),
-    composeProject: COMPOSE_PROJECT,
+    composeProject,
     imageId,
     containers,
     labels: { designer: designerLabels, renderer: rendererLabels },
@@ -739,16 +750,17 @@ async function findServiceContainer(
   runner: CommandRunner,
   executable: string,
   context: string,
+  composeProject: string,
   service: BoundService,
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   const output = await runDocker(runner, executable, [
     "--context", context, "ps", "-aq", "--no-trunc",
-    "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`,
+    "--filter", `label=com.docker.compose.project=${composeProject}`,
     "--filter", `label=com.docker.compose.service=${service}`,
   ], environment, `Docker ${service} container discovery`);
   const ids = output.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
-  if (ids.length !== 1) throw new Error(`Expected exactly one Docker ${service} container for ${COMPOSE_PROJECT}.`);
+  if (ids.length !== 1) throw new Error(`Expected exactly one Docker ${service} container for ${composeProject}.`);
   return strictString(ids[0], containerIdPattern, `Docker ${service} container ID`);
 }
 
@@ -816,6 +828,7 @@ async function inspectContainer(
   expectedId: string,
   service: BoundService,
   projectRoot: string,
+  composeProject: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<ContainerInspection> {
   const output = await runDocker(runner, executable, [
@@ -826,7 +839,13 @@ async function inspectContainer(
   const id = strictString(parseJson(lines[0]!, `Docker ${service} ID`), containerIdPattern, `Docker ${service} ID`);
   if (id !== expectedId) throw new Error(`Docker ${service} inspection changed identity.`);
   const imageId = strictString(parseJson(lines[1]!, `Docker ${service} image`), imageIdPattern, `Docker ${service} image ID`);
-  const labels = parseComposeLabels(parseJson(lines[2]!, `Docker ${service} labels`), service, projectRoot, imageId);
+  const labels = parseComposeLabels(
+    parseJson(lines[2]!, `Docker ${service} labels`),
+    service,
+    projectRoot,
+    composeProject,
+    imageId,
+  );
   const mountsValue = parseJson(lines[3]!, `Docker ${service} mounts`);
   if (!Array.isArray(mountsValue) || mountsValue.some((mount) => !isRecord(mount))) {
     throw new Error(`Docker ${service} mounts are invalid.`);
@@ -904,6 +923,7 @@ function verifyDesignerPortBinding(
 async function captureWithContext(
   projectRoot: string,
   context: string,
+  composeProject: string,
   dependencies: DockerRuntimeBindingDependencies,
 ): Promise<DockerRuntimeBinding> {
   const environment = sanitizedDockerProcessEnvironment(dependencies.environment ?? process.env);
@@ -911,11 +931,11 @@ async function captureWithContext(
   const executable = executableFor(dependencies);
   const recorded = readRecordedDockerEnvironment(projectRoot);
   const currentDaemonId = await daemonId(runner, executable, context, environment);
-  const designerId = await findServiceContainer(runner, executable, context, "designer", environment);
-  const rendererId = await findServiceContainer(runner, executable, context, "renderer", environment);
+  const designerId = await findServiceContainer(runner, executable, context, composeProject, "designer", environment);
+  const rendererId = await findServiceContainer(runner, executable, context, composeProject, "renderer", environment);
   const [designer, renderer] = await Promise.all([
-    inspectContainer(runner, executable, context, designerId, "designer", projectRoot, environment),
-    inspectContainer(runner, executable, context, rendererId, "renderer", projectRoot, environment),
+    inspectContainer(runner, executable, context, designerId, "designer", projectRoot, composeProject, environment),
+    inspectContainer(runner, executable, context, rendererId, "renderer", projectRoot, composeProject, environment),
   ]);
   if (designer.imageId !== renderer.imageId) throw new Error("Docker designer and renderer must use the exact same image ID.");
   if (designer.labels.imageId !== renderer.labels.imageId) {
@@ -943,7 +963,7 @@ async function captureWithContext(
     capturedAt: (dependencies.now?.() ?? new Date()).toISOString(),
     context,
     daemonId: currentDaemonId,
-    composeProject: COMPOSE_PROJECT,
+    composeProject,
     imageId: designer.imageId,
     containers: { designer: designer.id, renderer: renderer.id },
     labels: { designer: designer.labels, renderer: renderer.labels },
@@ -986,7 +1006,11 @@ export async function captureDockerRuntimeBinding(
   const runner = dependencies.commandRunner ?? runCommand;
   const executable = executableFor(dependencies);
   const context = await resolveContext(runner, executable, dependencies, environment);
-  return captureWithContext(projectRoot, context, dependencies);
+  const composeProject = parseComposeProject(
+    dependencies.composeProject ?? DEFAULT_DOCKER_COMPOSE_PROJECT,
+    "Docker Compose project",
+  );
+  return captureWithContext(projectRoot, context, composeProject, dependencies);
 }
 
 export function persistDockerRuntimeBinding(projectRoot: string, binding: DockerRuntimeBinding): string {
@@ -1055,7 +1079,11 @@ export async function verifyDockerRuntimeBinding(
   if (dependencies.context !== undefined && dependencies.context !== persisted.context) {
     throw new Error("Requested Docker context does not match the persisted runtime binding.");
   }
-  const current = await captureWithContext(projectRoot, persisted.context, {
+  if (dependencies.composeProject !== undefined
+    && parseComposeProject(dependencies.composeProject, "Requested Docker Compose project") !== persisted.composeProject) {
+    throw new Error("Requested Docker Compose project does not match the persisted runtime binding.");
+  }
+  const current = await captureWithContext(projectRoot, persisted.context, persisted.composeProject, {
     ...dependencies,
     context: persisted.context,
     now: () => new Date(persisted.capturedAt),
@@ -1110,6 +1138,9 @@ export function buildHardenedDockerRunArguments(
   return [
     "--context", validated.context,
     "run", "--rm", "--init", `--name=${containerName}`, "--pull=never",
+    `--label=com.formaspec.runtime.compose-project=${validated.composeProject}`,
+    `--label=com.formaspec.runtime.binding-version=${BINDING_VERSION}`,
+    ...(options.interactive ? ["--interactive"] : []),
     "--network=none", "--read-only", "--user=pwuser",
     "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
     "--pids-limit=256", "--memory=2g", "--cpus=2.0",

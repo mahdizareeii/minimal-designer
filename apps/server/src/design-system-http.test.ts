@@ -6,10 +6,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
+import {
+  createComponentSourceRevisionFixture,
+  type ComponentSourceRevisionFixture,
+} from "../test-fixtures/component-source.js";
 
 describe("design-system component authoring HTTP API", () => {
   let application: DesignerApplication | undefined;
   let directory: string;
+  let componentSource: ComponentSourceRevisionFixture;
 
   beforeEach(async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-component-http-"));
@@ -25,6 +30,13 @@ describe("design-system component authoring HTTP API", () => {
       DESIGNER_LOG_LEVEL: "silent",
     }));
     await application.app.ready();
+    componentSource = createComponentSourceRevisionFixture(
+      application.database,
+      application.service,
+      "local",
+      ["node_httpbuttonroot0001", "node_httpbuttonfocus001"],
+      "design-system-http",
+    );
   });
 
   afterEach(async () => {
@@ -84,10 +96,22 @@ describe("design-system component authoring HTTP API", () => {
         dont_list: [],
       },
     };
-    const draftResponse = await application.app.inject({
+    const missingSourceResponse = await application.app.inject({
       method: "POST",
       url: `/api/design-systems/${systemId}/components`,
       payload: { expectedLatestVersion: 0, definition },
+    });
+    expect(missingSourceResponse.statusCode).toBe(422);
+    expect(missingSourceResponse.json<{
+      error: { code: string; details: { diagnostics: Array<{ code: string }> } };
+    }>().error).toMatchObject({
+      code: "VALIDATION_FAILED",
+      details: { diagnostics: [expect.objectContaining({ code: "COMPONENT_SOURCE_REQUIRED" })] },
+    });
+    const draftResponse = await application.app.inject({
+      method: "POST",
+      url: `/api/design-systems/${systemId}/components`,
+      payload: { expectedLatestVersion: 0, definition, source: componentSource },
     });
     expect(draftResponse.statusCode).toBe(201);
 
@@ -115,7 +139,7 @@ describe("design-system component authoring HTTP API", () => {
     const publishResponse = await application.app.inject({
       method: "POST",
       url: `/api/design-systems/${systemId}/components/${definition.id}/lifecycle`,
-      payload: { expectedLatestVersion: 1, targetStatus: "published" },
+      payload: { expectedLatestVersion: 1, targetStatus: "published", source: componentSource },
     });
     expect(publishResponse.statusCode).toBe(201);
     expect(publishResponse.json<{ componentVersion: { version: number; status: string } }>().componentVersion)
@@ -124,7 +148,12 @@ describe("design-system component authoring HTTP API", () => {
     const deprecateResponse = await application.app.inject({
       method: "POST",
       url: `/api/design-systems/${systemId}/components/${definition.id}/lifecycle`,
-      payload: { expectedLatestVersion: 2, targetStatus: "deprecated", replacementComponentId: null },
+      payload: {
+        expectedLatestVersion: 2,
+        targetStatus: "deprecated",
+        replacementComponentId: null,
+        source: componentSource,
+      },
     });
     expect(deprecateResponse.statusCode).toBe(201);
     expect(deprecateResponse.json<{ componentVersion: { version: number; status: string } }>().componentVersion)
@@ -153,7 +182,7 @@ describe("design-system component authoring HTTP API", () => {
     const staleResponse = await application.app.inject({
       method: "POST",
       url: `/api/design-systems/${systemId}/components/${definition.id}/lifecycle`,
-      payload: { expectedLatestVersion: 2, targetStatus: "deprecated" },
+      payload: { expectedLatestVersion: 2, targetStatus: "deprecated", source: componentSource },
     });
     expect(staleResponse.statusCode).toBe(409);
     expect(staleResponse.json<{ error: { code: string } }>().error.code).toBe("VERSION_CONFLICT");

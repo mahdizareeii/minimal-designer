@@ -67,7 +67,7 @@ describe("enterprise workflow migration", () => {
 
     const migrated = new DesignerDatabase(filename);
     try {
-      expect(migrated.schemaVersion()).toBe(11);
+      expect(migrated.schemaVersion()).toBe(13);
       expect(migrated.sqlite.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'product_spec_previews'",
       ).get()).toEqual({ name: "product_spec_previews" });
@@ -394,6 +394,11 @@ describe("agent pairing and revocation", () => {
       const paired = opened.enterprise.pairAgentConnection(challenge.nonce);
       expect(paired.connection.status).toBe("active");
       expect(opened.enterprise.resolveGrantActorId(paired.grant.token)).toBe(paired.grant.actorId);
+      expect(opened.enterprise.readOwnAuthorizationContext(paired.grant.actorId)).toEqual({
+        role: "agent",
+        scopes: ["design:read", "product_spec:read", "task:read", "task:claim", "task:update"],
+        projectIds: [opened.created.document.id],
+      });
       expect(opened.enterprise.readProductSpecification(paired.grant.actorId, opened.created.document.id).version).toBe(1);
       expect(captureThrown(() => opened.enterprise.readProductSpecification(
         paired.grant.actorId,

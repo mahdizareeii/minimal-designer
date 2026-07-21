@@ -1,0 +1,104 @@
+name: Source CI and release evidence
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-quality:
+    name: Frozen source gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          test "$(node --version)" = "v24.14.0"
+          test "$(pnpm --version)" = "11.9.0"
+      - name: Frozen dependency installation
+        run: pnpm install --frozen-lockfile --strict-peer-dependencies
+      - name: Validate retained workflow contracts
+        run: pnpm test:ci-workflows
+      - name: Test non-installing macOS PKG runtime-smoke contract
+        run: pnpm test:macos-pkg-runtime-smoke
+      - name: Typecheck every workspace package
+        run: pnpm typecheck
+      - name: Test every workspace package
+        run: pnpm test:run
+      - name: Build every workspace package
+        run: pnpm build
+      - name: Test compatibility launcher
+        run: pnpm test:launcher
+      - name: Validate Compose topology
+        run: docker compose config --quiet
+      - name: Reject high-severity dependency advisories
+        run: |
+          mkdir -p artifacts/ci
+          pnpm audit --audit-level high --json | tee artifacts/ci/dependency-audit.json
+      - name: Retain dependency advisory evidence even when the gate fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-dependency-audit-${{ github.sha }}
+          path: artifacts/ci/dependency-audit.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  source-evidence:
+    name: Deterministic SBOM and license gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          test "$(node --version)" = "v24.14.0"
+          test "$(pnpm --version)" = "11.9.0"
+      - name: Frozen dependency installation
+        run: pnpm install --frozen-lockfile --strict-peer-dependencies
+      - name: Test evidence generator
+        run: pnpm test:release-evidence
+      - name: Generate deterministic source evidence
+        run: pnpm release:evidence:generate --target github-ubuntu-24.04-x64-source
+      - name: Retain source evidence even when the gate fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-source-sbom-license-${{ github.sha }}
+          path: artifacts/release-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Enforce deterministic evidence and license policy
+        run: pnpm release:evidence:check --target github-ubuntu-24.04-x64-source

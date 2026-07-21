@@ -19,6 +19,8 @@ import {
   StringValueSchema,
   ViewportSchema,
 } from "./model.js";
+import { ComponentSourceStateKeySchema } from "./component-source.js";
+import { ComponentDefinitionIdSchema } from "./product-spec.js";
 
 const operationIdShape = { operation_id: OperationIdSchema.optional() };
 
@@ -82,6 +84,7 @@ export const UpdateNodePatchSchema = z
     tags: z.array(z.string().trim().min(1).max(64)).max(32).nullable().optional(),
     metadata: MetadataSchema.optional(),
     metadata_mode: z.enum(["merge", "replace"]).optional(),
+    accessibility_label: z.string().max(2_000).nullable().optional(),
     content: z.string().max(100_000).optional(),
     direction: z.enum(["auto", "ltr", "rtl"]).nullable().optional(),
     asset_id: AssetIdSchema.nullable().optional(),
@@ -183,6 +186,24 @@ export const InsertTemplateOperationSchema = z
   })
   .strict();
 
+/**
+ * Persisted normalized evidence for a server-resolved component insertion.
+ * The immutable source tree is resolved from the project's pinned release and
+ * is deliberately not accepted as caller-supplied operation payload.
+ */
+export const InsertComponentInstanceOperationSchema = z.object({
+  ...operationIdShape,
+  type: z.literal("insert_component_instance"),
+  parent: ParentReferenceSchema,
+  component_definition_id: ComponentDefinitionIdSchema,
+  component_version: z.number().int().positive(),
+  source_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  instance_id: NodeIdSchema,
+  active_state: ComponentSourceStateKeySchema,
+  index: z.number().int().nonnegative().optional(),
+  position: z.object({ x: z.number().finite(), y: z.number().finite() }).strict().optional(),
+}).strict();
+
 export const SetPrototypeLinkOperationSchema = z
   .object({
     ...operationIdShape,
@@ -220,6 +241,7 @@ export const DesignOperationSchema = z.discriminatedUnion("type", [
   UpsertTokenOperationSchema,
   UpsertAssetOperationSchema,
   InsertTemplateOperationSchema,
+  InsertComponentInstanceOperationSchema,
   SetPrototypeLinkOperationSchema,
   SetMetadataOperationSchema,
 ]);
@@ -234,6 +256,7 @@ export type ArchiveNodesOperation = z.infer<typeof ArchiveNodesOperationSchema>;
 export type UpsertTokenOperation = z.infer<typeof UpsertTokenOperationSchema>;
 export type UpsertAssetOperation = z.infer<typeof UpsertAssetOperationSchema>;
 export type InsertTemplateOperation = z.infer<typeof InsertTemplateOperationSchema>;
+export type InsertComponentInstanceOperation = z.infer<typeof InsertComponentInstanceOperationSchema>;
 export type SetPrototypeLinkOperation = z.infer<typeof SetPrototypeLinkOperationSchema>;
 export type SetMetadataOperation = z.infer<typeof SetMetadataOperationSchema>;
 export type DesignOperation = z.infer<typeof DesignOperationSchema>;

@@ -116,7 +116,7 @@ describe("content-addressed persistence", () => {
 
     const opened = openService(filename);
     try {
-      expect(opened.database.schemaVersion()).toBe(11);
+      expect(opened.database.schemaVersion()).toBe(13);
       expect(opened.database.sqlite.prepare(
         "SELECT version, name FROM schema_migrations ORDER BY version",
       ).all()).toEqual([
@@ -131,8 +131,10 @@ describe("content-addressed persistence", () => {
         { version: 9, name: "audit_retention_execution" },
         { version: 10, name: "portable_import_provenance" },
         { version: 11, name: "render_job_persistence" },
+        { version: 12, name: "handoff_execution_decisions" },
+        { version: 13, name: "component_source_persistence" },
       ]);
-      expect(opened.database.metadata("database_schema_version")).toBe("11");
+      expect(opened.database.metadata("database_schema_version")).toBe("13");
       expect(DEFAULT_RUNTIME_VERSIONS).toMatchObject({
         commandEngine: ENGINE_VERSIONS.commandEngine,
         renderer: ENGINE_VERSIONS.renderer,
@@ -163,13 +165,31 @@ describe("content-addressed persistence", () => {
       const migratedPreview = opened.service.getPreview("alice", document.id, "preview_legacy12345678");
       expect(migratedPreview.operationHash).toBe(operationHash(legacyOperations));
       expect(migratedPreview.resultSnapshotHash).toBe(canonicalSnapshot(previewDocument).hash);
-      const migratedCommit = opened.service.commitPreview("alice", document.id, {
+      expect(opened.database.sqlite.prepare(
+        `SELECT command_engine_version, renderer_version, font_bundle_version
+         FROM previews WHERE id = ?`,
+      ).get(migratedPreview.id)).toEqual({
+        command_engine_version: "1",
+        renderer_version: "2",
+        font_bundle_version: "1",
+      });
+      expect(thrown(() => opened.service.commitPreview("alice", document.id, {
         previewId: migratedPreview.id,
         expectedBaseVersion: 1,
         idempotencyKey: "legacy-preview-commit-0001",
         message: "Commit migrated preview",
+      }))).toMatchObject({ code: "PREVIEW_ENGINE_MISMATCH" });
+      const freshPreview = opened.service.createPreview("alice", document.id, {
+        baseVersion: 1,
+        operations: legacyOperations,
       });
-      expect(migratedCommit.document).toEqual(previewDocument);
+      const freshCommit = opened.service.commitPreview("alice", document.id, {
+        previewId: freshPreview.id,
+        expectedBaseVersion: 1,
+        idempotencyKey: "fresh-preview-commit-0001",
+        message: "Commit current-engine preview",
+      });
+      expect(freshCommit.document.nodes[frameId]?.name).toBe("Legacy preview");
       expect(() => opened.database.sqlite.prepare("UPDATE revisions SET message = 'tamper'").run()).toThrow(/immutable/);
       expect(() => opened.database.sqlite.prepare("DELETE FROM schema_migrations WHERE version = 1").run()).toThrow(/immutable/);
     } finally {
@@ -193,6 +213,14 @@ describe("content-addressed persistence", () => {
       {
         mutate: (sqlite) => sqlite.exec("DROP TABLE render_jobs"),
         expected: /migration 11 is missing required table render_jobs/,
+      },
+      {
+        mutate: (sqlite) => sqlite.exec("DROP TABLE handoff_execution_decisions"),
+        expected: /migration 12 is missing required table handoff_execution_decisions/,
+      },
+      {
+        mutate: (sqlite) => sqlite.exec("DROP TRIGGER handoff_execution_decisions_insert_integrity"),
+        expected: /migration 12 is missing required trigger handoff_execution_decisions_insert_integrity/,
       },
       {
         mutate: (sqlite) => {
@@ -241,7 +269,7 @@ describe("content-addressed persistence", () => {
       const inspected = new Database(filename, { readonly: true });
       try {
         expect(inspected.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
-          .toEqual({ version: 11 });
+          .toEqual({ version: 13 });
       } finally {
         inspected.close();
       }

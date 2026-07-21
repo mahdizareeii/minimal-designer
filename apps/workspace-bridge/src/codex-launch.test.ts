@@ -57,6 +57,7 @@ function executableEnvironment(extra: NodeJS.ProcessEnv = {}, executableContents
 
 interface FixtureOptions {
   handoffStatus?: "draft" | "approved" | "implementing" | "completed";
+  implementationTransition?: "valid" | "missing" | "malformed";
   handoffInventoryId?: string;
   centralInventoryId?: string;
   centralInventoryHash?: string;
@@ -67,7 +68,7 @@ interface FixtureOptions {
 }
 
 function handoff(options: FixtureOptions): Record<string, unknown> {
-  const status = options.handoffStatus ?? "approved";
+  const status = options.handoffStatus ?? "implementing";
   const transitions: Array<Record<string, unknown>> = [
     { fromStatus: null, toStatus: "draft", details: { decision: "created", version: 1 } },
     { fromStatus: "draft", toStatus: "in_review", details: { decision: "submitted", submittedVersion: 1 } },
@@ -82,13 +83,13 @@ function handoff(options: FixtureOptions): Record<string, unknown> {
       },
     },
   ];
-  if (status === "implementing") {
+  if (status === "implementing" && options.implementationTransition !== "missing") {
     transitions.push({
       fromStatus: "approved",
       toStatus: "implementing",
       details: {
         decision: "implementation_authorized",
-        authorization: "start_implementation",
+        authorization: options.implementationTransition === "malformed" ? "review_only" : "start_implementation",
         approvedVersion: 1,
       },
     });
@@ -182,7 +183,7 @@ async function authorizedFixture(): Promise<{
   return { root: await fs.promises.realpath(root), store, grantId: grant.id, repositoryFingerprint: inventory.repositoryFingerprint };
 }
 
-describe("approved selected-workspace Codex launch", () => {
+describe("implementation-authorized selected-workspace Codex launch", () => {
   it("revalidates the exact grant and launches Codex with one secret-free argument in the selected cwd", async () => {
     const fixture = await authorizedFixture();
     const secret = "central-secret-token-value";
@@ -254,7 +255,7 @@ describe("approved selected-workspace Codex launch", () => {
     });
   });
 
-  it("accepts only approved or explicitly implementing handoffs with intact approval metadata", async () => {
+  it("rejects an approved handoff that has not entered implementing", async () => {
     const fixture = await authorizedFixture();
     const base = {
       grantStore: fixture.store,
@@ -266,8 +267,46 @@ describe("approved selected-workspace Codex launch", () => {
     };
     await expect(prepareCodexLaunch({
       ...base,
-      fetchImplementation: mcpFetch({ repositoryFingerprint: fixture.repositoryFingerprint, handoffStatus: "draft" }),
-    })).rejects.toThrow("not an approved implementation handoff");
+      fetchImplementation: mcpFetch({ repositoryFingerprint: fixture.repositoryFingerprint, handoffStatus: "approved" }),
+    })).rejects.toThrow("not explicitly authorized for implementation");
+  });
+
+  it("rejects missing or malformed start-implementation transitions", async () => {
+    const fixture = await authorizedFixture();
+    const base = {
+      grantStore: fixture.store,
+      grantId: fixture.grantId,
+      handoffId: HANDOFF_ID,
+      connection: { mcpUrl: "http://127.0.0.1:4312/mcp" },
+      environment: executableEnvironment(),
+      now: () => NOW,
+    };
+    await expect(prepareCodexLaunch({
+      ...base,
+      fetchImplementation: mcpFetch({
+        repositoryFingerprint: fixture.repositoryFingerprint,
+        implementationTransition: "missing",
+      }),
+    })).rejects.toThrow("does not match its immutable transition history");
+    await expect(prepareCodexLaunch({
+      ...base,
+      fetchImplementation: mcpFetch({
+        repositoryFingerprint: fixture.repositoryFingerprint,
+        implementationTransition: "malformed",
+      }),
+    })).rejects.toThrow("implementation authorization is incomplete or stale");
+  });
+
+  it("accepts only a current-version implementing handoff with the exact authorization contract", async () => {
+    const fixture = await authorizedFixture();
+    const base = {
+      grantStore: fixture.store,
+      grantId: fixture.grantId,
+      handoffId: HANDOFF_ID,
+      connection: { mcpUrl: "http://127.0.0.1:4312/mcp" },
+      environment: executableEnvironment(),
+      now: () => NOW,
+    };
     await expect(prepareCodexLaunch({
       ...base,
       fetchImplementation: mcpFetch({ repositoryFingerprint: fixture.repositoryFingerprint, approvalConfirmed: false }),
@@ -275,7 +314,7 @@ describe("approved selected-workspace Codex launch", () => {
     await expect(prepareCodexLaunch({
       ...base,
       fetchImplementation: mcpFetch({ repositoryFingerprint: fixture.repositoryFingerprint, handoffStatus: "implementing" }),
-    })).resolves.toMatchObject({ handoffStatus: "implementing" });
+    })).resolves.toMatchObject({ handoffStatus: "implementing", handoffVersion: 1 });
   });
 
   it("rejects any reviewed-plan status, version, schema, or argument substitution", async () => {
@@ -303,11 +342,11 @@ describe("approved selected-workspace Codex launch", () => {
       processLauncher: async () => 0,
     })).rejects.toThrow("launch context changed after review");
 
-    centralState.handoffStatus = "implementing";
+    centralState.handoffStatus = "approved";
     await expect(executeCodexLaunch(plan, {
       ...options,
       processLauncher: async () => 0,
-    })).rejects.toThrow("launch context changed after review");
+    })).rejects.toThrow("not explicitly authorized for implementation");
   });
 
   it("fails closed when the handoff or central inventory differs from the local grant binding", async () => {

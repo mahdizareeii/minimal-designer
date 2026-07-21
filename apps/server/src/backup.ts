@@ -7,10 +7,16 @@ import { pipeline } from "node:stream/promises";
 import Database from "better-sqlite3";
 import tar from "tar-stream";
 import {
+  ComponentDefinitionSchema,
   DesignDocumentSchema,
   DesignDocumentV2Schema,
+  DesignSystemReleaseSchema,
+  DesignSystemTokenSchema,
   DesignOperationListSchema,
   ENGINE_VERSIONS,
+  FORMASPEC_FOUNDATION_RELEASE_ID,
+  FORMASPEC_FOUNDATION_SYSTEM_ID,
+  FORMASPEC_FOUNDATION_VERSION,
   type AnyDesignDocument,
 } from "@designer/core";
 
@@ -25,7 +31,12 @@ import {
   validateDatabaseSchemaShape,
   type DesignerDatabase,
 } from "./db/database.js";
+import {
+  DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES,
+  DESIGN_SYSTEM_RELEASE_JSON_MAX_BYTES,
+} from "./design-system-limits.js";
 import { DomainError } from "./errors.js";
+import { canonicalJson } from "./ids.js";
 import {
   organizationPolicyBackupJson,
   verifyOrganizationPolicyBackupConfiguration,
@@ -38,7 +49,8 @@ import {
 } from "./persistence.js";
 
 const MAX_BACKUP_ENTRIES = 20_000;
-const MAX_BACKUP_EXPANDED_BYTES = 16 * 1024 * 1024 * 1024;
+export const MAX_BACKUP_BUNDLE_BYTES = 16 * 1024 * 1024 * 1024;
+const MAX_BACKUP_EXPANDED_BYTES = MAX_BACKUP_BUNDLE_BYTES;
 const MAX_BACKUP_CONTROL_BYTES = 4 * 1024 * 1024;
 const MAX_BACKUP_VERSION_BYTES = 128;
 const MAX_BACKUP_DATABASE_ROWS = 200_000;
@@ -55,6 +67,10 @@ const RESTORE_JOURNAL_VERSION = 1;
 export const RESTORE_JOURNAL_MAX_BYTES = 64 * 1024;
 const MAX_RESTORE_JOURNAL_MESSAGE_BYTES = 4 * 1024;
 const BACKUP_SPACE_RESERVE_BYTES = 16 * 1024 * 1024;
+const FORENSIC_RECOVERY_MANIFEST = "forensic-recovery-manifest.json";
+const FORENSIC_RECOVERY_PAYLOAD_ROOT = "recovery-data";
+const FORENSIC_RECOVERY_FORMAT = "formaspec-forensic-recovery";
+const FORENSIC_RECOVERY_VERSION = 1;
 
 type RestoreJournalPhase =
   | "staging"
@@ -116,6 +132,35 @@ export interface BackupVerificationResult {
   entryCount: number;
 }
 
+export interface BackupInspectionResult {
+  verification: BackupVerificationResult;
+  organizationIds: string[];
+}
+
+export interface ForensicRecoveryManifest {
+  format: typeof FORENSIC_RECOVERY_FORMAT;
+  version: typeof FORENSIC_RECOVERY_VERSION;
+  operationId: string;
+  createdAt: string;
+  files: Array<{ path: string; sizeBytes: number; sha256: string }>;
+}
+
+export interface ForensicRecoveryVerificationResult {
+  valid: true;
+  manifest: ForensicRecoveryManifest;
+  extractedBytes: number;
+  entryCount: number;
+}
+
+export interface ForensicRecoveryBundleResult {
+  path: string;
+  filename: string;
+  bundleSha256: string;
+  sizeBytes: number;
+  createdAt: string;
+  verification: ForensicRecoveryVerificationResult;
+}
+
 export interface BackupRasterVerifier {
   engine: RasterNormalizationEngine;
   limits: Pick<RasterNormalizationOptions, "maxBytes" | "maxPixels">;
@@ -139,6 +184,7 @@ const BACKUP_MANIFEST_KEYS = new Set([
   "files",
 ]);
 const BACKUP_FILE_KEYS = new Set(["path", "sizeBytes", "sha256"]);
+const FORENSIC_RECOVERY_MANIFEST_KEYS = new Set(["format", "version", "operationId", "createdAt", "files"]);
 const ASSET_MANIFEST_KEYS = new Set(["files"]);
 const BACKUP_CONTROL_PATHS = new Set(["backup-manifest.json", "checksums.sha256"]);
 const REQUIRED_BACKUP_PAYLOAD_PATHS = ["database.sqlite", "asset-manifest.json", "organization-config.yaml"] as const;
@@ -250,6 +296,59 @@ function parseBackupManifest(contents: string): BackupManifest {
   };
 }
 
+function parseForensicRecoveryManifest(contents: string): ForensicRecoveryManifest {
+  let value: unknown;
+  try {
+    value = JSON.parse(contents) as unknown;
+  } catch (error) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery manifest is not valid JSON.", 422, { cause: error });
+  }
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, FORENSIC_RECOVERY_MANIFEST_KEYS)
+    || value.format !== FORENSIC_RECOVERY_FORMAT
+    || value.version !== FORENSIC_RECOVERY_VERSION
+    || typeof value.operationId !== "string"
+    || !/^restore_[A-Za-z0-9][A-Za-z0-9_-]{7,111}$/.test(value.operationId)
+    || !isCanonicalIsoTimestamp(value.createdAt)
+    || !Array.isArray(value.files)
+    || value.files.length > MAX_BACKUP_ENTRIES
+  ) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery manifest is unsupported or malformed.", 422);
+  }
+  const seen = new Set<string>();
+  const files = value.files.map((entry): ForensicRecoveryManifest["files"][number] => {
+    if (
+      !isRecord(entry)
+      || !hasExactKeys(entry, BACKUP_FILE_KEYS)
+      || typeof entry.path !== "string"
+      || !Number.isSafeInteger(entry.sizeBytes)
+      || (entry.sizeBytes as number) < 0
+      || (entry.sizeBytes as number) > MAX_BACKUP_EXPANDED_BYTES
+      || typeof entry.sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(entry.sha256)
+    ) {
+      throw new DomainError("VALIDATION_FAILED", "Forensic recovery manifest contains an invalid file record.", 422);
+    }
+    const normalized = canonicalBackupPath(entry.path);
+    if (!normalized.startsWith(`${FORENSIC_RECOVERY_PAYLOAD_ROOT}/`)) {
+      throw new DomainError("VALIDATION_FAILED", "Forensic recovery payload escaped its reserved root.", 422);
+    }
+    if (seen.has(normalized)) {
+      throw new DomainError("VALIDATION_FAILED", `Forensic recovery manifest repeats ${normalized}.`, 422);
+    }
+    seen.add(normalized);
+    return { path: normalized, sizeBytes: entry.sizeBytes as number, sha256: entry.sha256 };
+  });
+  return {
+    format: FORENSIC_RECOVERY_FORMAT,
+    version: FORENSIC_RECOVERY_VERSION,
+    operationId: value.operationId,
+    createdAt: value.createdAt,
+    files,
+  };
+}
+
 function parseBackupChecksums(contents: string): Map<string, string> {
   const checksums = new Map<string, string>();
   const lines = contents.split("\n").filter((line) => line.length > 0);
@@ -336,6 +435,127 @@ async function regularFileBytes(root: string): Promise<number> {
     }
   }
   return total;
+}
+
+async function copyForensicDataTree(sourceRoot: string, destinationRoot: string): Promise<void> {
+  const source = path.resolve(sourceRoot);
+  const destination = path.resolve(destinationRoot);
+  if (destination === source || destination.startsWith(`${source}${path.sep}`)
+    || source.startsWith(`${destination}${path.sep}`)) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery staging must be outside the live data tree.", 422);
+  }
+  let sourceStat: fs.BigIntStats;
+  try {
+    sourceStat = await fs.promises.lstat(source, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery requires a real data directory.", 422);
+  }
+  if (await pathExists(path.join(source, RESTORE_JOURNAL_DIRECTORY))) {
+    throw new DomainError(
+      "VERSION_CONFLICT",
+      "Forensic recovery cannot snapshot data while a restore journal is active.",
+      409,
+    );
+  }
+
+  let files = 0;
+  let entriesSeen = 0;
+  let totalBytes = 0;
+  const copyDirectory = async (relativeDirectory: string, depth: number): Promise<void> => {
+    if (depth > 64) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", "Forensic recovery source exceeds the directory-depth limit.", 413);
+    }
+    const sourceDirectory = relativeDirectory
+      ? path.join(source, ...relativeDirectory.split("/"))
+      : source;
+    const before = await fs.promises.lstat(sourceDirectory, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      throw new DomainError("VALIDATION_FAILED", "Forensic recovery source contains a non-real directory.", 422);
+    }
+    const entries = await fs.promises.readdir(sourceDirectory, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const relative = canonicalBackupPath(relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name);
+      entriesSeen += 1;
+      if (entriesSeen > MAX_BACKUP_ENTRIES || Buffer.byteLength(relative, "utf8") > 4096) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", "Forensic recovery source exceeds its entry or path limit.", 413);
+      }
+      if (!relativeDirectory && relative === RESTORE_JOURNAL_DIRECTORY) {
+        throw new DomainError("VERSION_CONFLICT", "Forensic recovery found active restore-journal state.", 409);
+      }
+      const sourcePath = path.join(source, ...relative.split("/"));
+      const entryStat = await fs.promises.lstat(sourcePath, { bigint: true });
+      if (entryStat.isSymbolicLink()) {
+        throw new DomainError("VALIDATION_FAILED", `Forensic recovery rejects symbolic link ${relative}.`, 422);
+      }
+      if (entryStat.isDirectory()) {
+        await copyDirectory(relative, depth + 1);
+        continue;
+      }
+      if (!entryStat.isFile()) {
+        throw new DomainError("VALIDATION_FAILED", `Forensic recovery rejects non-regular entry ${relative}.`, 422);
+      }
+      files += 1;
+      if (entryStat.size > BigInt(MAX_BACKUP_EXPANDED_BYTES)) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", "Forensic recovery source contains an oversized file.", 413);
+      }
+      totalBytes += Number(entryStat.size);
+      if (files > MAX_BACKUP_ENTRIES || !Number.isSafeInteger(totalBytes)
+        || totalBytes > MAX_BACKUP_EXPANDED_BYTES) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", "Forensic recovery source exceeds its fixed limits.", 413);
+      }
+      const targetPath = path.join(destination, FORENSIC_RECOVERY_PAYLOAD_ROOT, ...relative.split("/"));
+      await fs.promises.mkdir(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+      const input = await fs.promises.open(
+        sourcePath,
+        process.platform === "win32"
+          ? fs.constants.O_RDONLY
+          : fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+      );
+      let output: fs.promises.FileHandle | undefined;
+      try {
+        const opened = await input.stat({ bigint: true });
+        if (!opened.isFile() || opened.dev !== entryStat.dev || opened.ino !== entryStat.ino
+          || opened.size !== entryStat.size) {
+          throw new DomainError("TEMPORARILY_UNAVAILABLE", `Forensic recovery source changed before ${relative} was copied.`, 503);
+        }
+        output = await fs.promises.open(targetPath, "wx", 0o600);
+        const buffer = Buffer.allocUnsafe(1024 * 1024);
+        let position = 0;
+        while (position < Number(opened.size)) {
+          const { bytesRead } = await input.read(buffer, 0, Math.min(buffer.length, Number(opened.size) - position), position);
+          if (bytesRead < 1) {
+            throw new DomainError("TEMPORARILY_UNAVAILABLE", `Forensic recovery source changed while ${relative} was copied.`, 503);
+          }
+          let written = 0;
+          while (written < bytesRead) {
+            const result = await output.write(buffer, written, bytesRead - written, position + written);
+            if (result.bytesWritten < 1) throw new Error("Forensic recovery copy made no progress.");
+            written += result.bytesWritten;
+          }
+          position += bytesRead;
+        }
+        const after = await input.stat({ bigint: true });
+        if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+          || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) {
+          throw new DomainError("TEMPORARILY_UNAVAILABLE", `Forensic recovery source changed while ${relative} was copied.`, 503);
+        }
+        await output.sync();
+      } finally {
+        await output?.close().catch(() => undefined);
+        await input.close().catch(() => undefined);
+      }
+    }
+    const after = await fs.promises.lstat(sourceDirectory, { bigint: true });
+    if (!after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino
+      || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) {
+      throw new DomainError("TEMPORARILY_UNAVAILABLE", "Forensic recovery data changed while it was captured.", 503);
+    }
+  };
+  await copyDirectory("", 0);
 }
 
 async function requireFilesystemCapacity(
@@ -586,7 +806,11 @@ function verifyDatabaseMigrationLedger(sqlite: Database.Database, manifestVersio
   return migrationVersion;
 }
 
-function boundedTableCount(sqlite: Database.Database, table: "assets" | "snapshots" | "revisions" | "designs"): number {
+function boundedTableCount(
+  sqlite: Database.Database,
+  table: "assets" | "snapshots" | "revisions" | "designs" | "design_systems" | "design_system_tokens"
+    | "component_definitions" | "design_system_releases" | "project_design_system_pins",
+): number {
   const row = sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: unknown } | undefined;
   if (!row || !Number.isSafeInteger(row.count) || (row.count as number) < 0 || (row.count as number) > MAX_BACKUP_DATABASE_ROWS) {
     throw new DomainError("VALIDATION_FAILED", `Backup ${table} row count exceeds the verification limit.`, 422);
@@ -594,8 +818,12 @@ function boundedTableCount(sqlite: Database.Database, table: "assets" | "snapsho
   return row.count as number;
 }
 
-function parseBoundedStoredJson(value: unknown, label: string): unknown {
-  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_BACKUP_JSON_BYTES) {
+function parseBoundedStoredJson(
+  value: unknown,
+  label: string,
+  maximumBytes = MAX_BACKUP_JSON_BYTES,
+): unknown {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > maximumBytes) {
     throw new DomainError("VALIDATION_FAILED", `${label} is missing or exceeds the JSON verification limit.`, 422);
   }
   try {
@@ -871,6 +1099,374 @@ interface VerifiedDesignOwnership {
   organizationId: string | null;
 }
 
+interface VerifiedDesignSystemPin {
+  designSystemId: string;
+  releaseId: string;
+  releaseVersion: number;
+}
+
+interface VerifiedDesignSystemRow {
+  id: string;
+  organizationId: string;
+}
+
+interface VerifiedDesignSystemReleaseRow {
+  id: string;
+  designSystemId: string;
+  version: number;
+  status: "draft" | "published" | "deprecated";
+}
+
+interface VerifiedDesignSystemState {
+  systemsById: ReadonlyMap<string, VerifiedDesignSystemRow>;
+  releasesById: ReadonlyMap<string, VerifiedDesignSystemReleaseRow>;
+  pinsByDesignId: ReadonlyMap<string, VerifiedDesignSystemPin>;
+}
+
+function isFoundationDesignSystemPin(pin: VerifiedDesignSystemPin): boolean {
+  return pin.designSystemId === FORMASPEC_FOUNDATION_SYSTEM_ID
+    && pin.releaseId === FORMASPEC_FOUNDATION_RELEASE_ID
+    && pin.releaseVersion === FORMASPEC_FOUNDATION_VERSION;
+}
+
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function isValidReleaseDiagnostic(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactObjectKeys(value, [
+    "code",
+    "severity",
+    "safety",
+    "message",
+    ...(value.entityKind === undefined ? [] : ["entityKind"]),
+    ...(value.entityId === undefined ? [] : ["entityId"]),
+    ...(value.path === undefined ? [] : ["path"]),
+  ])) return false;
+  return typeof value.code === "string"
+    && value.code.length >= 1
+    && value.code.length <= 160
+    && (value.severity === "info" || value.severity === "warning" || value.severity === "error")
+    && (value.safety === "safe" || value.safety === "review_required" || value.safety === "blocked")
+    && typeof value.message === "string"
+    && value.message.length >= 1
+    && value.message.length <= 4_000
+    && (value.entityKind === undefined
+      || value.entityKind === "release"
+      || value.entityKind === "token"
+      || value.entityKind === "component"
+      || value.entityKind === "project")
+    && (value.entityId === undefined
+      || (typeof value.entityId === "string" && value.entityId.length >= 1 && value.entityId.length <= 300))
+    && (value.path === undefined || (typeof value.path === "string" && value.path.length <= 500));
+}
+
+function versionedEntityKey(systemId: string, entityId: string, version: number): string {
+  return `${systemId}\0${entityId}\0${version}`;
+}
+
+function verifiedDocumentDesignSystemPin(document: AnyDesignDocument): VerifiedDesignSystemPin | null {
+  if (document.schema_version !== 2) return null;
+  return {
+    designSystemId: document.design_system.design_system_id,
+    releaseId: document.design_system.release_id,
+    releaseVersion: document.design_system.release_version,
+  };
+}
+
+function loadVerifiedDesignSystemState(
+  sqlite: Database.Database,
+  migrationVersion: number,
+  designsById: ReadonlyMap<string, VerifiedDesignOwnership>,
+): VerifiedDesignSystemState | null {
+  if (migrationVersion < 8) return null;
+  boundedTableCount(sqlite, "design_systems");
+  boundedTableCount(sqlite, "design_system_tokens");
+  boundedTableCount(sqlite, "component_definitions");
+  boundedTableCount(sqlite, "design_system_releases");
+  boundedTableCount(sqlite, "project_design_system_pins");
+
+  const systemsById = new Map<string, VerifiedDesignSystemRow>();
+  const systemRows = sqlite.prepare(
+    "SELECT id, organization_id, status FROM design_systems ORDER BY id",
+  ).iterate() as Iterable<{ id: unknown; organization_id: unknown; status: unknown }>;
+  for (const row of systemRows) {
+    if (typeof row.id !== "string"
+      || !row.id
+      || row.id === FORMASPEC_FOUNDATION_SYSTEM_ID
+      || systemsById.has(row.id)
+      || typeof row.organization_id !== "string"
+      || !row.organization_id
+      || (row.status !== "active" && row.status !== "archived")) {
+      throw new DomainError("VALIDATION_FAILED", "Backup database contains an invalid design-system record.", 422);
+    }
+    systemsById.set(row.id, { id: row.id, organizationId: row.organization_id });
+  }
+
+  const tokenVersions = new Set<string>();
+  const tokenRows = sqlite.prepare(
+    `SELECT design_system_id, token_id, version, status, token_json
+     FROM design_system_tokens ORDER BY design_system_id, token_id, version`,
+  ).iterate() as Iterable<{
+    design_system_id: unknown;
+    token_id: unknown;
+    version: unknown;
+    status: unknown;
+    token_json: unknown;
+  }>;
+  for (const row of tokenRows) {
+    if (typeof row.design_system_id !== "string"
+      || !systemsById.has(row.design_system_id)
+      || typeof row.token_id !== "string"
+      || !row.token_id
+      || !Number.isSafeInteger(row.version)
+      || (row.version as number) < 1
+      || (row.status !== "draft" && row.status !== "published" && row.status !== "deprecated")) {
+      throw new DomainError("VALIDATION_FAILED", "Backup database contains an invalid design-system token version.", 422);
+    }
+    const parsed = DesignSystemTokenSchema.safeParse(parseBoundedStoredJson(
+      row.token_json,
+      `Backup design-system token ${row.token_id}@${row.version}`,
+      DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES,
+    ));
+    const key = versionedEntityKey(row.design_system_id, row.token_id, row.version as number);
+    if (!parsed.success
+      || canonicalJson(parsed.data) !== row.token_json
+      || parsed.data.id !== row.token_id
+      || tokenVersions.has(key)) {
+      throw new DomainError("VALIDATION_FAILED", `Backup design-system token metadata is inconsistent: ${row.token_id}.`, 422);
+    }
+    tokenVersions.add(key);
+  }
+
+  const componentVersions = new Set<string>();
+  const componentRows = sqlite.prepare(
+    `SELECT design_system_id, component_id, version, status, definition_json, replacement_component_id
+     FROM component_definitions ORDER BY design_system_id, component_id, version`,
+  ).iterate() as Iterable<{
+    design_system_id: unknown;
+    component_id: unknown;
+    version: unknown;
+    status: unknown;
+    definition_json: unknown;
+    replacement_component_id: unknown;
+  }>;
+  for (const row of componentRows) {
+    if (typeof row.design_system_id !== "string"
+      || !systemsById.has(row.design_system_id)
+      || typeof row.component_id !== "string"
+      || !row.component_id
+      || !Number.isSafeInteger(row.version)
+      || (row.version as number) < 1
+      || (row.status !== "draft" && row.status !== "published" && row.status !== "deprecated")
+      || (row.replacement_component_id !== null && typeof row.replacement_component_id !== "string")) {
+      throw new DomainError("VALIDATION_FAILED", "Backup database contains an invalid component-definition version.", 422);
+    }
+    const parsed = ComponentDefinitionSchema.safeParse(parseBoundedStoredJson(
+      row.definition_json,
+      `Backup component definition ${row.component_id}@${row.version}`,
+      DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES,
+    ));
+    const key = versionedEntityKey(row.design_system_id, row.component_id, row.version as number);
+    if (!parsed.success
+      || canonicalJson(parsed.data) !== row.definition_json
+      || parsed.data.id !== row.component_id
+      || parsed.data.version !== row.version
+      || parsed.data.status !== row.status
+      || (parsed.data.replacement_component_id ?? null) !== row.replacement_component_id
+      || componentVersions.has(key)) {
+      throw new DomainError("VALIDATION_FAILED", `Backup component-definition metadata is inconsistent: ${row.component_id}.`, 422);
+    }
+    componentVersions.add(key);
+  }
+
+  const releasesById = new Map<string, VerifiedDesignSystemReleaseRow>();
+  const releaseRows = sqlite.prepare(
+    `SELECT id, design_system_id, version, name, status, release_json, created_at, published_at
+     FROM design_system_releases ORDER BY id`,
+  ).iterate() as Iterable<{
+    id: unknown;
+    design_system_id: unknown;
+    version: unknown;
+    name: unknown;
+    status: unknown;
+    release_json: unknown;
+    created_at: unknown;
+    published_at: unknown;
+  }>;
+  for (const row of releaseRows) {
+    if (typeof row.id !== "string"
+      || !row.id
+      || row.id === FORMASPEC_FOUNDATION_RELEASE_ID
+      || releasesById.has(row.id)
+      || typeof row.design_system_id !== "string"
+      || !row.design_system_id
+      || !Number.isSafeInteger(row.version)
+      || (row.version as number) < 1
+      || typeof row.name !== "string"
+      || !row.name
+      || (row.status !== "draft" && row.status !== "published" && row.status !== "deprecated")
+      || typeof row.created_at !== "string"
+      || (row.published_at !== null && typeof row.published_at !== "string")) {
+      throw new DomainError("VALIDATION_FAILED", "Backup database contains an invalid design-system release record.", 422);
+    }
+    if (!systemsById.has(row.design_system_id)) {
+      throw new DomainError("VALIDATION_FAILED", `Backup design-system release references a missing system: ${row.id}.`, 422);
+    }
+    const payload = parseBoundedStoredJson(
+      row.release_json,
+      `Backup design-system release ${row.id}`,
+      DESIGN_SYSTEM_RELEASE_JSON_MAX_BYTES,
+    );
+    const parsedRelease = isRecord(payload)
+      ? DesignSystemReleaseSchema.safeParse(payload.release)
+      : { success: false as const };
+    if (!parsedRelease.success
+      || !isRecord(payload)
+      || !hasExactObjectKeys(payload, ["format", "format_version", "release", "token_versions", "component_versions", "diagnostics"])
+      || payload.format !== "formaspec-design-system-release"
+      || payload.format_version !== 1
+      || !Array.isArray(payload.token_versions)
+      || payload.token_versions.length > 20_000
+      || !Array.isArray(payload.component_versions)
+      || payload.component_versions.length > 5_000
+      || !Array.isArray(payload.diagnostics)
+      || payload.diagnostics.length > 20_000
+      || !payload.diagnostics.every(isValidReleaseDiagnostic)
+      || canonicalJson(payload) !== row.release_json
+      || parsedRelease.data.id !== row.id
+      || parsedRelease.data.design_system_id !== row.design_system_id
+      || parsedRelease.data.version !== row.version
+      || parsedRelease.data.name !== row.name
+      || parsedRelease.data.status !== row.status
+      || parsedRelease.data.created_at !== row.created_at
+      || (parsedRelease.data.published_at ?? null) !== row.published_at) {
+      throw new DomainError("VALIDATION_FAILED", `Backup design-system release metadata is inconsistent: ${row.id}.`, 422);
+    }
+    const selectedTokenIds: string[] = [];
+    for (const selection of payload.token_versions) {
+      if (!isRecord(selection)
+        || !hasExactObjectKeys(selection, ["token_id", "version"])
+        || typeof selection.token_id !== "string"
+        || !Number.isSafeInteger(selection.version)
+        || (selection.version as number) < 1
+        || !tokenVersions.has(versionedEntityKey(row.design_system_id, selection.token_id, selection.version as number))) {
+        throw new DomainError("VALIDATION_FAILED", `Backup design-system release selects an invalid token version: ${row.id}.`, 422);
+      }
+      selectedTokenIds.push(selection.token_id);
+    }
+    const selectedComponents: Array<{ component_definition_id: string; version: number }> = [];
+    for (const selection of payload.component_versions) {
+      if (!isRecord(selection)
+        || !hasExactObjectKeys(selection, ["component_definition_id", "version"])
+        || typeof selection.component_definition_id !== "string"
+        || !Number.isSafeInteger(selection.version)
+        || (selection.version as number) < 1
+        || !componentVersions.has(versionedEntityKey(
+          row.design_system_id,
+          selection.component_definition_id,
+          selection.version as number,
+        ))) {
+        throw new DomainError("VALIDATION_FAILED", `Backup design-system release selects an invalid component version: ${row.id}.`, 422);
+      }
+      selectedComponents.push({
+        component_definition_id: selection.component_definition_id,
+        version: selection.version as number,
+      });
+    }
+    if (canonicalJson(parsedRelease.data.token_ids) !== canonicalJson(selectedTokenIds)
+      || canonicalJson(parsedRelease.data.component_versions) !== canonicalJson(selectedComponents)) {
+      throw new DomainError("VALIDATION_FAILED", `Backup design-system release selections are inconsistent: ${row.id}.`, 422);
+    }
+    releasesById.set(row.id, {
+      id: row.id,
+      designSystemId: row.design_system_id,
+      version: row.version as number,
+      status: row.status,
+    });
+  }
+
+  const pinsByDesignId = new Map<string, VerifiedDesignSystemPin>();
+  const pinRows = sqlite.prepare(
+    `SELECT design_id, organization_id, design_system_id, release_id, release_version, pinned_by, pinned_at
+     FROM project_design_system_pins ORDER BY design_id`,
+  ).iterate() as Iterable<{
+    design_id: unknown;
+    organization_id: unknown;
+    design_system_id: unknown;
+    release_id: unknown;
+    release_version: unknown;
+    pinned_by: unknown;
+    pinned_at: unknown;
+  }>;
+  for (const row of pinRows) {
+    if (typeof row.design_id !== "string"
+      || !row.design_id
+      || pinsByDesignId.has(row.design_id)
+      || typeof row.organization_id !== "string"
+      || !row.organization_id
+      || typeof row.design_system_id !== "string"
+      || !row.design_system_id
+      || typeof row.release_id !== "string"
+      || !row.release_id
+      || !Number.isSafeInteger(row.release_version)
+      || (row.release_version as number) < 1
+      || typeof row.pinned_by !== "string"
+      || !row.pinned_by
+      || typeof row.pinned_at !== "string") {
+      throw new DomainError("VALIDATION_FAILED", "Backup database contains an invalid project design-system pin.", 422);
+    }
+    const design = designsById.get(row.design_id);
+    const system = systemsById.get(row.design_system_id);
+    const release = releasesById.get(row.release_id);
+    if (!design
+      || design.organizationId !== row.organization_id
+      || !system
+      || system.organizationId !== row.organization_id
+      || !release
+      || release.designSystemId !== row.design_system_id
+      || release.version !== row.release_version
+      || release.status === "draft") {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        `Backup project design-system pin is inconsistent: ${row.design_id}.`,
+        422,
+      );
+    }
+    pinsByDesignId.set(row.design_id, {
+      designSystemId: row.design_system_id,
+      releaseId: row.release_id,
+      releaseVersion: row.release_version as number,
+    });
+  }
+  return { systemsById, releasesById, pinsByDesignId };
+}
+
+function verifyDocumentDesignSystemReference(
+  document: AnyDesignDocument,
+  design: VerifiedDesignOwnership,
+  state: VerifiedDesignSystemState | null,
+): void {
+  const pin = verifiedDocumentDesignSystemPin(document);
+  if (!pin || isFoundationDesignSystemPin(pin)) return;
+  const release = state?.releasesById.get(pin.releaseId);
+  const system = state?.systemsById.get(pin.designSystemId);
+  if (!release
+    || !system
+    || system.organizationId !== design.organizationId
+    || release.designSystemId !== pin.designSystemId
+    || release.version !== pin.releaseVersion
+    || release.status === "draft") {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      `Backup revision ${document.id}@${document.revision} references an invalid design-system release.`,
+      422,
+    );
+  }
+}
+
 function verifyDocumentAssetReferences(
   document: AnyDesignDocument,
   databaseAssets: ReadonlyMap<string, VerifiedDatabaseAsset>,
@@ -986,6 +1582,8 @@ interface VerifiedRevisionHead {
   version: number;
   revisionHash: string | null;
   documentName: string;
+  schemaVersion: 1 | 2;
+  designSystemPin: VerifiedDesignSystemPin | null;
 }
 
 function verifyRevisionAndHeadIntegrity(
@@ -1024,6 +1622,7 @@ function verifyRevisionAndHeadIntegrity(
       organizationId: design.organization_id as string | null,
     });
   }
+  const designSystemState = loadVerifiedDesignSystemState(sqlite, migrationVersion, designsById);
   const hasIntegrityHashes = migrationVersion >= 2;
   const columns = hasIntegrityHashes
     ? ", snapshot_hash, operation_hash, parent_revision_hash, revision_hash"
@@ -1074,6 +1673,7 @@ function verifyRevisionAndHeadIntegrity(
       throw new DomainError("VALIDATION_FAILED", `Backup revision references a missing project: ${row.design_id}.`, 422);
     }
     verifyDocumentAssetReferences(document, databaseAssets, design);
+    verifyDocumentDesignSystemReference(document, design, designSystemState);
     const prior = heads.get(row.design_id);
     if (!prior) {
       if (row.version !== 1 || row.parent_revision_id !== null) {
@@ -1128,6 +1728,8 @@ function verifyRevisionAndHeadIntegrity(
       version: row.version as number,
       revisionHash: verifiedRevisionHash,
       documentName: document.name,
+      schemaVersion: document.schema_version,
+      designSystemPin: verifiedDocumentDesignSystemPin(document),
     });
   }
 
@@ -1143,6 +1745,29 @@ function verifyRevisionAndHeadIntegrity(
       || head.documentName !== design.name
     ) {
       throw new DomainError("VALIDATION_FAILED", `Backup project head is inconsistent: ${designId}.`, 422);
+    }
+    const persistedPin = designSystemState?.pinsByDesignId.get(designId);
+    if (head.schemaVersion === 2) {
+      if (!head.designSystemPin) {
+        throw new DomainError("VALIDATION_FAILED", `Backup V2 project head is missing its design-system pin: ${designId}.`, 422);
+      }
+      if (persistedPin) {
+        if (persistedPin.designSystemId !== head.designSystemPin.designSystemId
+          || persistedPin.releaseId !== head.designSystemPin.releaseId
+          || persistedPin.releaseVersion !== head.designSystemPin.releaseVersion) {
+          throw new DomainError(
+            "VALIDATION_FAILED",
+            `Backup V2 project head does not match its persisted design-system pin: ${designId}.`,
+            422,
+          );
+        }
+      } else if (!isFoundationDesignSystemPin(head.designSystemPin)) {
+        throw new DomainError(
+          "VALIDATION_FAILED",
+          `Backup V2 project head has no persisted custom design-system pin: ${designId}.`,
+          422,
+        );
+      }
     }
     seenDesigns.add(designId);
   }
@@ -1275,6 +1900,66 @@ async function verifyExtractedBackup(
   } finally {
     sqlite.close();
   }
+}
+
+async function verifyExtractedForensicRecovery(
+  root: string,
+  metrics: { entryCount: number; expandedBytes: number },
+  expectedOperationId?: string,
+): Promise<ForensicRecoveryVerificationResult> {
+  const manifestPath = path.join(root, FORENSIC_RECOVERY_MANIFEST);
+  const checksumPath = path.join(root, "checksums.sha256");
+  if (!fs.existsSync(manifestPath) || !fs.existsSync(checksumPath)) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery bundle is missing required control files.", 422);
+  }
+  const manifestContents = await readBackupControlFile(manifestPath, "Forensic recovery manifest");
+  const checksumContents = await readBackupControlFile(checksumPath, "Forensic recovery checksums");
+  const manifest = parseForensicRecoveryManifest(manifestContents);
+  if (expectedOperationId !== undefined && manifest.operationId !== expectedOperationId) {
+    throw new DomainError("VERSION_CONFLICT", "Forensic recovery bundle belongs to a different restore operation.", 409);
+  }
+  const checksums = parseBackupChecksums(checksumContents);
+  const manifestDigest = await fileDigest(manifestPath);
+  if (checksums.get(FORENSIC_RECOVERY_MANIFEST) !== manifestDigest.sha256) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery manifest checksum failed.", 422);
+  }
+  const payloadPaths = new Set(manifest.files.map((file) => file.path));
+  const allowedPaths = new Set([FORENSIC_RECOVERY_MANIFEST, "checksums.sha256", ...payloadPaths]);
+  const archivePaths = await listFiles(root);
+  const archivePathSet = new Set(archivePaths);
+  for (const relative of archivePaths) {
+    const normalized = canonicalBackupPath(relative);
+    if (!allowedPaths.has(normalized)) {
+      throw new DomainError("VALIDATION_FAILED", `Forensic recovery bundle contains undeclared payload ${normalized}.`, 422);
+    }
+  }
+  for (const expected of allowedPaths) {
+    if (!archivePathSet.has(expected)) {
+      throw new DomainError("VALIDATION_FAILED", `Forensic recovery file is missing: ${expected}.`, 422);
+    }
+  }
+  const requiredChecksums = new Set([FORENSIC_RECOVERY_MANIFEST, ...payloadPaths]);
+  if (checksums.size !== requiredChecksums.size) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery checksum coverage is not exact.", 422);
+  }
+  for (const required of requiredChecksums) {
+    if (!checksums.has(required)) {
+      throw new DomainError("VALIDATION_FAILED", `Forensic recovery checksum is missing: ${required}.`, 422);
+    }
+  }
+  for (const file of manifest.files) {
+    const actual = await fileDigest(path.join(root, ...file.path.split("/")));
+    if (actual.sizeBytes !== file.sizeBytes || actual.sha256 !== file.sha256
+      || checksums.get(file.path) !== actual.sha256) {
+      throw new DomainError("VALIDATION_FAILED", `Forensic recovery checksum failed: ${file.path}.`, 422);
+    }
+  }
+  return {
+    valid: true,
+    manifest,
+    extractedBytes: metrics.expandedBytes,
+    entryCount: metrics.entryCount,
+  };
 }
 
 function restoreErrorMessage(error: unknown): string {
@@ -1727,7 +2412,7 @@ async function recoverExistingRestoreJournal(destination: string, requestedBundl
 
 export class BackupManager {
   constructor(
-    private readonly database: DesignerDatabase,
+    private readonly database: Pick<DesignerDatabase, "sqlite">,
     private readonly dataDirectory: string,
     private readonly backupDirectory: string,
     readonly rasterVerifier?: BackupRasterVerifier,
@@ -1821,10 +2506,114 @@ export class BackupManager {
   }
 }
 
-export async function verifyBackupBundle(
+function deterministicRecoveryFilename(namespace: string): string {
+  const digest = createHash("sha256").update(namespace).digest("hex").slice(0, 24);
+  const decimal = BigInt(`0x${digest}`).toString(10).padStart(29, "0");
+  return `formaspec-backup-1970-01-01T00-00-00-000Z-${decimal}.tar`;
+}
+
+export async function createForensicRecoveryBundle(
+  dataDirectory: string,
+  backupDirectory: string,
+  operationId: string,
+  _now: () => Date = () => new Date(),
+): Promise<ForensicRecoveryBundleResult> {
+  if (!/^restore_[A-Za-z0-9][A-Za-z0-9_-]{7,111}$/.test(operationId)) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery operation ID is invalid.", 422);
+  }
+  const backupRoot = path.resolve(backupDirectory);
+  await fs.promises.mkdir(backupRoot, { recursive: true, mode: 0o700 });
+  const backupRootStat = await fs.promises.lstat(backupRoot);
+  if (!backupRootStat.isDirectory() || backupRootStat.isSymbolicLink()) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery backup root must be a real directory.", 422);
+  }
+  const staging = path.join(backupRoot, `.forensic-${randomUUID()}`);
+  const bundleStaging = path.join(backupRoot, `.forensic-bundle-${randomUUID()}`);
+  const temporaryBundle = path.join(bundleStaging, "bundle.tar");
+  const filename = deterministicRecoveryFilename(`safety\0${operationId}`);
+  const destination = path.join(backupRoot, filename);
+  // The durable restore-operation record carries the operator timestamp. Keep
+  // snapshot bytes deterministic so a crash before state publication can
+  // safely recreate and compare the same operation's forensic bundle.
+  const createdAt = new Date(0).toISOString();
+  await fs.promises.mkdir(staging, { mode: 0o700 });
+  await fs.promises.mkdir(bundleStaging, { mode: 0o700 });
+  try {
+    const sourceBytes = await regularFileBytes(path.resolve(dataDirectory));
+    await requireFilesystemCapacity(
+      backupRoot,
+      sourceBytes,
+      2,
+      "capturing the forensic recovery snapshot",
+    );
+    await copyForensicDataTree(dataDirectory, staging);
+    const payloadFiles = (await listFiles(path.join(staging, FORENSIC_RECOVERY_PAYLOAD_ROOT)))
+      .map((relative) => `${FORENSIC_RECOVERY_PAYLOAD_ROOT}/${relative}`);
+    const files = await Promise.all(payloadFiles.map(async (relative) => {
+      const digest = await fileDigest(path.join(staging, ...relative.split("/")));
+      return { path: relative, sizeBytes: digest.sizeBytes, sha256: digest.sha256 };
+    }));
+    const manifest: ForensicRecoveryManifest = {
+      format: FORENSIC_RECOVERY_FORMAT,
+      version: FORENSIC_RECOVERY_VERSION,
+      operationId,
+      createdAt,
+      files,
+    };
+    await fs.promises.writeFile(
+      path.join(staging, FORENSIC_RECOVERY_MANIFEST),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    const checksumSources = await listFiles(staging);
+    const checksumLines = await Promise.all(checksumSources.map(async (relative) => {
+      const digest = await fileDigest(path.join(staging, ...relative.split("/")));
+      return `${digest.sha256}  ${portablePath(relative)}`;
+    }));
+    await fs.promises.writeFile(
+      path.join(staging, "checksums.sha256"),
+      `${checksumLines.sort().join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    const stagedBytes = await regularFileBytes(staging);
+    await requireFilesystemCapacity(backupRoot, stagedBytes, 2, "creating the forensic recovery snapshot");
+    await writeDeterministicTar(staging, temporaryBundle);
+    const digest = await fileDigest(temporaryBundle);
+    if (await pathExists(destination)) {
+      const existing = await fs.promises.lstat(destination);
+      if (!existing.isFile() || existing.isSymbolicLink()) {
+        throw new DomainError("VALIDATION_FAILED", "Forensic recovery destination is not a regular file.", 422);
+      }
+      const existingDigest = await fileDigest(destination);
+      if (existingDigest.sha256 !== digest.sha256 || existingDigest.sizeBytes !== digest.sizeBytes) {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "Forensic recovery operation already has different safety bytes.", 409);
+      }
+      await fs.promises.rm(temporaryBundle, { force: true });
+    } else {
+      await fs.promises.rename(temporaryBundle, destination);
+      await fs.promises.chmod(destination, 0o400);
+      await syncDirectory(backupRoot);
+    }
+    const verification = await verifyForensicRecoveryBundle(destination, { expectedOperationId: operationId });
+    const finalDigest = await fileDigest(destination);
+    return {
+      path: destination,
+      filename,
+      bundleSha256: finalDigest.sha256,
+      sizeBytes: finalDigest.sizeBytes,
+      createdAt,
+      verification,
+    };
+  } finally {
+    await fs.promises.rm(staging, { recursive: true, force: true });
+    await fs.promises.rm(bundleStaging, { recursive: true, force: true });
+  }
+}
+
+export async function inspectBackupBundle(
   bundlePath: string,
   options: BackupVerificationOptions = {},
-): Promise<BackupVerificationResult> {
+): Promise<BackupInspectionResult> {
   const resolved = path.resolve(bundlePath);
   const source = await fs.promises.lstat(resolved).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") throw new DomainError("NOT_FOUND", "Backup bundle is unavailable.", 404);
@@ -1845,7 +2634,60 @@ export async function verifyBackupBundle(
   const temporary = path.join(path.dirname(resolved), `.verify-${randomUUID()}`);
   try {
     const metrics = await extractTar(resolved, temporary);
-    return await verifyExtractedBackup(temporary, metrics, options);
+    const verification = await verifyExtractedBackup(temporary, metrics, options);
+    const database = new Database(path.join(temporary, "database.sqlite"), { readonly: true, fileMustExist: true });
+    let organizationIds: string[];
+    try {
+      database.pragma("query_only = ON");
+      const organizationsTable = database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'organizations'",
+      ).get();
+      organizationIds = organizationsTable
+        ? (database.prepare("SELECT id FROM organizations ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id)
+        : ["organization_legacy"];
+    } finally {
+      database.close();
+    }
+    if (organizationIds.length < 1 || organizationIds.length > 16
+      || organizationIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/.test(id))) {
+      throw new DomainError("VALIDATION_FAILED", "Backup organization inventory is invalid.", 422);
+    }
+    return {
+      verification,
+      organizationIds,
+    };
+  } finally {
+    await fs.promises.rm(temporary, { recursive: true, force: true });
+  }
+}
+
+export async function verifyBackupBundle(
+  bundlePath: string,
+  options: BackupVerificationOptions = {},
+): Promise<BackupVerificationResult> {
+  return (await inspectBackupBundle(bundlePath, options)).verification;
+}
+
+export async function verifyForensicRecoveryBundle(
+  bundlePath: string,
+  options: { expectedOperationId?: string } = {},
+): Promise<ForensicRecoveryVerificationResult> {
+  const resolved = path.resolve(bundlePath);
+  const source = await fs.promises.lstat(resolved).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new DomainError("NOT_FOUND", "Forensic recovery bundle is unavailable.", 404);
+    throw error;
+  });
+  if (!source.isFile() || source.isSymbolicLink()) {
+    throw new DomainError("VALIDATION_FAILED", "Forensic recovery bundle must be a regular non-symbolic file.", 422);
+  }
+  if (source.size > MAX_BACKUP_EXPANDED_BYTES) {
+    throw new DomainError("PAYLOAD_TOO_LARGE", "Forensic recovery bundle exceeds the configured size limit.", 413);
+  }
+  await requireFilesystemCapacity(path.dirname(resolved), source.size, 1, "verifying the forensic recovery snapshot");
+  const temporary = path.join(path.dirname(resolved), `.verify-${randomUUID()}`);
+  try {
+    const metrics = await extractTar(resolved, temporary);
+    return await verifyExtractedForensicRecovery(temporary, metrics, options.expectedOperationId);
   } finally {
     await fs.promises.rm(temporary, { recursive: true, force: true });
   }
@@ -2017,6 +2859,51 @@ export async function verifyPinnedBackupBundle(
   }
 }
 
+export async function verifyPinnedForensicRecoveryBundle(
+  bundlePath: string,
+  options: {
+    expectedSource: ExpectedRestoreSource;
+    sourcePinDirectory?: string;
+    expectedOperationId?: string;
+  },
+): Promise<{
+  verification: ForensicRecoveryVerificationResult;
+  bundleSha256: string;
+  sizeBytes: number;
+}> {
+  const pinnedSource = await pinRestoreSource(
+    bundlePath,
+    options.expectedSource,
+    options.sourcePinDirectory,
+  );
+  let primaryError: unknown;
+  try {
+    const verification = await verifyForensicRecoveryBundle(pinnedSource.path, {
+      ...(options.expectedOperationId ? { expectedOperationId: options.expectedOperationId } : {}),
+    });
+    return {
+      verification,
+      bundleSha256: pinnedSource.sha256,
+      sizeBytes: pinnedSource.sizeBytes,
+    };
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try {
+      await pinnedSource.release();
+    } catch (cleanupError) {
+      if (primaryError !== undefined) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          "Forensic recovery verification failed and its private pinned source could not be cleaned up.",
+        );
+      }
+      throw cleanupError;
+    }
+  }
+}
+
 export async function openPinnedBackupStream(
   bundlePath: string,
   options: {
@@ -2076,6 +2963,8 @@ export async function restoreVerifiedBackup(
     sourcePinDirectory?: string;
     rasterVerifier?: BackupRasterVerifier;
     requireRasterVerifier?: boolean;
+    sourceFormat?: "formaspec-backup" | "forensic-recovery";
+    expectedForensicOperationId?: string;
   },
 ): Promise<void> {
   if (options.databaseClosed !== true) throw new DomainError("VALIDATION_FAILED", "Restore requires the database service to be stopped.", 409);
@@ -2118,12 +3007,21 @@ export async function restoreVerifiedBackup(
     await cleanupRestoreJournal(destination);
     return;
   }
-  await verifyBackupBundle(pinnedSource.path, {
-    ...(options.rasterVerifier ? { rasterVerifier: options.rasterVerifier } : {}),
-    ...(options.requireRasterVerifier === undefined
-      ? {}
-      : { requireRasterVerifier: options.requireRasterVerifier }),
-  });
+  const sourceFormat = options.sourceFormat ?? "formaspec-backup";
+  if (sourceFormat === "forensic-recovery") {
+    await verifyForensicRecoveryBundle(pinnedSource.path, {
+      ...(options.expectedForensicOperationId
+        ? { expectedOperationId: options.expectedForensicOperationId }
+        : {}),
+    });
+  } else {
+    await verifyBackupBundle(pinnedSource.path, {
+      ...(options.rasterVerifier ? { rasterVerifier: options.rasterVerifier } : {}),
+      ...(options.requireRasterVerifier === undefined
+        ? {}
+        : { requireRasterVerifier: options.requireRasterVerifier }),
+    });
+  }
   await requireFilesystemCapacity(
     destination,
     pinnedSource.sizeBytes,
@@ -2166,20 +3064,35 @@ export async function restoreVerifiedBackup(
   let cutoverStarted = false;
   try {
     await extractTar(pinnedSource.path, locations.candidate);
-    await fs.promises.rm(path.join(locations.candidate, "backup-manifest.json"), { force: true });
     await fs.promises.rm(path.join(locations.candidate, "checksums.sha256"), { force: true });
-    await fs.promises.rm(path.join(locations.candidate, "asset-manifest.json"), { force: true });
-    if (await pathExists(path.join(locations.candidate, "database.sqlite"))) {
-      await moveWithoutReplacement(
-        path.join(locations.candidate, "database.sqlite"),
-        path.join(locations.candidate, "designer.sqlite"),
-      );
-    }
-    if (await pathExists(path.join(locations.candidate, "organization-config.yaml"))) {
-      await moveWithoutReplacement(
-        path.join(locations.candidate, "organization-config.yaml"),
-        path.join(locations.candidate, "organization.formaspec.yaml"),
-      );
+    if (sourceFormat === "forensic-recovery") {
+      await fs.promises.rm(path.join(locations.candidate, FORENSIC_RECOVERY_MANIFEST), { force: true });
+      const payloadRoot = path.join(locations.candidate, FORENSIC_RECOVERY_PAYLOAD_ROOT);
+      if (await pathExists(payloadRoot)) {
+        const payloadEntries = await topLevelEntries(payloadRoot);
+        for (const entry of payloadEntries) {
+          await moveWithoutReplacement(
+            path.join(payloadRoot, entry),
+            path.join(locations.candidate, entry),
+          );
+        }
+        await fs.promises.rmdir(payloadRoot);
+      }
+    } else {
+      await fs.promises.rm(path.join(locations.candidate, "backup-manifest.json"), { force: true });
+      await fs.promises.rm(path.join(locations.candidate, "asset-manifest.json"), { force: true });
+      if (await pathExists(path.join(locations.candidate, "database.sqlite"))) {
+        await moveWithoutReplacement(
+          path.join(locations.candidate, "database.sqlite"),
+          path.join(locations.candidate, "designer.sqlite"),
+        );
+      }
+      if (await pathExists(path.join(locations.candidate, "organization-config.yaml"))) {
+        await moveWithoutReplacement(
+          path.join(locations.candidate, "organization-config.yaml"),
+          path.join(locations.candidate, "organization.formaspec.yaml"),
+        );
+      }
     }
 
     journal.candidateEntries = await topLevelEntries(locations.candidate);

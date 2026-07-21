@@ -14,10 +14,10 @@ const CODEX_REQUESTED_SCOPES = [
   "product_spec:read", "product_spec:preview", "product_spec:write",
   "planning:read", "planning:write",
   "task:read", "task:create", "task:claim", "task:update",
-  "design_system:read", "workspace:inventory:read", "workspace:inventory:write", "handoff:read",
+  "design_system:read", "workspace:inventory:read", "workspace:inventory:write",
+  "implementation_mapping:read", "implementation_mapping:write", "handoff:read",
   "redesign:read", "redesign:assessment", "redesign:review",
   "redesign:interview", "redesign:proposal", "redesign:design", "redesign:handoff",
-  "redesign:approve", "redesign:implement", "redesign:cancel",
 ] as const;
 const ALLOWED_REQUEST_HEADERS = [
   "accept",
@@ -146,6 +146,51 @@ interface AutomaticCodexConnectionPolicy {
   scopes: string[];
   expiresInSeconds: number;
   projectIds: string[];
+}
+
+interface StoredGrantAuthorizationContext {
+  role: "agent";
+  scopes: string[];
+  projectIds: string[];
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
+}
+
+async function readStoredGrantAuthorizationContext(
+  apiOrigin: URL,
+  token: string,
+  fetchImplementation: typeof fetch,
+): Promise<StoredGrantAuthorizationContext | null> {
+  try {
+    const response = await fetchImplementation(new URL("/api/agent-authorization-context", apiOrigin), {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      redirect: "error",
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return null;
+    }
+    const body = recordValue(await response.json());
+    if (body === null
+      || Object.keys(body).some((key) => key !== "role" && key !== "scopes" && key !== "projectIds")
+      || body.role !== "agent") {
+      return null;
+    }
+    const scopes = stringArray(body.scopes);
+    const projectIds = stringArray(body.projectIds);
+    if (scopes === null || projectIds === null) return null;
+    return { role: "agent", scopes, projectIds };
+  } catch {
+    return null;
+  }
 }
 
 async function readAutomaticCodexConnectionPolicy(
@@ -301,19 +346,32 @@ async function authorizeAgentConnection(
     });
     if (probe.ok) {
       await probe.body?.cancel();
-      return {
-        connectionId: "stored",
-        status: "active",
-        expiresAt: null,
-        credentialStored: true,
-        reused: true,
-      };
+      const authorizationContext = await readStoredGrantAuthorizationContext(
+        apiOrigin,
+        existingToken,
+        fetchImplementation,
+      );
+      if (authorizationContext
+        && sameStringSet(authorizationContext.scopes, policy.scopes)
+        && sameStringSet(authorizationContext.projectIds, policy.projectIds)) {
+        return {
+          connectionId: "stored",
+          status: "active",
+          expiresAt: null,
+          credentialStored: true,
+          reused: true,
+        };
+      }
+      await credentialStore.clear();
+      existingToken = null;
+    } else {
+      await probe.body?.cancel();
+      if (probe.status !== 401 && probe.status !== 403 && probe.status !== 410) {
+        throw new Error("The stored FormaSpec grant could not be verified.");
+      }
+      await credentialStore.clear();
+      existingToken = null;
     }
-    await probe.body?.cancel();
-    if (probe.status !== 401 && probe.status !== 403 && probe.status !== 410) {
-      throw new Error("The stored FormaSpec grant could not be verified.");
-    }
-    await credentialStore.clear();
   }
 
   const connectionResponse = await fetchImplementation(new URL("/api/agent-connections", apiOrigin), {

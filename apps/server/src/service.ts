@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
 import {
+  DesignDocumentV2Schema,
+  FORMASPEC_FOUNDATION_RELEASE_ID,
+  FORMASPEC_FOUNDATION_SYSTEM_ID,
+  FORMASPEC_FOUNDATION_VERSION,
   migrateDesignDocumentV1ToV2,
   type AnyDesignDocument,
   type DesignDocument,
@@ -26,9 +30,18 @@ import {
   resolveAccess,
 } from "./authorization.js";
 import type { DesignerDatabase } from "./db/database.js";
+import {
+  assessDesignSystemReleaseCompatibility,
+  type DesignSystemDiagnostic,
+} from "./design-system-service.js";
 import { DomainError } from "./errors.js";
+import {
+  canReadDesignerEvent,
+  designerEventSqlVisibility,
+  hasDesignerEventReadAccess,
+} from "./event-authorization.js";
 import type { DesignerEvent, DesignerEventType, EventHub } from "./events.js";
-import { createId, hashPayload } from "./ids.js";
+import { canonicalJson, createId, hashPayload } from "./ids.js";
 import { loadOrganizationPolicy } from "./organization-policy-model.js";
 import {
   DEFAULT_RUNTIME_VERSIONS,
@@ -123,6 +136,7 @@ const MAX_OPERATION_COUNT = 500;
 const MAX_OPERATION_JSON_BYTES = 1_048_576;
 const ACTIVE_CONTEXT_WINDOW_MS = 5 * 60 * 1000;
 const V2_MIGRATION_ACTOR_ID = "system_formaspec_v2_migration";
+const RESTORE_DESIGN_SYSTEM_PIN_PRESERVED = "RESTORE_DESIGN_SYSTEM_PIN_PRESERVED";
 
 interface ContextRow {
   actor_id: string;
@@ -163,6 +177,36 @@ export interface RevisionResult {
   };
   diagnostics: Diagnostic[];
   createdIds: unknown;
+}
+
+export type RestoreDesignSystemStatus =
+  | "not_applicable_v1"
+  | "active_pin_unchanged"
+  | "active_pin_preserved";
+
+export interface RestoreDesignSystemReference {
+  designSystemId: string;
+  releaseId: string;
+  releaseVersion: number;
+}
+
+export interface RestoreDisposition {
+  targetVersion: number;
+  targetRevisionId: string;
+  targetSnapshotHash: string;
+  targetRevisionHash: string;
+  targetSchemaVersion: 1 | 2;
+  designSystem: {
+    status: RestoreDesignSystemStatus;
+    pinSource: "project_design_system_pins" | "formaspec_foundation_default" | null;
+    active: RestoreDesignSystemReference | null;
+    historical: RestoreDesignSystemReference | null;
+    compatibilityDiagnostics: DesignSystemDiagnostic[];
+  };
+}
+
+export interface RestoreRevisionResult extends RevisionResult {
+  restore: RestoreDisposition;
 }
 
 export interface PreviewResult {
@@ -298,6 +342,46 @@ export class DesignerService {
       designs: selected.map(designSummary),
       nextCursor: hasMore ? selected.at(-1)?.updated_at ?? null : null,
     };
+  }
+
+  authorizeDesignList(actorId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") assertScope(access, "design:read");
+  }
+
+  authorizeDesignCreation(actorId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    assertDesignWrite(access);
+    if (access.projectIds.length > 0) {
+      throw new DomainError("FORBIDDEN", "A project-restricted agent grant cannot create projects.", 403);
+    }
+  }
+
+  authorizeDesignRead(actorId: string, designId: string): void {
+    this.requireDesign(actorId, designId);
+  }
+
+  authorizeDesignRevision(actorId: string, designId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    assertDesignWrite(access);
+    this.requireDesign(actorId, designId);
+  }
+
+  authorizeDesignMigration(actorId: string, designId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role !== "organization_admin") {
+      throw new DomainError("FORBIDDEN", "Organization Administrator permission is required for document migration.", 403);
+    }
+    this.requireDesign(actorId, designId);
+  }
+
+  authorizeDesignRestore(actorId: string, designId: string): void {
+    this.authorizeDesignRevision(actorId, designId);
+  }
+
+  authorizeContextRead(actorId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") assertScope(access, "design:read");
   }
 
   createDesign(actorId: string, input: {
@@ -441,14 +525,28 @@ export class DesignerService {
     }));
   }
 
+  authorizePreviewCreation(actorId: string, designId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") assertScope(access, "design:preview");
+    this.requireDesign(actorId, designId);
+  }
+
+  authorizePreviewRead(actorId: string, designId: string, previewId: string, taskId?: string): void {
+    this.loadPreview(actorId, designId, previewId, taskId, "read");
+  }
+
+  authorizePreviewCommit(actorId: string, designId: string, previewId: string, taskId?: string): void {
+    assertDesignWrite(resolveAccess(this.database.sqlite, actorId));
+    this.loadPreview(actorId, designId, previewId, taskId, "commit");
+  }
+
   createPreview(actorId: string, designId: string, input: {
     baseVersion?: number;
     basePreviewId?: string;
     operations: unknown;
     kind?: PreviewKind;
   }): PreviewResult {
-    const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role === "agent") assertScope(access, "design:preview");
+    this.authorizePreviewCreation(actorId, designId);
     if (!this.database.sqlite.inTransaction) {
       const transaction = this.database.sqlite.transaction(() => this.createPreview(actorId, designId, input));
       return transaction.immediate();
@@ -604,6 +702,119 @@ export class DesignerService {
     };
   }
 
+  /**
+   * Persist an exact server-resolved ordinary preview. This is used for
+   * operations whose immutable inputs live behind an authorized service
+   * boundary (for example a component source in a pinned design-system
+   * release) and therefore cannot be accepted as caller-supplied trees.
+   */
+  createPreparedPreview(actorId: string, designId: string, input: {
+    baseVersion: number;
+    operations: unknown;
+    document: AnyDesignDocument;
+    diagnostics?: Diagnostic[];
+    createdIds?: unknown;
+  }): PreviewResult {
+    this.authorizePreviewCreation(actorId, designId);
+    if (!this.database.sqlite.inTransaction) {
+      const transaction = this.database.sqlite.transaction(() => this.createPreparedPreview(actorId, designId, input));
+      return transaction.immediate();
+    }
+    assertOperationPayloadLimit(input.operations, "preview");
+    const operations = parseOperations(input.operations);
+    if (hasArchiveOperations(operations)) {
+      throw new DomainError("VALIDATION_FAILED", "A prepared ordinary preview cannot contain archive operations.", 422);
+    }
+    const currentDesign = this.requireDesign(actorId, designId);
+    if (currentDesign.current_version !== input.baseVersion) {
+      throw this.versionConflict(input.baseVersion, currentDesign.current_version, currentDesign.current_revision_id);
+    }
+    const baseRevision = this.requireRevision(designId, input.baseVersion);
+    if (!baseRevision.snapshot_hash) throw new DomainError("INTERNAL_ERROR", "Base revision snapshot is missing.", 500);
+    const prepared = parseDocument(input.document);
+    if (prepared.id !== designId) {
+      throw new DomainError("VALIDATION_FAILED", "Prepared preview document identity does not match the project.", 422);
+    }
+
+    const now = new Date().toISOString();
+    const canonicalDocument = forceDocumentRevision(prepared, input.baseVersion + 1, now);
+    const diagnostics = input.diagnostics ?? collectDiagnostics(canonicalDocument);
+    const canCommit = !diagnostics.some((item) => item.severity === "error");
+    const status: PreviewStatus = canCommit ? "ready" : "blocked";
+    const operationsHash = operationHash(operations);
+    const previewId = createId("preview");
+    const expiresAt = new Date(Date.now() + this.previewTtlSeconds * 1000).toISOString();
+    const resultSnapshot = storeSnapshot(this.database.sqlite, canonicalDocument, now);
+    const baseDocument = parseDocument(JSON.parse(readSnapshotJson(this.database.sqlite, baseRevision.snapshot_hash)));
+    const changedIds = changedNodeIds(baseDocument, canonicalDocument);
+    const createdIds = input.createdIds ?? {
+      pages: [],
+      nodes: [],
+      tokens: [],
+      assets: [],
+      prototype_links: [],
+    };
+
+    this.database.sqlite.prepare(
+      `INSERT INTO previews
+       (id, organization_id, design_id, actor_id, root_base_version, base_revision_id, base_snapshot_hash, base_preview_id,
+        operation_hash, operations_json, document_json, result_snapshot_hash, diagnostics_json,
+        temporary_id_map_json, created_ids_json, changed_node_ids_json, command_engine_version,
+        renderer_version, font_bundle_version, status, kind, committable, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, 'ordinary', ?, ?, ?)`,
+    ).run(
+      previewId,
+      currentDesign.organization_id,
+      designId,
+      actorId,
+      input.baseVersion,
+      baseRevision.id,
+      baseRevision.snapshot_hash,
+      operationsHash,
+      JSON.stringify(operations),
+      resultSnapshot.canonicalJson,
+      resultSnapshot.hash,
+      JSON.stringify(diagnostics),
+      JSON.stringify(createdIds),
+      JSON.stringify(changedIds),
+      this.versions.commandEngine,
+      this.versions.renderer,
+      this.versions.fontBundle,
+      status,
+      canCommit ? 1 : 0,
+      now,
+      expiresAt,
+    );
+
+    return {
+      id: previewId,
+      designId,
+      rootBaseVersion: input.baseVersion,
+      baseRevisionId: baseRevision.id,
+      baseSnapshotHash: baseRevision.snapshot_hash,
+      basePreviewId: null,
+      operationHash: operationsHash,
+      resultSnapshotHash: resultSnapshot.hash,
+      expiresAt,
+      canCommit,
+      destructive: false,
+      kind: "ordinary",
+      status,
+      changedNodeIds: changedIds,
+      versions: {
+        commandEngine: this.versions.commandEngine,
+        renderer: this.versions.renderer,
+        fontBundle: this.versions.fontBundle,
+      },
+      committedRevisionId: null,
+      diagnostics,
+      createdIds: { temporary: {}, created: createdIds },
+      document: editorDocument(canonicalDocument),
+      canonicalDocument,
+      schemaVersion: canonicalDocument.schema_version,
+    };
+  }
+
   getPreview(
     actorId: string,
     designId: string,
@@ -655,6 +866,7 @@ export class DesignerService {
     kind?: PreviewKind;
     taskId?: string;
   }): RevisionResult {
+    this.authorizePreviewCommit(actorId, designId, input.previewId, input.taskId);
     const scope = `design:${designId}:commit-preview`;
     this.database.cleanupPreviews();
     const normalizedInput = {
@@ -682,6 +894,7 @@ export class DesignerService {
     idempotencyKey: string;
     message?: string;
   }): RevisionResult {
+    this.authorizeDesignRevision(actorId, designId);
     assertOperationPayloadLimit(input.operations, "revision");
     const operations = parseOperations(input.operations);
     if (hasArchiveOperations(operations)) {
@@ -714,15 +927,100 @@ export class DesignerService {
     });
   }
 
+  commitDesignSystemPinRevisionInTransaction(actorId: string, designId: string, input: {
+    expectedBaseVersion: number;
+    expectedBaseRevisionId: string;
+    designSystemId: string;
+    releaseId: string;
+    releaseVersion: number;
+    message: string;
+    now?: string;
+  }): RevisionResult | null {
+    if (!this.database.sqlite.inTransaction) {
+      throw new DomainError("INTERNAL_ERROR", "Design-system pin revisions require an active transaction.", 500);
+    }
+    const design = this.requireDesign(actorId, designId);
+    if (design.current_version !== input.expectedBaseVersion || design.current_revision_id !== input.expectedBaseRevisionId) {
+      throw this.versionConflict(input.expectedBaseVersion, design.current_version, design.current_revision_id);
+    }
+    const current = this.getDesign(actorId, designId, input.expectedBaseVersion).canonicalDocument;
+    if (current.schema_version !== 2) return null;
+    const now = input.now ?? new Date().toISOString();
+    const document = DesignDocumentV2Schema.parse({
+      ...current,
+      revision: input.expectedBaseVersion + 1,
+      design_system: {
+        design_system_id: input.designSystemId,
+        release_id: input.releaseId,
+        release_version: input.releaseVersion,
+      },
+      updated_at: now,
+    });
+    return this.commitDocumentInTransaction(actorId, designId, {
+      baseVersion: input.expectedBaseVersion,
+      document,
+      operations: [],
+      diagnostics: collectDiagnostics(document),
+      createdIds: [],
+      message: input.message,
+    });
+  }
+
+  commitExactSnapshotInTransaction(actorId: string, designId: string, input: {
+    expectedBaseVersion: number;
+    expectedBaseRevisionId: string;
+    expectedBaseSnapshotHash: string;
+    resultSnapshotHash: string;
+    message: string;
+    diagnostics?: Diagnostic[];
+    createdIds?: unknown;
+  }): RevisionResult {
+    if (!this.database.sqlite.inTransaction) {
+      throw new DomainError("INTERNAL_ERROR", "Exact snapshot commits require an active transaction.", 500);
+    }
+    const design = this.requireDesign(actorId, designId);
+    if (design.current_version !== input.expectedBaseVersion
+      || design.current_revision_id !== input.expectedBaseRevisionId) {
+      throw this.versionConflict(input.expectedBaseVersion, design.current_version, design.current_revision_id);
+    }
+    const baseRevision = this.requireRevision(designId, input.expectedBaseVersion);
+    if (baseRevision.id !== input.expectedBaseRevisionId
+      || baseRevision.snapshot_hash !== input.expectedBaseSnapshotHash) {
+      throw new DomainError("VERSION_CONFLICT", "The exact commit base snapshot changed after preview.", 409, {
+        retryable: true,
+        details: {
+          expectedRevisionId: input.expectedBaseRevisionId,
+          currentRevisionId: baseRevision.id,
+          expectedSnapshotHash: input.expectedBaseSnapshotHash,
+          currentSnapshotHash: baseRevision.snapshot_hash,
+        },
+      });
+    }
+    const document = parseDocument(JSON.parse(readSnapshotJson(this.database.sqlite, input.resultSnapshotHash)));
+    if (document.id !== designId || document.revision !== input.expectedBaseVersion + 1) {
+      throw new DomainError("VALIDATION_FAILED", "The exact commit snapshot identity or revision is invalid.", 422);
+    }
+    if (canonicalSnapshot(document).hash !== input.resultSnapshotHash) {
+      throw new DomainError("VALIDATION_FAILED", "The exact commit snapshot hash is invalid.", 422);
+    }
+    return this.commitDocumentInTransaction(actorId, designId, {
+      baseVersion: input.expectedBaseVersion,
+      document,
+      operations: [],
+      expectedSnapshotHash: input.resultSnapshotHash,
+      diagnostics: input.diagnostics ?? collectDiagnostics(document),
+      createdIds: input.createdIds ?? [],
+      message: input.message,
+    });
+  }
+
   migrateDesignHeadToV2(actorId: string, designId: string, input: {
     expectedBaseVersion: number;
     backupId: string;
     idempotencyKey: string;
   }): HeadMigrationResult {
+    this.authorizeDesignMigration(actorId, designId);
     const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role !== "organization_admin") {
-      throw new DomainError("FORBIDDEN", "Organization Administrator permission is required for document migration.", 403);
-    }
     const scope = `design:${designId}:migrate-v2`;
     return this.withIdempotency(actorId, scope, input.idempotencyKey, input, () => {
       const design = this.requireDesign(actorId, designId);
@@ -737,7 +1035,20 @@ export class DesignerService {
           result: current,
         };
       }
-      this.requireVerifiedMigrationBackup(access.organizationId, input.backupId, design.updated_at);
+      const existingPin = this.database.sqlite.prepare(
+        `SELECT design_system_id, release_id, release_version, pinned_at
+         FROM project_design_system_pins
+         WHERE design_id = ? AND organization_id = ?`,
+      ).get(designId, access.organizationId) as {
+        design_system_id: string;
+        release_id: string;
+        release_version: number;
+        pinned_at: string;
+      } | undefined;
+      this.requireVerifiedMigrationBackup(access.organizationId, input.backupId, {
+        designUpdatedAt: design.updated_at,
+        projectPinUpdatedAt: existingPin?.pinned_at ?? null,
+      });
       const parent = this.requireRevision(designId, input.expectedBaseVersion);
       if (!parent.snapshot_hash) throw new DomainError("INTERNAL_ERROR", "Migration source snapshot metadata is missing.", 500);
       const now = new Date().toISOString();
@@ -746,12 +1057,20 @@ export class DesignerService {
         revision: input.expectedBaseVersion + 1,
         updated_at: now,
       };
-      const migrated = migrateDesignDocumentV1ToV2(source, {
+      const migratedBase = migrateDesignDocumentV1ToV2(source, {
         migratedAt: now,
         sourceRevisionId: parent.id,
         sourceSnapshotHash: parent.snapshot_hash,
         verifiedBackupId: input.backupId,
       });
+      const migrated = existingPin ? DesignDocumentV2Schema.parse({
+        ...migratedBase,
+        design_system: {
+          design_system_id: existingPin.design_system_id,
+          release_id: existingPin.release_id,
+          release_version: existingPin.release_version,
+        },
+      }) : migratedBase;
       const result = this.commitDocumentInTransaction(actorId, designId, {
         baseVersion: input.expectedBaseVersion,
         document: migrated,
@@ -770,6 +1089,11 @@ export class DesignerService {
         targetRevisionId: result.revision.id,
         targetSnapshotHash: result.revision.snapshotHash,
         verifiedBackupId: input.backupId,
+        ...(existingPin ? {
+          preservedDesignSystemId: existingPin.design_system_id,
+          preservedReleaseId: existingPin.release_id,
+          preservedReleaseVersion: existingPin.release_version,
+        } : {}),
       });
       return { migrated: true, backupId: input.backupId, result };
     });
@@ -779,24 +1103,197 @@ export class DesignerService {
     targetVersion: number;
     expectedBaseVersion: number;
     idempotencyKey: string;
-  }): RevisionResult {
+  }): RestoreRevisionResult {
+    this.authorizeDesignRestore(actorId, designId);
     const scope = `design:${designId}:restore`;
     return this.withIdempotency(actorId, scope, input.idempotencyKey, input, () => {
+      const access = resolveAccess(this.database.sqlite, actorId);
       const design = this.requireDesign(actorId, designId);
       if (design.current_version !== input.expectedBaseVersion) {
         throw this.versionConflict(input.expectedBaseVersion, design.current_version, design.current_revision_id);
       }
-      const target = this.getDesign(actorId, designId, input.targetVersion).canonicalDocument;
+      const targetResult = this.getDesign(actorId, designId, input.targetVersion);
+      const target = targetResult.canonicalDocument;
       const now = new Date().toISOString();
-      return this.commitDocumentInTransaction(actorId, designId, {
+      const restored = this.restoreTargetWithActiveDesignSystemPin(design, target, input.targetVersion);
+      const restore: RestoreDisposition = {
+        targetVersion: input.targetVersion,
+        targetRevisionId: targetResult.revision.id,
+        targetSnapshotHash: targetResult.revision.snapshotHash,
+        targetRevisionHash: targetResult.revision.revisionHash,
+        targetSchemaVersion: target.schema_version,
+        designSystem: restored.designSystem,
+      };
+      const provenance = {
+        kind: "formaspec-revision-restore",
+        formatVersion: 1,
+        targetVersion: restore.targetVersion,
+        targetRevisionId: restore.targetRevisionId,
+        targetSnapshotHash: restore.targetSnapshotHash,
+        targetRevisionHash: restore.targetRevisionHash,
+        targetSchemaVersion: restore.targetSchemaVersion,
+        designSystem: {
+          status: restore.designSystem.status,
+          pinSource: restore.designSystem.pinSource,
+          active: restore.designSystem.active,
+          historical: restore.designSystem.historical,
+        },
+      };
+      const document = forceDocumentRevision(restored.document, input.expectedBaseVersion + 1, now);
+      const result = this.commitDocumentInTransaction(actorId, designId, {
         baseVersion: input.expectedBaseVersion,
-        document: forceDocumentRevision(target, input.expectedBaseVersion + 1, now),
+        document,
         operations: [],
-        diagnostics: collectDiagnostics(target),
+        diagnostics: [...collectDiagnostics(document), ...restored.diagnostics],
         createdIds: [],
-        message: `Restore version ${input.targetVersion}`,
+        message: `Restore version ${input.targetVersion}; provenance=${canonicalJson(provenance)}`,
       });
+      appendAuditEvent(this.database.sqlite, access, "design.revision.restore", "revision", result.revision.id, {
+        designId,
+        revisionId: result.revision.id,
+        revisionVersion: result.revision.version,
+        revisionHash: result.revision.revisionHash,
+        ...provenance,
+        compatibilityDiagnostics: restore.designSystem.compatibilityDiagnostics,
+      });
+      return { ...result, restore };
     });
+  }
+
+  private restoreTargetWithActiveDesignSystemPin(
+    design: DesignRow,
+    target: AnyDesignDocument,
+    targetVersion: number,
+  ): {
+    document: AnyDesignDocument;
+    diagnostics: Diagnostic[];
+    designSystem: RestoreDisposition["designSystem"];
+  } {
+    if (target.schema_version !== 2) return {
+      document: target,
+      diagnostics: [],
+      designSystem: {
+        status: "not_applicable_v1",
+        pinSource: null,
+        active: null,
+        historical: null,
+        compatibilityDiagnostics: [],
+      },
+    };
+    const persistedPin = this.database.sqlite.prepare(
+      `SELECT design_system_id, release_id, release_version
+       FROM project_design_system_pins
+       WHERE design_id = ? AND organization_id = ?`,
+    ).get(design.id, design.organization_id) as {
+      design_system_id: string;
+      release_id: string;
+      release_version: number;
+    } | undefined;
+    const currentPin = persistedPin ?? {
+      design_system_id: FORMASPEC_FOUNDATION_SYSTEM_ID,
+      release_id: FORMASPEC_FOUNDATION_RELEASE_ID,
+      release_version: FORMASPEC_FOUNDATION_VERSION,
+    };
+    const historicalPin = target.design_system;
+    const compatibility = assessDesignSystemReleaseCompatibility(this.database, {
+      organizationId: design.organization_id,
+      sourceReleaseId: historicalPin.release_id,
+      targetReleaseId: currentPin.release_id,
+      document: target,
+    });
+    if (compatibility.source.designSystemId !== historicalPin.design_system_id
+      || compatibility.source.version !== historicalPin.release_version
+      || compatibility.target.designSystemId !== currentPin.design_system_id
+      || compatibility.target.version !== currentPin.release_version) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "Design-system release metadata is inconsistent with the restore source or active project pin.",
+        422,
+        {
+          details: {
+            targetVersion,
+            historicalPin,
+            activePin: currentPin,
+            resolvedHistoricalRelease: compatibility.source,
+            resolvedActiveRelease: compatibility.target,
+          },
+        },
+      );
+    }
+    const blockingDiagnostics = compatibility.diagnostics.filter((diagnostic) => diagnostic.safety === "blocked");
+    if (blockingDiagnostics.length > 0) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "The restored V2 content is incompatible with the active project design-system release.",
+        422,
+        {
+          details: {
+            reasonCode: "RESTORE_DESIGN_SYSTEM_INCOMPATIBLE",
+            targetVersion,
+            historicalPin,
+            activePin: currentPin,
+            diagnostics: blockingDiagnostics,
+          },
+        },
+      );
+    }
+    const pinSource = persistedPin ? "project_design_system_pins" as const : "formaspec_foundation_default" as const;
+    const samePin = historicalPin.design_system_id === currentPin.design_system_id
+      && historicalPin.release_id === currentPin.release_id
+      && historicalPin.release_version === currentPin.release_version;
+    const active = {
+      designSystemId: currentPin.design_system_id,
+      releaseId: currentPin.release_id,
+      releaseVersion: currentPin.release_version,
+    };
+    const historical = {
+      designSystemId: historicalPin.design_system_id,
+      releaseId: historicalPin.release_id,
+      releaseVersion: historicalPin.release_version,
+    };
+    const document = samePin ? target : DesignDocumentV2Schema.parse({ ...target, design_system: currentPin });
+    const compatibilityDiagnostics = compatibility.diagnostics;
+    const normalizedCompatibilityDiagnostics: Diagnostic[] = compatibilityDiagnostics.map((diagnostic) => ({
+      ...diagnostic,
+    }));
+    if (samePin) return {
+      document,
+      diagnostics: normalizedCompatibilityDiagnostics,
+      designSystem: {
+        status: "active_pin_unchanged",
+        pinSource,
+        active,
+        historical,
+        compatibilityDiagnostics,
+      },
+    };
+    return {
+      document,
+      diagnostics: [
+        ...normalizedCompatibilityDiagnostics,
+        {
+          severity: "warning",
+          code: RESTORE_DESIGN_SYSTEM_PIN_PRESERVED,
+          message: `Restored content from version ${targetVersion} while preserving active design-system release ${currentPin.release_id}; historical release ${historicalPin.release_id} was not restored.`,
+          path: "design_system",
+          target_version: targetVersion,
+          pin_source: pinSource,
+          active_design_system_id: currentPin.design_system_id,
+          active_release_id: currentPin.release_id,
+          active_release_version: currentPin.release_version,
+          historical_design_system_id: historicalPin.design_system_id,
+          historical_release_id: historicalPin.release_id,
+          historical_release_version: historicalPin.release_version,
+        },
+      ],
+      designSystem: {
+        status: "active_pin_preserved",
+        pinSource,
+        active,
+        historical,
+        compatibilityDiagnostics,
+      },
+    };
   }
 
   history(actorId: string, designId: string, limit = 50): Array<Record<string, unknown>> {
@@ -831,22 +1328,25 @@ export class DesignerService {
 
   latestEventId(actorId: string): number {
     const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role === "agent") assertScope(access, "design:read");
-    const projectClause = access.projectIds.length > 0
-      ? ` AND json_extract(payload_json, '$.designId') IN (${access.projectIds.map(() => "?").join(", ")})`
-      : "";
+    this.assertEventReadAccess(access);
+    const visibility = designerEventSqlVisibility(access);
     const row = this.database.sqlite.prepare(
       `SELECT MAX(id) AS id FROM event_outbox
-       WHERE organization_id = ? AND (workspace = 1 OR actor_id = ?)${projectClause}`,
-    ).get(access.organizationId, actorId, ...access.projectIds) as { id: number | null };
+       WHERE organization_id = ? AND (workspace = 1 OR actor_id = ?) AND ${visibility.sql}`,
+    ).get(access.organizationId, actorId, ...visibility.parameters) as { id: number | null };
     return row.id ?? 0;
+  }
+
+  authorizeEventRead(actorId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertEventReadAccess(access);
   }
 
   eventOrganizationId(actorId: string): string {
     return resolveAccess(this.database.sqlite, actorId).organizationId;
   }
 
-  assetNormalizationOrganizationId(actorId: string, designId?: string): string {
+  authorizeAssetUpload(actorId: string, designId?: string): string {
     const access = resolveAccess(this.database.sqlite, actorId);
     assertDesignWrite(access);
     if (access.projectIds.length > 0 && !designId) {
@@ -860,28 +1360,30 @@ export class DesignerService {
     return access.organizationId;
   }
 
+  assetNormalizationOrganizationId(actorId: string, designId?: string): string {
+    return this.authorizeAssetUpload(actorId, designId);
+  }
+
   eventProjectIds(actorId: string): string[] {
     return resolveAccess(this.database.sqlite, actorId).projectIds;
   }
 
   eventsSince(actorId: string, afterId: number, limit = 500): EventReplayResult {
     const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role === "agent") assertScope(access, "design:read");
+    this.assertEventReadAccess(access);
     const boundedLimit = Math.max(1, Math.min(limit, 1000));
-    const projectClause = access.projectIds.length > 0
-      ? ` AND json_extract(payload_json, '$.designId') IN (${access.projectIds.map(() => "?").join(", ")})`
-      : "";
+    const visibility = designerEventSqlVisibility(access);
     const bounds = this.database.sqlite.prepare(
       `SELECT MIN(id) AS earliest_id, MAX(id) AS latest_id
        FROM event_outbox
-       WHERE organization_id = ? AND (workspace = 1 OR actor_id = ?)${projectClause}`,
-    ).get(access.organizationId, actorId, ...access.projectIds) as { earliest_id: number | null; latest_id: number | null };
+       WHERE organization_id = ? AND (workspace = 1 OR actor_id = ?) AND ${visibility.sql}`,
+    ).get(access.organizationId, actorId, ...visibility.parameters) as { earliest_id: number | null; latest_id: number | null };
     const rows = this.database.sqlite.prepare(
       `SELECT id, organization_id, actor_id, event_type, payload_json, created_at
        FROM event_outbox
-       WHERE id > ? AND organization_id = ? AND (workspace = 1 OR actor_id = ?)${projectClause}
+       WHERE id > ? AND organization_id = ? AND (workspace = 1 OR actor_id = ?) AND ${visibility.sql}
        ORDER BY id LIMIT ?`,
-    ).all(afterId, access.organizationId, actorId, ...access.projectIds, boundedLimit + 1) as Array<{
+    ).all(afterId, access.organizationId, actorId, ...visibility.parameters, boundedLimit + 1) as Array<{
       id: number;
       organization_id: string;
       actor_id: string;
@@ -893,7 +1395,7 @@ export class DesignerService {
     return {
       events: rows.slice(0, boundedLimit).map((row) => {
         const data = JSON.parse(row.payload_json) as Record<string, unknown>;
-        return {
+        const event: DesignerEvent = {
           id: row.id,
           type: row.event_type,
           actorId: row.actor_id,
@@ -902,6 +1404,10 @@ export class DesignerService {
           timestamp: row.created_at,
           data,
         };
+        if (!canReadDesignerEvent(access, event)) {
+          throw new DomainError("INTERNAL_ERROR", "Persisted event visibility does not match the authorization policy.", 500);
+        }
+        return event;
       }),
       earliestId: bounds.earliest_id,
       latestId: bounds.latest_id ?? 0,
@@ -933,11 +1439,15 @@ export class DesignerService {
     if (!options.workspaceFallback) return { designId: null, pageId: null, selection: [], updatedAt: null };
 
     const activeSince = new Date(Date.now() - ACTIVE_CONTEXT_WINDOW_MS).toISOString();
+    const projectClause = access.projectIds.length > 0
+      ? ` AND design_id IN (${access.projectIds.map(() => "?").join(", ")})`
+      : "";
     const rows = this.database.sqlite.prepare(
       `SELECT * FROM contexts
        WHERE organization_id = ? AND design_id IS NOT NULL AND updated_at >= ? AND actor_id <> '__workspace_context__'
+         ${projectClause}
        ORDER BY updated_at DESC LIMIT 50`,
-    ).all(access.organizationId, activeSince) as ContextRow[];
+    ).all(access.organizationId, activeSince, ...access.projectIds) as ContextRow[];
 
     if (options.contextRef) {
       const selected = rows.find((row) => contextRefForActor(row.actor_id) === options.contextRef);
@@ -976,9 +1486,15 @@ export class DesignerService {
     return toResult(candidates[0]!, "workspace");
   }
 
-  setContext(actorId: string, input: { designId?: string | null; pageId?: string | null; selection?: string[] }): Record<string, unknown> {
+  authorizeContextWrite(actorId: string, designId?: string): void {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "context:write");
+    if (designId) this.requireDesign(actorId, designId);
+  }
+
+  setContext(actorId: string, input: { designId?: string | null; pageId?: string | null; selection?: string[] }): Record<string, unknown> {
+    this.authorizeContextWrite(actorId, input.designId ?? undefined);
+    const access = resolveAccess(this.database.sqlite, actorId);
     if (!input.designId && (input.pageId || (input.selection?.length ?? 0) > 0)) {
       throw new DomainError("VALIDATION_FAILED", "pageId and selection require a designId.", 422);
     }
@@ -1080,8 +1596,8 @@ export class DesignerService {
   }
 
   getAsset(actorId: string, assetId: string): AssetRecord {
+    this.authorizeAssetRead(actorId, assetId);
     const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role === "agent") assertScope(access, "design:read");
     const row = this.database.sqlite.prepare("SELECT * FROM assets WHERE id = ?").get(assetId) as {
       id: string;
       design_id: string | null;
@@ -1122,6 +1638,18 @@ export class DesignerService {
       data: stored ?? quarantinedBlob,
       createdAt: row.created_at,
     };
+  }
+
+  authorizeAssetRead(actorId: string, assetId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") assertScope(access, "design:read");
+    const projectClause = access.projectIds.length > 0
+      ? ` AND design_id IN (${access.projectIds.map(() => "?").join(", ")})`
+      : "";
+    const row = this.database.sqlite.prepare(
+      `SELECT id FROM assets WHERE id = ? AND organization_id = ?${projectClause}`,
+    ).get(assetId, access.organizationId, ...access.projectIds) as { id: string } | undefined;
+    if (!row) throw new DomainError("NOT_FOUND", "Asset not found.", 404);
   }
 
   private commitPreviewInTransaction(actorId: string, designId: string, input: {
@@ -1339,7 +1867,11 @@ export class DesignerService {
     return result;
   }
 
-  private requireVerifiedMigrationBackup(organizationId: string, backupId: string, designUpdatedAt: string): void {
+  private requireVerifiedMigrationBackup(
+    organizationId: string,
+    backupId: string,
+    source: { designUpdatedAt: string; projectPinUpdatedAt: string | null },
+  ): void {
     const row = this.database.sqlite.prepare(
       `SELECT status, bundle_sha256, manifest_json, verification_json, created_at, verified_at, completed_at, size_bytes
        FROM backup_records WHERE id = ? AND organization_id = ?`,
@@ -1366,9 +1898,20 @@ export class DesignerService {
     const verifiedManifest = verification?.manifest && typeof verification.manifest === "object"
       ? verification.manifest
       : null;
+    const designUpdatedAtMs = Date.parse(source.designUpdatedAt);
+    const projectPinUpdatedAtMs = source.projectPinUpdatedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(source.projectPinUpdatedAt);
+    const sourceWatermarkMs = Number.isFinite(designUpdatedAtMs) && Number.isFinite(projectPinUpdatedAtMs)
+      ? Math.max(designUpdatedAtMs, projectPinUpdatedAtMs)
+      : source.projectPinUpdatedAt === null && Number.isFinite(designUpdatedAtMs)
+        ? designUpdatedAtMs
+        : Number.NaN;
+    const sourceWatermark = Number.isFinite(sourceWatermarkMs)
+      ? new Date(sourceWatermarkMs).toISOString()
+      : null;
     const coversCurrentHead = manifestCreatedAt !== null
       && Number.isFinite(Date.parse(manifestCreatedAt))
-      && Date.parse(manifestCreatedAt) >= Date.parse(designUpdatedAt);
+      && sourceWatermark !== null
+      && Date.parse(manifestCreatedAt) >= sourceWatermarkMs;
     const valid = row.status === "valid"
       && typeof row.bundle_sha256 === "string"
       && /^[a-f0-9]{64}$/.test(row.bundle_sha256)
@@ -1390,15 +1933,17 @@ export class DesignerService {
     if (!valid) {
       throw new DomainError(
         "VALIDATION_FAILED",
-        "V1 to V2 migration requires a verified backup that conservatively covers the current project head.",
+        "V1 to V2 migration requires a verified backup that conservatively covers the current project head and pin state.",
         409,
         {
           details: {
             backupId,
             backupStatus: row.status,
             backupCreatedAt: manifestCreatedAt,
-            designUpdatedAt,
-            recovery: "Create and verify a new backup after the latest design commit, then retry the migration.",
+            designUpdatedAt: source.designUpdatedAt,
+            projectPinUpdatedAt: source.projectPinUpdatedAt,
+            sourceWatermark,
+            recovery: "Create and verify a new backup after the latest design or project-pin change, then retry the migration.",
           },
         },
       );
@@ -1515,6 +2060,12 @@ export class DesignerService {
     return row;
   }
 
+  private assertEventReadAccess(access: ReturnType<typeof resolveAccess>): void {
+    if (!hasDesignerEventReadAccess(access)) {
+      throw new DomainError("FORBIDDEN", "The principal cannot read any event family within its authorization boundary.", 403);
+    }
+  }
+
   private documentForRevision(revision: RevisionRow): AnyDesignDocument {
     const json = revision.snapshot_hash
       ? readSnapshotJson(this.database.sqlite, revision.snapshot_hash)
@@ -1523,12 +2074,29 @@ export class DesignerService {
   }
 
   private versionConflict(expected: number, current: number, currentRevisionId: string): DomainError {
+    const latestRevision = this.database.sqlite.prepare(
+      `SELECT id, version, actor_id, created_at, message
+       FROM revisions WHERE id = ?`,
+    ).get(currentRevisionId) as {
+      id: string;
+      version: number;
+      actor_id: string;
+      created_at: string;
+      message: string | null;
+    } | undefined;
     return new DomainError("VERSION_CONFLICT", `Expected version ${expected}, but the current version is ${current}.`, 409, {
       retryable: true,
       details: {
         expectedVersion: expected,
         currentVersion: current,
         currentRevisionId,
+        latestRevision: latestRevision ? {
+          id: latestRevision.id,
+          version: latestRevision.version,
+          actorId: latestRevision.actor_id,
+          createdAt: latestRevision.created_at,
+          ...(latestRevision.message === null ? {} : { message: latestRevision.message.slice(0, 1_000) }),
+        } : null,
         recovery: "Read the current design and create a new preview or revision.",
       },
     });

@@ -7,6 +7,7 @@ import { useDesignerStore } from "../store/designer-store";
 describe("canonical web editor contract", () => {
   beforeEach(() => {
     const document = createStarterDocument({ preset: "phone", name: "Test design" });
+    document.revision = 1;
     useDesignerStore.setState({
       document,
       baseVersion: document.revision,
@@ -18,6 +19,7 @@ describe("canonical web editor contract", () => {
       error: null,
       saveState: "saved",
       saving: false,
+      conflictRecovery: null,
     });
   });
 
@@ -157,17 +159,68 @@ describe("canonical web editor contract", () => {
   it("stops on version conflicts instead of automatically rebasing local edits", async () => {
     const state = useDesignerStore.getState();
     const frameId = state.document!.pages[0]!.children[0]!;
+    const baseRevisionId = "revision_fixture_000001";
+    useDesignerStore.setState({
+      projects: [{
+        id: state.document!.id,
+        name: state.document!.name,
+        version: state.baseVersion,
+        revisionId: baseRevisionId,
+        updatedAt: state.document!.updated_at,
+      }],
+    });
     state.updateNode(frameId, { name: "Local unsaved title" });
     const originalVersion = useDesignerStore.getState().baseVersion;
+    const latest = structuredClone(state.document!);
+    latest.revision = originalVersion + 1;
+    latest.nodes[frameId]!.name = "Server title";
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      error: {
-        code: "VERSION_CONFLICT",
-        message: "The design changed.",
-        retryable: true,
-        details: { currentVersion: originalVersion + 1 },
-      },
-    }), { status: 409, headers: { "content-type": "application/json" } }));
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          code: "VERSION_CONFLICT",
+          message: "The design changed.",
+          retryable: true,
+          details: {
+            currentVersion: originalVersion + 1,
+            currentRevisionId: "revision_fixture_000002",
+            currentActor: "usr_codex_fixture",
+            currentRevisionCreatedAt: "2026-07-21T10:00:00.000Z",
+          },
+        },
+      }), { status: 409, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(latest), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        duplicated: true,
+        source: {
+          projectId: state.document!.id,
+          baseVersion: originalVersion,
+          baseRevisionId,
+          baseSnapshotHash: "a".repeat(64),
+          baseRevisionHash: "b".repeat(64),
+          currentVersion: originalVersion + 1,
+          currentRevisionId: "revision_fixture_000002",
+        },
+        project: {
+          id: "document_duplicate_fixture_000001",
+          name: "Recovered copy",
+          version: 1,
+          revisionId: "revision_duplicate_fixture_000001",
+          snapshotHash: "c".repeat(64),
+          operationHash: "d".repeat(64),
+          revisionHash: "e".repeat(64),
+          schemaVersion: 1,
+          assetCount: 0,
+          productSpecificationVersion: null,
+          implementationMappingCount: 0,
+        },
+        idMapping: { [state.document!.id]: "document_duplicate_fixture_000001" },
+        diagnostics: [],
+        deepLink: "/design/document_duplicate_fixture_000001",
+      }), { status: 201, headers: { "content-type": "application/json" } }));
 
     await useDesignerStore.getState().save();
     const conflicted = useDesignerStore.getState();
@@ -176,6 +229,47 @@ describe("canonical web editor contract", () => {
     expect(conflicted.pendingOperations).toHaveLength(1);
     expect(conflicted.document!.nodes[frameId]!.name).toBe("Local unsaved title");
     expect(conflicted.notice).toContain("no automatic merge");
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(conflicted.conflictRecovery).toMatchObject({
+      design: { id: state.document!.id },
+      baseRevision: { version: originalVersion, id: baseRevisionId },
+      latestRevision: {
+        version: originalVersion + 1,
+        id: "revision_fixture_000002",
+        actor: "usr_codex_fixture",
+        createdAt: "2026-07-21T10:00:00.000Z",
+      },
+      operations: conflicted.pendingOperations,
+    });
+    expect(conflicted.conflictRecovery?.operationHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const recovery = conflicted.conflictRecovery;
+    await conflicted.loadLatestForConflict();
+    const reloaded = useDesignerStore.getState();
+    expect(reloaded.document!.nodes[frameId]!.name).toBe("Server title");
+    expect(reloaded.baseVersion).toBe(originalVersion + 1);
+    expect(reloaded.pendingOperations).toEqual([]);
+    expect(reloaded.saveState).toBe("saved");
+    expect(reloaded.conflictRecovery).toEqual(recovery);
+    reloaded.updateNode(frameId, { name: "Must remain blocked" });
+    expect(useDesignerStore.getState().document!.nodes[frameId]!.name).toBe("Server title");
+    expect(useDesignerStore.getState().notice).toContain("explicitly discard");
+
+    const duplicated = await reloaded.duplicateConflictDraft("Recovered copy");
+    expect(duplicated?.project.id, useDesignerStore.getState().error ?? undefined).toBe("document_duplicate_fixture_000001");
+    expect(useDesignerStore.getState().conflictRecovery).toEqual(recovery);
+    const duplicateRequest = fetch.mock.calls[2]!;
+    expect(duplicateRequest[0]).toBe(`/api/designs/${encodeURIComponent(state.document!.id)}/conflict-recovery/duplicate`);
+    const body = JSON.parse(String((duplicateRequest[1] as RequestInit).body)) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      baseVersion: originalVersion,
+      operations: recovery?.operations,
+      name: "Recovered copy",
+    });
+    expect(String(body.idempotencyKey)).toMatch(/^conflict-duplicate_/);
+
+    await useDesignerStore.getState().discardConflictRecovery();
+    expect(useDesignerStore.getState().conflictRecovery).toBeNull();
+    expect(useDesignerStore.getState().document!.nodes[frameId]!.name).toBe("Server title");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
   });
 });

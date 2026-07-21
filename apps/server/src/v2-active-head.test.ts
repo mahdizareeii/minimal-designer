@@ -105,6 +105,65 @@ describe("V1/V2 active-head compatibility", () => {
     });
   });
 
+  it("keeps typed V2 accessibility edits authoritative across generic metadata operation order", () => {
+    const ids = createSequentialIdFactory("v2a11yorder");
+    const source = createStarterDocument({ now: "2026-01-01T00:00:00.000Z", idFactory: ids });
+    source.revision = 1;
+    const frameId = source.pages[0]!.children[0]!;
+    const frame = source.nodes[frameId]!;
+    if (frame.type !== "frame") throw new Error("Expected starter frame");
+    frame.role = "button";
+    const migrated = migrateDesignDocumentV1ToV2(source, { migratedAt: "2026-02-01T00:00:00.000Z" });
+
+    const cases = [
+      {
+        expected: "Typed before generic",
+        operations: [
+          { type: "update_node" as const, node_id: frameId, patch: { accessibility_label: "Typed before generic" } },
+          { type: "update_node" as const, node_id: frameId, patch: {
+            metadata: { source: "generic-after", accessible_label: "Generic after" },
+            metadata_mode: "replace" as const,
+          } },
+        ],
+      },
+      {
+        expected: "Typed after generic",
+        operations: [
+          { type: "update_node" as const, node_id: frameId, patch: {
+            metadata: { source: "generic-before", accessible_label: "Generic before" },
+            metadata_mode: "replace" as const,
+          } },
+          { type: "update_node" as const, node_id: frameId, patch: { accessibility_label: "Typed after generic" } },
+        ],
+      },
+      {
+        expected: "Last explicit label",
+        operations: [
+          { type: "update_node" as const, node_id: frameId, patch: { accessibility_label: "First explicit label" } },
+          { type: "update_node" as const, node_id: frameId, patch: { accessibility_label: "Last explicit label" } },
+          { type: "update_node" as const, node_id: frameId, patch: {
+            metadata: { source: "generic-last", accessible_label: "Generic last" },
+            metadata_mode: "replace" as const,
+          } },
+        ],
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const result = applyOperations(migrated, testCase.operations, {
+        expectedRevision: migrated.revision,
+        now: `2026-03-0${index + 1}T00:00:00.000Z`,
+      });
+      if (result.document.schema_version !== 2) throw new Error("Expected V2 result.");
+      expect(result.document.nodes[frameId]?.semantics).toMatchObject({
+        role: "button",
+        accessibility_label: testCase.expected,
+      });
+      expect(result.document.nodes[frameId]?.metadata).not.toHaveProperty("accessible_label");
+      expect(result.diagnostics.some((item) => item.code === "interactive_accessible_name_missing")).toBe(false);
+    }
+  });
+
   it("creates one backup-gated system migration revision and keeps V1 history immutable", () => {
     const opened = openService();
     try {
@@ -271,11 +330,29 @@ describe("V1/V2 active-head compatibility", () => {
 
       const preview = opened.service.createPreview("local", created.design.id, {
         baseVersion: 2,
-        operations: [{ type: "update_node", node_id: frameId, patch: { name: "Edited V2 frame" } }],
+        operations: [{
+          type: "update_node",
+          node_id: frameId,
+          patch: {
+            name: "Edited V2 frame",
+            role: "button",
+            accessibility_label: "Open checkout",
+          },
+        }],
       });
       expect(preview.schemaVersion).toBe(2);
-      expect(preview.document.nodes[frameId]?.name).toBe("Edited V2 frame");
+      expect(preview.document.nodes[frameId]).toMatchObject({
+        name: "Edited V2 frame",
+        role: "button",
+        metadata: { accessible_label: "Open checkout" },
+      });
       expect(preview.canonicalDocument.schema_version).toBe(2);
+      if (preview.canonicalDocument.schema_version !== 2) throw new Error("Expected V2 preview.");
+      expect(preview.canonicalDocument.nodes[frameId]?.semantics).toMatchObject({
+        role: "button",
+        accessibility_label: "Open checkout",
+      });
+      expect(preview.diagnostics.some((item) => item.code === "interactive_accessible_name_missing")).toBe(false);
       expect(canonicalSnapshot(preview.canonicalDocument).hash).toBe(preview.resultSnapshotHash);
 
       const committed = opened.service.commitPreview("local", created.design.id, {
@@ -285,9 +362,18 @@ describe("V1/V2 active-head compatibility", () => {
         message: "Edit migrated head",
       });
       expect(committed.schemaVersion).toBe(2);
-      expect(committed.document.nodes[frameId]?.name).toBe("Edited V2 frame");
+      expect(committed.document.nodes[frameId]).toMatchObject({
+        name: "Edited V2 frame",
+        role: "button",
+        metadata: { accessible_label: "Open checkout" },
+      });
       expect(committed.canonicalDocument.schema_version).toBe(2);
       if (committed.canonicalDocument.schema_version !== 2) throw new Error("Expected V2 commit.");
+      expect(committed.canonicalDocument.nodes[frameId]?.semantics).toMatchObject({
+        role: "button",
+        accessibility_label: "Open checkout",
+      });
+      expect(committed.diagnostics.some((item) => item.code === "interactive_accessible_name_missing")).toBe(false);
       expect(committed.canonicalDocument.product_specification).toEqual(productSpecification);
       expect(opened.service.getDesign("local", created.design.id, 1).schemaVersion).toBe(1);
       expect(opened.service.getDesign("local", created.design.id).schemaVersion).toBe(2);

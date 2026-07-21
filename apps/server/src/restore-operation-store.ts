@@ -38,6 +38,10 @@ const resultSchema = z.object({
     nonces: z.number().int().nonnegative(),
   }).strict(),
 }).strict();
+const recoverySchema = z.object({
+  mode: z.literal("offline"),
+  safetyKind: z.literal("forensic"),
+}).strict();
 const common = z.object({
   format: z.literal("formaspec-restore-operation"),
   version: z.literal(1),
@@ -49,6 +53,7 @@ const common = z.object({
     auditEventId: z.number().int().nonnegative(),
     outboxEventId: z.number().int().nonnegative(),
   }).strict(),
+  recovery: recoverySchema.optional(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 }).strict();

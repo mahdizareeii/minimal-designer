@@ -1,0 +1,77 @@
+name: Docker schema 11 smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-schema11-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-smoke:
+    name: Disposable schema-12 topology and cross-browser smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+      - name: Validate Compose topology
+        run: docker compose config --quiet
+      - name: Build and exercise disposable Docker topology
+        env:
+          CI: "1"
+          FORMASPEC_CI_EVIDENCE_DIR: artifacts/ci/docker-schema11
+          FORMASPEC_CI_SOURCE_SHA: ${{ github.sha }}
+        run: node scripts/ci-docker-schema11-smoke.mjs
+      - name: Exercise Firefox and WebKit in the exact built image
+        env:
+          CI: "1"
+          FORMASPEC_CI_EVIDENCE_DIR: artifacts/ci/cross-browser-docker
+          FORMASPEC_CI_IMAGE: formaspec/server:local
+          FORMASPEC_CI_SOURCE_SHA: ${{ github.sha }}
+        run: node scripts/ci-cross-browser-docker-smoke.mjs
+      - name: Restore a copied verified bundle into an independent clean project
+        env:
+          CI: "1"
+          FORMASPEC_CI_EVIDENCE_DIR: artifacts/ci/offhost-restore-simulation
+          FORMASPEC_CI_SOURCE_SHA: ${{ github.sha }}
+        run: node scripts/ci-offhost-restore-smoke.mjs
+      - name: Retain Docker smoke evidence and failure logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-docker-schema11-${{ github.sha }}
+          path: artifacts/ci/docker-schema11/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain Firefox and WebKit Docker evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-cross-browser-docker-${{ github.sha }}
+          path: artifacts/ci/cross-browser-docker/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain copied-bundle recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-offhost-restore-${{ github.sha }}
+          path: artifacts/ci/offhost-restore-simulation/
+          if-no-files-found: error
+          retention-days: 30

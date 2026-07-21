@@ -107,7 +107,7 @@ describe("renderer worker IPC", () => {
       renderer: "playwright",
       contract: {
         ipcProtocolVersion: 2,
-        rendererVersion: "2",
+        rendererVersion: "3",
         rasterNormalizerVersion: "1",
         maxBytes: normalizationLimits.maxBytes,
         maxPixels: normalizationLimits.maxPixels,

@@ -479,6 +479,8 @@ export const componentDefinitions = sqliteTable("component_definitions", {
   status: text("status").notNull(),
   definitionJson: text("definition_json").notNull(),
   replacementComponentId: text("replacement_component_id"),
+  sourceJson: text("source_json"),
+  sourceHash: text("source_hash"),
   createdBy: text("created_by").notNull(),
   createdAt: text("created_at").notNull(),
 }, (table) => [primaryKey({ columns: [table.designSystemId, table.componentId, table.version] })]);
@@ -511,6 +513,9 @@ export const designSystemUpgradePreviews = sqliteTable("design_system_upgrade_pr
   designId: text("design_id").notNull(),
   currentReleaseId: text("current_release_id"),
   targetReleaseId: text("target_release_id").notNull(),
+  baseRevisionId: text("base_revision_id"),
+  baseSnapshotHash: text("base_snapshot_hash"),
+  resultSnapshotHash: text("result_snapshot_hash"),
   diagnosticsJson: text("diagnostics_json").notNull(),
   previewHash: text("preview_hash").notNull(),
   status: text("status").notNull(),
@@ -581,6 +586,23 @@ export const handoffTransitions = sqliteTable("handoff_transitions", {
   detailsJson: text("details_json").notNull(),
   createdAt: text("created_at").notNull(),
 });
+
+export const handoffExecutionDecisions = sqliteTable("handoff_execution_decisions", {
+  id: text("id").primaryKey(),
+  handoffId: text("handoff_id").notNull(),
+  handoffVersion: integer("handoff_version").notNull(),
+  sequence: integer("sequence").notNull(),
+  kind: text("kind").notNull(),
+  outcome: text("outcome").notNull(),
+  supersedesDecisionId: text("supersedes_decision_id"),
+  evidenceJson: text("evidence_json").notNull(),
+  evidenceHash: text("evidence_hash").notNull(),
+  actorId: text("actor_id").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("handoff_execution_decisions_handoff_sequence_unique").on(
+  table.handoffId,
+  table.sequence,
+)]);
 
 export const redesignAssessments = sqliteTable("redesign_assessments", {
   id: text("id").primaryKey(),

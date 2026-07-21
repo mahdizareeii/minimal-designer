@@ -2,7 +2,6 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
   AnyDesignDocumentSchema,
-  NodeIdSchema,
   PLANNING_SECTIONS,
   PlanningSectionSchema,
   PlanningSessionSchema,
@@ -13,6 +12,16 @@ import {
 } from "@designer/core";
 import { z } from "zod";
 
+import {
+  AGENT_TASK_EXPECTED_OUTPUTS,
+  AGENT_TASK_STATUSES,
+  AgentTaskCompletionSchemas,
+  AgentTaskExpectedOutputSchema,
+  AgentTaskSelectionSchema,
+  AgentTaskTransitionDataSchema,
+  type AgentTaskExpectedOutput,
+  type AgentTaskStatus,
+} from "./agent-task-schema.js";
 import {
   appendAuditEvent,
   assertProjectAccess,
@@ -35,40 +44,14 @@ import { canonicalProductSpecification } from "./product-spec-persistence.js";
 const MAX_TRANSITION_DATA_BYTES = 65_536;
 const IDEMPOTENCY_TTL_MS = 86_400_000;
 
-export const AGENT_TASK_EXPECTED_OUTPUTS = [
-  "design_preview",
-  "design_commit",
-  "product_spec_preview",
-  "product_spec_commit",
-] as const;
-export type AgentTaskExpectedOutput = (typeof AGENT_TASK_EXPECTED_OUTPUTS)[number];
-
-export const AGENT_TASK_STATUSES = [
-  "queued",
-  "claimed",
-  "in_progress",
-  "awaiting_approval",
-  "completed",
-  "failed",
-  "cancelled",
-  "expired",
-] as const;
-export type AgentTaskStatus = (typeof AGENT_TASK_STATUSES)[number];
+export { AGENT_TASK_EXPECTED_OUTPUTS, AGENT_TASK_STATUSES };
+export type { AgentTaskExpectedOutput, AgentTaskStatus };
 
 export type PlanningSection = (typeof PLANNING_SECTIONS)[number];
 export type PlanningStatus = "draft" | "in_progress" | "ready_for_review" | "completed" | "cancelled";
 export type AgentConnectionStatus = "pending" | "active" | "expired" | "revoked" | "error";
 
 export const AGENT_CONNECTION_SCOPES = ORGANIZATION_AGENT_SCOPES;
-
-const taskExpectedOutputSchema = z.enum(AGENT_TASK_EXPECTED_OUTPUTS);
-const taskSelectionSchema = z.array(NodeIdSchema).max(500);
-const taskCompletionSchemas = {
-  design_preview: z.object({ previewId: z.string().min(1).max(240) }).strict(),
-  design_commit: z.object({ revisionId: z.string().min(1).max(240) }).strict(),
-  product_spec_preview: z.object({ previewId: z.string().min(1).max(240) }).strict(),
-  product_spec_commit: z.object({ version: z.number().int().positive() }).strict(),
-} satisfies Record<AgentTaskExpectedOutput, z.ZodTypeAny>;
 
 const taskTransitionGraph: Record<AgentTaskStatus, readonly AgentTaskStatus[]> = {
   queued: ["claimed", "cancelled", "expired"],
@@ -286,6 +269,12 @@ export interface AgentConnectionResult {
   updatedAt: string;
 }
 
+export interface OwnAuthorizationContextResult {
+  role: OrganizationRole;
+  scopes: string[];
+  projectIds: string[];
+}
+
 export interface PairingChallenge {
   connection: AgentConnectionResult;
   nonce: string;
@@ -352,7 +341,11 @@ function assertSeconds(value: number, label: string, minimum: number, maximum: n
   }
 }
 
-function parseInput<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+function parseInput<Schema extends z.ZodTypeAny>(
+  schema: Schema,
+  value: unknown,
+  label: string,
+): z.output<Schema> {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new DomainError("VALIDATION_FAILED", `${label} is invalid.`, 422, {
@@ -406,7 +399,7 @@ export class EnterpriseService {
     }
     const diagnostics = this.productSpecificationDiagnostics(canonical.specification);
     const transaction = this.database.sqlite.transaction(() => {
-      this.expireProductSpecificationPreviews(this.nowIso());
+      this.expireProductSpecificationPreviews(access, design.id, this.nowIso());
       const currentVersion = this.currentProductSpecificationVersion(design.id);
       if (currentVersion !== input.baseVersion) throw this.versionConflict(input.baseVersion, currentVersion, "product specification");
       const now = this.nowIso();
@@ -450,7 +443,8 @@ export class EnterpriseService {
 
   readProductSpecificationPreview(actorId: string, designId: string, previewId: string): ProductSpecificationPreviewResult {
     const { access, design } = this.requireDesign(actorId, designId, "product_spec:read");
-    this.expireProductSpecificationPreviews(this.nowIso());
+    this.requireProductSpecificationPreviewRow(access, design.id, previewId);
+    this.expireProductSpecificationPreviews(access, design.id, this.nowIso(), previewId);
     const row = this.requireProductSpecificationPreviewRow(access, design.id, previewId);
     if (row.status === "expired") throw new DomainError("PREVIEW_EXPIRED", "The product specification preview expired.", 410, { retryable: true });
     return this.productSpecificationPreviewResult(row);
@@ -467,7 +461,8 @@ export class EnterpriseService {
     this.assertProductSpecificationWrite(access, "product_spec:write");
     const idempotencyKey = boundedText(input.idempotencyKey, "Idempotency key", 240);
     const message = input.message === undefined ? "Commit product specification" : boundedText(input.message, "Commit message", 4_000, true);
-    this.expireProductSpecificationPreviews(this.nowIso());
+    this.requireProductSpecificationPreviewRow(access, design.id, input.previewId);
+    this.expireProductSpecificationPreviews(access, design.id, this.nowIso(), input.previewId);
     return this.withIdempotency(access, `product_spec:${design.id}:commit`, idempotencyKey, {
       previewId: input.previewId,
       expectedBaseVersion: input.expectedBaseVersion,
@@ -546,12 +541,19 @@ export class EnterpriseService {
     return this.productSpecificationResult(this.requireProductSpecificationRow(design.id, requestedVersion));
   }
 
+  authorizePlanningSessionList(actorId: string, designId: string): void {
+    this.requireDesign(actorId, designId, "planning:read");
+  }
+
+  authorizePlanningSessionCreate(actorId: string, designId: string): void {
+    this.requirePlanningWriteDesign(actorId, designId);
+  }
+
   createPlanningSession(actorId: string, input: {
     designId: string;
     idempotencyKey: string;
   }): PlanningSessionResult {
-    const { access, design } = this.requireDesign(actorId, input.designId, "planning:write");
-    this.assertPlanningWrite(access);
+    const { access, design } = this.requirePlanningWriteDesign(actorId, input.designId);
     const key = boundedText(input.idempotencyKey, "Idempotency key", 240);
     return this.withIdempotency(access, `planning:${design.id}:create`, key, input, () => {
       const now = this.nowIso();
@@ -708,6 +710,14 @@ export class EnterpriseService {
     return result;
   }
 
+  authorizeAgentTaskList(actorId: string, designId: string): void {
+    this.requireDesign(actorId, designId, "task:read");
+  }
+
+  authorizeAgentTaskCreate(actorId: string, designId: string): void {
+    this.requireTaskCreateDesign(actorId, designId);
+  }
+
   createAgentTask(actorId: string, input: {
     designId: string;
     brief: string;
@@ -717,11 +727,10 @@ export class EnterpriseService {
     idempotencyKey: string;
     expiresInSeconds?: number;
   }): AgentTaskResult {
-    const { access, design } = this.requireDesign(actorId, input.designId, "task:create");
-    this.assertTaskCreate(access);
+    const { access, design } = this.requireTaskCreateDesign(actorId, input.designId);
     const brief = boundedText(input.brief, "Task brief", 100_000);
-    const selection = parseInput(taskSelectionSchema, input.selection ?? [], "Task selection");
-    const expectedOutput = parseInput(taskExpectedOutputSchema, input.expectedOutput, "Expected task output");
+    const selection = parseInput(AgentTaskSelectionSchema, input.selection ?? [], "Task selection");
+    const expectedOutput = parseInput(AgentTaskExpectedOutputSchema, input.expectedOutput, "Expected task output");
     const expiresInSeconds = input.expiresInSeconds ?? 86_400;
     assertSeconds(expiresInSeconds, "Task expiry", 60, 604_800);
     if (design.current_version !== input.baseVersion) {
@@ -771,18 +780,33 @@ export class EnterpriseService {
   } = {}): AgentTaskResult[] {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "task:read");
+    const designId = input.designId === undefined
+      ? undefined
+      : this.requireDesignForAccess(access, input.designId).id;
     const limit = Math.max(1, Math.min(input.limit ?? 50, 100));
-    const rows = input.designId
-      ? this.database.sqlite.prepare(
-        `SELECT * FROM agent_tasks WHERE organization_id = ? AND design_id = ? ORDER BY created_at DESC LIMIT ?`,
-      ).all(access.organizationId, input.designId, limit) as AgentTaskRow[]
-      : this.database.sqlite.prepare(
-        `SELECT * FROM agent_tasks WHERE organization_id = ? ORDER BY created_at DESC LIMIT ?`,
-      ).all(access.organizationId, limit) as AgentTaskRow[];
-    return rows
-      .filter((row) => access.projectIds.length === 0 || access.projectIds.includes(row.design_id))
-      .map((row) => this.agentTaskResult(row))
-      .filter((task) => input.status === undefined || task.status === input.status);
+    const filters = ["task.organization_id = ?"];
+    const parameters: Array<string | number> = [access.organizationId];
+    if (designId) {
+      filters.push("task.design_id = ?");
+      parameters.push(designId);
+    } else if (access.projectIds.length > 0) {
+      filters.push(`task.design_id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      parameters.push(...access.projectIds);
+    }
+    if (input.status !== undefined) {
+      filters.push(`(
+        SELECT transition.to_status FROM agent_task_transitions transition
+        WHERE transition.task_id = task.id
+        ORDER BY transition.rowid DESC LIMIT 1
+      ) = ?`);
+      parameters.push(input.status);
+    }
+    const rows = this.database.sqlite.prepare(
+      `SELECT task.* FROM agent_tasks task
+       WHERE ${filters.join(" AND ")}
+       ORDER BY task.created_at DESC, task.id DESC LIMIT ?`,
+    ).all(...parameters, limit) as AgentTaskRow[];
+    return rows.map((row) => this.agentTaskResult(row));
   }
 
   claimAgentTask(actorId: string, taskId: string): AgentTaskResult {
@@ -823,10 +847,7 @@ export class EnterpriseService {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "task:update");
     const message = input.message === undefined ? null : boundedText(input.message, "Transition message", 4_000, true);
-    const data = input.data ?? {};
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      throw new DomainError("VALIDATION_FAILED", "Task transition data must be an object.", 422);
-    }
+    const data = parseInput(AgentTaskTransitionDataSchema, input.data ?? {}, "Task transition data");
     if (Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_TRANSITION_DATA_BYTES) {
       throw new DomainError("PAYLOAD_TOO_LARGE", "Task transition data may not exceed 64 KiB.", 413);
     }
@@ -877,6 +898,20 @@ export class EnterpriseService {
     this.flushPendingEventsSafely();
     if (expired) throw new DomainError("TASK_EXPIRED", "The agent task expired.", 410);
     return result;
+  }
+
+  readOwnAuthorizationContext(actorId: string): OwnAuthorizationContextResult {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    return {
+      role: access.role,
+      scopes: [...access.scopes],
+      projectIds: [...access.projectIds],
+    };
+  }
+
+  authorizeAgentConnectionAdministration(actorId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertOrganizationAdmin(access);
   }
 
   createAgentConnection(actorId: string, input: {
@@ -1292,11 +1327,18 @@ export class EnterpriseService {
     return row;
   }
 
-  private expireProductSpecificationPreviews(now: string): void {
+  private expireProductSpecificationPreviews(
+    access: AccessContext,
+    designId: string,
+    now: string,
+    previewId?: string,
+  ): void {
+    const previewClause = previewId === undefined ? "" : " AND id = ?";
     this.database.sqlite.prepare(
       `UPDATE product_spec_previews SET status = 'expired'
-       WHERE expires_at <= ? AND status IN ('ready', 'blocked')`,
-    ).run(now);
+       WHERE organization_id = ? AND design_id = ? AND actor_id = ?
+         AND expires_at <= ? AND status IN ('ready', 'blocked')${previewClause}`,
+    ).run(access.organizationId, designId, access.principalId, now, ...(previewId === undefined ? [] : [previewId]));
   }
 
   private planningSessionResult(row: PlanningSessionRow): PlanningSessionResult {
@@ -1381,9 +1423,9 @@ export class EnterpriseService {
       id: row.id,
       designId: row.design_id,
       brief: row.brief,
-      selection: taskSelectionSchema.parse(JSON.parse(row.selection_json) as unknown),
+      selection: AgentTaskSelectionSchema.parse(JSON.parse(row.selection_json) as unknown),
       baseVersion: row.base_version,
-      expectedOutput: taskExpectedOutputSchema.parse(row.expected_output),
+      expectedOutput: AgentTaskExpectedOutputSchema.parse(row.expected_output),
       status: current.toStatus,
       claimedBy: transitions.find((transition) => transition.toStatus === "claimed")?.actorId ?? null,
       createdBy: row.actor_id,
@@ -1454,7 +1496,7 @@ export class EnterpriseService {
   }
 
   private validateTaskCompletion(task: AgentTaskRow, data: Record<string, unknown>): void {
-    const schema = taskCompletionSchemas[task.expected_output];
+    const schema = AgentTaskCompletionSchemas[task.expected_output];
     const parsed = schema.safeParse(data);
     if (!parsed.success) {
       throw new DomainError("VALIDATION_FAILED", `Completion data does not match expected output ${task.expected_output}.`, 422, {
@@ -1630,6 +1672,24 @@ export class EnterpriseService {
   private requireDesign(actorId: string, designId: string, agentScope: string): { access: AccessContext; design: DesignAccessRow } {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, agentScope);
+    return { access, design: this.requireDesignForAccess(access, designId) };
+  }
+
+  private requirePlanningWriteDesign(actorId: string, designId: string): {
+    access: AccessContext;
+    design: DesignAccessRow;
+  } {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertPlanningWrite(access);
+    return { access, design: this.requireDesignForAccess(access, designId) };
+  }
+
+  private requireTaskCreateDesign(actorId: string, designId: string): {
+    access: AccessContext;
+    design: DesignAccessRow;
+  } {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertTaskCreate(access);
     return { access, design: this.requireDesignForAccess(access, designId) };
   }
 

@@ -12,7 +12,9 @@ import {
   dockerRestoreHealthRequestOptions,
   dockerRestoreStatus,
   restoreDockerBackup,
+  restoreDockerBackupOffline,
   resumeDockerRestore,
+  resumeOfflineDockerRestore,
   rollbackDockerRestore,
   type DockerRestoreOperationStatus,
 } from "./docker-restore.js";
@@ -326,6 +328,55 @@ describe("Docker restore supervision", () => {
     });
   });
 
+  it("uses the exact persisted candidate Compose project for restore verification and one-shot containers", async () => {
+    const root = projectFixture();
+    const composeProject = "formaspeccandidate_restore";
+    const existing = runtimeBinding(root);
+    persistDockerRuntimeBinding(root, {
+      ...existing,
+      composeProject,
+      labels: {
+        designer: { ...existing.labels.designer, project: composeProject },
+        renderer: { ...existing.labels.renderer, project: composeProject },
+      },
+    });
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (_executable, args) => {
+      commands.push([...args]);
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) {
+        if (args.includes("ps") && args.includes("-aq")) {
+          expect(args).toContain(`label=com.docker.compose.project=${composeProject}`);
+          expect(args).not.toContain("label=com.docker.compose.project=minimalappdesigner");
+        }
+        if (args.includes("inspect") && args.some((argument) => argument.includes("{{json .Id}}"))) {
+          const lines = identity.stdout.trim().split(/\r?\n/);
+          const labels = JSON.parse(lines[2]!) as Record<string, string>;
+          labels["com.docker.compose.project"] = composeProject;
+          lines[2] = JSON.stringify(labels);
+          return { ...identity, stdout: `${lines.join("\n")}\n` };
+        }
+        return identity;
+      }
+      if (args.includes("apps/server/dist/restore-control.js") && args.includes("status")) {
+        expect(args).toContain(`--label=com.formaspec.runtime.compose-project=${composeProject}`);
+        expect(args).toContain("--label=com.formaspec.runtime.binding-version=2");
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({ ok: true, status: terminalStatus(false) })}\n`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    await expect(dockerRestoreStatus(root, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+    })).resolves.toMatchObject({ operation: { phase: "reconciled" } });
+    expect(commands.filter((args) => args.includes("ps") && args.includes("-aq"))).toHaveLength(2);
+  });
+
   it("enforces an absolute wall-clock deadline when a health requester never settles", async () => {
     const root = projectFixture();
     const runner: CommandRunner = async (_executable, args) => {
@@ -363,7 +414,386 @@ describe("Docker restore supervision", () => {
       healthTimeoutMs: 5,
       healthPollIntervalMs: 1,
       createOperationId: () => operationId,
-    })).rejects.toThrow(/HEALTHY_PLANNED_RESTORE_ONLY.*offline disaster recovery is not implemented/);
+    })).rejects.toThrow(
+      /HEALTHY_PLANNED_RESTORE_ONLY.*managed backup-ID restore requires a healthy current API.*backup restore offline <bundle> --yes/,
+    );
+  });
+
+  it("streams an explicitly authorized bundle into the isolated offline preparation before cutover", async () => {
+    const root = projectFixture();
+    const sourcePath = path.join(root, "operator-selected-backup.tar");
+    const sourceBytes = Buffer.from("bounded verified offline bundle bytes");
+    fs.writeFileSync(sourcePath, sourceBytes, { mode: 0o600 });
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    const offlineBackupId = `backup_${"c".repeat(40)}`;
+    const offlineSafetyId = `backup_${"d".repeat(40)}`;
+    let maintenance = false;
+    let operation: DockerRestoreOperationStatus["operation"] = null;
+    let streamed = Buffer.alloc(0);
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (_executable, args, options) => {
+      commands.push([...args]);
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        const command = args[controlIndex + 1];
+        if (command === "set") maintenance = true;
+        if (command === "clear") maintenance = false;
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: operation?.phase === "reconciled" ? "verification" : "restore",
+                  operationId,
+                  startedAt: "2026-07-19T12:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+      if (workerIndex >= 0 && args[workerIndex + 1] === "offline-prepare") {
+        expect(args).toContain("--interactive");
+        expect(options?.input).toBeDefined();
+        const chunks: Buffer[] = [];
+        for await (const chunk of options!.input!) chunks.push(Buffer.from(chunk as Buffer | Uint8Array));
+        streamed = Buffer.concat(chunks);
+        operation = {
+          operationId,
+          backupId: offlineBackupId,
+          safetyBackupId: offlineSafetyId,
+          phase: "prepared",
+          createdAt: "2026-07-19T12:00:00.000Z",
+          updatedAt: "2026-07-19T12:00:00.000Z",
+          smoke: null,
+          result: null,
+          errorCode: null,
+          recovery: { mode: "offline", safetyKind: "forensic" },
+        };
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            preparation: {
+              status: "prepared",
+              operationId,
+              backupId: offlineBackupId,
+              organizationId: "organization_legacy",
+              targetFilename: "formaspec-backup-1970-01-01T00-00-00-000Z-1.tar",
+              targetSha256: sourceSha256,
+              targetSizeBytes: sourceBytes.length,
+              safetyBackupId: offlineSafetyId,
+              safetyFilename: "formaspec-backup-1970-01-01T00-00-00-000Z-2.tar",
+              safetySha256: "e".repeat(64),
+              safetySizeBytes: 123,
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      if (workerIndex >= 0) {
+        operation = {
+          ...operation!,
+          phase: "reconciled",
+          updatedAt: "2026-07-19T12:01:00.000Z",
+          smoke: { schemaVersion: CLI_SUPPORTED_DATABASE_VERSION, renderedDesignId: "design_fixture" },
+          result: {
+            auditEventId: 11,
+            outboxEventId: 13,
+            revoked: { grants: 1, connections: 1, nonces: 1 },
+          },
+        };
+        return { exitCode: 0, stdout: `${JSON.stringify({ ok: true, result: { status: "restored" } })}\n`, stderr: "" };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+    const fetchMock: typeof fetch = async (input) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname === "/health/render") {
+        return response({ ok: true, mode: "worker", renderer: "playwright", softwareFallback: false });
+      }
+      if (pathname === "/health/ready" && maintenance) {
+        return response({
+          ok: false,
+          status: "maintenance",
+          database: "ready",
+          migrations: CLI_SUPPORTED_DATABASE_VERSION,
+          render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+          maintenance: { active: true, phase: "verification", operationId },
+        }, 503);
+      }
+      if (pathname === "/health/ready") {
+        return response({
+          ok: true,
+          database: "ready",
+          migrations: CLI_SUPPORTED_DATABASE_VERSION,
+          render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+        });
+      }
+      return response({ ok: true });
+    };
+
+    const result = await restoreDockerBackupOffline(root, {
+      path: sourcePath,
+      sha256: sourceSha256,
+      sizeBytes: sourceBytes.length,
+    }, { stdout: () => undefined }, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: fetchMock,
+      createOperationId: () => operationId,
+    });
+
+    expect(streamed).toEqual(sourceBytes);
+    expect(result).toMatchObject({
+      status: "restored",
+      operationId,
+      backupId: offlineBackupId,
+      safetyBackupId: offlineSafetyId,
+      serviceReady: true,
+    });
+    const flattened = commands.map((args) => args.join(" "));
+    expect(flattened.findIndex((command) => command.includes("restore-control.js set")))
+      .toBeLessThan(flattened.findIndex((command) => command.includes(`stop --time 30 ${designerContainerId}`)));
+    expect(flattened.findIndex((command) => command.includes("restore-worker.js offline-prepare")))
+      .toBeLessThan(flattened.findIndex((command) => command.includes("restore-worker.js --backup-id")));
+  });
+
+  it.each([
+    { label: "a new offline fence", predecessor: false },
+    { label: "a forensic rollback fence takeover", predecessor: true },
+  ])("keeps $label active when offline preparation fails", async ({ predecessor }) => {
+    const root = projectFixture();
+    const nextOperationId = "restore_ffffffffffffffffffffffffffffffff";
+    const sourcePath = path.join(root, "failing-offline-source.tar");
+    const sourceBytes = Buffer.from("offline source that fails server preparation");
+    fs.writeFileSync(sourcePath, sourceBytes, { mode: 0o600 });
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    let maintenance = predecessor;
+    let maintenanceOwner = predecessor ? operationId : nextOperationId;
+    const operation: DockerRestoreOperationStatus["operation"] = predecessor
+      ? {
+        ...terminalStatus(true, "rolled_back").operation!,
+        recovery: { mode: "offline", safetyKind: "forensic" },
+      }
+      : null;
+    if (predecessor) runtimeStates.get(root)!.designerRunning = false;
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (_executable, args) => {
+      commands.push([...args]);
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        const command = args[controlIndex + 1];
+        if (command === "set") {
+          maintenance = true;
+          maintenanceOwner = args[args.indexOf("--operation-id") + 1]!;
+        }
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: "restore",
+                  operationId: maintenanceOwner,
+                  startedAt: "2026-07-19T12:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+      if (workerIndex >= 0 && args[workerIndex + 1] === "offline-prepare") {
+        return { exitCode: 1, stdout: "", stderr: "injected capacity failure" };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    await expect(restoreDockerBackupOffline(root, {
+      path: sourcePath,
+      sha256: sourceSha256,
+      sizeBytes: sourceBytes.length,
+    }, { stdout: () => undefined }, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      createOperationId: () => nextOperationId,
+    })).rejects.toThrow(/Maintenance remains active.*resume with --offline-bundle/);
+
+    const flattened = commands.map((args) => args.join(" "));
+    expect(flattened.some((command) => command.includes("restore-control.js abort"))).toBe(false);
+    expect(flattened.some((command) => command.includes(`start ${designerContainerId}`))).toBe(false);
+    expect(maintenance).toBe(true);
+    expect(maintenanceOwner).toBe(nextOperationId);
+    expect(runtimeStates.get(root)?.designerRunning).toBe(false);
+  });
+
+  it("resumes a failed forensic-fence replacement under the current maintenance owner", async () => {
+    const root = projectFixture();
+    const replacementOperationId = "restore_ffffffffffffffffffffffffffffffff";
+    const sourcePath = path.join(root, "replacement-offline-source.tar");
+    const sourceBytes = Buffer.from("verified replacement offline bundle bytes");
+    fs.writeFileSync(sourcePath, sourceBytes, { mode: 0o600 });
+    const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+    const replacementBackupId = `backup_${"f".repeat(40)}`;
+    const replacementSafetyId = `backup_${"e".repeat(40)}`;
+    let maintenance = true;
+    let operation: DockerRestoreOperationStatus["operation"] = {
+      ...terminalStatus(true, "rolled_back").operation!,
+      recovery: { mode: "offline", safetyKind: "forensic" },
+    };
+    runtimeStates.get(root)!.designerRunning = false;
+    let streamed = Buffer.alloc(0);
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (_executable, args, options) => {
+      commands.push([...args]);
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        if (args[controlIndex + 1] === "clear") maintenance = false;
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: operation?.phase === "reconciled" ? "verification" : "restore",
+                  operationId: replacementOperationId,
+                  startedAt: "2026-07-19T13:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+      if (workerIndex >= 0 && args[workerIndex + 1] === "offline-prepare") {
+        expect(options?.input).toBeDefined();
+        const chunks: Buffer[] = [];
+        for await (const chunk of options!.input!) chunks.push(Buffer.from(chunk as Buffer | Uint8Array));
+        streamed = Buffer.concat(chunks);
+        operation = {
+          operationId: replacementOperationId,
+          backupId: replacementBackupId,
+          safetyBackupId: replacementSafetyId,
+          phase: "prepared",
+          createdAt: "2026-07-19T13:00:00.000Z",
+          updatedAt: "2026-07-19T13:00:00.000Z",
+          smoke: null,
+          result: null,
+          errorCode: null,
+          recovery: { mode: "offline", safetyKind: "forensic" },
+        };
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            preparation: {
+              status: "prepared",
+              operationId: replacementOperationId,
+              backupId: replacementBackupId,
+              organizationId: "organization_legacy",
+              targetFilename: "formaspec-backup-1970-01-01T00-00-00-000Z-3.tar",
+              targetSha256: sourceSha256,
+              targetSizeBytes: sourceBytes.length,
+              safetyBackupId: replacementSafetyId,
+              safetyFilename: "formaspec-backup-1970-01-01T00-00-00-000Z-4.tar",
+              safetySha256: "d".repeat(64),
+              safetySizeBytes: 456,
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      if (workerIndex >= 0) {
+        expect(args).toContain(replacementBackupId);
+        operation = {
+          ...operation!,
+          phase: "reconciled",
+          updatedAt: "2026-07-19T13:01:00.000Z",
+          smoke: { schemaVersion: CLI_SUPPORTED_DATABASE_VERSION, renderedDesignId: "design_replacement" },
+          result: {
+            auditEventId: 21,
+            outboxEventId: 22,
+            revoked: { grants: 1, connections: 1, nonces: 1 },
+          },
+        };
+        return { exitCode: 0, stdout: `${JSON.stringify({ ok: true, result: { status: "restored" } })}\n`, stderr: "" };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+    const fetchMock: typeof fetch = async (input) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname === "/health/render") {
+        return response({ ok: true, mode: "worker", renderer: "playwright", softwareFallback: false });
+      }
+      if (pathname === "/health/ready" && maintenance) {
+        return response({
+          ok: false,
+          status: "maintenance",
+          database: "ready",
+          migrations: CLI_SUPPORTED_DATABASE_VERSION,
+          render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+          maintenance: { active: true, phase: "verification", operationId: replacementOperationId },
+        }, 503);
+      }
+      if (pathname === "/health/ready") {
+        return response({
+          ok: true,
+          database: "ready",
+          migrations: CLI_SUPPORTED_DATABASE_VERSION,
+          render: { ok: true, mode: "worker", renderer: "playwright", softwareFallback: false },
+        });
+      }
+      return response({ ok: true });
+    };
+
+    const result = await resumeOfflineDockerRestore(root, {
+      path: sourcePath,
+      sha256: sourceSha256,
+      sizeBytes: sourceBytes.length,
+    }, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: fetchMock,
+    });
+
+    expect(streamed).toEqual(sourceBytes);
+    expect(result).toMatchObject({
+      status: "restored",
+      operationId: replacementOperationId,
+      backupId: replacementBackupId,
+      safetyBackupId: replacementSafetyId,
+      serviceReady: true,
+    });
+    const flattened = commands.map((args) => args.join(" "));
+    expect(flattened.some((command) => command.includes("restore-worker.js offline-prepare"))).toBe(true);
+    expect(flattened.some((command) => command.includes(`restore-worker.js --backup-id ${replacementBackupId}`))).toBe(true);
   });
 
   it("refuses a symlinked runtime lock path without deleting its external target", async () => {
@@ -1119,5 +1549,80 @@ describe("Docker restore supervision", () => {
       healthTimeoutMs: 5,
       healthPollIntervalMs: 1,
     })).rejects.toThrow(/health verification timed out at \/health\/ready/);
+  });
+
+  it("restores the preserved forensic snapshot without claiming a corrupt prior database is ready", async () => {
+    const root = projectFixture();
+    let maintenance = false;
+    let operation: DockerRestoreOperationStatus["operation"] = {
+      ...terminalStatus(false).operation!,
+      recovery: { mode: "offline", safetyKind: "forensic" },
+    };
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (_executable, args) => {
+      commands.push([...args]);
+      const identity = dockerIdentityResponse(args, root);
+      if (identity) return identity;
+      const controlIndex = args.indexOf("apps/server/dist/restore-control.js");
+      if (controlIndex >= 0) {
+        const command = args[controlIndex + 1];
+        if (command === "set") maintenance = true;
+        if (command === "clear") maintenance = false;
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            ok: true,
+            status: {
+              maintenance: maintenance
+                ? {
+                  active: true,
+                  markerValid: true,
+                  phase: operation?.phase === "rolled_back" ? "rollback" : "restore",
+                  operationId,
+                  startedAt: "2026-07-19T12:00:00.000Z",
+                }
+                : { active: false, markerValid: true },
+              operation,
+              workerLock: { active: false, lockValid: true },
+            },
+          })}\n`,
+          stderr: "",
+        };
+      }
+      const workerIndex = args.indexOf("apps/server/dist/restore-worker.js");
+      if (workerIndex >= 0 && args[workerIndex + 1] === "forensic-rollback") {
+        operation = {
+          ...operation!,
+          phase: "rolled_back",
+          smoke: null,
+          result: null,
+          errorCode: "OPERATOR_ROLLBACK",
+        };
+        return {
+          exitCode: 0,
+          stdout: `${JSON.stringify({ ok: true, result: { status: "forensic_rolled_back", operationId } })}\n`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+    };
+
+    const result = await rollbackDockerRestore(root, { stdout: () => undefined }, {
+      commandRunner: runner,
+      dockerExecutable: "/usr/bin/docker",
+      fetch: healthyFetch(),
+    });
+
+    expect(result).toMatchObject({
+      status: "forensic_rolled_back",
+      operationId,
+      serviceReady: false,
+      reconnectRequired: false,
+      maintenanceCleared: false,
+    });
+    expect(runtimeStates.get(root)?.designerRunning).toBe(false);
+    const flattened = commands.map((args) => args.join(" "));
+    expect(flattened.some((command) => command.includes("restore-worker.js forensic-rollback"))).toBe(true);
+    expect(flattened.some((command) => command.includes("restore-worker.js preflight"))).toBe(false);
   });
 });

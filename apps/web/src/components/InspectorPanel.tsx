@@ -23,7 +23,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { getDescendantIds } from "@designer/core";
+import { getDescendantIds, type UpdateNodePatch } from "@designer/core";
 
 import {
   isNodeContainer,
@@ -38,6 +38,12 @@ import {
   type PageId,
   type TokenId,
 } from "../domain";
+import {
+  INSPECTOR_UTILITY_TABS,
+  PRIMARY_INSPECTOR_TABS,
+  isPrimaryInspectorTab,
+  type PrimaryInspectorTab,
+} from "../lib/editor-information-architecture";
 import { createTokenDraft, useDesignerStore } from "../store/designer-store";
 import { navigate } from "../App";
 
@@ -58,7 +64,34 @@ function NumberField({ label, value, onChange, min }: { label: string; value: nu
   );
 }
 
-function DesignInspector({ node }: { node: DesignNode }) {
+export function AccessibilityIdentityEditor({
+  node,
+  updateNode,
+}: {
+  node: DesignNode;
+  updateNode: (nodeId: NodeId, patch: UpdateNodePatch) => void;
+}) {
+  const accessibilityLabel = typeof node.metadata.accessible_label === "string"
+    ? node.metadata.accessible_label
+    : node.type === "image"
+      ? node.alt
+      : node.type === "icon"
+        ? node.label ?? ""
+        : "";
+  return (
+    <div className="inspector-section">
+      <div className="inspector-section-title"><span>Accessible identity</span><Eye size={11} /></div>
+      <label className="inspector-field wide"><span>Label</span><input value={accessibilityLabel} placeholder={node.name} onChange={(event) => updateNode(node.id, { accessibility_label: event.target.value || null })} /></label>
+      {node.type === "image" && <label className="inspector-field wide" style={{ marginTop: 7 }}><span>Alt</span><input value={node.alt} onChange={(event) => updateNode(node.id, { alt: event.target.value })} /></label>}
+      {node.type === "icon" && <label className="inspector-field wide" style={{ marginTop: 7 }}><span>Icon</span><input value={node.label ?? ""} onChange={(event) => updateNode(node.id, { label: event.target.value || null })} /></label>}
+      {node.type === "frame" && <label className="inspector-field wide" style={{ marginTop: 7 }}><span>Role</span><select value={node.role ?? "none"} onChange={(event) => updateNode(node.id, { role: event.target.value === "none" ? null : event.target.value as NonNullable<typeof node.role> })}>
+        {['none', 'screen', 'section', 'navigation', 'main', 'aside', 'header', 'footer', 'button', 'form', 'list', 'dialog'].map((role) => <option value={role} key={role}>{role}</option>)}
+      </select></label>}
+    </div>
+  );
+}
+
+function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspectorTab }) {
   const document = useDesignerStore((state) => state.document)!;
   const updateNode = useDesignerStore((state) => state.updateNode);
   const setNodePrototype = useDesignerStore((state) => state.setNodePrototype);
@@ -86,6 +119,11 @@ function DesignInspector({ node }: { node: DesignNode }) {
   const excludedParents = new Set([node.id, ...getDescendantIds(document, node.id, { includeArchived: true })]);
   const containerParents = Object.values(document.nodes).filter((candidate) =>
     isNodeContainer(candidate) && !candidate.archived && !excludedParents.has(candidate.id));
+  const metadataText = (key: string) => typeof node.metadata[key] === "string" ? node.metadata[key] as string : "";
+  const setMetadataText = (key: string, value: string) => updateNode(node.id, {
+    metadata: { ...node.metadata, [key]: value },
+    metadata_mode: "replace",
+  });
 
   return (
     <>
@@ -94,6 +132,7 @@ function DesignInspector({ node }: { node: DesignNode }) {
         <div><strong>{node.name}</strong><span>{node.type} · {node.id.slice(-8)}</span></div>
       </div>
 
+      {tab === "design" && <>
       <div className="inspector-section">
         <div className="inspector-section-title"><span>Layer</span><span><button className="icon-button" onClick={duplicateSelection} aria-label="Duplicate"><Copy size={11} /></button><button className="icon-button" onClick={deleteSelection} aria-label="Delete"><Trash2 size={11} /></button></span></div>
         <div className="inspector-grid">
@@ -153,8 +192,9 @@ function DesignInspector({ node }: { node: DesignNode }) {
           <NumberField label="Rot" value={node.layout.rotation ?? 0} onChange={(rotation) => updateNode(node.id, { layout: { rotation } })} />
         </div>
       </div>
+      </>}
 
-      {node.type === "text" && (
+      {tab === "content" && node.type === "text" && (
         <div className="inspector-section">
           <div className="inspector-section-title"><span>Typography</span><span>Mixed / RTL</span></div>
           <label className="inspector-field textarea-field wide"><textarea value={node.content} dir={node.direction ?? "auto"} onChange={(event) => updateNode(node.id, { content: event.target.value })} /></label>
@@ -176,7 +216,7 @@ function DesignInspector({ node }: { node: DesignNode }) {
         </div>
       )}
 
-      {node.type === "image" && (
+      {tab === "content" && node.type === "image" && (
         <div className="inspector-section">
           <div className="inspector-section-title"><span>Image asset</span><Image size={11} /></div>
           <label className="button button-secondary" style={{ width: "100%", minHeight: 31, fontSize: 9, cursor: "pointer" }}>
@@ -196,7 +236,57 @@ function DesignInspector({ node }: { node: DesignNode }) {
         </div>
       )}
 
-      <div className="inspector-section">
+      {tab === "content" && node.type === "icon" && (
+        <div className="inspector-section">
+          <div className="inspector-section-title"><span>Bundled icon</span><Sparkles size={11} /></div>
+          <label className="inspector-field wide"><span>Icon</span><input value={node.icon_name} onChange={(event) => updateNode(node.id, { icon_name: event.target.value || "circle" })} /></label>
+          <label className="inspector-field wide" style={{ marginTop: 7 }}><span>Label</span><input value={node.label ?? ""} onChange={(event) => updateNode(node.id, { label: event.target.value || null })} /></label>
+        </div>
+      )}
+
+      {tab === "content" && node.type !== "text" && node.type !== "image" && node.type !== "icon" && (
+        <div className="inspector-tab-empty"><Type size={16} /><strong>No direct content</strong><small>This layer contains layout or shape data. Select a text, image, or icon child to edit its content.</small></div>
+      )}
+
+      {tab === "component" && node.type === "component" && (
+        <div className="inspector-section">
+          <div className="inspector-section-title"><span>Component definition</span><Box size={11} /></div>
+          <label className="inspector-field wide"><span>Key</span><input value={node.component_key} onChange={(event) => updateNode(node.id, { component_key: event.target.value || "project.component" })} /></label>
+          <label className="inspector-field textarea-field wide" style={{ marginTop: 7 }}><span>Description</span><textarea value={node.description ?? ""} onChange={(event) => updateNode(node.id, { description: event.target.value || null })} /></label>
+          <p className="inspector-note">V1 definitions are project-local drafts. Publishing, version pinning, states, slots, and upgrade previews are managed by the V2 design-system workspace.</p>
+        </div>
+      )}
+
+      {tab === "component" && node.type === "instance" && (
+        <div className="inspector-section">
+          <div className="inspector-section-title"><span>Component instance</span><Box size={11} /></div>
+          <div className="inspector-readonly-row"><span>Definition</span><code>{node.component_id}</code></div>
+          <div className="inspector-readonly-row"><span>Overrides</span><code>{Object.keys(node.overrides).length}</code></div>
+          <pre className="inspector-json-preview">{JSON.stringify(node.overrides, null, 2)}</pre>
+        </div>
+      )}
+
+      {tab === "component" && node.type !== "component" && node.type !== "instance" && (
+        <div className="inspector-tab-empty"><Box size={16} /><strong>Detached layer</strong><small>This node is not linked to a component definition. Inserted V1 templates intentionally remain editable detached trees.</small></div>
+      )}
+
+      {tab === "logic" && (
+        <>
+          <div className="inspector-section">
+            <div className="inspector-section-title"><span>Business logic</span><span>Structured handoff</span></div>
+            <label className="inspector-field textarea-field wide"><textarea value={metadataText("business_logic")} placeholder="Describe conditions, permissions, validation, and outcomes for this entity." onChange={(event) => setMetadataText("business_logic", event.target.value)} /></label>
+            <label className="inspector-field textarea-field wide" style={{ marginTop: 7 }}><textarea value={metadataText("acceptance_notes")} placeholder="Acceptance notes linked to this design entity." onChange={(event) => setMetadataText("acceptance_notes", event.target.value)} /></label>
+          </div>
+          <div className="inspector-section">
+            <div className="inspector-section-title"><span>Tags</span><span>{node.tags?.length ?? 0}</span></div>
+            <label className="inspector-field wide"><span>#</span><input value={(node.tags ?? []).join(", ")} placeholder="checkout, authenticated, critical" onChange={(event) => updateNode(node.id, {
+              tags: event.target.value.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 32),
+            })} /></label>
+          </div>
+        </>
+      )}
+
+      {tab === "prototype" && <div className="inspector-section">
         <div className="inspector-section-title"><span>Prototype</span><Link2 size={11} /></div>
         <select
           className="prototype-target"
@@ -206,7 +296,24 @@ function DesignInspector({ node }: { node: DesignNode }) {
           <option value="" disabled>Choose target…</option>
           {document.pages.filter((page) => !page.archived).map((page) => <option key={page.id} value={page.id}>On click → {page.name}</option>)}
         </select>
-      </div>
+      </div>}
+
+      {tab === "accessibility" && (
+        <>
+          <AccessibilityIdentityEditor node={node} updateNode={updateNode} />
+          <div className="inspector-section">
+            <div className="inspector-section-title"><span>Touch target</span><span>{node.layout.width >= 44 && node.layout.height >= 44 ? "Pass" : "Review"}</span></div>
+            <div className={`accessibility-check ${node.layout.width >= 44 && node.layout.height >= 44 ? "is-pass" : "is-warning"}`}>
+              <strong>{Math.round(node.layout.width)} × {Math.round(node.layout.height)} px</strong>
+              <small>Interactive targets should be at least 44 × 44 CSS px unless the element is intentionally non-interactive.</small>
+            </div>
+          </div>
+          {node.type === "text" && <div className="inspector-section">
+            <div className="inspector-section-title"><span>Text direction</span><span>{node.direction ?? "auto"}</span></div>
+            <label className="inspector-field wide"><span>Dir</span><select value={node.direction ?? "auto"} onChange={(event) => updateNode(node.id, { direction: event.target.value as "auto" | "ltr" | "rtl" })}><option value="auto">Automatic mixed direction</option><option value="ltr">Left to right</option><option value="rtl">Right to left</option></select></label>
+          </div>}
+        </>
+      )}
     </>
   );
 }
@@ -304,15 +411,27 @@ export function InspectorPanel() {
 
   return (
     <aside className="right-sidebar">
-      <div className="sidebar-tabs">
-        <button className={`sidebar-tab ${tab === "design" ? "is-active" : ""}`} onClick={() => setTab("design")}>Design</button>
-        <button className={`sidebar-tab ${tab === "tokens" ? "is-active" : ""}`} onClick={() => setTab("tokens")}>Tokens</button>
-        <button className={`sidebar-tab ${tab === "history" ? "is-active" : ""}`} onClick={() => setTab("history")}>History</button>
-      </div>
+      <nav className="sidebar-tabs inspector-primary-tabs" aria-label="Inspector workspace">
+        {PRIMARY_INSPECTOR_TABS.map((item) => (
+          <button
+            key={item}
+            className={`sidebar-tab ${tab === item ? "is-active" : ""}`}
+            aria-pressed={tab === item}
+            onClick={() => setTab(item)}
+          >{item}</button>
+        ))}
+      </nav>
+      <nav className="inspector-utility-tabs" aria-label="Inspector utilities">
+        {INSPECTOR_UTILITY_TABS.map((item) => (
+          <button key={item} className={tab === item ? "is-active" : ""} aria-pressed={tab === item} onClick={() => setTab(item)}>
+            {item === "tokens" ? <Sparkles size={10} /> : <Clock3 size={10} />}{item}
+          </button>
+        ))}
+      </nav>
       {tab === "tokens" && document ? <TokensPanel /> : tab === "history" ? <HistoryPanel /> : (
         <div className="right-sidebar-scroll">
-          {node && !node.archived ? <DesignInspector node={node} /> : (
-            <div className="empty-inspector"><span><Square size={16} /></span><strong>{selectedIds.length > 1 ? `${selectedIds.length} layers selected` : "Nothing selected"}</strong><small>Select one layer to edit its layout, style, text, and prototype behavior.</small></div>
+          {node && !node.archived && isPrimaryInspectorTab(tab) ? <DesignInspector node={node} tab={tab} /> : (
+            <div className="empty-inspector"><span><Square size={16} /></span><strong>{selectedIds.length > 1 ? `${selectedIds.length} layers selected` : "Nothing selected"}</strong><small>Select one layer to inspect its design, content, component contract, logic, prototype, and accessibility.</small></div>
           )}
         </div>
       )}

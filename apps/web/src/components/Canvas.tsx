@@ -43,6 +43,8 @@ import {
   resizePatchForGesture,
   selectionGestureCapabilities,
   sameNodeSelection,
+  unionClientRects,
+  type CanvasSelectionBounds,
 } from "../lib/canvas-geometry";
 import { clientPointInViewport, ViewportTransform } from "../lib/viewport-transform";
 import { activePage, useDesignerStore } from "../store/designer-store";
@@ -64,6 +66,96 @@ interface NodeViewProps {
   highlightedIds?: ReadonlySet<NodeId>;
   reviewTone?: "before" | "after";
   onPrototypeNavigate?: (pageId: PageId) => void;
+}
+
+interface ComponentSourceViewProps {
+  document: DesignDocument;
+  nodeId: NodeId;
+  parentMode?: DesignNode["layout"]["mode"] | null;
+  root?: boolean;
+  definitionStack?: readonly NodeId[];
+}
+
+/**
+ * Render an immutable component master inside an instance without exposing the
+ * master's node IDs as editor targets. Component masters may be archived in
+ * the canonical document so they stay detached from pages; archival is ignored
+ * only for this bounded render projection.
+ */
+export function ComponentSourceView({
+  document,
+  nodeId,
+  parentMode = null,
+  root = false,
+  definitionStack = [],
+}: ComponentSourceViewProps) {
+  const node = document.nodes[nodeId];
+  if (!node || !node.visible || definitionStack.length > 32) return null;
+
+  const css = styleForNode(document, node, {
+    parentLayoutMode: parentMode,
+    includePosition: !root,
+  });
+  const sourceStyle: CSSProperties = root ? {
+    ...css,
+    position: "relative",
+    left: 0,
+    top: 0,
+    width: "100%",
+    height: "100%",
+    pointerEvents: "none",
+  } : { ...css, pointerEvents: "none" };
+
+  const children = nodeChildren(node);
+  const content = (() => {
+    if (node.type === "text") return <>{node.content}</>;
+    if (node.type === "image") {
+      return node.asset_id
+        ? <img src={`/api/assets/${encodeURIComponent(node.asset_id)}`} alt={node.alt} draggable={false} style={{ width: "100%", height: "100%", objectFit: node.object_fit }} />
+        : <ImageIcon size={Math.min(40, node.layout.width / 3)} />;
+    }
+    if (node.type === "icon") {
+      const Icon = iconGlyphs[node.icon_name as keyof typeof iconGlyphs] ?? Sparkles;
+      return <Icon size={Math.max(12, Math.min(node.layout.width, node.layout.height) * .46)} aria-label={node.label} />;
+    }
+    if (node.type === "instance") {
+      const definitionRootId = node.component_id;
+      if (definitionStack.includes(definitionRootId)) {
+        return <span className="component-source-error">Component cycle</span>;
+      }
+      return document.nodes[definitionRootId]
+        ? <ComponentSourceView
+            document={document}
+            nodeId={definitionRootId}
+            root
+            definitionStack={[...definitionStack, definitionRootId]}
+          />
+        : <span className="component-source-error">Missing component</span>;
+    }
+    return children.map((childId) => (
+      <ComponentSourceView
+        key={`${nodeId}:${childId}`}
+        document={document}
+        nodeId={childId}
+        parentMode={node.layout.mode}
+        definitionStack={definitionStack}
+      />
+    ));
+  })();
+
+  return (
+    <div
+      className={`component-source-node is-${node.type}`}
+      data-component-source-node-id={node.id}
+      dir={node.type === "text" ? node.direction ?? "auto" : undefined}
+      style={{
+        ...sourceStyle,
+        ...(node.type === "text" ? { unicodeBidi: "plaintext" } : {}),
+      }}
+    >
+      {content}
+    </div>
+  );
 }
 
 function NodeViewComponent({
@@ -120,6 +212,16 @@ function NodeViewComponent({
     if (node.type === "icon") {
       const Icon = iconGlyphs[node.icon_name as keyof typeof iconGlyphs] ?? Sparkles;
       return <Icon size={Math.max(12, Math.min(node.layout.width, node.layout.height) * .46)} aria-label={node.label} />;
+    }
+    if (node.type === "instance") {
+      return document.nodes[node.component_id]
+        ? <ComponentSourceView
+            document={document}
+            nodeId={node.component_id}
+            root
+            definitionStack={[node.component_id]}
+          />
+        : <span className="component-source-error">{node.name}</span>;
     }
     return children.map((childId) => (
       <NodeView
@@ -202,8 +304,10 @@ export function Canvas() {
   const [canvasLayer, setCanvasLayer] = useState<HTMLDivElement | null>(null);
   const [interactionOverlay, setInteractionOverlay] = useState<HTMLDivElement | null>(null);
   const [targets, setTargets] = useState<HTMLElement[]>([]);
+  const [multiSelectionBounds, setMultiSelectionBounds] = useState<CanvasSelectionBounds | null>(null);
   const [panning, setPanning] = useState(false);
   const moveableRef = useRef<Moveable>(null);
+  const targetsRef = useRef<HTMLElement[]>([]);
   const geometryFrame = useRef<number | null>(null);
   const pointerStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const spacePressed = useRef(false);
@@ -223,11 +327,29 @@ export function Canvas() {
   const canDragSelection = gestureCapabilities.draggable;
   const canResizeSelection = gestureCapabilities.resizable;
 
+  useLayoutEffect(() => {
+    targetsRef.current = targets;
+  }, [targets]);
+
   const scheduleGeometryRefresh = useCallback(() => {
     if (geometryFrame.current !== null) return;
     geometryFrame.current = requestAnimationFrame(() => {
       geometryFrame.current = null;
       moveableRef.current?.updateRect();
+      const currentTargets = targetsRef.current;
+      const bounds = currentTargets.length > 1
+        ? unionClientRects(currentTargets.map((target) => target.getBoundingClientRect()))
+        : null;
+      setMultiSelectionBounds((current) => {
+        if (current === bounds) return current;
+        if (!current || !bounds) return bounds;
+        return current.left === bounds.left
+          && current.top === bounds.top
+          && current.right === bounds.right
+          && current.bottom === bounds.bottom
+          ? current
+          : bounds;
+      });
     });
   }, []);
 
@@ -424,11 +546,10 @@ export function Canvas() {
 
   const fitCanvasRef = useRef(fitCanvas);
   useLayoutEffect(() => { fitCanvasRef.current = fitCanvas; }, [fitCanvas]);
-  useEffect(() => {
-    if (!document || !page) return;
-    const frame = requestAnimationFrame(() => fitCanvasRef.current());
-    return () => cancelAnimationFrame(frame);
-  }, [document?.id, page?.id]);
+  useLayoutEffect(() => {
+    if (!document || !page || !editorRoot) return;
+    fitCanvasRef.current();
+  }, [document?.id, editorRoot, page?.id]);
 
   const dragUpdate = (target: HTMLElement, delta: readonly number[]) => {
     const node = nodeForTarget(document, target);
@@ -533,6 +654,25 @@ export function Canvas() {
       )}
 
       <div ref={setInteractionOverlay} className="canvas-interaction-overlay">
+        {multiSelectionBounds && targets.length > 1 && (
+          <div
+            className="formaspec-multi-selection-bounds"
+            data-formaspec-selection-bounds="multi"
+            aria-hidden="true"
+            style={{
+              left: multiSelectionBounds.left,
+              top: multiSelectionBounds.top,
+              width: multiSelectionBounds.width,
+              height: multiSelectionBounds.height,
+            }}
+          >
+            <span data-selection-edge="top" />
+            <span data-selection-edge="right" />
+            <span data-selection-edge="bottom" />
+            <span data-selection-edge="left" />
+          </div>
+        )}
+
         {document && canvasLayer && editorRoot && interactionOverlay && tool === "select" && !prototypeOpen && (
           <Selecto
             container={interactionOverlay}
@@ -560,6 +700,7 @@ export function Canvas() {
           <Moveable
             ref={moveableRef}
             target={targets}
+            className={targets.length > 1 ? "formaspec-fractional-group" : undefined}
             container={interactionOverlay}
             rootContainer={editorRoot.ownerDocument.body}
             dragContainer={editorRoot}

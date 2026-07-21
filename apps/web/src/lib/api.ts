@@ -1,4 +1,9 @@
-import type { AnyDesignDocument, ComponentDefinition } from "@designer/core";
+import type {
+  AnyDesignDocument,
+  ComponentDefinition,
+  RedesignStageArtifact,
+  RedesignStageArtifactMap,
+} from "@designer/core";
 
 import type {
   DesignDocument,
@@ -8,6 +13,8 @@ import type {
   RevisionSummary,
 } from "../domain";
 import { createClientKey, normalizeDocument, normalizeOperations } from "../domain";
+import { normalizeConflictRecoveryOperations } from "./conflict-recovery";
+import type { OrganizationPolicy } from "./organization-policy";
 
 const API_ROOT = "/api";
 
@@ -127,6 +134,180 @@ export async function commitRevision(
     ...(result.revisionId || result.revision_id ? { revisionId: String(result.revisionId ?? result.revision_id) } : {}),
     ...(possibleDocument ? { document: normalizeDocument(possibleDocument) } : {}),
   };
+}
+
+export interface DuplicateConflictDraftResult {
+  duplicated: true;
+  source: {
+    projectId: string;
+    baseVersion: number;
+    baseRevisionId: string;
+    baseSnapshotHash: string;
+    baseRevisionHash: string;
+    currentVersion: number;
+    currentRevisionId: string;
+  };
+  project: {
+    id: string;
+    name: string;
+    version: number;
+    revisionId: string;
+    snapshotHash: string;
+    operationHash: string;
+    revisionHash: string;
+    schemaVersion: number;
+    assetCount: number;
+    productSpecificationVersion: 1 | null;
+    implementationMappingCount: number;
+  };
+  idMapping: Record<string, string>;
+  diagnostics: unknown[];
+  deepLink: string;
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  return value as Record<string, unknown>;
+}
+
+function requiredExactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  const record = requiredRecord(value, label);
+  const allowed = new Set(keys);
+  const unexpected = Object.keys(record).filter((key) => !allowed.has(key));
+  if (unexpected.length > 0) {
+    throw new ApiError(`${label} contains unsupported fields: ${unexpected.sort().join(", ")}.`, { code: "INVALID_RESPONSE" });
+  }
+  return record;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  return value;
+}
+
+function requiredNonnegativeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  return value as number;
+}
+
+function requiredPositiveInteger(value: unknown, label: string): number {
+  const parsed = requiredNonnegativeInteger(value, label);
+  if (parsed < 1) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  return parsed;
+}
+
+function requiredOpaqueId(value: unknown, label: string): string {
+  const parsed = requiredString(value, label);
+  if (!/^[A-Za-z][A-Za-z0-9_-]{7,191}$/.test(parsed)) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  return parsed;
+}
+
+function requiredHash(value: unknown, label: string): string {
+  const parsed = requiredString(value, label);
+  if (!/^[a-f0-9]{64}$/.test(parsed)) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  return parsed;
+}
+
+function parseDuplicateConflictDraftResult(
+  input: unknown,
+  expectedSourceProjectId: string,
+  expectedBaseVersion: number,
+): DuplicateConflictDraftResult {
+  const result = requiredExactRecord(
+    input,
+    ["duplicated", "source", "project", "idMapping", "diagnostics", "deepLink"],
+    "Conflict-recovery duplicate response",
+  );
+  if (result.duplicated !== true) throw new ApiError("Conflict-recovery duplicate response did not confirm success.", { code: "INVALID_RESPONSE" });
+  const source = requiredExactRecord(
+    result.source,
+    ["projectId", "baseVersion", "baseRevisionId", "baseSnapshotHash", "baseRevisionHash", "currentVersion", "currentRevisionId"],
+    "Conflict-recovery source",
+  );
+  const project = requiredExactRecord(
+    result.project,
+    ["id", "name", "version", "revisionId", "snapshotHash", "operationHash", "revisionHash", "schemaVersion", "assetCount", "productSpecificationVersion", "implementationMappingCount"],
+    "Duplicated project",
+  );
+  const rawIdMapping = requiredRecord(result.idMapping, "Conflict-recovery ID mapping");
+  const idMapping = Object.fromEntries(Object.entries(rawIdMapping).map(([sourceId, targetId]) => [
+    sourceId,
+    requiredOpaqueId(targetId, `Conflict-recovery ID mapping for ${sourceId}`),
+  ]));
+  const sourceProjectId = requiredOpaqueId(source.projectId, "Conflict-recovery source project ID");
+  const baseVersion = requiredPositiveInteger(source.baseVersion, "Conflict-recovery source base version");
+  if (sourceProjectId !== expectedSourceProjectId || baseVersion !== expectedBaseVersion) {
+    throw new ApiError("Conflict-recovery duplicate response does not match the requested source project and base version.", { code: "INVALID_RESPONSE" });
+  }
+  const projectId = requiredOpaqueId(project.id, "Duplicated project ID");
+  if (idMapping[expectedSourceProjectId] !== projectId) {
+    throw new ApiError("Conflict-recovery duplicate response does not map the source project to the duplicated project.", { code: "INVALID_RESPONSE" });
+  }
+  const projectVersion = requiredPositiveInteger(project.version, "Duplicated project version");
+  if (projectVersion !== 1) throw new ApiError("Duplicated project version is invalid.", { code: "INVALID_RESPONSE" });
+  const schemaVersion = requiredPositiveInteger(project.schemaVersion, "Duplicated project schema version");
+  if (schemaVersion !== 1 && schemaVersion !== 2) throw new ApiError("Duplicated project schema version is invalid.", { code: "INVALID_RESPONSE" });
+  const productSpecificationVersion = project.productSpecificationVersion === null
+    ? null
+    : requiredPositiveInteger(project.productSpecificationVersion, "Duplicated product-specification version");
+  if (productSpecificationVersion !== null && productSpecificationVersion !== 1) {
+    throw new ApiError("Duplicated product-specification version is invalid.", { code: "INVALID_RESPONSE" });
+  }
+  if (!Array.isArray(result.diagnostics) || result.diagnostics.some((item) => typeof item !== "object" || item === null || Array.isArray(item))) {
+    throw new ApiError("Conflict-recovery diagnostics are invalid.", { code: "INVALID_RESPONSE" });
+  }
+  const deepLink = requiredString(result.deepLink, "Duplicated project deep link");
+  if (deepLink !== `/design/${encodeURIComponent(projectId)}`) {
+    throw new ApiError("Duplicated project deep link is invalid.", { code: "INVALID_RESPONSE" });
+  }
+  return {
+    duplicated: true,
+    source: {
+      projectId: sourceProjectId,
+      baseVersion,
+      baseRevisionId: requiredOpaqueId(source.baseRevisionId, "Conflict-recovery source base revision ID"),
+      baseSnapshotHash: requiredHash(source.baseSnapshotHash, "Conflict-recovery source snapshot hash"),
+      baseRevisionHash: requiredHash(source.baseRevisionHash, "Conflict-recovery source revision hash"),
+      currentVersion: requiredPositiveInteger(source.currentVersion, "Conflict-recovery source current version"),
+      currentRevisionId: requiredOpaqueId(source.currentRevisionId, "Conflict-recovery source current revision ID"),
+    },
+    project: {
+      id: projectId,
+      name: requiredString(project.name, "Duplicated project name"),
+      version: 1,
+      revisionId: requiredOpaqueId(project.revisionId, "Duplicated project revision ID"),
+      snapshotHash: requiredHash(project.snapshotHash, "Duplicated project snapshot hash"),
+      operationHash: requiredHash(project.operationHash, "Duplicated project operation hash"),
+      revisionHash: requiredHash(project.revisionHash, "Duplicated project revision hash"),
+      schemaVersion,
+      assetCount: requiredNonnegativeInteger(project.assetCount, "Duplicated project asset count"),
+      productSpecificationVersion,
+      implementationMappingCount: requiredNonnegativeInteger(project.implementationMappingCount, "Duplicated implementation-mapping count"),
+    },
+    idMapping,
+    diagnostics: structuredClone(result.diagnostics),
+    deepLink,
+  };
+}
+
+export async function duplicateConflictDraft(
+  id: string,
+  baseVersion: number,
+  operations: DesignOperation[],
+  idempotencyKey: string,
+  name?: string,
+): Promise<DuplicateConflictDraftResult> {
+  const normalizedOperations = normalizeConflictRecoveryOperations(normalizeOperations(operations));
+  const result = await request<unknown>(`/designs/${encodeURIComponent(id)}/conflict-recovery/duplicate`, {
+    method: "POST",
+    body: JSON.stringify({
+      baseVersion,
+      operations: normalizedOperations,
+      idempotencyKey,
+      ...(name === undefined ? {} : { name }),
+    }),
+  });
+  return parseDuplicateConflictDraftResult(result, id, baseVersion);
 }
 
 export async function listHistory(id: string): Promise<RevisionSummary[]> {
@@ -380,7 +561,7 @@ export interface AgentConnectionRecord {
 export interface OrganizationPolicyRecord {
   organizationId: string;
   organizationName: string;
-  policy: Record<string, unknown>;
+  policy: OrganizationPolicy;
   policyHash: string;
   configurationHash: string;
   source: "default" | "stored" | "legacy_quarantined" | "corrupt_fail_closed";
@@ -395,7 +576,7 @@ export async function readOrganizationPolicy(): Promise<OrganizationPolicyRecord
 
 export async function updateOrganizationPolicy(
   expectedConfigurationHash: string,
-  policy: Record<string, unknown>,
+  policy: OrganizationPolicy | Record<string, unknown>,
 ): Promise<OrganizationPolicyRecord> {
   const result = await request<{ organizationPolicy: OrganizationPolicyRecord }>("/organization/policy", {
     method: "PUT",
@@ -437,6 +618,8 @@ const defaultAgentScopes = [
   "design_system:read",
   "workspace:inventory:read",
   "workspace:inventory:write",
+  "implementation_mapping:read",
+  "implementation_mapping:write",
   "handoff:read",
   "redesign:read",
   "redesign:assessment",
@@ -445,9 +628,6 @@ const defaultAgentScopes = [
   "redesign:proposal",
   "redesign:design",
   "redesign:handoff",
-  "redesign:approve",
-  "redesign:implement",
-  "redesign:cancel",
 ];
 
 export async function createCodexConnection(): Promise<AgentPairingChallenge> {
@@ -1101,6 +1281,7 @@ export function subscribeToEvents(onEvent: (event: ServerEvent) => void): () => 
     "agent_connection.changed",
     "design_system.changed",
     "repository_inventory.changed",
+    "implementation_mapping.changed",
     "handoff.transitioned",
     "redesign.transitioned",
     "backup.operation",
@@ -1156,6 +1337,19 @@ export interface ComponentDefinitionVersionRecord {
   version: number;
   status: "draft" | "published" | "deprecated";
   definition: ComponentDefinition;
+  source: {
+    kind: "verified";
+    hash: string;
+    nodeCount: number;
+    prototypeLinkCount: number;
+    publishable: true;
+  } | {
+    kind: "legacy_null";
+    hash: null;
+    nodeCount: 0;
+    prototypeLinkCount: 0;
+    publishable: false;
+  };
   createdBy: string;
   createdAt: string;
 }
@@ -1181,6 +1375,13 @@ export interface DesignSystemComponentCatalog {
   components: ComponentDefinitionCatalogRecord[];
   permissions: ComponentAuthoringPermissions;
 }
+
+export interface ComponentSourceReference {
+  designId: string;
+  revisionId: string;
+}
+
+export type ComponentDefinitionSubmission = Omit<ComponentDefinition, "id"> & { id?: string };
 
 export async function readDesignSystemComponentCatalog(
   designSystemId: string,
@@ -1211,7 +1412,8 @@ export async function listDesignSystemComponents(
 export async function createDesignSystemComponentDraft(input: {
   designSystemId: string;
   expectedLatestVersion: number;
-  definition: ComponentDefinition;
+  definition: ComponentDefinitionSubmission;
+  source: ComponentSourceReference;
 }): Promise<ComponentDefinitionVersionRecord> {
   if (input.definition.status !== "draft") {
     throw new ApiError("A component authoring submission must create a draft version.", {
@@ -1226,6 +1428,7 @@ export async function createDesignSystemComponentDraft(input: {
       body: JSON.stringify({
         expectedLatestVersion: input.expectedLatestVersion,
         definition: input.definition,
+        source: input.source,
       }),
     },
   );
@@ -1238,6 +1441,7 @@ export async function transitionDesignSystemComponent(input: {
   expectedLatestVersion: number;
   targetStatus: "published" | "deprecated";
   replacementComponentId?: string | null;
+  source: ComponentSourceReference;
 }): Promise<ComponentDefinitionVersionRecord> {
   const result = await request<{ componentVersion: ComponentDefinitionVersionRecord }>(
     `/design-systems/${encodeURIComponent(input.designSystemId)}/components/${encodeURIComponent(input.componentId)}/lifecycle`,
@@ -1246,6 +1450,7 @@ export async function transitionDesignSystemComponent(input: {
       body: JSON.stringify({
         expectedLatestVersion: input.expectedLatestVersion,
         targetStatus: input.targetStatus,
+        source: input.source,
         ...(input.replacementComponentId !== undefined
           ? { replacementComponentId: input.replacementComponentId }
           : {}),
@@ -1253,6 +1458,104 @@ export async function transitionDesignSystemComponent(input: {
     },
   );
   return result.componentVersion;
+}
+
+export interface DesignSystemReleaseRecord {
+  id: string;
+  designSystemId: string;
+  version: number;
+  name: string;
+  status: "draft" | "published" | "deprecated";
+  tokenVersions: Array<{ tokenId: string; version: number }>;
+  componentVersions: Array<{ componentDefinitionId: string; version: number }>;
+  diagnostics: DesignSystemDiagnosticRecord[];
+  createdBy: string;
+  createdAt: string;
+  publishedAt: string | null;
+}
+
+export interface ProjectDesignSystemPinRecord {
+  designId: string;
+  designSystemId: string;
+  releaseId: string;
+  releaseVersion: number;
+  pinnedBy: string;
+  pinnedAt: string;
+}
+
+export interface DesignSystemUpgradePreviewRecord {
+  id: string;
+  designId: string;
+  currentReleaseId: string;
+  targetReleaseId: string;
+  designVersion: number;
+  designRevisionId: string;
+  baseRevisionId: string | null;
+  baseSnapshotHash: string | null;
+  resultSnapshotHash: string | null;
+  diagnostics: DesignSystemDiagnosticRecord[];
+  previewHash: string;
+  status: "ready" | "blocked" | "committed" | "expired";
+  canCommit: boolean;
+  createdAt: string;
+  expiresAt: string;
+  committedAt: string | null;
+}
+
+export async function listDesignSystemReleases(designSystemId: string): Promise<DesignSystemReleaseRecord[]> {
+  const result = await request<{ releases?: DesignSystemReleaseRecord[] }>(
+    `/design-systems/${encodeURIComponent(designSystemId)}/releases`,
+  );
+  return result.releases ?? [];
+}
+
+export async function readProjectDesignSystemPin(designId: string): Promise<ProjectDesignSystemPinRecord> {
+  const result = await request<{ pin: ProjectDesignSystemPinRecord }>(
+    `/designs/${encodeURIComponent(designId)}/design-system-pin`,
+  );
+  return result.pin;
+}
+
+export async function pinProjectDesignSystem(input: {
+  designId: string;
+  releaseId: string;
+  expectedCurrentReleaseId: string | null;
+}): Promise<ProjectDesignSystemPinRecord> {
+  const result = await request<{ pin: ProjectDesignSystemPinRecord }>(
+    `/designs/${encodeURIComponent(input.designId)}/design-system-pin`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        releaseId: input.releaseId,
+        expectedCurrentReleaseId: input.expectedCurrentReleaseId,
+      }),
+    },
+  );
+  return result.pin;
+}
+
+export async function previewProjectDesignSystemUpgrade(input: {
+  designId: string;
+  targetReleaseId: string;
+}): Promise<DesignSystemUpgradePreviewRecord> {
+  const result = await request<{ preview: DesignSystemUpgradePreviewRecord }>(
+    `/designs/${encodeURIComponent(input.designId)}/design-system-upgrade-previews`,
+    { method: "POST", body: JSON.stringify({ targetReleaseId: input.targetReleaseId }) },
+  );
+  return result.preview;
+}
+
+export async function commitProjectDesignSystemUpgrade(input: {
+  previewId: string;
+  expectedPreviewHash: string;
+}): Promise<{ preview: DesignSystemUpgradePreviewRecord; pin: ProjectDesignSystemPinRecord }> {
+  return request<{ preview: DesignSystemUpgradePreviewRecord; pin: ProjectDesignSystemPinRecord }>(
+    `/design-system-upgrade-previews/${encodeURIComponent(input.previewId)}/commit`,
+    {
+      method: "POST",
+      body: JSON.stringify({ expectedPreviewHash: input.expectedPreviewHash }),
+    },
+  );
 }
 
 export interface RepositoryInventorySummary {
@@ -1294,6 +1597,80 @@ export async function readRepositoryInventory(inventoryId: string): Promise<Repo
   return result.inventory;
 }
 
+export type ImplementationMappingEntityKind = "component" | "token" | "screen" | "asset" | "flow" | "business_rule";
+
+export interface ImplementationMappingRecord {
+  id: string;
+  designId: string;
+  revisionId: string;
+  designVersion: number;
+  snapshotHash: string;
+  revisionHash: string;
+  productSpecificationVersion: number;
+  productSpecificationHash: string;
+  productSpecificationSource: "document" | "revision_link";
+  inventoryId: string;
+  inventoryHash: string;
+  entityKind: ImplementationMappingEntityKind;
+  entityId: string;
+  platform: "web" | "android" | "ios" | "flutter" | "react_native" | "other";
+  symbol: string;
+  inventoryEntityId: string;
+  inventoryEntityKind: string;
+  locationId: string;
+  line: number | null;
+  createdBy: string;
+  createdAt: string;
+}
+
+export async function listImplementationMappings(input: {
+  designId: string;
+  revisionId?: string;
+  entityKind?: ImplementationMappingEntityKind;
+  entityId?: string;
+  inventoryId?: string;
+  limit?: number;
+}): Promise<ImplementationMappingRecord[]> {
+  const query = new URLSearchParams();
+  if (input.revisionId) query.set("revisionId", input.revisionId);
+  if (input.entityKind) query.set("entityKind", input.entityKind);
+  if (input.entityId) query.set("entityId", input.entityId);
+  if (input.inventoryId) query.set("inventoryId", input.inventoryId);
+  query.set("limit", String(input.limit ?? 200));
+  const result = await request<{ mappings?: ImplementationMappingRecord[] }>(
+    `/designs/${encodeURIComponent(input.designId)}/implementation-mappings?${query}`,
+  );
+  return result.mappings ?? [];
+}
+
+export async function createImplementationMappings(input: {
+  designId: string;
+  revisionId: string;
+  expectedDesignVersion: number;
+  inventoryId: string;
+  idempotencyKey?: string;
+  mappings: Array<{
+    entityKind: ImplementationMappingEntityKind;
+    entityId: string;
+    inventoryEntityId: string;
+  }>;
+}): Promise<{ mappings: ImplementationMappingRecord[] }> {
+  const result = await request<{ result: { mappings: ImplementationMappingRecord[] } }>(
+    `/designs/${encodeURIComponent(input.designId)}/implementation-mappings`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        revisionId: input.revisionId,
+        expectedDesignVersion: input.expectedDesignVersion,
+        inventoryId: input.inventoryId,
+        idempotencyKey: input.idempotencyKey ?? createClientKey("implementation-mapping"),
+        mappings: input.mappings,
+      }),
+    },
+  );
+  return result.result;
+}
+
 export interface EngineeringHandoffRecord {
   id: string;
   designId: string;
@@ -1305,9 +1682,123 @@ export interface EngineeringHandoffRecord {
   specification: Record<string, unknown>;
   versions: Array<Record<string, unknown>>;
   transitions: Array<Record<string, unknown>>;
+  executionDecisions: HandoffExecutionDecisionRecord[];
+  executionDecisionState: HandoffExecutionDecisionState;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export const HANDOFF_EXECUTION_DECISION_KINDS = [
+  "plan_approval",
+  "isolation_choice",
+  "diff_review",
+  "validation_approval",
+  "commit_approval",
+  "push_authorization",
+  "pull_request_request",
+] as const;
+
+export type HandoffExecutionDecisionKind = (typeof HANDOFF_EXECUTION_DECISION_KINDS)[number];
+export type HandoffExecutionDecisionOutcome =
+  | "approved"
+  | "branch"
+  | "worktree"
+  | "authorized"
+  | "requested"
+  | "not_requested"
+  | "denied"
+  | "revoked";
+
+export type HandoffValidationCheck =
+  | "typecheck"
+  | "unit_tests"
+  | "integration_tests"
+  | "build"
+  | "lint"
+  | "visual_regression"
+  | "accessibility";
+
+export interface HandoffExecutionDecisionRecord {
+  id: string;
+  handoffId: string;
+  handoffVersion: number;
+  sequence: number;
+  kind: HandoffExecutionDecisionKind;
+  outcome: HandoffExecutionDecisionOutcome;
+  supersedesDecisionId: string | null;
+  evidence: Record<string, unknown>;
+  evidenceHash: string;
+  actorId: string;
+  createdAt: string;
+}
+
+export type HandoffExecutionDecisionState = Record<
+  HandoffExecutionDecisionKind,
+  HandoffExecutionDecisionRecord | null
+>;
+
+interface HandoffExecutionDecisionBase {
+  expectedVersion: number;
+  expectedPriorDecisionId: string | null;
+  idempotencyKey: string;
+}
+
+type HandoffDeniedOrRevokedDecision = HandoffExecutionDecisionBase & {
+  kind: HandoffExecutionDecisionKind;
+  outcome: "denied" | "revoked";
+  evidence: { reason: string };
+};
+
+export type HandoffExecutionDecisionRequest =
+  | (HandoffExecutionDecisionBase & {
+    kind: "plan_approval";
+    outcome: "approved";
+    evidence: { summary: string; acceptanceCriteriaConfirmed: true; implementationPlanConfirmed: true };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "isolation_choice";
+    outcome: "branch" | "worktree";
+    evidence: { summary: string };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "diff_review";
+    outcome: "approved";
+    evidence: { summary: string; diffHash: string; changedFileCount: number };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "validation_approval";
+    outcome: "approved";
+    evidence: {
+      summary: string;
+      checks: Array<{ name: HandoffValidationCheck; status: "passed"; evidenceHash?: string }>;
+    };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "commit_approval";
+    outcome: "approved";
+    evidence: { summary: string; diffHash: string; commitMessage: string };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "push_authorization";
+    outcome: "authorized";
+    evidence: { summary: string; commitHash: string; targetRef: string };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "pull_request_request";
+    outcome: "requested";
+    evidence: { summary: string; title: string; baseRef: string; headRef: string };
+  })
+  | (HandoffExecutionDecisionBase & {
+    kind: "pull_request_request";
+    outcome: "not_requested";
+    evidence: { reason: string };
+  })
+  | HandoffDeniedOrRevokedDecision;
+
+export interface HandoffExecutionDecisionReadResult {
+  decisions: HandoffExecutionDecisionRecord[];
+  current: HandoffExecutionDecisionState;
 }
 
 export async function listEngineeringHandoffs(designId: string): Promise<EngineeringHandoffRecord[]> {
@@ -1315,6 +1806,13 @@ export async function listEngineeringHandoffs(designId: string): Promise<Enginee
     `/designs/${encodeURIComponent(designId)}/handoffs`,
   );
   return result.handoffs ?? [];
+}
+
+export async function readEngineeringHandoff(handoffId: string): Promise<EngineeringHandoffRecord> {
+  const result = await request<{ handoff: EngineeringHandoffRecord }>(
+    `/handoffs/${encodeURIComponent(handoffId)}`,
+  );
+  return result.handoff;
 }
 
 export async function createEngineeringHandoff(input: {
@@ -1353,6 +1851,81 @@ export async function submitEngineeringHandoff(handoffId: string, expectedVersio
   return result.handoff;
 }
 
+export async function approveEngineeringHandoff(
+  handoffId: string,
+  expectedVersion: number,
+  expectedPriorDecisionId: string | null,
+  summary: string,
+): Promise<EngineeringHandoffRecord> {
+  const result = await request<{ handoff: EngineeringHandoffRecord }>(
+    `/handoffs/${encodeURIComponent(handoffId)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion,
+        expectedPriorDecisionId,
+        decision: "approved",
+        summary,
+        acceptanceCriteriaConfirmed: true,
+        implementationPlanConfirmed: true,
+      }),
+    },
+  );
+  return result.handoff;
+}
+
+export async function readHandoffExecutionDecisions(
+  handoffId: string,
+): Promise<HandoffExecutionDecisionReadResult> {
+  return request<HandoffExecutionDecisionReadResult>(
+    `/handoffs/${encodeURIComponent(handoffId)}/execution-decisions`,
+  );
+}
+
+export async function recordHandoffExecutionDecision(
+  handoffId: string,
+  decision: HandoffExecutionDecisionRequest,
+): Promise<HandoffExecutionDecisionRecord> {
+  const result = await request<{ decision: HandoffExecutionDecisionRecord }>(
+    `/handoffs/${encodeURIComponent(handoffId)}/execution-decisions`,
+    { method: "POST", body: JSON.stringify(decision) },
+  );
+  return result.decision;
+}
+
+export async function startEngineeringHandoffImplementation(
+  handoffId: string,
+  expectedVersion: number,
+): Promise<EngineeringHandoffRecord> {
+  const result = await request<{ handoff: EngineeringHandoffRecord }>(
+    `/handoffs/${encodeURIComponent(handoffId)}/start-implementation`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion,
+        approvedVersion: expectedVersion,
+        authorization: "start_implementation",
+      }),
+    },
+  );
+  return result.handoff;
+}
+
+export async function completeEngineeringHandoff(
+  handoffId: string,
+  expectedVersion: number,
+  summary: string,
+): Promise<EngineeringHandoffRecord> {
+  const result = await request<{ handoff: EngineeringHandoffRecord }>(
+    `/handoffs/${encodeURIComponent(handoffId)}/complete`,
+    {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion, summary }),
+    },
+  );
+  return result.handoff;
+}
+
 export const REDESIGN_STAGE_ORDER = [
   "connect_inspect",
   "document_current_state",
@@ -1384,13 +1957,16 @@ export interface RedesignAssessmentRecord {
     brief: string;
     base: { designVersion: number | null; revisionId: string | null; inventoryId: string | null };
     content: Record<string, unknown>;
+    artifact: RedesignStageArtifact;
     actorId: string;
     createdAt: string;
   };
+  stageArtifacts: RedesignStageArtifactMap;
   versions: Array<{
     version: number;
     stage: RedesignStage;
     content: Record<string, unknown>;
+    artifact: RedesignStageArtifact;
     actorId: string;
     createdAt: string;
   }>;
@@ -1403,8 +1979,30 @@ export interface RedesignAssessmentRecord {
   }>;
 }
 
+export interface RedesignStageArtifactRecord {
+  assessmentId: string;
+  stage: RedesignStage;
+  headVersion: number;
+  sourceMutation: "none";
+  current: {
+    assessmentVersion: number;
+    stage: RedesignStage;
+    artifact: RedesignStageArtifact;
+    actorId: string;
+    createdAt: string;
+  } | null;
+  versions: Array<{
+    assessmentVersion: number;
+    stage: RedesignStage;
+    artifact: RedesignStageArtifact;
+    actorId: string;
+    createdAt: string;
+  }>;
+}
+
 export async function createRedesignAssessment(input: {
   designId: string;
+  inventoryId: string;
   expectedDesignVersion: number;
   brief: string;
 }): Promise<RedesignAssessmentRecord> {
@@ -1412,6 +2010,7 @@ export async function createRedesignAssessment(input: {
     method: "POST",
     body: JSON.stringify({
       designId: input.designId,
+      inventoryId: input.inventoryId,
       expectedDesignVersion: input.expectedDesignVersion,
       brief: input.brief,
       content: { assessmentRequested: true },
@@ -1423,6 +2022,37 @@ export async function createRedesignAssessment(input: {
 export async function readRedesignAssessment(assessmentId: string): Promise<RedesignAssessmentRecord> {
   const result = await request<{ assessment: RedesignAssessmentRecord }>(
     `/redesign-assessments/${encodeURIComponent(assessmentId)}`,
+  );
+  return result.assessment;
+}
+
+export async function readRedesignStageArtifact(
+  assessmentId: string,
+  stage: RedesignStage,
+): Promise<RedesignStageArtifactRecord> {
+  const result = await request<{ stageArtifact: RedesignStageArtifactRecord }>(
+    `/redesign-assessments/${encodeURIComponent(assessmentId)}/stages/${encodeURIComponent(stage)}/artifact`,
+  );
+  return result.stageArtifact;
+}
+
+export async function reviseRedesignStageArtifact(input: {
+  assessmentId: string;
+  expectedVersion: number;
+  expectedDesignVersion?: number;
+  stage: RedesignStage;
+  artifact: RedesignStageArtifact;
+}): Promise<RedesignAssessmentRecord> {
+  const result = await request<{ assessment: RedesignAssessmentRecord }>(
+    `/redesign-assessments/${encodeURIComponent(input.assessmentId)}/stages/${encodeURIComponent(input.stage)}/artifact`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        expectedVersion: input.expectedVersion,
+        ...(input.expectedDesignVersion ? { expectedDesignVersion: input.expectedDesignVersion } : {}),
+        artifact: input.artifact,
+      }),
+    },
   );
   return result.assessment;
 }

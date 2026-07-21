@@ -138,7 +138,19 @@ function projectToken(document: DesignDocumentV2, token: DesignSystemToken): Des
   return parsed.data;
 }
 
-function commonNode(node: DesignNodeV2) {
+function compatibilityNodeMetadata(node: DesignNodeV2): Metadata {
+  const metadata = structuredClone(node.metadata);
+  const accessibilityLabel = node.semantics.accessibility_label;
+  const representedByNativeField = typeof metadata.accessible_label !== "string"
+    && ((node.type === "image" && node.alt === accessibilityLabel)
+      || (node.type === "icon" && node.label === accessibilityLabel));
+  if (accessibilityLabel !== undefined && !representedByNativeField) {
+    metadata.accessible_label = accessibilityLabel;
+  }
+  return metadata;
+}
+
+function commonNode(node: DesignNodeV2, componentSource = false) {
   return {
     id: node.id,
     name: node.name,
@@ -146,8 +158,8 @@ function commonNode(node: DesignNodeV2) {
     style: structuredClone(node.style),
     visible: node.visible,
     locked: node.locked,
-    archived: node.archived,
-    metadata: structuredClone(node.metadata),
+    archived: componentSource ? false : node.archived,
+    metadata: compatibilityNodeMetadata(node),
     ...(node.tags === undefined ? {} : { tags: [...node.tags] }),
   };
 }
@@ -164,18 +176,36 @@ function localizedMetadata(
   };
 }
 
+function componentSourceNodeIds(document: DesignDocumentV2): Set<string> {
+  const result = new Set<string>();
+  const collect = (nodeId: string): void => {
+    if (result.has(nodeId)) return;
+    const node = document.nodes[nodeId];
+    if (!node) return;
+    result.add(nodeId);
+    if (node.type === "frame" || node.type === "container") {
+      for (const childId of node.children) collect(childId);
+    }
+  };
+  for (const definition of Object.values(document.component_definitions)) {
+    for (const state of definition.states) collect(state.node_id);
+  }
+  return result;
+}
+
 function projectNode(
   document: DesignDocumentV2,
   node: DesignNodeV2,
   definitionByRoot: Map<string, DesignDocumentV2["component_definitions"][string]>,
+  componentSourceNodeIds: ReadonlySet<string>,
 ): DesignNode {
-  const common = commonNode(node);
+  const common = commonNode(node, componentSourceNodeIds.has(node.id));
   switch (node.type) {
     case "frame": {
       const role = frameRole(document, node);
       return {
         ...common,
-        metadata: localizedMetadata(node.metadata, node.locale, node.text_direction),
+        metadata: localizedMetadata(common.metadata, node.locale, node.text_direction),
         type: "frame",
         children: [...node.children],
         clip_content: node.clip_content,
@@ -202,6 +232,11 @@ function projectNode(
         }
         return {
           ...common,
+          // Component masters are detached/archived in canonical V2. The V1
+          // compatibility document is an ephemeral render/editor projection,
+          // so expose exact state masters as available component sources while
+          // keeping them detached from every page.
+          archived: false,
           type: "component",
           children: [...node.children],
           component_key: definition.key,
@@ -249,21 +284,40 @@ function projectNode(
           ["nodes", node.id, "component_definition_id"],
         );
       }
-      const definitionRoot = document.nodes[definition.root_node_id];
-      if (!definitionRoot || definitionRoot.type !== "container") {
+      const activeState = definition.states.find((state) => state.key === node.active_state);
+      if (!activeState) {
+        return compatibilityFailure(
+          "V2_COMPONENT_STATE_MISSING",
+          `Component ${definition.id} does not define active state ${node.active_state}.`,
+          ["nodes", node.id, "active_state"],
+        );
+      }
+      const stateRoot = document.nodes[activeState.node_id];
+      if (!stateRoot || stateRoot.type !== "container") {
         return compatibilityFailure(
           "V2_COMPONENT_ROOT_UNSUPPORTED",
-          `Component ${definition.id} does not use a V1-compatible container root.`,
-          ["component_definitions", definition.id, "root_node_id"],
+          `Component ${definition.id} state ${activeState.key} does not use a V1-compatible container root.`,
+          ["component_definitions", definition.id, "states", activeState.key, "node_id"],
         );
       }
       return {
         ...common,
         type: "instance",
-        component_id: definition.root_node_id,
+        component_id: activeState.node_id,
         overrides: structuredClone(document.migration?.legacy_component_overrides[node.id] ?? {}),
       };
     }
+  }
+}
+
+function restoreAccessibilityMetadata(
+  base: DesignNodeV2,
+  candidate: DesignNodeV2,
+): void {
+  if (Object.prototype.hasOwnProperty.call(base.metadata, "accessible_label")) {
+    candidate.metadata.accessible_label = structuredClone(base.metadata.accessible_label!);
+  } else {
+    delete candidate.metadata.accessible_label;
   }
 }
 
@@ -292,15 +346,18 @@ export function toV1CompatibleDesignDocument(input: AnyDesignDocument): DesignDo
 
   const definitionByRoot = new Map<string, DesignDocumentV2["component_definitions"][string]>();
   for (const definition of Object.values(parsed.component_definitions)) {
-    if (definitionByRoot.has(definition.root_node_id)) {
-      compatibilityFailure(
-        "V2_COMPONENT_ROOT_AMBIGUOUS",
-        `Multiple component definitions use root ${definition.root_node_id}.`,
-        ["component_definitions", definition.id, "root_node_id"],
-      );
+    for (const state of definition.states) {
+      if (definitionByRoot.has(state.node_id)) {
+        compatibilityFailure(
+          "V2_COMPONENT_ROOT_AMBIGUOUS",
+          `Multiple component definitions or states use root ${state.node_id}.`,
+          ["component_definitions", definition.id, "states", state.key, "node_id"],
+        );
+      }
+      definitionByRoot.set(state.node_id, definition);
     }
-    definitionByRoot.set(definition.root_node_id, definition);
   }
+  const projectedComponentSourceNodeIds = componentSourceNodeIds(parsed);
 
   const projected = DesignDocumentSchema.safeParse({
     schema_version: 1,
@@ -318,7 +375,7 @@ export function toV1CompatibleDesignDocument(input: AnyDesignDocument): DesignDo
     })),
     nodes: Object.fromEntries(Object.values(parsed.nodes).map((node) => [
       node.id,
-      projectNode(parsed, node, definitionByRoot),
+      projectNode(parsed, node, definitionByRoot, projectedComponentSourceNodeIds),
     ])),
     tokens: Object.fromEntries(Object.values(parsed.tokens).map((token) => [token.id, projectToken(parsed, token)])),
     assets: Object.fromEntries(Object.values(parsed.assets).map((asset) => [asset.id, projectAsset(parsed, asset)])),
@@ -364,6 +421,7 @@ function mergeExistingNode(
   editedDocument: DesignDocument,
   candidateDocument: DesignDocumentV2,
   nodeId: string,
+  immutableComponentSourceNodeIds: ReadonlySet<string>,
 ): void {
   const base = baseDocument.nodes[nodeId];
   const projected = projectedDocument.nodes[nodeId];
@@ -376,6 +434,17 @@ function mergeExistingNode(
       `Node ${nodeId} cannot change type through the V1 compatibility editor.`,
       ["nodes", nodeId, "type"],
     );
+  }
+  if (immutableComponentSourceNodeIds.has(nodeId)) {
+    if (!equal(projected, edited)) {
+      compatibilityFailure(
+        "V2_COMPONENT_SOURCE_EDIT_UNSUPPORTED",
+        `Immutable component source node ${nodeId} must be edited through the design-system workflow.`,
+        ["nodes", nodeId],
+      );
+    }
+    candidateDocument.nodes[nodeId] = structuredClone(base);
+    return;
   }
   if (base.type === "component_instance") {
     if (edited.type !== "instance" || projected.type !== "instance") {
@@ -408,6 +477,7 @@ function mergeExistingNode(
         active_state: base.active_state,
         semantics: structuredClone(base.semantics),
       };
+      restoreAccessibilityMetadata(base, candidateDocument.nodes[nodeId]!);
       return;
     }
   }
@@ -446,6 +516,7 @@ function mergeExistingNode(
     candidateDocument.nodes[nodeId]!.locale = base.locale;
     candidateDocument.nodes[nodeId]!.text_direction = base.text_direction;
   }
+  restoreAccessibilityMetadata(base, candidateDocument.nodes[nodeId]!);
 }
 
 function preserveExistingPageFields(
@@ -522,12 +593,16 @@ function updateComponentDefinitions(
 export function mergeV1CompatibilityDocument(
   input: DesignDocumentV2,
   editedInput: DesignDocument,
+  options: { accessibilityLabelEdits?: ReadonlyMap<string, string | null> } = {},
 ): DesignDocumentV2 {
   const base = DesignDocumentV2Schema.parse(input);
   const edited = DesignDocumentSchema.parse(editedInput);
   const projected = toV1CompatibleDesignDocument(base);
+  const accessibilityLabelEdits = options.accessibilityLabelEdits ?? new Map<string, string | null>();
   assertSameIdentity(base, edited);
-  if (equal(projected, edited)) return DesignDocumentV2Schema.parse(structuredClone(base));
+  if (equal(projected, edited) && accessibilityLabelEdits.size === 0) {
+    return DesignDocumentV2Schema.parse(structuredClone(base));
+  }
 
   const candidate = migrateDesignDocumentV1ToV2(edited, {
     migratedAt: base.migration?.migrated_at ?? edited.updated_at,
@@ -536,7 +611,23 @@ export function mergeV1CompatibilityDocument(
     ...(base.migration?.verified_backup_id === undefined ? {} : { verifiedBackupId: base.migration.verified_backup_id }),
   });
 
-  for (const nodeId of Object.keys(base.nodes)) mergeExistingNode(base, projected, edited, candidate, nodeId);
+  const immutableComponentSourceNodeIds = componentSourceNodeIds(base);
+
+  for (const nodeId of Object.keys(base.nodes)) {
+    mergeExistingNode(base, projected, edited, candidate, nodeId, immutableComponentSourceNodeIds);
+  }
+  for (const [nodeId, accessibilityLabel] of accessibilityLabelEdits) {
+    const node = candidate.nodes[nodeId];
+    if (!node) {
+      compatibilityFailure(
+        "V2_ACCESSIBILITY_LABEL_TARGET_MISSING",
+        `Accessibility-label edit targets missing node ${nodeId}.`,
+        ["nodes", nodeId, "semantics", "accessibility_label"],
+      );
+    }
+    if (accessibilityLabel === null) delete node.semantics.accessibility_label;
+    else node.semantics.accessibility_label = accessibilityLabel;
+  }
   preserveExistingPageFields(base, edited, candidate);
   candidate.component_definitions = updateComponentDefinitions(base, projected, edited);
   candidate.design_system = structuredClone(base.design_system);

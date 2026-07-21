@@ -219,11 +219,21 @@ function renderNode(
   assetDataUrl: (id: string) => string | null,
   parentLayoutMode: LayoutMode = "absolute",
   isRoot = false,
+  componentSource = false,
+  definitionStack: readonly string[] = [],
 ): string {
   const node = document.nodes[nodeId];
   if (!node) return "";
   const children = "children" in node
-    ? node.children.map((childId) => renderNode(childId, document, assetDataUrl, node.layout.mode)).join("")
+    ? node.children.map((childId) => renderNode(
+        childId,
+        document,
+        assetDataUrl,
+        node.layout.mode,
+        false,
+        componentSource,
+        definitionStack,
+      )).join("")
     : "";
   let content = children;
   let attributes = "";
@@ -243,23 +253,46 @@ function renderNode(
       : `<span style="margin:auto;color:#6b7280">Missing image</span>`;
   }
   if (node.type === "icon") content = `<span aria-label="${escapeHtml(node.label ?? node.icon_name)}" style="margin:auto;font-size:24px">◇</span>`;
-  if (node.type === "instance") content = `<span style="margin:auto;color:#6b7280">${escapeHtml(node.name)}</span>`;
+  if (node.type === "instance") {
+    if (definitionStack.includes(node.component_id)) {
+      content = `<span style="margin:auto;color:#b42318">Component cycle</span>`;
+    } else if (document.nodes[node.component_id]) {
+      content = renderNode(
+        node.component_id,
+        document,
+        assetDataUrl,
+        "absolute",
+        true,
+        true,
+        [...definitionStack, node.component_id],
+      );
+    } else {
+      content = `<span style="margin:auto;color:#6b7280">${escapeHtml(node.name)}</span>`;
+    }
+  }
   const css = nodeToCss(node, document, {
     parentLayoutMode,
     includePosition: !isRoot,
   });
-  if (node.archived) css.display = "none";
+  if (node.archived && !componentSource) css.display = "none";
   if (isRoot) {
     css.position = "relative";
     css.left = "0";
     css.top = "0";
-    css.width = `${node.layout.width}px`;
-    css.height = `${node.layout.height}px`;
+    css.width = componentSource ? "100%" : `${node.layout.width}px`;
+    css.height = componentSource ? "100%" : `${node.layout.height}px`;
   }
-  return `<div data-node-id="${escapeHtml(node.id)}"${attributes} style="${escapeHtml(cssDeclarations(css))}">${content}</div>`;
+  const identityAttribute = componentSource
+    ? `data-component-source-node-id="${escapeHtml(node.id)}"`
+    : `data-node-id="${escapeHtml(node.id)}"`;
+  return `<div ${identityAttribute}${attributes} style="${escapeHtml(cssDeclarations(css))}">${content}</div>`;
 }
 
-function renderHtml(document: DesignDocument, options: RenderOptions, assetDataUrl: (id: string) => string | null): { html: string; width: number; height: number } {
+export function renderHtmlDocument(
+  document: DesignDocument,
+  options: RenderOptions,
+  assetDataUrl: (id: string) => string | null,
+): { html: string; width: number; height: number } {
   const page = options.pageId ? document.pages.find((candidate) => candidate.id === options.pageId) : document.pages.find((candidate) => !candidate.archived);
   if (!page) throw new DomainError("RENDER_FAILED", "The design has no renderable page.", 422);
   const target = options.nodeId ? document.nodes[options.nodeId] : undefined;
@@ -359,15 +392,31 @@ function softwareRender(document: DesignDocument, options: RenderOptions): Rende
   const pixels = Buffer.alloc(width * height * 4);
   drawRect(pixels, width, height, 0, 0, width, height, parseColor(page.background, document, [255, 255, 255, 255]));
 
-  const visit = (nodeId: string, parentX: number, parentY: number, root = false): void => {
+  const visit = (
+    nodeId: string,
+    parentX: number,
+    parentY: number,
+    root = false,
+    componentSource = false,
+    definitionStack: readonly string[] = [],
+  ): void => {
     const node = document.nodes[nodeId];
-    if (!node || node.archived || !node.visible) return;
-    const x = root ? 0 : parentX + node.layout.x;
-    const y = root ? 0 : parentY + node.layout.y;
+    if (!node || (node.archived && !componentSource) || !node.visible) return;
+    const x = root ? (componentSource ? parentX : 0) : parentX + node.layout.x;
+    const y = root ? (componentSource ? parentY : 0) : parentY + node.layout.y;
     let fill = parseColor(node.style.fill, document, [0, 0, 0, 0]);
     if (node.type === "text" && fill[3] === 0) fill = parseColor(node.style.color, document, [31, 41, 55, 255]);
     drawRect(pixels, width, height, x * scale, y * scale, node.layout.width * scale, node.layout.height * scale, fill);
-    if ("children" in node) for (const childId of node.children) visit(childId, x, y);
+    if (node.type === "instance"
+      && !definitionStack.includes(node.component_id)
+      && document.nodes[node.component_id]) {
+      visit(node.component_id, x, y, true, true, [...definitionStack, node.component_id]);
+    }
+    if ("children" in node) {
+      for (const childId of node.children) {
+        visit(childId, x, y, false, componentSource, definitionStack);
+      }
+    }
   };
   if (target) visit(target.id, 0, 0, true);
   else for (const rootId of page.children) visit(rootId, 0, 0);
@@ -566,7 +615,7 @@ export class PngRenderer {
         if (this.#allowSoftwareFallback) return softwareRender(compatibleDocument, options);
         throw new DomainError("RENDER_FAILED", "Pinned Chromium is unavailable.", 503, { retryable: true });
       }
-      const rendered = renderHtml(compatibleDocument, options, assetDataUrl);
+      const rendered = renderHtmlDocument(compatibleDocument, options, assetDataUrl);
       if (rendered.width * rendered.height > this.#maxPixels) {
         throw new DomainError("PAYLOAD_TOO_LARGE", `Render exceeds the ${this.#maxPixels} pixel limit.`, 413, {
           details: { width: rendered.width, height: rendered.height },

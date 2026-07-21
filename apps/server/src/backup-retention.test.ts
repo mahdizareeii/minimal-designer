@@ -5,6 +5,7 @@ import {
   backupScheduleWindow,
   buildBackupRetentionPlan,
   calendarRetentionBounds,
+  evaluateBackupScheduleSupervision,
   parseDailyBackupCron,
   type RetentionRecord,
 } from "./backup-retention.js";
@@ -42,6 +43,83 @@ describe("managed backup scheduling and retention", () => {
     });
     expect(() => parseDailyBackupCron("*/5 * * * *")).toThrow("one daily UTC time");
     expect(() => parseDailyBackupCron("60 2 * * *")).toThrow("outside the valid UTC range");
+
+    const supervision = evaluateBackupScheduleSupervision({
+      enabled: true,
+      cronExpression: "5 2 * * *",
+      at: new Date("2026-07-19T09:00:00.000Z"),
+      currentWindowCovered: false,
+      latestAttempt: {
+        runId: `backup_schedule_run_${"a".repeat(32)}`,
+        status: "failed",
+        dueAt: "2026-07-19T02:05:00.000Z",
+        nextDueAt: "2026-07-20T02:05:00.000Z",
+        startedAt: "2026-07-19T02:06:00.000Z",
+        completedAt: "2026-07-19T02:07:00.000Z",
+        errorCode: "INTERNAL_ERROR",
+        retryable: true,
+      },
+      retentionCandidateCount: 2,
+      retentionCandidateBytes: 500,
+      retentionProtectedCount: 1,
+      retentionPlanHash: "b".repeat(64),
+    });
+    expect(supervision.status).toBe("critical");
+    expect(supervision.alerts.map((alert) => alert.code)).toEqual([
+      "SCHEDULE_RUN_FAILED",
+      "BACKUP_WINDOW_OVERDUE",
+      "RETENTION_PRUNE_REQUIRED",
+      "BACKUP_RECORDS_REQUIRE_REVIEW",
+    ]);
+    expect(evaluateBackupScheduleSupervision({
+      enabled: true,
+      cronExpression: "5 2 * * *",
+      at: new Date("2026-07-19T09:00:00.000Z"),
+      currentWindowCovered: true,
+      latestAttempt: supervision.latestAttempt,
+      retentionCandidateCount: 0,
+      retentionCandidateBytes: 0,
+      retentionProtectedCount: 0,
+      retentionPlanHash: "b".repeat(64),
+    })).toMatchObject({
+      status: "critical",
+      currentWindowCovered: true,
+      alerts: [{ code: "SCHEDULE_RUN_FAILED", severity: "critical" }],
+    });
+    expect(evaluateBackupScheduleSupervision({
+      enabled: true,
+      cronExpression: "5 2 * * *",
+      at: new Date("2026-07-19T09:00:00.000Z"),
+      currentWindowCovered: true,
+      latestAttempt: {
+        runId: `backup_schedule_run_${"c".repeat(32)}`,
+        status: "running",
+        dueAt: "2026-07-19T02:05:00.000Z",
+        nextDueAt: "2026-07-20T02:05:00.000Z",
+        startedAt: "2026-07-19T02:06:00.000Z",
+        completedAt: null,
+        errorCode: null,
+        retryable: null,
+      },
+      retentionCandidateCount: 0,
+      retentionCandidateBytes: 0,
+      retentionProtectedCount: 0,
+      retentionPlanHash: "b".repeat(64),
+    })).toMatchObject({
+      status: "critical",
+      currentWindowCovered: true,
+      alerts: [{ code: "SCHEDULE_RUN_STALLED", severity: "critical" }],
+    });
+    expect(evaluateBackupScheduleSupervision({
+      ...supervision,
+      at: new Date("2026-07-19T09:00:00.000Z"),
+      enabled: false,
+      cronExpression: "5 2 * * *",
+      retentionCandidateCount: 0,
+      retentionCandidateBytes: 0,
+      retentionProtectedCount: 0,
+      retentionPlanHash: "b".repeat(64),
+    })).toMatchObject({ status: "disabled", dueAt: null, alerts: [] });
   });
 
   it("uses UTC calendar months and ISO Monday-based weeks", () => {

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { PLANNING_SECTIONS } from "@designer/core";
 import { z } from "zod";
 
+import { AgentTaskTransitionRequestSchema } from "./agent-task-schema.js";
 import {
   AGENT_CONNECTION_SCOPES,
   AGENT_TASK_EXPECTED_OUTPUTS,
@@ -94,12 +95,16 @@ export function registerEnterpriseHttpRoutes(
   });
 
   app.get("/api/designs/:id/planning-sessions", async (request) => {
+    const rawId = (request.params as { id?: string }).id ?? "";
+    enterprise.authorizePlanningSessionList(request.actorId, rawId);
     const { id } = designParams.parse(request.params);
     const query = z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }).strict().parse(request.query);
     return { sessions: enterprise.listPlanningSessions(request.actorId, id, query.limit) };
   });
 
   app.post("/api/designs/:id/planning-sessions", async (request, reply) => {
+    const rawId = (request.params as { id?: string }).id ?? "";
+    enterprise.authorizePlanningSessionCreate(request.actorId, rawId);
     const { id } = designParams.parse(request.params);
     const input = z.object({ idempotencyKey }).strict().parse(request.body);
     return reply.code(201).send(enterprise.createPlanningSession(request.actorId, {
@@ -136,6 +141,8 @@ export function registerEnterpriseHttpRoutes(
   });
 
   app.get("/api/designs/:id/agent-tasks", async (request) => {
+    const rawId = (request.params as { id?: string }).id ?? "";
+    enterprise.authorizeAgentTaskList(request.actorId, rawId);
     const { id } = designParams.parse(request.params);
     const query = z.object({
       status: z.enum(AGENT_TASK_STATUSES).optional(),
@@ -145,6 +152,8 @@ export function registerEnterpriseHttpRoutes(
   });
 
   app.post("/api/designs/:id/agent-tasks", async (request, reply) => {
+    const rawId = (request.params as { id?: string }).id ?? "";
+    enterprise.authorizeAgentTaskCreate(request.actorId, rawId);
     const { id } = designParams.parse(request.params);
     const input = z.object({
       brief: z.string().trim().min(1).max(100_000),
@@ -174,13 +183,13 @@ export function registerEnterpriseHttpRoutes(
 
   app.post("/api/agent-tasks/:taskId/transition", async (request) => {
     const { taskId } = taskParams.parse(request.params);
-    const input = z.object({
-      expectedStatus: z.enum(AGENT_TASK_STATUSES),
-      toStatus: z.enum(["in_progress", "awaiting_approval", "completed", "failed", "cancelled", "expired"]),
-      message: z.string().trim().max(4_000).optional(),
-      data: z.record(z.unknown()).optional(),
-    }).strict().parse(request.body);
+    const input = AgentTaskTransitionRequestSchema.parse(request.body);
     return { task: enterprise.transitionAgentTask(request.actorId, taskId, input) };
+  });
+
+  app.get("/api/agent-authorization-context", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    return enterprise.readOwnAuthorizationContext(request.actorId);
   });
 
   app.get("/api/agent-connections", async (request) => ({
@@ -188,6 +197,7 @@ export function registerEnterpriseHttpRoutes(
   }));
 
   app.post("/api/agent-connections", async (request, reply) => {
+    enterprise.authorizeAgentConnectionAdministration(request.actorId);
     const input = z.object({
       adapter: z.enum(["codex", "generic_mcp"]),
       displayName: z.string().trim().min(1).max(240),
@@ -205,11 +215,13 @@ export function registerEnterpriseHttpRoutes(
   });
 
   app.post("/api/agent-connections/:connectionId/reconnect", async (request) => {
+    enterprise.authorizeAgentConnectionAdministration(request.actorId);
     const { connectionId } = connectionParams.parse(request.params);
     return enterprise.renewAgentConnectionPairing(request.actorId, connectionId);
   });
 
   app.post("/api/agent-connections/:connectionId/revoke", async (request) => {
+    enterprise.authorizeAgentConnectionAdministration(request.actorId);
     const { connectionId } = connectionParams.parse(request.params);
     return enterprise.revokeAgentConnection(request.actorId, connectionId);
   });

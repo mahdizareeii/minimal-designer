@@ -1,0 +1,83 @@
+name: Browser release gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser-gate:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gate: alignment
+            label: Selection alignment
+            command: test:e2e:alignment
+          - gate: alignment-cross-browser
+            label: Selection alignment Firefox and WebKit
+            command: test:e2e:alignment:cross-browser
+          - gate: editor
+            label: Enterprise editor and prototype
+            command: test:e2e:editor
+          - gate: visual
+            label: Visual regression
+            command: test:e2e:visual
+          - gate: performance
+            label: 1000-node performance budget
+            command: test:e2e:performance
+          - gate: release
+            label: Product manager to backup/restore
+            command: test:e2e:release
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          test "$(node --version)" = "v24.14.0"
+          test "$(pnpm --version)" = "11.9.0"
+      - name: Frozen dependency installation
+        run: pnpm install --frozen-lockfile --strict-peer-dependencies
+      - name: Install Playwright 1.61.1 Chromium
+        if: matrix.gate != 'alignment-cross-browser'
+        run: pnpm --filter @designer/server exec playwright install --with-deps chromium
+      - name: Install Playwright 1.61.1 Firefox and WebKit
+        if: matrix.gate == 'alignment-cross-browser'
+        run: pnpm --filter @designer/server exec playwright install --with-deps firefox webkit
+      - name: Run browser gate
+        env:
+          CI: "1"
+          FORMASPEC_ALLOW_SYSTEM_CHROME: "false"
+        run: pnpm ${{ matrix.command }}
+      - name: Retain traces and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-browser-${{ matrix.gate }}-${{ github.sha }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14

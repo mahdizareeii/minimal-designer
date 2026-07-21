@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { scanFrameworkSource } from "./framework-scanners.js";
+
 export type RepositoryPlatform = "web" | "android" | "ios" | "flutter" | "react-native" | "generic-git";
 export type InventoryEntityKind = "component" | "screen" | "route" | "token" | "asset" | "flow" | "business-rule";
 
@@ -62,19 +64,132 @@ const SECRET_BASENAMES = new Set([
 ]);
 
 const SECRET_EXTENSIONS = new Set([".jks", ".key", ".keystore", ".p12", ".pem", ".pfx"]);
-const SOURCE_EXTENSIONS = new Set([".css", ".dart", ".gradle", ".html", ".java", ".js", ".jsx", ".kt", ".kts", ".m", ".mm", ".scss", ".swift", ".ts", ".tsx", ".vue", ".xml"]);
+const SOURCE_EXTENSIONS = new Set([".css", ".dart", ".gradle", ".h", ".html", ".java", ".js", ".jsx", ".kt", ".kts", ".m", ".mm", ".scss", ".storyboard", ".swift", ".ts", ".tsx", ".vue", ".xib", ".xml"]);
 const ASSET_EXTENSIONS = new Set([".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"]);
 const MAXIMUM_EXCLUDED_PATTERNS = 100;
 const MAXIMUM_EXCLUDED_PATTERN_LENGTH = 240;
 const MAXIMUM_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAXIMUM_GIT_POINTER_BYTES = 16 * 1024;
 const MAXIMUM_PACKED_REFS_BYTES = 4 * 1024 * 1024;
+const MAXIMUM_PLATFORM_MARKER_DIRECTORIES = 2_000;
+const MAXIMUM_PLATFORM_MARKER_ENTRIES = 20_000;
+const MAXIMUM_PLATFORM_MARKER_DEPTH = 8;
+const MAXIMUM_PLATFORM_MARKER_BYTES = 8 * 1024 * 1024;
 
 function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function sha256File(filename: string, expected: fs.Stats): Promise<string> {
+function pathIsWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function descriptorPath(fd: number): string | null {
+  if (process.platform === "darwin") return `/dev/fd/${fd}`;
+  if (process.platform === "linux") return `/proc/self/fd/${fd}`;
+  return null;
+}
+
+async function assertDescriptorPath(
+  root: string,
+  filename: string,
+  handle: fs.promises.FileHandle,
+  label: string,
+): Promise<string | null> {
+  const candidate = descriptorPath(handle.fd);
+  if (!candidate) return null;
+  let actual: string;
+  let current: string;
+  try {
+    [actual, current] = await Promise.all([
+      fs.promises.realpath(candidate),
+      fs.promises.realpath(filename),
+    ]);
+  } catch (error) {
+    throw new Error(`${label} changed while it was being inspected.`, { cause: error });
+  }
+  if (!pathIsWithin(root, current)) {
+    throw new Error(`${label} escaped the selected repository or changed through a symbolic-link swap.`);
+  }
+  // macOS exposes /dev/fd descriptors but realpath intentionally leaves that
+  // pseudo-path unresolved. The caller's before/open/after inode checks still
+  // bind the handle to the exact lstat result before any bytes are consumed.
+  if (path.resolve(actual) === path.resolve(candidate)
+    || (process.platform === "darwin" && actual.startsWith("/dev/fd/"))) return candidate;
+  if (!pathIsWithin(root, actual) || path.resolve(actual) !== path.resolve(current)) {
+    throw new Error(`${label} escaped the selected repository or changed through a symbolic-link swap.`);
+  }
+  return candidate;
+}
+
+async function readVerifiedDirectory(
+  root: string,
+  directory: string,
+  label: string,
+  hooks: {
+    afterHandleVerified?: () => void | Promise<void>;
+    afterDirectoryOpened?: () => void | Promise<void>;
+  } = {},
+): Promise<fs.Dirent[]> {
+  const expected = await fs.promises.lstat(directory);
+  if (!expected.isDirectory() || expected.isSymbolicLink()) throw new Error(`${label} must be a non-symlinked directory.`);
+  const noFollow = process.platform === "win32" ? 0 : fs.constants.O_NOFOLLOW;
+  const directoryOnly = process.platform === "win32" ? 0 : fs.constants.O_DIRECTORY;
+  const handle = await fs.promises.open(directory, fs.constants.O_RDONLY | noFollow | directoryOnly);
+  let openedDirectory: fs.Dir | null = null;
+  try {
+    const opened = await handle.stat();
+    if (!opened.isDirectory() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+      throw new Error(`${label} changed while it was being inspected.`);
+    }
+    const currentBeforeOpen = await fs.promises.lstat(directory);
+    if (!currentBeforeOpen.isDirectory() || currentBeforeOpen.isSymbolicLink()
+      || currentBeforeOpen.dev !== opened.dev || currentBeforeOpen.ino !== opened.ino) {
+      throw new Error(`${label} changed while it was being inspected.`);
+    }
+    await hooks.afterHandleVerified?.();
+    openedDirectory = await fs.promises.opendir(directory);
+    await hooks.afterDirectoryOpened?.();
+    const entries: fs.Dirent[] = [];
+    while (true) {
+      const beforeRead = await fs.promises.lstat(directory);
+      if (!beforeRead.isDirectory() || beforeRead.isSymbolicLink()
+        || beforeRead.dev !== opened.dev || beforeRead.ino !== opened.ino) {
+        throw new Error(`${label} changed while it was being inspected.`);
+      }
+      const entry = await openedDirectory.read();
+      const afterEntry = await fs.promises.lstat(directory);
+      if (!afterEntry.isDirectory() || afterEntry.isSymbolicLink()
+        || afterEntry.dev !== opened.dev || afterEntry.ino !== opened.ino) {
+        throw new Error(`${label} changed while it was being inspected.`);
+      }
+      if (entry === null) break;
+      entries.push(entry);
+    }
+    const verificationEntries = await fs.promises.readdir(directory, { withFileTypes: true });
+    const entrySignature = (entry: fs.Dirent) => `${entry.name}\0${entry.isDirectory() ? "d" : entry.isFile() ? "f" : entry.isSymbolicLink() ? "l" : "o"}`;
+    const openedSignature = entries.map(entrySignature).sort();
+    const verifiedSignature = verificationEntries.map(entrySignature).sort();
+    if (openedSignature.length !== verifiedSignature.length
+      || openedSignature.some((value, index) => value !== verifiedSignature[index])) {
+      throw new Error(`${label} changed while it was being inspected.`);
+    }
+    const afterRead = await handle.stat();
+    const current = await fs.promises.lstat(directory);
+    if (!current.isDirectory() || current.isSymbolicLink()
+      || afterRead.dev !== opened.dev || afterRead.ino !== opened.ino
+      || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new Error(`${label} changed while it was being inspected.`);
+    }
+    return entries;
+  } finally {
+    if (openedDirectory) await openedDirectory.close().catch(() => undefined);
+    await handle.close();
+  }
+}
+
+async function sha256File(root: string, filename: string, expected: fs.Stats): Promise<string> {
   const noFollow = process.platform === "win32" ? 0 : fs.constants.O_NOFOLLOW;
   const handle = await fs.promises.open(filename, fs.constants.O_RDONLY | noFollow);
   try {
@@ -87,6 +202,7 @@ async function sha256File(filename: string, expected: fs.Stats): Promise<string>
       || opened.ctimeMs !== expected.ctimeMs) {
       throw new Error("Repository contents changed while the inventory fingerprint was being computed; retry authorization.");
     }
+    await assertDescriptorPath(root, filename, handle, "Repository file");
     const hash = createHash("sha256");
     const stream = handle.createReadStream({ autoClose: false, highWaterMark: 64 * 1024 });
     for await (const chunk of stream) hash.update(chunk as Buffer);
@@ -105,7 +221,7 @@ async function sha256File(filename: string, expected: fs.Stats): Promise<string>
   }
 }
 
-async function readVerifiedSourceFile(filename: string, expected: fs.Stats, expectedHash: string): Promise<Buffer> {
+async function readVerifiedSourceFile(root: string, filename: string, expected: fs.Stats, expectedHash: string): Promise<Buffer> {
   const noFollow = process.platform === "win32" ? 0 : fs.constants.O_NOFOLLOW;
   const handle = await fs.promises.open(filename, fs.constants.O_RDONLY | noFollow);
   try {
@@ -113,6 +229,7 @@ async function readVerifiedSourceFile(filename: string, expected: fs.Stats, expe
     if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino || opened.size !== expected.size) {
       throw new Error("Repository contents changed while source symbols were being inspected; retry authorization.");
     }
+    await assertDescriptorPath(root, filename, handle, "Repository source file");
     const contents = await handle.readFile();
     const afterRead = await handle.stat();
     const current = await fs.promises.lstat(filename);
@@ -130,7 +247,7 @@ async function readVerifiedSourceFile(filename: string, expected: fs.Stats, expe
   }
 }
 
-async function readBoundedMetadataFile(filename: string, maximumBytes: number, label: string): Promise<string | null> {
+async function readBoundedMetadataFile(root: string, filename: string, maximumBytes: number, label: string): Promise<string | null> {
   let expected: fs.Stats;
   try {
     expected = await fs.promises.lstat(filename);
@@ -147,6 +264,7 @@ async function readBoundedMetadataFile(filename: string, maximumBytes: number, l
     if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino || opened.size !== expected.size) {
       throw new Error(`${label} changed while it was being inspected.`);
     }
+    await assertDescriptorPath(root, filename, handle, label);
     const contents = await handle.readFile();
     if (contents.byteLength > maximumBytes) throw new Error(`${label} exceeds the ${maximumBytes}-byte discovery limit.`);
     const afterRead = await handle.stat();
@@ -165,8 +283,21 @@ async function readBoundedMetadataFile(filename: string, maximumBytes: number, l
 }
 
 async function safeMarkerExists(root: string, relativePath: string, directory = false): Promise<boolean> {
+  const components = portablePath(relativePath).split("/");
+  if (components.some((component) => component.length === 0 || component === "." || component === "..")) return false;
+  let parent = root;
+  for (const component of components.slice(0, -1)) {
+    parent = path.join(parent, component);
+    try {
+      const parentStat = await fs.promises.lstat(parent);
+      if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
   try {
-    const stat = await fs.promises.lstat(path.join(root, relativePath));
+    const stat = await fs.promises.lstat(path.join(root, ...components));
     if (stat.isSymbolicLink()) return false;
     return directory ? stat.isDirectory() : stat.isFile();
   } catch (error) {
@@ -264,17 +395,76 @@ function secretPath(relativePath: string): boolean {
 }
 
 async function readGitHead(root: string): Promise<string | null> {
-  const git = path.join(root, ".git");
+  const gitMarker = path.join(root, ".git");
   let gitStat: fs.Stats;
   try {
-    gitStat = await fs.promises.lstat(git);
+    gitStat = await fs.promises.lstat(gitMarker);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (!gitStat.isDirectory() || gitStat.isSymbolicLink()) return null;
-  const headPath = path.join(git, "HEAD");
-  const headContents = await readBoundedMetadataFile(headPath, MAXIMUM_GIT_POINTER_BYTES, "Git HEAD");
+  if (gitStat.isSymbolicLink()) throw new Error(".git may not be a symbolic link.");
+  let gitDirectory: string;
+  let commonDirectory: string;
+  if (gitStat.isDirectory()) {
+    gitDirectory = gitMarker;
+    commonDirectory = gitMarker;
+  } else if (gitStat.isFile()) {
+    const pointer = await readBoundedMetadataFile(root, gitMarker, MAXIMUM_GIT_POINTER_BYTES, ".git worktree pointer");
+    const value = /^gitdir: ([^\r\n]+)\s*$/.exec(pointer ?? "")?.[1]?.trim();
+    if (!value) throw new Error(".git worktree pointer is invalid.");
+    if (!path.isAbsolute(value) && value.split(/[\\/]+/).some((component) => component === "..")) {
+      throw new Error(".git worktree pointer may not traverse outside the selected worktree.");
+    }
+    const unresolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(root, value);
+    const unresolvedStat = await fs.promises.lstat(unresolved);
+    if (!unresolvedStat.isDirectory() || unresolvedStat.isSymbolicLink()) {
+      throw new Error(".git worktree target must be a non-symlinked directory.");
+    }
+    gitDirectory = await fs.promises.realpath(unresolved);
+    const backReference = await readBoundedMetadataFile(
+      gitDirectory,
+      path.join(gitDirectory, "gitdir"),
+      MAXIMUM_GIT_POINTER_BYTES,
+      "Git worktree back-reference",
+    );
+    if (backReference === null) throw new Error("Git worktree metadata is missing its back-reference.");
+    const backReferenceValue = backReference.trim();
+    if (!backReferenceValue || backReferenceValue.includes("\0")) {
+      throw new Error("Git worktree back-reference is invalid.");
+    }
+    const resolvedBackReference = path.resolve(gitDirectory, backReferenceValue);
+    const [canonicalBackReference, canonicalGitMarker] = await Promise.all([
+      fs.promises.realpath(resolvedBackReference),
+      fs.promises.realpath(gitMarker),
+    ]);
+    if (path.resolve(canonicalBackReference) !== path.resolve(canonicalGitMarker)) {
+      throw new Error("Git worktree metadata does not point back to the selected worktree.");
+    }
+    const commonPointer = await readBoundedMetadataFile(
+      gitDirectory,
+      path.join(gitDirectory, "commondir"),
+      MAXIMUM_GIT_POINTER_BYTES,
+      "Git worktree common-directory pointer",
+    );
+    if (commonPointer === null) throw new Error("Git worktree metadata is missing commondir.");
+    const commonValue = commonPointer.trim();
+    if (!commonValue || commonValue.includes("\0")) throw new Error("Git worktree commondir is invalid.");
+    const commonUnresolved = path.resolve(gitDirectory, commonValue);
+    const commonStat = await fs.promises.lstat(commonUnresolved);
+    if (!commonStat.isDirectory() || commonStat.isSymbolicLink()) {
+      throw new Error("Git worktree common directory must be a non-symlinked directory.");
+    }
+    commonDirectory = await fs.promises.realpath(commonUnresolved);
+    if (!pathIsWithin(commonDirectory, gitDirectory)) {
+      throw new Error("Git worktree metadata must remain within its common Git directory.");
+    }
+  } else {
+    throw new Error(".git must be a non-symlinked directory or bounded worktree pointer file.");
+  }
+
+  const headPath = path.join(gitDirectory, "HEAD");
+  const headContents = await readBoundedMetadataFile(gitDirectory, headPath, MAXIMUM_GIT_POINTER_BYTES, "Git HEAD");
   if (headContents === null) return null;
   const head = headContents.trim();
   const reference = /^ref: (.+)$/.exec(head)?.[1];
@@ -282,21 +472,26 @@ async function readGitHead(root: string): Promise<string | null> {
   if (!/^refs\/[A-Za-z0-9._/-]+$/.test(reference)
     || reference.split("/").some((part) => part.length === 0 || part === "." || part === "..")) return null;
   const referenceComponents = reference.split("/");
-  const referencePath = path.join(git, ...referenceComponents);
-  const safeReferenceParents = await safeMetadataParentPath(
-    git,
-    referenceComponents.slice(0, -1),
-    "Git loose reference",
-  );
-  const looseReference = safeReferenceParents
-    ? await readBoundedMetadataFile(referencePath, MAXIMUM_GIT_POINTER_BYTES, "Git loose reference")
-    : null;
+  const referenceRoots = gitDirectory === commonDirectory ? [gitDirectory] : [gitDirectory, commonDirectory];
+  let looseReference: string | null = null;
+  for (const referenceRoot of referenceRoots) {
+    const referencePath = path.join(referenceRoot, ...referenceComponents);
+    const safeReferenceParents = await safeMetadataParentPath(
+      referenceRoot,
+      referenceComponents.slice(0, -1),
+      "Git loose reference",
+    );
+    looseReference = safeReferenceParents
+      ? await readBoundedMetadataFile(referenceRoot, referencePath, MAXIMUM_GIT_POINTER_BYTES, "Git loose reference")
+      : null;
+    if (looseReference !== null) break;
+  }
   if (looseReference !== null) {
     const value = looseReference.trim();
     return /^[a-f0-9]{40,64}$/i.test(value) ? value.toLowerCase() : null;
   }
-  const packedRefs = path.join(git, "packed-refs");
-  const packedReferenceContents = await readBoundedMetadataFile(packedRefs, MAXIMUM_PACKED_REFS_BYTES, "Git packed refs");
+  const packedRefs = path.join(commonDirectory, "packed-refs");
+  const packedReferenceContents = await readBoundedMetadataFile(commonDirectory, packedRefs, MAXIMUM_PACKED_REFS_BYTES, "Git packed refs");
   if (packedReferenceContents === null) return null;
   for (const line of packedReferenceContents.split("\n")) {
     const [value, name] = line.trim().split(" ");
@@ -308,7 +503,8 @@ async function readGitHead(root: string): Promise<string | null> {
 async function detectPlatforms(
   root: string,
   excludedByPolicy: (relativePath: string, directory: boolean) => boolean,
-): Promise<RepositoryPlatform[]> {
+  maximumMarkerBytes: number,
+): Promise<{ platforms: RepositoryPlatform[]; truncated: boolean }> {
   const platforms = new Set<RepositoryPlatform>();
   const exists = async (name: string, directory = false) => (
     !excludedByPolicy(portablePath(name), directory) && await safeMarkerExists(root, name, directory)
@@ -316,6 +512,7 @@ async function detectPlatforms(
   let packageJson: Record<string, unknown> | null = null;
   if (await exists("package.json")) {
     const contents = await readBoundedMetadataFile(
+      root,
       path.join(root, "package.json"),
       MAXIMUM_PACKAGE_JSON_BYTES,
       "package.json",
@@ -328,25 +525,134 @@ async function detectPlatforms(
     }
     platforms.add("web");
   }
-  const dependencies = packageJson && typeof packageJson.dependencies === "object" && packageJson.dependencies !== null
-    ? packageJson.dependencies as Record<string, unknown>
-    : {};
-  if ("react-native" in dependencies || await exists("metro.config.js") || await exists("metro.config.ts")) platforms.add("react-native");
+  if (!platforms.has("web") && (
+    await exists("index.html")
+    || await exists("vite.config.js") || await exists("vite.config.ts")
+    || await exists("next.config.js") || await exists("next.config.mjs") || await exists("next.config.ts")
+  )) platforms.add("web");
+  const dependencySections = ["dependencies", "devDependencies", "peerDependencies"]
+    .map((name) => packageJson?.[name])
+    .filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null);
+  const hasDependency = (name: string) => dependencySections.some((section) => name in section);
+  if (hasDependency("react-native")
+    || await exists("metro.config.js") || await exists("metro.config.ts")
+    || await exists("react-native.config.js")) platforms.add("react-native");
   if (await exists("pubspec.yaml") || await exists("pubspec.yml")) platforms.add("flutter");
-  if (await exists("settings.gradle") || await exists("settings.gradle.kts") || await exists("gradlew")) platforms.add("android");
-  const topLevel = await fs.promises.readdir(root, { withFileTypes: true });
-  if (await exists("Package.swift") || topLevel.some((entry) => (
+  if (await exists("settings.gradle") || await exists("settings.gradle.kts") || await exists("gradlew")
+    || await exists("AndroidManifest.xml")
+    || await exists("android/settings.gradle") || await exists("android/settings.gradle.kts")
+    || await exists("android/gradlew") || await exists("android/app/src/main/AndroidManifest.xml")) platforms.add("android");
+
+  let markerDirectories = 0;
+  let markerEntries = 0;
+  let markerBytesRead = 0;
+  let markerLimitReached = false;
+  const visitPlatformMarkers = async (directory: string, prefix: string, depth: number): Promise<void> => {
+    if (markerLimitReached) return;
+    if (depth > MAXIMUM_PLATFORM_MARKER_DEPTH) {
+      markerLimitReached = true;
+      return;
+    }
+    markerDirectories += 1;
+    if (markerDirectories > MAXIMUM_PLATFORM_MARKER_DIRECTORIES) {
+      markerLimitReached = true;
+      return;
+    }
+    const entries = await readVerifiedDirectory(root, directory, `Platform marker directory ${prefix || "."}`);
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      markerEntries += 1;
+      if (markerEntries > MAXIMUM_PLATFORM_MARKER_ENTRIES) {
+        markerLimitReached = true;
+        return;
+      }
+      const relativePath = portablePath(prefix ? `${prefix}/${entry.name}` : entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (GENERATED_DIRECTORIES.has(entry.name) || excludedByPolicy(relativePath, true)) continue;
+        if (entry.name.endsWith(".xcodeproj") || entry.name.endsWith(".xcworkspace")) {
+          platforms.add("ios");
+          continue;
+        }
+        await visitPlatformMarkers(path.join(directory, entry.name), relativePath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || excludedByPolicy(relativePath, false) || secretPath(relativePath)) continue;
+      const lower = entry.name.toLowerCase();
+      if (lower === "package.json") {
+        const packageStat = await fs.promises.lstat(path.join(directory, entry.name));
+        if (!packageStat.isFile() || packageStat.isSymbolicLink()) continue;
+        if (markerBytesRead + packageStat.size > maximumMarkerBytes) {
+          markerLimitReached = true;
+          return;
+        }
+        markerBytesRead += packageStat.size;
+        const contents = await readBoundedMetadataFile(
+          root,
+          path.join(directory, entry.name),
+          MAXIMUM_PACKAGE_JSON_BYTES,
+          `Nested package.json ${relativePath}`,
+        );
+        if (contents !== null) {
+          platforms.add("web");
+          try {
+            const parsed = JSON.parse(contents) as Record<string, unknown>;
+            const sections = ["dependencies", "devDependencies", "peerDependencies"]
+              .map((name) => parsed[name])
+              .filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null);
+            if (sections.some((section) => "react-native" in section)) platforms.add("react-native");
+          } catch {
+            // Invalid package metadata is ignored here and remains bounded.
+          }
+        }
+      } else if (["index.html", "vite.config.js", "vite.config.ts", "next.config.js", "next.config.mjs", "next.config.ts"].includes(lower)) {
+        platforms.add("web");
+      } else if (["metro.config.js", "metro.config.ts", "react-native.config.js"].includes(lower)) {
+        platforms.add("react-native");
+      } else if (lower === "pubspec.yaml" || lower === "pubspec.yml") {
+        platforms.add("flutter");
+      } else if (["settings.gradle", "settings.gradle.kts", "gradlew", "androidmanifest.xml"].includes(lower)) {
+        platforms.add("android");
+      } else if (lower === "package.swift") {
+        platforms.add("ios");
+      }
+    }
+  };
+  await visitPlatformMarkers(root, "", 0);
+
+  const topLevel = await readVerifiedDirectory(root, root, "Repository root");
+  let nestedAppleProject = false;
+  for (const appleDirectory of ["ios", "macos"]) {
+    if (!await exists(appleDirectory, true)) continue;
+    const entries = await readVerifiedDirectory(root, path.join(root, appleDirectory), `${appleDirectory} project directory`);
+    if (entries.some((entry) => entry.isDirectory()
+      && !entry.isSymbolicLink()
+      && !excludedByPolicy(`${appleDirectory}/${entry.name}`, true)
+      && (entry.name.endsWith(".xcodeproj") || entry.name.endsWith(".xcworkspace")))) {
+      nestedAppleProject = true;
+      break;
+    }
+  }
+  if (await exists("Package.swift") || nestedAppleProject || topLevel.some((entry) => (
     entry.isDirectory()
     && !entry.isSymbolicLink()
     && !excludedByPolicy(entry.name, true)
     && (entry.name.endsWith(".xcodeproj") || entry.name.endsWith(".xcworkspace"))
   ))) platforms.add("ios");
   if (platforms.size === 0) platforms.add("generic-git");
-  return [...platforms].sort();
+  return { platforms: [...platforms].sort(), truncated: markerLimitReached };
 }
 
-function entityId(kind: InventoryEntityKind, locationId: string, name: string, line: number | null): string {
-  return `inv_${sha256(`${kind}\0${locationId}\0${name}\0${line ?? 0}`).slice(0, 40)}`;
+function entityLocationId(
+  relativePath: string,
+  kind: InventoryEntityKind,
+  name: string,
+  symbol: string | null,
+): string {
+  return `loc_${sha256(`${relativePath}\0${kind}\0${symbol ?? name}`).slice(0, 40)}`;
+}
+
+function entityId(kind: InventoryEntityKind, locationId: string, name: string, symbol: string | null): string {
+  return `inv_${sha256(`${kind}\0${locationId}\0${name}\0${symbol ?? ""}`).slice(0, 40)}`;
 }
 
 function appendEntity(
@@ -359,12 +665,14 @@ function appendEntity(
   line: number | null,
 ): boolean {
   if (entities.length >= maximumEntities) return false;
-  const locationId = `loc_${sha256(relativePath).slice(0, 40)}`;
+  const normalizedName = name.slice(0, 240);
+  const normalizedSymbol = symbol?.slice(0, 240) ?? null;
+  const locationId = entityLocationId(relativePath, kind, normalizedName, normalizedSymbol);
   entities.push({
-    id: entityId(kind, locationId, name, line),
+    id: entityId(kind, locationId, normalizedName, normalizedSymbol),
     kind,
-    name: name.slice(0, 240),
-    symbol: symbol?.slice(0, 240) ?? null,
+    name: normalizedName,
+    symbol: normalizedSymbol,
     relativePath,
     locationId,
     line,
@@ -372,32 +680,45 @@ function appendEntity(
   return true;
 }
 
-function sourceEntities(relativePath: string, contents: string, maximumEntities: number, entities: LocalInventoryEntity[]): boolean {
-  const lines = contents.split("\n");
-  const screenLike = /(^|\/)(pages?|screens?|views?|routes?)(\/|$)/i.test(relativePath);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    const lineNumber = index + 1;
-    const component = /(?:export\s+)?(?:default\s+)?(?:function|class|const|let|var|struct)\s+([A-Z][A-Za-z0-9_]*)/.exec(line)?.[1]
-      ?? /class\s+([A-Z][A-Za-z0-9_]*)\s+extends\s+(?:StatelessWidget|StatefulWidget)/.exec(line)?.[1];
-    if (component && !appendEntity(entities, maximumEntities, relativePath, screenLike ? "screen" : "component", component, component, lineNumber)) return false;
-    const route = /(?:path|route|routeName)\s*[:=]\s*["'`]([^"'`]{1,200})["'`]/.exec(line)?.[1]
-      ?? /(?:GET|POST|PUT|PATCH|DELETE)\s+["'`]([^"'`]{1,200})["'`]/.exec(line)?.[1];
-    if (route && !appendEntity(entities, maximumEntities, relativePath, "route", route, null, lineNumber)) return false;
-    const cssToken = /(--[a-zA-Z0-9_-]+)\s*:/.exec(line)?.[1];
-    const xmlToken = /<(?:color|dimen|string|style)\s+name=["']([^"']+)["']/.exec(line)?.[1];
-    if ((cssToken || xmlToken) && !appendEntity(entities, maximumEntities, relativePath, "token", (cssToken ?? xmlToken)!, null, lineNumber)) return false;
-    const flow = /(?:class|struct|function|const)\s+([A-Za-z0-9_]*(?:Flow|Journey|Workflow)[A-Za-z0-9_]*)/.exec(line)?.[1];
-    if (flow && !appendEntity(entities, maximumEntities, relativePath, "flow", flow, flow, lineNumber)) return false;
-    const rule = /(?:class|struct|function|const)\s+([A-Za-z0-9_]*(?:Policy|Rule|Validator|Constraint)[A-Za-z0-9_]*)/.exec(line)?.[1];
-    if (rule && !appendEntity(entities, maximumEntities, relativePath, "business-rule", rule, rule, lineNumber)) return false;
+function sourceEntities(
+  relativePath: string,
+  contents: string,
+  platforms: readonly RepositoryPlatform[],
+  maximumEntities: number,
+  entities: LocalInventoryEntity[],
+): boolean {
+  const scan = scanFrameworkSource({
+    relativePath,
+    contents,
+    platforms,
+    maximumEntities: Math.max(0, maximumEntities - entities.length),
+  });
+  for (const entity of scan.entities) {
+    if (!appendEntity(
+      entities,
+      maximumEntities,
+      relativePath,
+      entity.kind,
+      entity.name,
+      entity.symbol,
+      entity.line,
+    )) return false;
   }
-  return true;
+  return !scan.truncated;
 }
 
 export async function scanRepository(
   repositoryRoot: string,
-  options: { limits?: Partial<InventoryLimits>; now?: Date; excludedPatterns?: readonly string[] } = {},
+  options: {
+    limits?: Partial<InventoryLimits>;
+    now?: Date;
+    excludedPatterns?: readonly string[];
+    /** Internal deterministic race-test hook; never populated from remote input. */
+    beforeDirectoryRead?: (directory: string, relativePath: string) => void | Promise<void>;
+    /** Internal deterministic race-test hooks around pathname-based opendir. */
+    afterDirectoryHandleVerified?: (directory: string, relativePath: string) => void | Promise<void>;
+    afterDirectoryOpened?: (directory: string, relativePath: string) => void | Promise<void>;
+  } = {},
 ): Promise<LocalRepositoryInventory> {
   const root = await fs.promises.realpath(path.resolve(repositoryRoot));
   const rootStat = await fs.promises.lstat(root);
@@ -408,20 +729,29 @@ export async function scanRepository(
   }
   const excludedPatterns = normalizeExcludedPatterns(options.excludedPatterns ?? []);
   const excludedByPolicy = excludedPathMatcher(excludedPatterns);
-  const platforms = await detectPlatforms(root, excludedByPolicy);
+  const platformDetection = await detectPlatforms(
+    root,
+    excludedByPolicy,
+    Math.min(MAXIMUM_PLATFORM_MARKER_BYTES, limits.maximumTotalBytesRead),
+  );
+  const platforms = platformDetection.platforms;
   const gitHead = await readGitHead(root);
   const entities: LocalInventoryEntity[] = [];
-  const excluded = { secret: 0, generated: 0, policy: 0, symlink: 0, limit: 0 };
+  const excluded = { secret: 0, generated: 0, policy: 0, symlink: 0, limit: platformDetection.truncated ? 1 : 0 };
   const fingerprintRows: string[] = [`platforms:${platforms.join(",")}`, `git:${gitHead ?? "none"}`];
   let scannedFileCount = 0;
   let skippedFileCount = 0;
   let bytesRead = 0;
   let fingerprintBytes = 0;
-  let truncated = false;
+  let truncated = platformDetection.truncated;
 
   const visit = async (directory: string, prefix = ""): Promise<void> => {
     if (truncated) return;
-    const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    await options.beforeDirectoryRead?.(directory, prefix);
+    const entries = await readVerifiedDirectory(root, directory, `Repository directory ${prefix || "."}`, {
+      afterHandleVerified: () => options.afterDirectoryHandleVerified?.(directory, prefix),
+      afterDirectoryOpened: () => options.afterDirectoryOpened?.(directory, prefix),
+    });
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (truncated) return;
       const relativePath = portablePath(prefix ? `${prefix}/${entry.name}` : entry.name);
@@ -432,7 +762,7 @@ export async function scanRepository(
         skippedFileCount += 1;
         continue;
       }
-      if (entry.isDirectory()) {
+      if (stat.isDirectory()) {
         if (GENERATED_DIRECTORIES.has(entry.name)) {
           excluded.generated += 1;
           continue;
@@ -441,10 +771,27 @@ export async function scanRepository(
           excluded.policy += 1;
           continue;
         }
+        if (platforms.includes("ios") && /\.(?:appiconset|imageset)$/i.test(entry.name)) {
+          const assetName = entry.name.replace(/\.(?:appiconset|imageset)$/i, "");
+          fingerprintRows.push(`semantic-directory:${relativePath}`);
+          if (!appendEntity(entities, limits.maximumEntities, relativePath, "asset", assetName, null, null)) {
+            excluded.limit += 1;
+            truncated = true;
+            return;
+          }
+        } else if (platforms.includes("ios") && /\.colorset$/i.test(entry.name)) {
+          const tokenName = entry.name.replace(/\.colorset$/i, "");
+          fingerprintRows.push(`semantic-directory:${relativePath}`);
+          if (!appendEntity(entities, limits.maximumEntities, relativePath, "token", tokenName, null, null)) {
+            excluded.limit += 1;
+            truncated = true;
+            return;
+          }
+        }
         await visit(absolute, relativePath);
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!stat.isFile()) continue;
       if (secretPath(relativePath)) {
         excluded.secret += 1;
         skippedFileCount += 1;
@@ -469,7 +816,7 @@ export async function scanRepository(
         return;
       }
       fingerprintBytes += stat.size;
-      const contentHash = await sha256File(absolute, stat);
+      const contentHash = await sha256File(root, absolute, stat);
       fingerprintRows.push(`${relativePath}\0${stat.size}\0${contentHash}`);
       const extension = path.extname(entry.name).toLowerCase();
       if (ASSET_EXTENSIONS.has(extension)) {
@@ -491,10 +838,10 @@ export async function scanRepository(
         truncated = true;
         return;
       }
-      const contentsBuffer = await readVerifiedSourceFile(absolute, stat, contentHash);
+      const contentsBuffer = await readVerifiedSourceFile(root, absolute, stat, contentHash);
       const contents = contentsBuffer.toString("utf8");
       bytesRead += contentsBuffer.byteLength;
-      if (!sourceEntities(relativePath, contents, limits.maximumEntities, entities)) {
+      if (!sourceEntities(relativePath, contents, platforms, limits.maximumEntities, entities)) {
         excluded.limit += 1;
         truncated = true;
         return;

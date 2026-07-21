@@ -1,23 +1,27 @@
 import type Database from "better-sqlite3";
 
-export type DesignerEventType =
-  | "design.created"
-  | "design.updated"
-  | "asset.created"
-  | "context.updated"
-  | "product_spec.preview.updated"
-  | "product_spec.committed"
-  | "planning_session.updated"
-  | "agent_task.transitioned"
-  | "agent_connection.changed"
-  | "organization_policy.changed"
-  | "design_system.changed"
-  | "repository_inventory.changed"
-  | "handoff.transitioned"
-  | "redesign.transitioned"
-  | "backup.operation"
-  | "audit.retention"
-  | "events.gap";
+export const DESIGNER_EVENT_TYPES = [
+  "design.created",
+  "design.updated",
+  "asset.created",
+  "context.updated",
+  "product_spec.preview.updated",
+  "product_spec.committed",
+  "planning_session.updated",
+  "agent_task.transitioned",
+  "agent_connection.changed",
+  "organization_policy.changed",
+  "design_system.changed",
+  "repository_inventory.changed",
+  "implementation_mapping.changed",
+  "handoff.transitioned",
+  "redesign.transitioned",
+  "backup.operation",
+  "audit.retention",
+  "events.gap",
+] as const;
+
+export type DesignerEventType = (typeof DESIGNER_EVENT_TYPES)[number];
 
 export interface DesignerEvent {
   id: number;

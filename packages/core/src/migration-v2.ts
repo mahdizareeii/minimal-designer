@@ -31,6 +31,13 @@ function semanticRole(node: DesignNode): DesignNodeV2["semantics"]["role"] {
 }
 
 function commonNode(node: DesignNode) {
+  const compatibilityAccessibilityLabel = typeof node.metadata.accessible_label === "string"
+    ? node.metadata.accessible_label
+    : node.type === "image" && node.alt
+      ? node.alt
+      : node.type === "icon" && node.label
+        ? node.label
+        : undefined;
   return {
     id: node.id,
     name: node.name,
@@ -43,8 +50,9 @@ function commonNode(node: DesignNode) {
       role: semanticRole(node),
       business_rule_ids: [],
       acceptance_criterion_ids: [],
-      ...(node.type === "image" && node.alt ? { accessibility_label: node.alt } : {}),
-      ...(node.type === "icon" && node.label ? { accessibility_label: node.label } : {}),
+      ...(compatibilityAccessibilityLabel === undefined
+        ? {}
+        : { accessibility_label: compatibilityAccessibilityLabel }),
     },
     metadata: structuredClone(node.metadata),
     ...(node.tags === undefined ? {} : { tags: [...node.tags] }),
@@ -128,6 +136,28 @@ export function migrateDesignDocumentV1ToV2(
   const source = DesignDocumentSchema.parse(input);
   const migratedAt = options.migratedAt ?? source.updated_at;
   const nodes = Object.fromEntries(Object.values(source.nodes).map((node) => [node.id, migrateNode(node)]));
+  const pageReachable = new Set<string>();
+  const visitPageTree = (nodeId: string): void => {
+    if (pageReachable.has(nodeId)) return;
+    const node = source.nodes[nodeId];
+    if (!node || node.archived) return;
+    pageReachable.add(nodeId);
+    if ("children" in node) for (const childId of node.children) visitPageTree(childId);
+  };
+  for (const page of source.pages) {
+    if (!page.archived) for (const rootId of page.children) visitPageTree(rootId);
+  }
+  const archiveDetachedComponentTree = (nodeId: string): void => {
+    const sourceNode = source.nodes[nodeId];
+    const migratedNode = nodes[nodeId];
+    if (!sourceNode || !migratedNode || migratedNode.archived) return;
+    migratedNode.archived = true;
+    migratedNode.locked = true;
+    if ("children" in sourceNode) for (const childId of sourceNode.children) archiveDetachedComponentTree(childId);
+  };
+  for (const node of Object.values(source.nodes)) {
+    if (node.type === "component" && !pageReachable.has(node.id)) archiveDetachedComponentTree(node.id);
+  }
   const componentDefinitions = Object.fromEntries(
     Object.values(source.nodes)
       .filter((node) => node.type === "component")

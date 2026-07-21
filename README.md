@@ -34,12 +34,21 @@ For a local Node.js installation:
 ./designer --yes install local
 ```
 
-The Docker installer and container-local security mode are implemented. The
-Compose file validates, both API and network-denied renderer services reached
-healthy state, and a fresh isolated volume preserved a project across API
-restart. A separate disposable local-Docker restore/safety-restore exercise also
+The Docker installer and container-local security mode are implemented. Fresh
+exact-current schema-12 Compose project `formaspeccischema118e2818fed6`
+reached Playwright-worker readiness without fallback, rendered a real PNG, and
+preserved the same design and version across an API-only restart. Both services
+used image
+`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`,
+ran non-root with the documented filesystem/capability/resource limits, and
+kept renderer networking disabled; DNS/TCP/interface egress checks failed
+closed. Its temporary local `NO-GO` summary is
+`/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
+(SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`).
+Exact-image Firefox/WebKit 12/12 and same-machine copied-bundle recovery also
 passed. Keep source evaluation bound to the default host loopback address; this
-is not complete server-production evidence.
+is not complete server-production, hosted-CI, remote/off-site, or retained
+provenance evidence.
 
 The compatibility `designer` launcher preserves existing `.designer` state and
 delegates supported commands to `formaspecctl`. Remove `--yes` if you want an
@@ -118,8 +127,10 @@ pnpm formaspecctl -- backup prune preview
 pnpm formaspecctl -- backup verify /path/to/formaspec-backup.tar
 pnpm formaspecctl -- backup restore /path/to/formaspec-backup.tar --yes
 pnpm formaspecctl -- backup restore --backup-id backup_<id> --yes
+pnpm formaspecctl -- backup restore offline /safe/path/formaspec-backup.tar --yes
 pnpm formaspecctl -- backup restore status
 pnpm formaspecctl -- backup restore resume --yes
+pnpm formaspecctl -- backup restore resume --offline-bundle /safe/path/formaspec-backup.tar --yes
 pnpm formaspecctl -- backup restore rollback --yes
 pnpm formaspecctl -- backup restore abort --yes
 pnpm formaspecctl -- backup restore clear-stale-lock --yes
@@ -141,20 +152,22 @@ Currently implemented `formaspecctl` workflows are:
 | `backup prune preview\|execute` | Produces an exact expiring plan, permanently exempts manual backups, and requires plan hash plus explicit `--yes` before revalidated deletion. |
 | `backup verify` | Independently verifies an existing bounded `formaspec-backup` bundle. |
 | `backup restore <bundle>` | With explicit `--yes`, verifies and atomically restores source-local `./data`, creates a stopped-service safety copy, rolls back on health failure, and refuses Docker/server modes. |
-| `backup restore --backup-id <id>` | Externally supervises a `HEALTHY_PLANNED_RESTORE_ONLY` operation for the launcher-recorded local Docker/server runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. The current API/database must be healthy for backup-ID resolution and preflight; offline disaster recovery is not implemented. |
-| `backup restore status\|resume\|rollback\|abort\|clear-stale-lock` | Inspects or safely recovers the exact durable Docker restore operation. Abort requires no operation/journal/worker evidence; stale-lock clearing requires proof that the pinned worker container is absent. |
+| `backup restore --backup-id <id>` | Externally supervises a `HEALTHY_PLANNED_RESTORE_ONLY` operation for the launcher-recorded local Docker/server runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. This planned path still requires the current API/database for backup-ID resolution and preflight. |
+| `backup restore offline <bundle>` | With explicit `--yes`, verifies the operator-selected bundle before mutation, pins the same regular file by identity/hash/size, capacity-gates stdin and the whole workflow, streams only stdin into the network-disabled restore worker, applies forensic pre-copy capacity checks, creates and verifies an exact snapshot of the existing `/data` bytes even when SQLite is corrupt, then uses the standard verified cutover, schema/render checks, audit/outbox reconciliation, credential revocation, and readiness-gated restart. Child stdout/stderr shares one combined 4 MiB budget by default, with a 5-second SIGKILL fallback when SIGTERM is ignored. Any failure after fencing remains in maintenance for explicit resume; it never auto-aborts or restarts the API. |
+| `backup restore status\|resume\|rollback\|abort\|clear-stale-lock` | Inspects or safely recovers the exact durable Docker restore operation. Offline interruption before preparation resumes with `--offline-bundle <same-bundle>` under the current maintenance owner; `offlinePrepare` and the replacement worker never reuse a retained forensic predecessor's ID. Forensic rollback restores exact pre-state bytes, keeps maintenance active and the API stopped, and reports `maintenanceCleared: false`/`serviceReady: false`; direct clear is rejected and only a newly verified offline restore may atomically take over that fence. Abort accepts only pristine/prepared pre-cutover state with no journal/worker lock and a reverified healthy live database, so corrupt state remains fenced; stale-lock clearing requires proof that the pinned worker container is absent. |
 | `agent connect codex` | Starts/authorizes the bridge, configures MCP, installs the managed skill/plugin, and verifies the connection. |
 | `agent config generic` | Prints validated token-free loopback JSON/TOML and verification guidance without reading or modifying an unknown client. |
 | `support-bundle preview\|create` | Previews or explicitly creates a deterministic bounded diagnostic archive with aggressive redaction and no database, assets, backups, environment values, source, or credentials. |
 
 Automatic supervisor installation/alerting, native package installation,
 autostart, and full upgrade/uninstall workflows are not complete CLI features
-yet. Launcher-pinned Docker/server restore is implemented only as
-`HEALTHY_PLANNED_RESTORE_ONLY`: it requires the current API and database to be
-healthy before maintenance and is not an offline disaster-recovery path.
-Backup create/list/schedule/prune still require the local loopback service,
-while offline verification, source-local restore, and support-bundle creation
-remain separate.
+yet. Launcher-pinned Docker/server restore now has two separately authorized
+paths: `HEALTHY_PLANNED_RESTORE_ONLY` by managed backup ID, and offline recovery
+from an explicitly selected verified bundle. The offline path does not depend
+on a healthy current API/database, but it still lacks a retained real Docker/
+server corrupt-database lifecycle exercise. Backup create/list/schedule/prune
+still require the local loopback service, while bundle verification,
+source-local restore, and support-bundle creation remain separate.
 
 ## What is implemented
 
@@ -196,8 +209,13 @@ remain separate.
 - A read-only Workspace Bridge foundation with explicit expiring/revocable
   repository grants, secret/symlink/generated-file exclusion, supported-platform
   detection, bounded inventories, and path-free upload mappings.
+- Automatic managed Codex grant reconciliation: authorized startup reuses a
+  stored credential only when its exact scopes and project restrictions match
+  current organization policy, otherwise it rotates through one-time pairing;
+  Codex configuration remains token-free.
 - Approval-gated selected-workspace Codex launch. A grant is bound to the exact
-  central inventory, the handoff must be approved/implementing, Codex starts
+  central inventory, the handoff must carry the exact immutable
+  `approved` → `implementing` `start_implementation` transition, Codex starts
   with the selected repository as its exact working directory, one secret-free
   task argument, `shell: false`, and a minimal environment. POSIX process-group
   monitoring terminates the launch after revocation, expiry, policy withdrawal,
@@ -206,12 +224,14 @@ remain separate.
 - Persisted organization design systems with append-only token/component
   versions, immutable releases, project pins, exact upgrade previews, REST/MCP
   interfaces, and initial Administration UI.
-- Central path-free repository inventories and revision-pinned engineering
-  handoffs with immutable versions, human approval/implementation gates,
-  replayable events, and an initial editor handoff panel.
+- Central path-free repository inventories, immutable design/spec/source
+  mappings pinned to exact revision and inventory hashes, and revision-pinned
+  engineering handoffs with reviewed mapping UI, human approval/implementation
+  gates, replayable events, and no central filesystem-path input.
 - A persisted seven-stage Redesign Studio with independent scopes, immutable
   stage history, design-version CAS, a planning-only one-click entry, REST/MCP,
-  and a dedicated browser workspace.
+  and a dedicated browser workspace. Future-state entry requires current
+  repository inventory and verified exact-revision mapping evidence.
 - A deterministic 1,000-node core/service performance comparison harness.
 - Fixed 7-daily/4-weekly/12-monthly managed backup planning with supervisor-run
   UTC scheduling, preview-first revalidated pruning, and permanent manual-backup
@@ -242,45 +262,86 @@ These foundations do not close the release gates listed below.
 - The local 20-step browser E2E, seven visual baselines, selection alignment,
   and 1,000-node interaction budgets pass. Cross-platform browser/visual,
   comprehensive security, and server-deployment matrices remain incomplete.
+- Five repository-native least-privilege workflows now cover frozen source
+  gates, browser alignment/visual/performance/release suites, schema-12 Docker
+  smoke, deterministic SBOM/license evidence, unsigned Linux packages, and the
+  non-installing macOS extracted-runtime gate. The local evidence helpers pass
+  workflow contracts 8/8, cross-browser runner tests 2/2, off-host simulation
+  tests 7/7, release-evidence tests 8/8, macOS package-evidence tests 12/12,
+  and macOS runtime-smoke tests 10/10; no GitHub-hosted run or real Ubuntu
+  DEB/RPM artifact has yet been retained.
 - Complete component/release authoring and upgrade-review UI, framework-aware
   Workspace Bridge mapping/upload/implementation launch, and full Redesign
-  Studio artifact/E2E coverage remain unfinished. Portable import now performs
-  strict central/local-header, descriptor, CRC, path, entry-type, size, and
-  trailing-data checks before bounded 16 KiB per-entry inflation. Multipart
-  bodies and extracted entry buffers are still retained within the configured
-  caps, so lower-peak end-to-end request streaming and broader stress evidence
-  remain.
+  Studio artifact/E2E coverage remain unfinished. Portable import now streams
+  the multipart upload into a private mode-`0700` staging directory, pins the
+  archive by hash/size, validates its central/local headers from bounded reads,
+  and inflates each entry in 16 KiB chunks into private files. It no longer
+  retains the multipart body or all extracted entries in memory. Individual
+  JSON/raster entries are still read under the 64 MiB per-entry cap when parsed
+  or normalized; broader concurrent/adversarial and packaged evidence remains.
 - Verified backup creation/list/verification/download and portable validation/
   import are exposed in `/administration`; source-local restore,
-  supervisor-callable schedule/prune, and launcher-pinned Docker/server planned
-  restore exist. The planned path requires a healthy current API/database and
-  is explicitly not offline disaster recovery. Installed supervision/alerting,
-  signed provenance, and broader failure-recovery evidence remain unfinished.
-- The previous self-contained unsigned macOS ARM64 PKG candidate and its offline
-  artifact-specific integrity/SBOM evidence match the earlier schema-10
-  checkpoint, not the current schema-11 source tree. The verifier requires
-  exact path/type/content-hash equality for every packaged workspace `dist`
-  tree and managed CLI asset, so stale compiled output fails. The package is
-  still **NO-GO** for release: Chromium LGPL-notice review,
-  signing/notarization, reproducibility, vulnerability scans, and clean
-  lifecycle proof remain open. Deterministic Linux DEB/RPM builders and a
-  Windows WiX v4 unsigned-MSI foundation now exist in source, but no current
-  native artifact/lifecycle evidence qualifies them for release. Windows tests
-  use fake PE/CFB/WiX fixtures and do not establish a real WiX compile or MSI
-  validity. See [Linux packaging](docs/LINUX_PACKAGING.md),
+  supervisor-callable schedule/prune, launcher-pinned planned restore, and the
+  explicitly authorized offline bundle path exist. Installed supervision/
+  alerting, signed provenance, an isolated end-to-end `formaspecctl` offline
+  lifecycle, and broader failure-recovery evidence remain unfinished. A real
+  unique-project `formaspecctl` smoke now exercises the offline worker/control
+  path through the validated persisted Compose identity. Server-mode proxy
+  lifecycle, packaged-runtime, real remote-host/network/TLS/off-site recovery,
+  and broader proof remain open. A separate same-machine copied-bundle smoke
+  now passes against an independent clean target without claiming those remote
+  guarantees.
+- A retained pre-current-SSE-authorization unsigned schema-12 macOS ARM64
+  engineering checkpoint
+  is stored at
+  `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
+  (185,279,180 bytes; SHA-256
+  `9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`).
+  It was not installed. Package integrity passes with 349 components, seven
+  exact workspace trees, two bundled runtimes, and no workspace-output drift;
+  the private extracted-runtime smoke also passes schema-12 health, a real
+  Playwright PNG, and the exact 51-tool/25-resource MCP inventory. Its
+  checksum-bound runtime summary hashes to
+  `c1719a9ebab5c7d241fa329df1d3bb6b19bb34b252c063abc276818e48c41964`.
+  The candidate-root `SHA256SUMS` manifest verifies all 14 retained package,
+  sidecar, source, runtime, reproducibility, and documentation entries.
+  Its original evidence remains valid for the frozen bytes, but the current
+  verifier now reports expected source drift: packaged `apps/server/dist`
+  predates the exhaustive event-authorization policy and the project/revision-
+  bound historical design-system release interface. It is not a package of the
+  current source tree.
+  Release remains **NO-GO**: Chromium LGPL notices lack policy approval, the
+  package is unsigned and unnotarized, vulnerability scans are missing, clean
+  native lifecycle proof is absent, and reproducibility is unresolved. A
+  same-host repeat produced a different outer PKG (SHA-256
+  `2c49f45a6840218b995cc969576f4209d0c94802a160c679ad02483ed5ba4dd0`,
+  185,279,075 bytes) even though the payload and workspace-tree hashes were
+  identical; the diagnostic summary hashes to
+  `570d1fb98fb61bc8b2f56b75a4a4379575d7ef2c6bf10bb2a1000ad69a2de710`.
+  The preserved `schema11-current` and `schema10-current` candidates are
+  historical only. Deterministic Linux DEB/RPM builders and a Windows WiX v4
+  unsigned-MSI foundation exist in source, but no release-qualified native
+  lifecycle evidence exists. Windows tests use fake PE/CFB/WiX fixtures and do
+  not establish a real WiX compile or MSI validity. See
+  [Linux packaging](docs/LINUX_PACKAGING.md),
   [Windows packaging](docs/WINDOWS_PACKAGING.md), and
   [macOS PKG evidence](docs/MACOS_PKG_EVIDENCE.md).
 - New server initializer output includes the strict server-mode, proxy,
   allowlist, CORS, and container-boundary contract, and the CLI/server migration
-  readers both recognize version 11. Migration 9 adds bounded, preview-first
+  readers both recognize version 12. Migration 9 adds bounded, preview-first
   audit/published-outbox retention with immutable hash-chained execution
   evidence; migration 10 adds immutable portable-import provenance; migration
-  11 adds persistent bounded render-job lifecycle records. A copied
-  version-7 fixture is verified to
-  upgrade without changing V1 revision bytes or hashes; clean reverse-proxy
-  deployment, offline disaster recovery, and real customer backup/restore
-  fixtures remain unproven. Server proxy-origin authentication hardening is
-  still under verification in the current working tree.
+  11 adds persistent bounded render-job lifecycle records; migration 12 adds
+  append-only, independently authorized handoff execution decisions. Genuine
+  schema 1 and schema 7–11 fixtures are verified to upgrade without changing
+  V1 revision bytes, hashes, IDs, or assets; clean reverse-proxy
+  deployment and real customer planned/offline backup-restore fixtures remain
+  unproven. Server mode now also requires a separate internal
+  proxy hop secret on every non-health request; focused server/launcher tests
+  pass. A controlled actual-TCP-socket lifecycle test also proves header
+  replacement, direct-peer denial, ambiguous append rejection, and restart-
+  bound secret rotation; real Nginx/TLS, identity-provider, firewall/routing,
+  and public-port evidence remains open.
 
 The recorded local-Docker evidence used an isolated Compose project on port
 `4397`: backup `backup_0dda1a60c54c5805557426a428739e505e089425` restored
@@ -289,6 +350,17 @@ design A only, then safety backup
 design/revision IDs were preserved, restored grant/connection/nonce state was
 revoked, and the disposable containers, volumes, and network were deleted. This
 does not change the overall **NO-GO** release status.
+
+A separate disposable offline-recovery smoke exercised the production worker/
+control path on a unique Compose stack: it restored a verified schema-11 bundle
+after replacing the live database with corrupt marker bytes, reproduced the
+exact design and PNG, revoked one grant/connection/nonce, then restored the
+exact corrupt pre-state bytes with durable `rolled_back`/`recovery=offline`
+evidence and removed the stack. The earlier worker/control smoke manually
+cleared its forensic fence only for disposable cleanup; product semantics keep
+maintenance active and the API stopped. A subsequent real unique-project
+`formaspecctl` smoke validated persisted Compose ownership end to end, closing
+the former hardcoded-project isolation gap.
 
 Do not expose a source build as an enterprise production service until
 [Implementation status](docs/IMPLEMENTATION_STATUS.md) changes the release
@@ -316,12 +388,15 @@ pnpm typecheck
 pnpm build
 pnpm test:launcher
 pnpm test:e2e:alignment
+pnpm test:e2e:alignment:cross-browser
+pnpm test:e2e:editor
 pnpm test:e2e:visual
 pnpm test:e2e:performance
 pnpm test:e2e:release
 pnpm test:performance
 pnpm test:release-evidence
 pnpm test:macos-pkg-evidence
+pnpm test:macos-pkg-runtime-smoke
 pnpm release:evidence:macos:verify
 pnpm package:linux:deb
 pnpm package:linux:rpm
@@ -329,15 +404,16 @@ docker compose config --quiet
 ```
 
 `pnpm ci:release-evidence` is the strict source-workspace production dependency
-gate. The last recorded checkpoint passed with 342 third-party components and
-zero policy violations after Sharp/libvips was removed. The exact unsigned
-macOS ARM64 PKG also passed offline artifact verification and exact linkage for
-seven workspace trees at that earlier checkpoint, while
-`pnpm release:evidence:macos:gate` intentionally failed on the five recorded
-release blockers. Migration 11 and later source changes require a fresh
-schema-11 source-evidence run plus a rebuilt package before current-workspace
-parity can be claimed. Container, Windows, and Linux artifacts still require
-their own target-specific evidence.
+gate. The current source passes with 342 third-party components and zero policy
+violations after Sharp/libvips was removed. The retained `schema12-current`
+unsigned PKG passed its frozen package/workspace integrity check and the
+non-installing extracted-runtime smoke, but the current verifier now records
+expected source drift and it remains an engineering checkpoint: the outer PKG was not
+byte-for-byte reproducible even on the same host, and legal approval, signing,
+notarization, vulnerability scanning, and privileged native lifecycle proof
+remain open. The preserved `schema11-current` and `schema10-current` candidates
+are historical; container, Windows, and Linux artifacts still require their own
+target-specific evidence.
 
 Passing unit/build checks alone does not establish production readiness. The
 browser, security, performance, backup/restore, installer, and release-evidence
@@ -353,6 +429,7 @@ More detail:
 - [Document schema](docs/DOCUMENT_SCHEMA.md)
 - [Design system](docs/DESIGN_SYSTEM.md)
 - [Product specification](docs/PRODUCT_SPECIFICATION.md)
+- [Retained CI and release evidence](docs/CI_RELEASE_EVIDENCE.md)
 - [MCP](docs/MCP.md)
 - [Agent connections](docs/AGENT_CONNECTIONS.md)
 - [Workspace Bridge](docs/WORKSPACE_BRIDGE.md)

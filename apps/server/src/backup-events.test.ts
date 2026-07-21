@@ -100,6 +100,7 @@ describe("persisted backup operation events", () => {
       "backup.create",
       "backup.verify",
       "backup.schedule_update",
+      "backup.schedule_run_started",
       "backup.create",
       "backup.schedule_run",
       "backup.prune_preview",
@@ -143,6 +144,10 @@ describe("persisted backup operation events", () => {
       .toMatchObject({ backupCount: 1, totalCandidateBytes: expect.any(Number) });
     expect(replay.events.find((event) => event.data.action === "backup.prune_commit")?.data.details)
       .toMatchObject({ backupCount: 1, prunedBytes: expect.any(Number) });
+    expect(replay.events.find((event) => event.data.action === "backup.schedule_run_started")?.data.details)
+      .toMatchObject({ runId: expect.stringMatching(/^backup_schedule_run_/), dueAt: expect.any(String) });
+    expect(replay.events.find((event) => event.data.action === "backup.schedule_run")?.data.details)
+      .toMatchObject({ status: "created", completedAt: expect.any(String) });
 
     // Detailed audit evidence remains available to administrators without
     // copying bundle identifiers into the broadly replayed SSE payload.

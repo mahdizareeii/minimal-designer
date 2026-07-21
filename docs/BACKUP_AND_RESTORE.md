@@ -1,6 +1,6 @@
 # Backup and restore
 
-Last audited: 2026-07-20
+Last audited: 2026-07-21
 
 ## Current status
 
@@ -10,7 +10,7 @@ interchangeable:
 | Mechanism | Implemented now | Important limitation |
 | --- | --- | --- |
 | Verified FormaSpec bundle engine | The server can create, verify, list, and download `formaspec-backup-*.tar` bundles. Verification checks semantic asset ownership/references, snapshots, typed operations, revision chains, and project heads across strict V1/V2 documents. Verification and download use private descriptor-pinned bytes. Restore forecasts whole-workflow capacity before maintenance, rechecks each copy/extraction step, opens sources with `O_NOFOLLOW`, and uses only expected size/SHA-256 pinned bytes afterward. | Bundles remain unsigned, so integrity and consistency checks do not establish creator provenance. Node does not expose a portable atomic no-replace directory rename, so the cutover destination race remains documented for hostile local filesystems. |
-| `formaspecctl` | `backup create`, `backup list`, schedule show/enable/disable/run, preview-first retention pruning, `backup verify <bundle>`, source-local bundle restore, and externally supervised Docker/server restore/status/resume/rollback/abort/stale-lock recovery by opaque backup ID are implemented. | The Docker/server capability is `HEALTHY_PLANNED_RESTORE_ONLY`: the current API/database must be healthy for backup-ID resolution and preflight. It accepts only the exact launcher-recorded Compose project, loopback binding, image, containers, verified local named volumes, secure runtime environment, and Docker context. It is not offline disaster recovery or a generic Compose/Kubernetes/remote-volume recovery tool, and bundles remain unsigned. |
+| `formaspecctl` | `backup create`, `backup list`, schedule show/enable/disable/run, preview-first retention pruning, `backup verify <bundle>`, source-local bundle restore, managed-ID planned restore, explicitly authorized offline bundle restore, and status/resume/rollback/abort/stale-lock recovery are implemented. | Both Docker/server paths accept only the exact launcher-recorded Compose project, loopback binding, image, containers, verified local named volumes, secure runtime environment, and Docker context. Managed-ID restore is `HEALTHY_PLANNED_RESTORE_ONLY`; offline restore requires an operator-selected verified bundle and explicit `--yes`. Neither is a generic Compose/Kubernetes/remote-volume tool and bundles remain unsigned. Real unique-project CLI and same-machine copied-bundle smokes pass; server-mode proxy, packaged-runtime, real remote-host/network/TLS/off-site storage, and broader lifecycle evidence remain open. |
 | Compatibility launcher | `./designer backup [DESTINATION]` makes a full stopped-service copy of `DATA_DIR`. | This is a downtime copy with a small text manifest, not a verified FormaSpec bundle. |
 
 Managed schedules use one daily UTC time and organization-policy retention
@@ -26,8 +26,8 @@ operator or service supervisor must call the schedule-run operation. The
 managed Docker/server restore foundation is deliberately controlled by
 `formaspecctl` outside
 the running Fastify process. Backup and restore remain a production-readiness
-blocker until clean server-mode planned-recovery evidence, a separately
-authorized offline disaster-recovery path, signed provenance, native
+blocker until clean server-mode planned/offline recovery evidence, signed
+provenance, native
 packaging, and complete release evidence are delivered.
 
 The installed Docker volume has two valid checkpoint bundles:
@@ -67,10 +67,13 @@ completed the following externally supervised exercise:
 
 This is concrete local-Docker restore/rollback evidence. A separate isolated
 20-step browser/MCP/source-local scenario now proves V1→V2 product/task/hash/
-render recovery, but neither scenario is evidence for `APP_MODE=server`, native
-packages, off-host recovery, signed backup provenance, historical customer
-fixtures, or the complete asset/design-system/failure-injection matrix. The
-enterprise release decision therefore remains **NO-GO**.
+render recovery. Deterministic source-built schema 1 and schema 7–11 fixtures
+also verify genuine migration-ledger prefixes, exact V1 history/assets, linked
+enterprise rows, and restore-to-schema-12 behavior. These fixtures are not a
+substitute for anonymized real-customer corpora, `APP_MODE=server`, native
+packages, off-host recovery, signed backup provenance, or the complete
+asset/design-system/failure-injection matrix. The enterprise release decision
+therefore remains **NO-GO**.
 
 ## Verified FormaSpec bundles
 
@@ -100,6 +103,11 @@ The server backup engine currently:
   strict V1 or V2 document schema and its canonical SHA-256 bytes; and
 - validates bounded typed revision operations, snapshot/operation/revision hash
   chains, contiguous parent/version history, and exact project-head tuples.
+
+The historical backup tests build schema 1 and schema 7–11 databases by
+applying the actual production migration prefix to a fresh SQLite file. They do
+not imitate old databases by deleting current tables. Reviewed schema and row
+digests make historical-schema or fixture-data drift fail visibly.
 
 Format-2 verification parses the generated organization configuration with the
 strict schema and requires exact equality with the staged database policy
@@ -159,12 +167,138 @@ for journal matching, verification, and extraction. The current hashes prove
 consistency of the bytes that were checked; without a trusted signature they do
 not prove who created the bundle.
 
-This supervised path is deliberately classified as
+The managed-ID supervised path is deliberately classified as
 `HEALTHY_PLANNED_RESTORE_ONLY`. Before maintenance, it uses the healthy current
 API/database to resolve the opaque backup ID and perform target preflight. It
 cannot recover a stopped or corrupt API/database from an otherwise valid
-bundle. Operators must not describe it as offline disaster recovery; that
-requires a separate authorization and recovery design.
+bundle. For that condition, operators must use the separately authorized
+offline bundle command described below rather than relabeling the planned path.
+
+### Offline Docker/server disaster-recovery foundation
+
+Use this only when the exact launcher-recorded Docker/server runtime remains
+available but the pinned API is stopped or its current SQLite database cannot
+support managed backup-ID resolution:
+
+```bash
+pnpm formaspecctl backup restore offline \
+  /safe/path/formaspec-backup-2026-07-20.tar \
+  --yes
+```
+
+This is a distinct explicit authorization boundary. The CLI first runs the
+standalone backup verifier and refuses a target database version newer than the
+CLI supports. It then reopens the selected regular file with `O_NOFOLLOW` where
+available, verifies file/device/inode/size identity against that result, and
+streams only the opened descriptor through stdin to a network-disabled one-shot
+worker. The host path is never exposed inside the container. The worker accepts
+only the preauthorized SHA-256 and byte count, writes into a private mode-`0700`
+directory, and first checks capacity for the authorized stdin payload plus a
+fixed reserve. It verifies the stream exactly, fully inspects the target, runs
+a conservative whole-workflow capacity forecast, and retains the immutable
+target as a mode-`0400` managed bundle. Supervisor/worker child stdout and
+stderr share one combined 4 MiB budget by default; excess aggregate output
+terminates the child and fails recovery rather than exhausting host memory.
+Focused tests also prove the 5-second SIGKILL fallback when an over-budget child
+ignores SIGTERM.
+
+Before any `/data` cutover, offline preparation performs the full bounded
+bundle, SQLite, V1/V2, snapshot/revision-chain, asset, policy, and isolated
+raster verification. It also creates and verifies a checksummed forensic
+recovery bundle containing the exact existing data-directory bytes. This
+forensic safety capture performs bounded tree accounting and capacity checks
+before copying the current tree and again before writing the archive. It
+deliberately does not open or bless the old database, so it can preserve the
+only pre-state even when SQLite is corrupt. Durable
+operation state records `recovery.mode=offline` and `safetyKind=forensic` before
+the ordinary journaled cutover begins.
+
+After preparation, the same restore engine used by planned recovery performs
+the target cutover, current-schema integrity and foreign-key checks,
+representative deterministic Playwright render, audit/outbox reconciliation,
+monotonic ID preservation, and atomic revocation of every restored grant,
+connection, and pairing nonce. The API is restarted under maintenance and must
+pass maintenance-fenced and then normal readiness before success is reported.
+
+Every failure after offline maintenance is acquired remains fenced. The CLI
+does not auto-abort or restart the API, even if no durable operation exists yet
+or preparation is incomplete. Correct the capacity/source/renderer/runtime
+failure and resume with the same `--offline-bundle`. When a new recovery takes
+over a forensic-rollback fence, the predecessor remains the durable maintenance
+owner until replacement preparation has been persisted; failed preparation
+restores the predecessor fence unchanged. A resumed takeover uses the current
+maintenance owner as the operation ID for `offlinePrepare` and the replacement
+worker; it does not accidentally resume under the retained predecessor ID.
+
+If interruption occurred before durable preparation, resume by selecting the
+same bundle again so it can be independently reverified and repinned:
+
+```bash
+pnpm formaspecctl backup restore resume \
+  --offline-bundle /safe/path/formaspec-backup-2026-07-20.tar \
+  --yes
+```
+
+Once status shows a durable prepared offline operation, ordinary
+`backup restore resume --yes` continues from its retained target. A different
+bundle is never substituted implicitly. Explicit `backup restore rollback
+--yes` restores the exact forensic pre-state bytes. Because those bytes may
+contain the original corruption, successful forensic rollback keeps maintenance
+active, leaves the API stopped, and returns `maintenanceCleared: false` plus
+`serviceReady: false`; it never claims readiness or restored credential safety.
+The operator must not clear the fence or manually start the old data. Restore
+control rejects direct clear for this terminal state; only a newly selected and
+fully verified offline restore can atomically take over the forensic-rollback
+fence.
+
+Focused server/CLI tests prove corrupt-database capture, exact source pinning,
+stdin-only transfer, full target verification, standard revocation, resume,
+and forensic rollback semantics. A disposable unique-Compose smoke additionally
+ran the production worker/control path against a real schema-11 design and PNG,
+replaced live SQLite with corrupt marker bytes, restored the exact design and
+render, revoked one grant/connection/nonce, restored the exact corrupt bytes,
+persisted durable `rolled_back`/`recovery=offline` state, and cleaned up without
+touching the user's live project. Its fence was removed only for disposable
+cleanup before direct-clear rejection was tightened; current product semantics
+do not permit that operation. A subsequent real unique-project `formaspecctl`
+smoke validates that the persisted Compose identity owns the full CLI recovery
+path. Server-mode lifecycle, packaged runtimes, real remote-host/off-site policy, alerting,
+signed provenance, and disaster-recovery drills remain open.
+
+### Same-machine copied-bundle recovery evidence
+
+The exact-current runtime image `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`
+passed a second, isolated source-to-clean-target recovery simulation on
+2026-07-21. The hardened runner:
+
+- rejected Docker daemon/context/config/TLS control overrides and verified the
+  active local Unix socket context before creating resources;
+- started independent source project `formaspecdrsourcede20d670cd` and target
+  project `formaspecdrtargetde20d670cd` with distinct local data, backup, and
+  renderer-socket volume names and mountpoints;
+- created and verified a format-2 bundle, copied the exact hash/size through a
+  separate temporary location, stopped the source, and streamed only the
+  pinned bytes into the target offline preparation path;
+- proved the target was initially empty, then verified SQLite integrity and
+  foreign keys, migration 12, exact snapshot/revision hashes, normalized asset
+  bytes and metadata, and deterministic PNG equality after restore;
+- verified non-root runtime UIDs and the exact image ID for both long-lived
+  services and all seven one-shot helpers; and
+- removed every disposable container, volume, network, and transfer directory.
+
+The checksum-bound evidence is
+`/private/tmp/formaspec-offhost-restore-20260721-final437-eventauth-sqlbounded-cli/NO-GO-SUMMARY.json`
+with SHA-256
+`2a7bf59d47579f4c5f6f20bf779976e9dd4a6260b6670e73f245753ef3abbdc9`.
+The transferred bundle SHA-256 was
+`f12887796030081d495ef3b266abf7b22f58cdb01fbe494072171e57ce73bfcc`;
+the recovered design was `document_9989d40c2c194b5dafb7f7da08bfc4b9` at
+revision `revision_3b6cbf1a84f5421b9f57c370d4541db2`.
+It deliberately reports `releaseStatus: NO-GO`,
+`realRemoteHostVerified: false`, `realNetworkTransferVerified: false`, and
+`tlsVerified: false`. This closes a same-machine independent-target evidence
+gap only; it does not establish remote storage, transport security, real
+off-site recovery, packaged supervision, provenance, or company RTO/RPO.
 
 ## Create, list, verify, and restore from the CLI
 
@@ -229,7 +363,12 @@ hash mismatch, unsafe path, or missing record rejects the commit without
 pruning database records. Deletion is serialized with backup creation by an
 expiring operational lock and is audit recorded. A supervisor should call
 `backup schedule run` at least once per day after the configured UTC time; a
-repeated call in the same due window returns the existing backup.
+repeated call in the same due window returns the existing backup. Each attempt
+persists start/success/failure audit and outbox evidence. `/health/ready` and
+`formaspecctl backup schedule show` report bounded overdue, stalled, failed-run,
+and retention-backlog diagnostics. Failed or stalled attempts remain critical
+even when the current window already contains a valid backup; error details and filesystem paths are not
+published through SSE.
 
 ### Source-local restore foundation
 
@@ -355,9 +494,11 @@ mutation.
 Every health request has an independent absolute deadline, including when a
 requester never settles. Launcher lock acquisition rejects symlinked or
 unexpected `.designer/run` state without recursively removing an unvalidated
-path. If a pre-cutover resume or rollback worker fails after maintenance aborts,
-the supervisor restarts and verifies the unchanged API. If that restart also
-fails, both failures are preserved in an aggregate error.
+path. If a planned pre-cutover resume or rollback worker fails after maintenance
+aborts, the supervisor restarts and verifies the unchanged API. If that restart
+also fails, both failures are preserved in an aggregate error. Offline recovery
+does not use this auto-abort/restart behavior and remains fenced for explicit
+resume.
 
 During maintenance, `/api/*`, `/mcp`, `/events`, and `/api/events` fail with
 retryable `TEMPORARILY_UNAVAILABLE`; `/health/ready` and `/ready` still perform
@@ -401,9 +542,7 @@ supervised restore operation:
 pnpm formaspecctl backup restore rollback --yes
 ```
 
-If preflight stopped before any operation record, cutover journal, or worker
-lock was created, the operator can explicitly clear only that empty maintenance
-attempt:
+For pristine or prepared pre-cutover state, the operator may request abort:
 
 ```bash
 pnpm formaspecctl backup restore abort --yes
@@ -417,9 +556,15 @@ before removing only that stale lock:
 pnpm formaspecctl backup restore clear-stale-lock --yes
 ```
 
-Neither command is a force option. `abort` refuses any operation/journal/worker
-evidence, and `clear-stale-lock` refuses an invalid lock, mismatched ownership,
-or a worker container that still exists.
+Neither command is a force option. `abort` refuses a cutover journal or worker
+lock, verifies a prepared offline forensic bundle when present, and reopens the
+unchanged live database read-only to require integrity, foreign keys, and the
+current migration ledger before clearing maintenance. Corrupt pristine or
+prepared offline state therefore returns `VALIDATION_FAILED` and stays fenced
+for resume; raw non-SQLite/open/query failures are normalized to the same domain
+error. Terminal forensic rollback cannot be cleared at all.
+`clear-stale-lock` refuses an invalid lock,
+mismatched ownership, or a worker container that still exists.
 
 An interrupted operation whose rollback state is not yet conclusive must be
 resumed first. Do not manually delete the maintenance marker, operation record,
@@ -434,7 +579,7 @@ This command surface is supported only for the launcher-recorded Compose
 topology created by the current `designer`/`formaspecctl` server or local-Docker
 startup. Server mode must retain its mode-`0600` `.designer/env/server.env`,
 loopback-only published port, exact HTTPS public origin/Host, trusted-header
-configuration, fixed Compose project, and pinned named volumes. A changed env,
+configuration, persisted exact Compose project, and pinned named volumes. A changed env,
 Host, context, daemon, image, container, label, port, or volume makes the
 binding stale and restore fails before mutation. Direct/unknown Compose
 projects, custom project names, bind-mounted data, Kubernetes/Swarm, guessed
@@ -489,7 +634,11 @@ secret-management lifecycle.
 recovery unit and leaves that service stopped. The
 `formaspecctl backup restore --backup-id <id> --yes` command supports the
 launcher-recorded local-Docker or server data and backup volumes through the
-external supervisor above. Test recovery in an isolated environment, keep source bundles
+healthy planned supervisor above. The offline form,
+`formaspecctl backup restore offline <bundle> --yes`, supports the same pinned
+Docker/server topology without consulting the
+current database and preserves an exact forensic pre-state bundle first. Test
+recovery in an isolated environment, keep source bundles
 unchanged, and never replace a volume manually while an operation or
 maintenance marker exists. Docker volume names are deployment-specific;
 determine them from `docker compose config` rather than guessing.
@@ -515,14 +664,17 @@ integrity. The Docker/server worker additionally checks the current schema,
 organization, deterministic renderer, audit/outbox reconciliation, and agent
 revocation before the supervisor clears maintenance. The isolated A/B Docker
 scenario and the separate 20-step source-local V1/V2/product-spec/task/hash/
-render scenario both pass. Complete normalized/legacy asset and design-system
-recovery coverage, historical fixtures, failure injection, reconnect/
-revocation, a clean server-mode planned-restore exercise, and offline disaster
-recovery remain unverified.
+render scenario both pass. Focused offline preparation/forensic tests also pass.
+Complete normalized/legacy asset and design-system recovery coverage,
+anonymized real-customer fixtures, broader failure injection, reconnect/revocation, a clean
+server-mode planned/offline restore exercise, and an isolated end-to-end CLI
+offline disaster-recovery lifecycle remain unverified; the disposable worker/
+control production-path smoke above passes.
 
 ## Retention and unfinished operator work
 
-Until a supported service supervisor and complete restore workflow are shipped:
+Until a supported external scheduler, alert-delivery integration, and complete
+restore workflow are shipped:
 
 - create recovery points deliberately and record who created and verified them;
 - download verified bundles to an organization-approved off-host location;
@@ -535,8 +687,8 @@ Until a supported service supervisor and complete restore workflow are shipped:
 - apply separate retention to downloaded/off-host copies through the
   organization's approved storage process.
 
-Release-blocking backup work still includes server external-supervisor
-integration and alerting, signing/provenance, native-installer/service
+Release-blocking backup work still includes installed external schedule
+invocation and alert delivery, signing/provenance, native-installer/service
 integration, server maintenance and rollback evidence, off-host destination
 operations, broader asset/design-system/historical/failure recovery fixtures,
 and clean install/upgrade/restore coverage across packaged targets. Do not

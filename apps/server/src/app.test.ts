@@ -133,8 +133,30 @@ describe("designer server", () => {
       },
     });
     expect(stale.statusCode).toBe(409);
-    const staleBody = stale.json<{ error?: { code?: string } }>();
+    const staleBody = stale.json<{ error?: {
+      code?: string;
+      details?: {
+        currentRevisionId?: string;
+        latestRevision?: {
+          id: string;
+          version: number;
+          actorId: string;
+          createdAt: string;
+          message?: string;
+        } | null;
+      };
+    } }>();
     expect(staleBody.error?.code, stale.body).toBe("VERSION_CONFLICT");
+    expect(staleBody.error?.details).toMatchObject({
+      currentRevisionId: updateBody.revisionId,
+      latestRevision: {
+        id: updateBody.revisionId,
+        version: 2,
+        actorId: "local",
+        message: "Rename screen",
+      },
+    });
+    expect(staleBody.error?.details?.latestRevision?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
     const historicalExport = await application.app.inject({
       method: "GET",
@@ -553,6 +575,52 @@ describe("designer server", () => {
     expect(rejectedGrant.json<{ error: { code: string } }>().error.code).toBe("AUTH_REQUIRED");
   });
 
+  it("returns only the authenticated scoped grant's own authorization context", async () => {
+    const created = await createDesign(application.app, "local", "authorization-context-design-0001");
+    const challengeResponse = await application.app.inject({
+      method: "POST",
+      url: "/api/agent-connections",
+      payload: {
+        adapter: "codex",
+        displayName: "Authorization context test",
+        scopes: ["design:read", "task:read"],
+        projectIds: [created.document.id],
+        expiresInSeconds: 3_600,
+      },
+    });
+    expect(challengeResponse.statusCode).toBe(201);
+    const challenge = challengeResponse.json<{ nonce: string }>();
+    const pairedResponse = await application.app.inject({
+      method: "POST",
+      url: "/api/agent-connections/pair",
+      payload: { nonce: challenge.nonce },
+    });
+    expect(pairedResponse.statusCode).toBe(200);
+    const paired = pairedResponse.json<{ grant: { token: string } }>();
+
+    const unauthenticated = await application.app.inject({
+      method: "GET",
+      url: "/api/agent-authorization-context",
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+
+    const contextResponse = await application.app.inject({
+      method: "GET",
+      url: "/api/agent-authorization-context",
+      headers: { authorization: `Bearer ${paired.grant.token}` },
+    });
+    expect(contextResponse.statusCode).toBe(200);
+    expect(contextResponse.headers["cache-control"]).toBe("no-store");
+    const context = contextResponse.json<Record<string, unknown>>();
+    expect(context).toEqual({
+      role: "agent",
+      scopes: ["design:read", "task:read"],
+      projectIds: [created.document.id],
+    });
+    expect(Object.keys(context).sort()).toEqual(["projectIds", "role", "scopes"]);
+    expect(JSON.stringify(context)).not.toMatch(/token|credential|grant|principal|connection/i);
+  });
+
   it("exposes persisted design-system, inventory, handoff, and redesign workflows through REST and the replayable outbox", async () => {
     const created = await createDesign(application.app, "local", "enterprise-domain-create-0001");
     const headers = { "x-designer-user": "local" };
@@ -603,6 +671,14 @@ describe("designer server", () => {
     });
     expect(inventoryResponse.statusCode).toBe(201);
     const inventoryId = inventoryResponse.json<{ inventory: { id: string } }>().inventory.id;
+
+    const mappingListResponse = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${created.document.id}/implementation-mappings?limit=25`,
+      headers,
+    });
+    expect(mappingListResponse.statusCode).toBe(200);
+    expect(mappingListResponse.json<{ mappings: unknown[] }>().mappings).toEqual([]);
 
     const handoffResponse = await application.app.inject({
       method: "POST",
@@ -710,6 +786,7 @@ describe("designer server", () => {
     expect(toolsResponse.statusCode).toBe(200);
     const tools = toolsResponse.json<{ result: { tools: Array<{
       name: string;
+      description?: string;
       inputSchema?: { properties?: Record<string, unknown> };
       outputSchema?: unknown;
       annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean };
@@ -728,9 +805,15 @@ describe("designer server", () => {
       "design_system_list",
       "repository_inventory_persist",
       "repository_inventory_read",
+      "implementation_mapping_read",
+      "implementation_mapping_create",
       "handoff_read",
       "redesign_assessment_create",
+      "redesign_stage_artifact_read",
+      "redesign_stage_artifact_write",
+      "redesign_stage_transition",
     ]));
+    expect(tools.find((tool) => tool.name === "redesign_stage_transition")?.description).toContain("review-ready");
     expect(tools.find((tool) => tool.name === "design_read")?.inputSchema?.properties).toMatchObject({
       node_id: expect.any(Object),
       depth: expect.any(Object),
@@ -748,6 +831,16 @@ describe("designer server", () => {
       destructiveHint: true,
     });
     expect(tools.find((tool) => tool.name === "repository_inventory_persist")?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+    });
+    expect(tools.find((tool) => tool.name === "implementation_mapping_read")?.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    });
+    expect(tools.find((tool) => tool.name === "implementation_mapping_create")?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -1125,6 +1218,16 @@ describe("designer server", () => {
       expect(ui.statusCode).toBe(201);
       const uiDesign = ui.json<RevisionEnvelope>();
       const selectedNodeId = uiDesign.document.pages[0]?.children[0] as string;
+      const identityPolicy = secured.policies.read("trusted:alice@example.test");
+      const mappedIdentityPolicy = structuredClone(identityPolicy.policy);
+      mappedIdentityPolicy.identity.roleMappings = [
+        { claim: "identity", value: "alice@example.test", role: "organization_admin" },
+        { claim: "identity", value: "bob@example.test", role: "design_editor" },
+      ];
+      secured.policies.update("trusted:alice@example.test", {
+        expectedConfigurationHash: identityPolicy.configurationHash,
+        policy: mappedIdentityPolicy,
+      });
 
       const contextUpdate = await secured.app.inject({
         method: "PUT",

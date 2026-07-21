@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 import { unzipSync, zipSync } from "fflate";
 import {
@@ -11,7 +12,7 @@ import {
   createStarterDocument,
   migrateDesignDocumentV1ToV2,
 } from "@designer/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
@@ -84,6 +85,20 @@ function multipart(filename: string, mimeType: string, data: Buffer): { boundary
   };
 }
 
+function chunkedBody(data: Buffer): Readable {
+  const chunks: Buffer[] = [];
+  const widths = [1, 3, 7, 31, 257, 4093];
+  let offset = 0;
+  let index = 0;
+  while (offset < data.length) {
+    const end = Math.min(data.length, offset + widths[index % widths.length]!);
+    chunks.push(data.subarray(offset, end));
+    offset = end;
+    index += 1;
+  }
+  return Readable.from(chunks);
+}
+
 function rewritePortableJson(
   bundle: Buffer,
   entryName: string,
@@ -111,6 +126,31 @@ async function createProject(application: DesignerApplication): Promise<{ id: st
   expect(response.statusCode).toBe(201);
   const body = response.json<{ version: number; document: { id: string } }>();
   return { id: body.document.id, version: body.version };
+}
+
+function customPinnedV2Document(
+  seed: string,
+  pin: { designSystemId: string; releaseId: string; releaseVersion: number },
+) {
+  const source = createStarterDocument({
+    name: `Portable custom pin ${seed}`,
+    now: "2026-07-20T00:00:00.000Z",
+    idFactory: createSequentialIdFactory(seed),
+  });
+  const migrated = migrateDesignDocumentV1ToV2(source, {
+    migratedAt: "2026-07-20T00:01:00.000Z",
+    sourceRevisionId: `revision_${seed}_source0001`,
+    sourceSnapshotHash: "a".repeat(64),
+    verifiedBackupId: `backup_${seed}_verified0001`,
+  });
+  return DesignDocumentV2Schema.parse({
+    ...migrated,
+    design_system: {
+      design_system_id: pin.designSystemId,
+      release_id: pin.releaseId,
+      release_version: pin.releaseVersion,
+    },
+  });
 }
 
 function seedVerifiedMigrationBackup(
@@ -170,6 +210,48 @@ async function seedManagedBackup(
 }
 
 describe("operational backup and portable bundle HTTP routes", () => {
+  it("accepts a genuinely chunked multipart bundle without buffering the request body", async () => {
+    const source = await localApplication();
+    const target = await localApplication();
+    const project = await createProject(source);
+    const exported = await source.app.inject({
+      method: "GET",
+      url: `/api/designs/${project.id}/export.formaspec.zip?includePreviews=false`,
+    });
+    expect(exported.statusCode).toBe(200);
+    const upload = multipart("chunked.formaspec.zip", "application/zip", exported.rawPayload);
+    const originalMkdtemp = fs.promises.mkdtemp.bind(fs.promises);
+    const stagedDirectories: string[] = [];
+    const mkdtemp = vi.spyOn(fs.promises, "mkdtemp").mockImplementation(async (prefix, options) => {
+      const created = await originalMkdtemp(prefix, options as BufferEncoding | { encoding: BufferEncoding } | undefined);
+      const createdPath = String(created);
+      if (String(prefix).includes("formaspec-portable-imports")) stagedDirectories.push(createdPath);
+      return created as never;
+    });
+    let imported;
+    try {
+      imported = await target.app.inject({
+        method: "POST",
+        url: "/api/imports",
+        headers: {
+          "content-type": `multipart/form-data; boundary=${upload.boundary}`,
+          "idempotency-key": "portable-chunked-import-0001",
+        },
+        payload: chunkedBody(upload.body),
+      });
+    } finally {
+      mkdtemp.mockRestore();
+    }
+    expect(imported.statusCode).toBe(201);
+    expect(imported.json()).toMatchObject({
+      bundleSha256: createHash("sha256").update(exported.rawPayload).digest("hex"),
+      project: { id: project.id, version: 1 },
+    });
+    expect(target.service.getDesign("local", project.id).canonicalDocument.id).toBe(project.id);
+    expect(stagedDirectories).toEqual([expect.stringContaining("upload-")]);
+    await expect(fs.promises.lstat(stagedDirectories[0]!)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("exports a strict project bundle, validates it without mutation, and includes the committed product specification", async () => {
     const application = await localApplication();
     const project = await createProject(application);
@@ -224,6 +306,10 @@ describe("operational backup and portable bundle HTTP routes", () => {
       project: { id: project.id, schemaVersion: 1 },
     });
 
+    const mutationCounts = Object.fromEntries(["designs", "revisions", "assets", "portable_imports", "idempotency"].map((table) => [
+      table,
+      (application.database.sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count,
+    ]));
     const invalidUpload = multipart("invalid.formaspec.zip", "application/zip", Buffer.from("not-a-zip"));
     const invalid = await application.app.inject({
       method: "POST",
@@ -233,6 +319,10 @@ describe("operational backup and portable bundle HTTP routes", () => {
     });
     expect(invalid.statusCode).toBe(422);
     expect(invalid.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_FAILED");
+    for (const table of ["designs", "revisions", "assets", "portable_imports", "idempotency"]) {
+      expect((application.database.sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count)
+        .toBe(mutationCounts[table]);
+    }
   });
 
   it("imports a conflict-free V1 bundle atomically and persists its external product specification as local version 1", async () => {
@@ -322,6 +412,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
       source: { revisionId: string; revisionHashClaim: string; productSpecificationVersion: number };
       project: { id: string; version: number; revisionId: string; productSpecificationVersion: number };
       idMapping: Record<string, string>;
+      designSystemPin: null;
       diagnostics: Array<{ code: string }>;
     }>();
     expect(result).toMatchObject({
@@ -339,6 +430,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
     });
     expect(result.project.revisionId).not.toBe(sourceBundle.manifest.revisionId);
     expect(result.importId).toMatch(/^import_[a-f0-9]{40}$/);
+    expect(result.designSystemPin).toBeNull();
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain("SOURCE_REVISION_HASH_IS_CLAIMED");
     expect(result.idMapping[project.id]).toBe(project.id);
 
@@ -681,7 +773,22 @@ describe("operational backup and portable bundle HTTP routes", () => {
       payload: upload.body,
     });
     expect(imported.statusCode, imported.body).toBe(201);
-    const result = imported.json<{ project: { id: string }; idMapping: Record<string, string> }>();
+    const result = imported.json<{
+      project: { id: string };
+      idMapping: Record<string, string>;
+      designSystemPin: {
+        designSystemId: string;
+        releaseId: string;
+        releaseVersion: number;
+        source: string;
+      };
+    }>();
+    expect(result.designSystemPin).toEqual({
+      designSystemId: "system_formaspec_foundation",
+      releaseId: "release_formaspec_foundation_1",
+      releaseVersion: 1,
+      source: "formaspec_foundation_default",
+    });
     const cloned = application.service.getDesign("local", result.project.id).canonicalDocument;
     expect(cloned.schema_version).toBe(2);
     if (cloned.schema_version !== 2) throw new Error("Expected a strict V2 clone.");
@@ -724,6 +831,241 @@ describe("operational backup and portable bundle HTTP routes", () => {
       source_revision_id: "revision_portabletypedv2_0001",
       verified_backup_id: "backup_portabletypedv2_0001",
     });
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM project_design_system_pins WHERE design_id = ?",
+    ).get(result.project.id)).toEqual({ count: 0 });
+  });
+
+  it("binds custom V2 portable imports to an exact local published release atomically", async () => {
+    const application = await localApplication();
+    const system = application.designSystems.createDesignSystem("local", { name: "Portable company system" });
+    const release = application.designSystems.createRelease("local", system.id, {
+      expectedLatestVersion: 0,
+      name: "Portable release 1",
+      status: "published",
+      tokenVersions: [],
+      componentVersions: [],
+    });
+    const document = customPinnedV2Document("portablecustompin", {
+      designSystemId: system.id,
+      releaseId: release.id,
+      releaseVersion: release.version,
+    });
+    const bundle = createPortableProjectBundle({
+      document,
+      revisionId: "revision_portablecustompin_0001",
+      revisionHash: "c".repeat(64),
+      designSystemVersion: release.version,
+    });
+    const upload = multipart("custom-pin.formaspec.zip", "application/zip", bundle);
+    const imported = await application.app.inject({
+      method: "POST",
+      url: "/api/imports",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${upload.boundary}`,
+        "idempotency-key": "portable-custom-pin-import-0001",
+      },
+      payload: upload.body,
+    });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const result = imported.json<{
+      project: { id: string };
+      designSystemPin: {
+        designSystemId: string;
+        releaseId: string;
+        releaseVersion: number;
+        source: string;
+      };
+    }>();
+    expect(result.designSystemPin).toEqual({
+      designSystemId: system.id,
+      releaseId: release.id,
+      releaseVersion: release.version,
+      source: "project_design_system_pins",
+    });
+    expect(application.database.sqlite.prepare(
+      `SELECT design_id, organization_id, design_system_id, release_id, release_version, pinned_by
+       FROM project_design_system_pins WHERE design_id = ?`,
+    ).get(result.project.id)).toEqual({
+      design_id: result.project.id,
+      organization_id: "organization_legacy",
+      design_system_id: system.id,
+      release_id: release.id,
+      release_version: release.version,
+      pinned_by: "principal_local",
+    });
+    expect(application.service.getDesign("local", result.project.id).canonicalDocument).toMatchObject({
+      schema_version: 2,
+      design_system: {
+        design_system_id: system.id,
+        release_id: release.id,
+        release_version: release.version,
+      },
+    });
+    const storedAudit = application.database.sqlite.prepare(
+      "SELECT details_json FROM audit_events WHERE action = 'portable_import.commit' ORDER BY id DESC LIMIT 1",
+    ).get() as { details_json: string };
+    expect(JSON.parse(storedAudit.details_json)).toMatchObject({
+      designSystemPin: {
+        designSystemId: system.id,
+        releaseId: release.id,
+        releaseVersion: release.version,
+        source: "project_design_system_pins",
+      },
+    });
+
+    const retryUpload = multipart("custom-pin.formaspec.zip", "application/zip", bundle);
+    const retry = await application.app.inject({
+      method: "POST",
+      url: "/api/imports",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${retryUpload.boundary}`,
+        "idempotency-key": "portable-custom-pin-import-0001",
+      },
+      payload: retryUpload.body,
+    });
+    expect(retry.statusCode).toBe(201);
+    expect(retry.json()).toEqual(imported.json());
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM project_design_system_pins").get())
+      .toEqual({ count: 1 });
+
+    const rollback = await localApplication();
+    const rollbackSystem = rollback.designSystems.createDesignSystem("local", { name: "Rollback system" });
+    const rollbackRelease = rollback.designSystems.createRelease("local", rollbackSystem.id, {
+      expectedLatestVersion: 0,
+      name: "Rollback release",
+      status: "published",
+      tokenVersions: [],
+      componentVersions: [],
+    });
+    const rollbackDocument = customPinnedV2Document("portablepinrollback", {
+      designSystemId: rollbackSystem.id,
+      releaseId: rollbackRelease.id,
+      releaseVersion: rollbackRelease.version,
+    });
+    const rollbackBundle = createPortableProjectBundle({
+      document: rollbackDocument,
+      revisionId: "revision_portablepinrollback_0001",
+      revisionHash: "d".repeat(64),
+      designSystemVersion: rollbackRelease.version,
+    });
+    rollback.database.sqlite.exec(`
+      CREATE TRIGGER portable_import_pin_failure
+      BEFORE INSERT ON project_design_system_pins
+      BEGIN SELECT RAISE(ABORT, 'injected portable pin failure'); END;
+    `);
+    const rollbackUpload = multipart("custom-pin-rollback.formaspec.zip", "application/zip", rollbackBundle);
+    const rolledBack = await rollback.app.inject({
+      method: "POST",
+      url: "/api/imports",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${rollbackUpload.boundary}`,
+        "idempotency-key": "portable-custom-pin-rollback-0001",
+      },
+      payload: rollbackUpload.body,
+    });
+    expect(rolledBack.statusCode).toBe(500);
+    for (const table of ["designs", "revisions", "project_design_system_pins", "portable_imports", "idempotency"]) {
+      expect(rollback.database.sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    }
+    expect(rollback.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'portable_import.commit'",
+    ).get()).toEqual({ count: 0 });
+  });
+
+  it("rejects unavailable, mismatched, draft, and archived custom V2 portable release pins without project mutation", async () => {
+    const application = await localApplication();
+    const system = application.designSystems.createDesignSystem("local", { name: "Portable validation system" });
+    const published = application.designSystems.createRelease("local", system.id, {
+      expectedLatestVersion: 0,
+      name: "Published release",
+      status: "published",
+      tokenVersions: [],
+      componentVersions: [],
+    });
+    const draft = application.designSystems.createRelease("local", system.id, {
+      expectedLatestVersion: 1,
+      name: "Draft release",
+      status: "draft",
+      tokenVersions: [],
+      componentVersions: [],
+    });
+    const cases = [
+      {
+        seed: "portablepinmissing",
+        releaseId: "release_portablepinmissing_0001",
+        releaseVersion: 1,
+      },
+      {
+        seed: "portablepinversion",
+        releaseId: published.id,
+        releaseVersion: published.version + 1,
+      },
+      {
+        seed: "portablepindraft",
+        releaseId: draft.id,
+        releaseVersion: draft.version,
+      },
+    ];
+    for (const [index, candidate] of cases.entries()) {
+      const document = customPinnedV2Document(candidate.seed, {
+        designSystemId: system.id,
+        releaseId: candidate.releaseId,
+        releaseVersion: candidate.releaseVersion,
+      });
+      const bundle = createPortableProjectBundle({
+        document,
+        revisionId: `revision_${candidate.seed}_0001`,
+        revisionHash: String(index + 1).repeat(64),
+        designSystemVersion: candidate.releaseVersion,
+      });
+      const upload = multipart(`${candidate.seed}.formaspec.zip`, "application/zip", bundle);
+      const rejected = await application.app.inject({
+        method: "POST",
+        url: "/api/imports",
+        headers: {
+          "content-type": `multipart/form-data; boundary=${upload.boundary}`,
+          "idempotency-key": `portable-invalid-custom-pin-000${index + 1}`,
+        },
+        payload: upload.body,
+      });
+      expect(rejected.statusCode, rejected.body).toBe(422);
+      expect(rejected.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_FAILED");
+    }
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM designs").get()).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM revisions").get()).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM project_design_system_pins").get())
+      .toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM portable_imports").get()).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM idempotency").get()).toEqual({ count: 0 });
+
+    application.designSystems.updateDesignSystem("local", system.id, {
+      expectedUpdatedAt: application.designSystems.readDesignSystem("local", system.id).updatedAt,
+      status: "archived",
+    });
+    const archivedDocument = customPinnedV2Document("portablepinarchived", {
+      designSystemId: system.id,
+      releaseId: published.id,
+      releaseVersion: published.version,
+    });
+    const archivedBundle = createPortableProjectBundle({
+      document: archivedDocument,
+      revisionId: "revision_portablepinarchived_0001",
+      revisionHash: "e".repeat(64),
+      designSystemVersion: published.version,
+    });
+    const archivedUpload = multipart("archived-pin.formaspec.zip", "application/zip", archivedBundle);
+    const archived = await application.app.inject({
+      method: "POST",
+      url: "/api/imports",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${archivedUpload.boundary}`,
+        "idempotency-key": "portable-invalid-archived-pin-0001",
+      },
+      payload: archivedUpload.body,
+    });
+    expect(archived.statusCode, archived.body).toBe(422);
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM designs").get()).toEqual({ count: 0 });
   });
 
   it("fully decodes and normalizes portable assets before any project mutation", async () => {
@@ -825,7 +1167,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
       },
       payload: validUpload.body,
     });
-    expect(accepted.statusCode).toBe(201);
+    expect(accepted.statusCode, accepted.body).toBe(201);
     expect(accepted.json()).toMatchObject({ project: { id: source.id, version: 1, assetCount: 1 } });
     const importedDocument = application.service.getDesign("local", source.id).canonicalDocument;
     const importedAssetMetadata = importedDocument.assets[assetId]!;
@@ -1209,13 +1551,47 @@ describe("operational backup and portable bundle HTTP routes", () => {
     const retry = await application.app.inject({ method: "POST", url: "/api/backups/schedule/run", payload: {} });
     expect(retry.statusCode).toBe(200);
     expect(retry.json()).toMatchObject({ run: { status: "already_completed", backup: { id: firstBackup } } });
+    const supervised = application.operations.getBackupSchedule("local");
+    expect(supervised.supervision).toMatchObject({
+      status: "healthy",
+      currentWindowCovered: true,
+      latestAttempt: { status: "already_completed" },
+      retention: { candidateCount: 0 },
+      alerts: [],
+    });
     expect((application.database.sqlite.prepare(
       "SELECT COUNT(*) AS count FROM backup_records WHERE retention_class <> 'manual'",
     ).get() as { count: number }).count).toBe(1);
     const actions = application.database.sqlite.prepare(
       "SELECT action FROM audit_events WHERE action LIKE 'backup.schedule_%' ORDER BY id",
     ).all() as Array<{ action: string }>;
-    expect(actions.map((row) => row.action)).toEqual(["backup.schedule_update", "backup.schedule_run"]);
+    expect(actions.map((row) => row.action)).toEqual([
+      "backup.schedule_update",
+      "backup.schedule_run_started",
+      "backup.schedule_run",
+      "backup.schedule_run_started",
+      "backup.schedule_run",
+    ]);
+
+    vi.spyOn(application.backups, "create").mockRejectedValueOnce(new Error("private filesystem detail"));
+    const nextWindow = new Date(Date.now() + 36 * 60 * 60 * 1_000);
+    await expect(application.operations.runScheduledBackup("local", nextWindow)).rejects.toThrow("private filesystem detail");
+    expect(application.operations.getBackupSchedule("local", nextWindow).supervision).toMatchObject({
+      status: "critical",
+      currentWindowCovered: false,
+      latestAttempt: { status: "failed", errorCode: "INTERNAL_ERROR", retryable: true },
+      alerts: expect.arrayContaining([expect.objectContaining({ code: "SCHEDULE_RUN_FAILED", severity: "critical" })]),
+    });
+    expect(application.operations.backupSupervisionHealth(nextWindow)).toMatchObject({
+      status: "critical",
+      enabledSchedules: 1,
+      criticalSchedules: 1,
+    });
+    const failedAudit = application.database.sqlite.prepare(
+      "SELECT details_json FROM audit_events WHERE action = 'backup.schedule_run_failed' ORDER BY id DESC LIMIT 1",
+    ).get() as { details_json: string };
+    expect(JSON.parse(failedAudit.details_json)).toMatchObject({ errorCode: "INTERNAL_ERROR", retryable: true });
+    expect(failedAudit.details_json).not.toContain("private filesystem detail");
   });
 
   it("requires an exact preview and never automatically prunes manual backups", async () => {

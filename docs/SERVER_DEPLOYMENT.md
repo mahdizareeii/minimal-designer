@@ -1,5 +1,7 @@
 # Server deployment
 
+Last audited: 2026-07-21
+
 The detailed deployment guide is [deployment.md](./deployment.md). This file
 records the required public contract.
 
@@ -15,13 +17,18 @@ TRUSTED_USER_HEADER=x-designer-user
 FORMASPEC_ALLOWED_HOSTS=design.example.com
 FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
 DESIGNER_CORS_ORIGINS=https://design.example.com
+FORMASPEC_PROXY_SECRET=replace-with-a-separate-32-plus-character-random-hop-secret
 FORMASPEC_CONTAINER_LOCAL=false
 ```
 
-The reverse proxy must terminate HTTPS, remove caller-supplied identity and
-forwarding headers, inject one canonical identity header, preserve the public
-origin, and prevent direct public access to the application port. Browser
-writes require the configured Origin and `x-formaspec-csrf: 1` intent header.
+The reverse proxy must terminate HTTPS, remove caller-supplied identity,
+forwarding, and `x-formaspec-proxy-secret` headers; inject one canonical
+identity; overwrite the hop-secret header from secure proxy storage; preserve
+the public origin; and prevent direct public access to the application port.
+Browser writes require the configured Origin and `x-formaspec-csrf: 1` intent
+header. Retrieve the generated hop secret only for operator configuration with
+`./designer proxy-secret`; never place it in source control, shell history,
+client-visible configuration, or access logs.
 
 Generate source-mode server configuration with:
 
@@ -30,7 +37,7 @@ Generate source-mode server configuration with:
 ```
 
 Starting through the current `formaspecctl`/`designer` wrapper records a
-mode-`0600`, secret-free runtime binding for the fixed Compose project. An
+mode-`0600`, secret-free runtime binding for the exact persisted Compose project. An
 Organization Administrator can then select an exact managed backup ID from the
 Administration UI and run the external maintenance workflow on the server host:
 
@@ -39,6 +46,18 @@ Administration UI and run the external maintenance workflow on the server host:
 ./designer backup restore status
 ./designer --yes backup restore resume
 ./designer --yes backup restore rollback
+```
+
+If the pinned API is stopped or its database cannot be opened, use the
+separately authorized offline path with an operator-selected bundle that has
+already been copied to protected host storage:
+
+```bash
+formaspecctl backup restore offline /safe/path/formaspec-backup.tar --yes
+formaspecctl backup restore status
+formaspecctl backup restore resume \
+  --offline-bundle /safe/path/formaspec-backup.tar \
+  --yes
 ```
 
 The supervisor revalidates the secure server environment hash, public Host,
@@ -50,13 +69,52 @@ aliased volumes fail closed. It never serializes or passes `DESIGNER_TOKEN` to
 the network-disabled restore worker. Unknown/custom Compose projects,
 Kubernetes/Swarm, and off-host volumes are outside this supported boundary.
 
-This command is `HEALTHY_PLANNED_RESTORE_ONLY`. It requires the current API and
-database to be healthy while resolving the backup ID and completing preflight.
-It cannot restore a stopped or corrupt deployment from an otherwise valid
-bundle and must not be treated as offline disaster recovery.
+The managed-ID command is `HEALTHY_PLANNED_RESTORE_ONLY`: it requires the
+current API/database while resolving the backup ID and completing preflight.
+The offline command does not query that database. It verifies and descriptor-
+pins the selected regular file on the host, checks receive capacity before
+worker stdin, transfers only the authorized SHA-256/size-matched bytes, performs
+a whole-workflow capacity forecast, fully verifies the target through the
+isolated renderer, and applies forensic pre-copy capacity gates before
+capturing a verified exact snapshot of the existing data bytes. Spawned child
+stdout/stderr shares one combined 4 MiB budget by default; a 5-second SIGKILL
+fallback handles an over-budget child that ignores SIGTERM. It then uses the standard restore engine,
+including schema/render verification, audit/outbox reconciliation, restored-
+credential revocation, maintenance-fenced restart, and final readiness.
+
+After the offline fence is acquired, any preparation or restore failure remains
+in maintenance for explicit resume; the supervisor never auto-aborts or
+restarts the API. During forensic-fence takeover, the predecessor remains
+durable until replacement preparation is committed, so a failed replacement
+restores the original fence. Resumed takeover runs `offlinePrepare` and the
+replacement worker under the current maintenance owner, not the predecessor ID.
+Abort re-verifies pristine/prepared live SQLite and
+returns `VALIDATION_FAILED` for corrupt/non-SQLite state rather than exposing it.
+
+Offline forensic rollback restores the exact old bytes but does not claim they
+are healthy: it keeps maintenance active, leaves the API stopped, and reports
+`maintenanceCleared: false` plus `serviceReady: false`. Restore control rejects
+direct clearing of that state; only a newly selected, fully verified offline
+restore may atomically take over the fence. A disposable unique-Compose worker/
+control smoke passed real schema-11 design/PNG recovery from corrupt live bytes,
+credential revocation, exact forensic byte rollback, durable offline rollback
+state, and cleanup. A later real unique-project `formaspecctl` smoke validates
+the persisted Compose identity through the end-to-end CLI. The exact-current
+schema-12 image, built from source identity
+`local-uncommitted-final437-eventauth-sqlbounded-cli`, is
+`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f` and
+also passed a same-machine copied-bundle restore into an independently
+mounted clean target with exact state/render equality. No real server-mode
+proxy, remote-host/network/TLS/off-site, or privileged packaged lifecycle has
+run, so this remains an implemented
+foundation rather than a release-qualified recovery service.
 
 Do not expose current source builds as enterprise production services. The
-required clean server planned-restore/rollback exercise, a separately authorized
-offline recovery design, deployment/security suites, signed packages, alerting,
-and release evidence remain incomplete. Server proxy-origin authentication
-hardening is still under verification in the current working tree.
+required clean server planned/offline restore/rollback exercises, signed
+packages, alerting, and release evidence remain incomplete. A controlled
+actual-socket loopback checkpoint passes 1/1 and proves proxy
+replace/remove behavior, application-level direct-peer denial, and fail-closed
+restart-bound hop-secret rotation. It does not prove real Nginx/TLS,
+identity-provider, firewall/routing, or public backend-port isolation; those
+deployment gates remain open. See the controlled proxy lifecycle evidence in
+[deployment.md](./deployment.md#controlled-proxy-lifecycle-evidence).

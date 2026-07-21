@@ -32,6 +32,7 @@ describe("server event subscription", () => {
     expect(sourceUrl).toBe("/api/events");
     expect(eventTypes).toContain("backup.operation");
     expect(eventTypes).toContain("audit.retention");
+    expect(eventTypes).toContain("implementation_mapping.changed");
     unsubscribe();
     expect(closed).toBe(true);
   });

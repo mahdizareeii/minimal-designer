@@ -91,6 +91,10 @@ describe("native Linux installer layout", () => {
     const launcher = linuxCompatibilityLauncher("0.2.0");
     expect(cli).toContain("XDG_STATE_HOME");
     expect(cli).toContain("FORMASPEC_RUNTIME_DIR");
+    expect(cli).toContain('FORMASPEC_DATA_DIR="${FORMASPEC_DATA_DIR:-${SYSTEM_STATE_ROOT}/data}"');
+    expect(cli).toContain('FORMASPEC_BACKUP_DIR="${FORMASPEC_BACKUP_DIR:-${SYSTEM_STATE_ROOT}/backups}"');
+    expect(cli).toContain("FORMASPEC_LOG_DIR");
+    expect(cli).toContain("FORMASPEC_SUPPORT_DIR");
     expect(cli).toContain("apps/cli/dist/index.js");
     expect(launcher).toContain("/usr/bin/systemctl");
     expect(launcher).toContain("/health/ready");

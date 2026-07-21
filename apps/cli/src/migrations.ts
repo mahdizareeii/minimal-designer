@@ -3,6 +3,8 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
+import { resolveRuntimePaths } from "./runtime-paths.js";
+
 export interface MigrationStatus {
   databasePath: string;
   latestAppliedVersion: number;
@@ -11,10 +13,13 @@ export interface MigrationStatus {
   migrations: Array<{ version: number; name: string; appliedAt: string }>;
 }
 
-export const CLI_SUPPORTED_DATABASE_VERSION = 11;
+export const CLI_SUPPORTED_DATABASE_VERSION = 12;
 
-export function defaultDatabasePath(projectRoot: string): string {
-  return path.join(projectRoot, "data", "designer.sqlite");
+export function defaultDatabasePath(
+  projectRoot: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  return path.join(resolveRuntimePaths(projectRoot, environment).dataDirectory, "designer.sqlite");
 }
 
 export function readMigrationStatus(databasePath: string): MigrationStatus {

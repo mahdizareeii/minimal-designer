@@ -1,19 +1,23 @@
 # Unsigned macOS PKG evidence
 
-Last verified: 2026-07-20
+Last audited: 2026-07-21
 
 Release decision: **NO-GO**
 
-Current-workspace parity: **STALE — schema-10 checkpoint only**
+Current-workspace parity: **FAIL for the retained schema-12 checkpoint**
 
-The candidate below was rebuilt from the schema-10 workspace after the
-portable-import, product-specification persistence, revision-inspect, launcher,
-and Docker hardening changes. Exact workspace equality and artifact integrity
-passed for that checkpoint. Migration 11 and later source changes mean it no
-longer matches the current workspace. Do not install or present it as current;
-do not install any replacement as part of verification without separate
-explicit operator approval immediately beforehand. The release decision remains
-NO-GO.
+The retained engineering checkpoint under
+`artifacts/candidates/schema12-current/` preserves passing package-integrity,
+workspace-tree, and extracted-runtime evidence for its frozen bytes. Its
+extracted API and renderer reached schema 12, rendered a real Playwright PNG,
+exposed the checkpoint's MCP inventory, and honored private native CLI state
+paths without installing the package. The current workspace has since added
+exhaustive SSE event authorization and project/revision-bound historical-release
+REST and MCP outputs, so a new package is required before parity can be claimed.
+The checkpoint remains unsigned and was not installed. The preserved
+`schema11-current` and `schema10-current` candidates are historical evidence
+only. Do not install any PKG without separate explicit operator approval
+immediately beforehand. The release decision remains **NO-GO**.
 
 FormaSpec can produce and inspect an unsigned macOS PKG without a network
 scanner, Apple account, signing identity, notarization credential, or external
@@ -29,6 +33,7 @@ pnpm package:macos:unsigned
 pnpm release:evidence:generate
 pnpm release:evidence:check
 pnpm test:macos-pkg-evidence
+pnpm test:macos-pkg-runtime-smoke
 pnpm release:evidence:macos:generate
 pnpm release:evidence:macos:verify
 pnpm release:evidence:macos:gate
@@ -40,6 +45,27 @@ files are current. `gate` additionally fails while any release blocker remains.
 The provider-neutral `pnpm ci:macos-pkg-evidence` entry point runs the same
 sequence against an already-built PKG.
 
+For a fresh package built from a frozen current source tree, run the separate non-installing extracted
+runtime smoke with explicit paths:
+
+```bash
+pnpm ci:macos-pkg-runtime-smoke --pkg <unsigned.pkg> --output <new-evidence-directory>
+```
+
+The smoke invokes only `pkgutil` inspection/private expansion and the extracted
+Node runtime. It starts the extracted API, renderer, and CLI against private
+runtime/data/backup/log/support directories; verifies schema 12, a real
+Playwright PNG, the exact 51-tool and 25-resource MCP inventories, migration,
+backup, and support-bundle path behavior; then terminates process groups and
+removes the private tree. It never invokes package installation, LaunchAgents,
+Keychain, Codex, protocol handlers, or a browser opener. This is stronger
+packaged-byte evidence, not privileged lifecycle or renderer-egress proof.
+
+The main/manual-only `.github/workflows/macos-native-packaging.yml` performs the
+build, source evidence, package evidence, exact expected blocker check, and
+runtime smoke, then retains everything under an explicitly `NO-GO-*` artifact.
+No hosted run has been retained yet.
+
 The tools remain offline. They read the PKG, its canonical `.sha256` sidecar,
 the checked-in license policy, and the passing source-workspace SBOM/license
 evidence. They invoke only local macOS tools: `pkgutil`, `lsbom`, `plutil`, and
@@ -48,8 +74,11 @@ evidence. They invoke only local macOS tools: `pkgutil`, `lsbom`, `plutil`, and
 ## Generated files
 
 Evidence is normally written below
-`artifacts/release-evidence/macos-pkg/<artifact-name>/`. The stale schema-10
-candidate evidence is retained below
+`artifacts/release-evidence/macos-pkg/<artifact-name>/`. The retained schema-12
+checkpoint evidence is stored below
+`artifacts/candidates/schema12-current/release-evidence/`; historical
+schema-11 and schema-10 evidence remains below the corresponding candidate
+directories. Historical schema-10 package evidence is retained below
 `artifacts/candidates/schema10-current/release-evidence/macos-pkg/<artifact-name>/`:
 
 | File | Contents |
@@ -58,6 +87,12 @@ candidate evidence is retained below
 | `components.json` | Deduplicated npm/workspace manifest inventory, instance paths/hashes, source linkage results, excluded build-only workspaces, exact packaged workspace-tree entries/hashes, and bundled runtime components |
 | `verification.json` | Artifact/signature/package metadata, BOM and payload-tree hashes/counts, exact workspace-tree comparison summaries, scripts, required key files, source-evidence hashes, performed checks, limitations, and blockers |
 | `SHA256SUMS` | Deterministic SHA-256 checksums for all three JSON evidence files |
+
+The retained checkpoint also has a root
+`artifacts/candidates/schema12-current/SHA256SUMS` manifest covering 14 retained
+files: the checkpoint README, package and sidecar, and all source, package,
+runtime-smoke, and reproducibility evidence. It passes 14/14 with
+`shasum -a 256 -c SHA256SUMS` from the candidate directory.
 
 No checkout path, username, hostname, timestamp, random identifier, credential,
 or raw signing output is recorded.
@@ -108,13 +143,100 @@ gate remains closed until all recorded blockers are resolved, including:
 - clean-install, automatic-startup, protocol-handler, upgrade, uninstall, and
   reinstall tests on supported macOS versions.
 
+The same-host repeat build is also explicitly negative evidence: the payload
+tree and all seven workspace trees were identical, but the outer PKG bytes and
+size differed. Reproducibility is therefore not achieved and must not be
+inferred from deterministic inner-tree hashes.
+
 No credential or provenance is fabricated. If signing or scanning inputs are
 unavailable, the unsigned artifact and deterministic evidence may be retained
 for engineering review, but release remains **NO-GO**.
 
-## Current verified result
+## Retained schema-12 unsigned engineering checkpoint
 
-The locally verified current-workspace candidate is:
+The retained checkpoint is:
+
+- Artifact: `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
+- SHA-256: `9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`
+- Size: 185,279,180 bytes
+- Signature: unsigned
+- Installation performed: no
+- Source SBOM/license policy: `PASS`, 342 third-party components and zero
+  policy violations
+- Package integrity: `PASS`, 349 npm/workspace components, seven exact
+  workspace trees, and two bundled runtimes
+- Payload-tree SHA-256:
+  `375daa2689cebdac26c1bd88322e3ea124e30c4c234f364faab4880a65b1d110`
+- Workspace-tree SHA-256:
+  `5478d6e03ab5ac6bac4fe57e2f26c4bf78802c1c5424da9ef5eb7f77617329c1`
+- Extracted-runtime smoke: `PASS`; checksum-bound summary SHA-256
+  `c1719a9ebab5c7d241fa329df1d3bb6b19bb34b252c063abc276818e48c41964`
+- Same-host reproducibility diagnostic: `FAILED`; checksum-bound summary
+  SHA-256 `570d1fb98fb61bc8b2f56b75a4a4379575d7ef2c6bf10bb2a1000ad69a2de710`
+- Release decision: `NO-GO`
+
+The extracted-runtime smoke privately expands the package with
+`pkgutil --expand-full`, verifies bundled Node v24.14.0 and Chromium headless
+shell revision 1228, starts the extracted API and renderer at schema 12,
+renders a 512×339 PNG through Playwright, checks the exact MCP inventory, and
+exercises packaged CLI migration, backup, log, and support-directory
+resolution. It terminates all process groups, removes temporary state, and
+records that system install targets and package receipts were unchanged. It
+does not prove LaunchAgent ownership or startup, protocol registration,
+install/upgrade/uninstall/reinstall behavior, native service isolation, or
+process-level renderer egress denial.
+
+The repeat-build artifact had SHA-256
+`2c49f45a6840218b995cc969576f4209d0c94802a160c679ad02483ed5ba4dd0`
+and size 185,279,075 bytes. Its payload-tree and workspace-tree hashes matched
+the final candidate exactly, but its outer bytes did not. The release gate
+therefore remains closed on exactly these package-level blockers:
+
+1. `CHROMIUM_RUNTIME_CONTAINS_LGPL_NOTICES`.
+2. `PACKAGE_UNSIGNED`.
+3. `NOTARIZATION_EVIDENCE_MISSING`.
+4. `REPRODUCIBILITY_EVIDENCE_MISSING`.
+5. `VULNERABILITY_SCAN_MISSING`.
+
+## Retained pre-final-patch schema-11 checkpoint
+
+The retained checkpoint is:
+
+- Artifact: `artifacts/candidates/schema11-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
+- Historical checkpoint SHA-256: `3aad0cd887a7ce83e59cd85e0527500083e71eb31e9340d96dec2eca958017c2`
+- Historical checkpoint size: 176.3 MiB
+- Checkpoint artifact integrity: `PASS` at the pre-final-patch checkpoint only
+- Current-workspace parity: `FAIL`
+- Current gate: `FAIL` — packaged `packages/core/dist` differs from the current
+  workspace
+- Release decision: `NO-GO`
+- Checkpoint inventory: 349 packaged npm/workspace components, seven workspace
+  trees, and two bundled runtimes
+- Installation performed: no
+
+At that checkpoint, the five recorded release blockers were Chromium
+LGPL-notice policy, missing signature, missing notarization, missing independent
+reproducibility, and missing vulnerability scanning. Current workspace parity is
+an additional prerequisite before any new artifact can be evaluated. These
+checkpoint bytes must not be presented as a current-source candidate.
+
+## Separate exact-current Docker evidence
+
+Native PKG evidence and Docker evidence are independent. The exact-current
+Compose project `formaspeccischema118e2818fed6` passed the schema-12 Docker
+smoke with both services using image
+`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`.
+The temporary summary is
+`/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
+(SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`).
+That smoke includes the passing DNS/TCP/interface renderer-egress canary. It
+does not validate native installation behavior, and its temporary local evidence
+is not signing, notarization, vulnerability-scan, reproducibility, or retained
+provenance evidence.
+
+## Historical schema-10 checkpoint
+
+The previous detailed checkpoint candidate is retained for comparison only:
 
 - Artifact: `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
 - SHA-256: `15d3104a36827da455b874405eaef91b3e2150f90e56b9ba33ad89e155a15f49`
@@ -222,7 +344,8 @@ These verified historical results belong only to artifact SHA-256
 - API and renderer processes stopped cleanly and removed the temporary socket.
 
 The historical PKG was not installed and no administrator credential was
-requested. This smoke evidence is retained rather than rewritten as evidence
-for the current `15d3104a…` candidate. A current-artifact runtime rerun and native
-install lifecycle remain required, and the five release blockers are unchanged;
-the decision remains **NO-GO**.
+requested. This smoke evidence belongs only to the historical `15d3104a…`
+candidate. The retained pre-final-patch schema-11 `3aad0cd8…` checkpoint also
+was not installed and now fails current-workspace parity at
+`packages/core/dist`; native install lifecycle evidence remains required. The
+decision remains **NO-GO**.

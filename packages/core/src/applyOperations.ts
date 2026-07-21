@@ -256,6 +256,12 @@ function updateNode(document: DesignDocument, operation: UpdateNodeOperation, co
   if (patch.metadata !== undefined) {
     candidate.metadata = patch.metadata_mode === "replace" ? patch.metadata : { ...node.metadata, ...patch.metadata };
   }
+  if (patch.accessibility_label !== undefined) {
+    const metadata = { ...(candidate.metadata as Metadata) };
+    if (patch.accessibility_label === null) delete metadata.accessible_label;
+    else metadata.accessible_label = patch.accessibility_label;
+    candidate.metadata = metadata;
+  }
 
   for (const field of Object.keys(fieldCompatibility)) {
     if (!Object.prototype.hasOwnProperty.call(patch, field)) continue;
@@ -500,6 +506,13 @@ function applyOperation(document: DesignDocument, operation: DesignOperation, co
       );
       return;
     }
+    case "insert_component_instance":
+      fail(
+        "operation_failed",
+        "insert_component_instance requires a server-resolved prepared preview.",
+        context,
+      );
+      return;
     case "set_prototype_link": {
       if (document.prototype_links[operation.link.id] === undefined) {
         context.created.prototype_links.push(operation.link.id);

@@ -87,6 +87,27 @@ describe("applyOperations", () => {
     if (updated?.type === "text") expect(updated.content).toBe("Updated title");
   });
 
+  it("stores typed accessibility-label edits in the V1 compatibility metadata field", () => {
+    const document = createStarterDocument({ idFactory: createSequentialIdFactory("a11ylabel") });
+    const frameId = document.pages[0]!.children[0]!;
+    document.nodes[frameId]!.metadata.nested = { source: "preserve" };
+
+    const labeled = applyOperations(document, [{
+      type: "update_node",
+      node_id: frameId,
+      patch: { accessibility_label: "Open checkout" },
+    }]).document;
+    expect(labeled.nodes[frameId]?.metadata.accessible_label).toBe("Open checkout");
+    expect(labeled.nodes[frameId]?.metadata.nested).toEqual({ source: "preserve" });
+
+    const cleared = applyOperations(labeled, [{
+      type: "update_node",
+      node_id: frameId,
+      patch: { accessibility_label: null },
+    }]).document;
+    expect(cleared.nodes[frameId]?.metadata).not.toHaveProperty("accessible_label");
+  });
+
   it("rejects a patch containing fields for another node type", () => {
     const ids = createSequentialIdFactory("badpatch");
     const document = createSampleDocument({ idFactory: ids });

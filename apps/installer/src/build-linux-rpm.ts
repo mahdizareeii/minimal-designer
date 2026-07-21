@@ -256,26 +256,44 @@ function findWorkspaceRoot(): string {
   return root;
 }
 
+export function linuxRpmBuildUsage(): string {
+  return `Usage: build-linux-rpm \\
+  [--output <absolute-directory>] \\
+  [--version <version>] \\
+  [--node <absolute-node>] \\
+  [--playwright-browsers <absolute-directory>] \\
+  [--rpmbuild <absolute-executable>] \\
+  [--source-date-epoch <unix-seconds>]
+
+The command runs only on Linux and emits an unsigned RPM plus SHA-256 file.
+It never downloads, signs, installs, or starts the generated package.
+`;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const workspaceRoot = findWorkspaceRoot();
-  const rootPackage = JSON.parse(fs.readFileSync(path.join(workspaceRoot, "package.json"), "utf8")) as { version?: unknown };
-  const version = argument("--version") ?? (typeof rootPackage.version === "string" ? rootPackage.version : "0.0.0");
-  const outputDirectory = path.resolve(argument("--output") ?? path.join(workspaceRoot, "artifacts", "installers"));
-  const nodeExecutable = path.resolve(argument("--node") ?? process.execPath);
-  const browsers = path.resolve(
-    argument("--playwright-browsers")
-      ?? process.env.PLAYWRIGHT_BROWSERS_PATH
-      ?? path.join(os.homedir(), ".cache", "ms-playwright"),
-  );
-  const sourceDateEpoch = normalizeSourceDateEpoch(argument("--source-date-epoch") ?? process.env.SOURCE_DATE_EPOCH);
-  const output = buildUnsignedLinuxRpm({
-    workspaceRoot,
-    outputDirectory,
-    nodeExecutable,
-    playwrightBrowsersDirectory: browsers,
-    version,
-    sourceDateEpoch,
-    ...(argument("--rpmbuild") === undefined ? {} : { rpmbuildExecutable: path.resolve(argument("--rpmbuild")!) }),
-  });
-  process.stdout.write(`${output}\n`);
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    process.stdout.write(linuxRpmBuildUsage());
+  } else {
+    const workspaceRoot = findWorkspaceRoot();
+    const rootPackage = JSON.parse(fs.readFileSync(path.join(workspaceRoot, "package.json"), "utf8")) as { version?: unknown };
+    const version = argument("--version") ?? (typeof rootPackage.version === "string" ? rootPackage.version : "0.0.0");
+    const outputDirectory = path.resolve(argument("--output") ?? path.join(workspaceRoot, "artifacts", "installers"));
+    const nodeExecutable = path.resolve(argument("--node") ?? process.execPath);
+    const browsers = path.resolve(
+      argument("--playwright-browsers")
+        ?? process.env.PLAYWRIGHT_BROWSERS_PATH
+        ?? path.join(os.homedir(), ".cache", "ms-playwright"),
+    );
+    const sourceDateEpoch = normalizeSourceDateEpoch(argument("--source-date-epoch") ?? process.env.SOURCE_DATE_EPOCH);
+    const output = buildUnsignedLinuxRpm({
+      workspaceRoot,
+      outputDirectory,
+      nodeExecutable,
+      playwrightBrowsersDirectory: browsers,
+      version,
+      sourceDateEpoch,
+      ...(argument("--rpmbuild") === undefined ? {} : { rpmbuildExecutable: path.resolve(argument("--rpmbuild")!) }),
+    });
+    process.stdout.write(`${output}\n`);
+  }
 }

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 
 export interface CommandResult {
   exitCode: number;
@@ -13,6 +14,8 @@ export interface CommandOptions {
   env?: NodeJS.ProcessEnv;
   inherit?: boolean;
   timeoutMs?: number;
+  input?: Readable;
+  maxOutputBytes?: number;
 }
 
 export type CommandRunner = (
@@ -22,22 +25,54 @@ export type CommandRunner = (
 ) => Promise<CommandResult>;
 
 export const runCommand: CommandRunner = (executable, args, options = {}) => new Promise((resolve, reject) => {
+  const maxOutputBytes = options.maxOutputBytes ?? 4 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1024 || maxOutputBytes > 64 * 1024 * 1024) {
+    throw new Error("Command output limit is invalid.");
+  }
   const child = spawn(executable, [...args], {
     shell: false,
     cwd: options.cwd,
     env: options.env,
-    stdio: options.inherit ? "inherit" : ["ignore", "pipe", "pipe"],
+    stdio: options.inherit ? "inherit" : [options.input ? "pipe" : "ignore", "pipe", "pipe"],
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
-  child.stdout?.on("data", (chunk: Buffer | Uint8Array) => stdout.push(Buffer.from(chunk)));
-  child.stderr?.on("data", (chunk: Buffer | Uint8Array) => stderr.push(Buffer.from(chunk)));
+  let outputBytes = 0;
+  let outputError: Error | undefined;
   let forceKill: ReturnType<typeof setTimeout> | undefined;
+  const terminate = (): void => {
+    child.kill("SIGTERM");
+    forceKill ??= setTimeout(() => child.kill("SIGKILL"), 5_000);
+  };
+  const capture = (target: Buffer[], chunk: Buffer | Uint8Array): void => {
+    if (outputError) return;
+    const buffer = Buffer.from(chunk);
+    outputBytes += buffer.length;
+    if (outputBytes > maxOutputBytes) {
+      outputError = new Error(`Command output exceeded the fixed ${maxOutputBytes}-byte limit.`);
+      terminate();
+      return;
+    }
+    target.push(buffer);
+  };
+  child.stdout?.on("data", (chunk: Buffer | Uint8Array) => capture(stdout, chunk));
+  child.stderr?.on("data", (chunk: Buffer | Uint8Array) => capture(stderr, chunk));
+  let inputError: Error | undefined;
+  if (options.input && child.stdin) {
+    options.input.once("error", (error) => {
+      inputError = error;
+      child.stdin?.destroy(error);
+      terminate();
+    });
+    child.stdin.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") inputError ??= error;
+    });
+    options.input.pipe(child.stdin);
+  }
   const timeout = options.timeoutMs === undefined
     ? undefined
     : setTimeout(() => {
-      child.kill("SIGTERM");
-      forceKill = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      terminate();
     }, options.timeoutMs);
   child.once("error", (error) => {
     if (timeout !== undefined) clearTimeout(timeout);
@@ -47,6 +82,10 @@ export const runCommand: CommandRunner = (executable, args, options = {}) => new
   child.once("exit", (code, signal) => {
     if (timeout !== undefined) clearTimeout(timeout);
     if (forceKill !== undefined) clearTimeout(forceKill);
+    if (inputError || outputError) {
+      reject(inputError ?? outputError);
+      return;
+    }
     resolve({
       exitCode: code ?? (signal === null ? 1 : 128),
       stdout: Buffer.concat(stdout).toString("utf8"),

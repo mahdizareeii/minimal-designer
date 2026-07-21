@@ -16,8 +16,16 @@ import { findExecutable, runCommand, type CommandRunner } from "./process.js";
 const backupIdPattern = /^backup_[a-f0-9]{40}$/;
 const operationIdPattern = /^restore_[A-Za-z0-9][A-Za-z0-9_-]{7,111}$/;
 const MAX_HEALTH_RESPONSE_BYTES = 64 * 1024;
+const MAX_OFFLINE_RESTORE_BYTES = 16 * 1024 * 1024 * 1024;
 
 export const DOCKER_RESTORE_CAPABILITY = "HEALTHY_PLANNED_RESTORE_ONLY" as const;
+export const DOCKER_OFFLINE_RESTORE_CAPABILITY = "EXPLICIT_OFFLINE_DISASTER_RECOVERY" as const;
+
+export interface OfflineRestoreSource {
+  path: string;
+  sha256: string;
+  sizeBytes: number;
+}
 
 export interface RestoreHealthRequest {
   connectHost: "127.0.0.1" | "::1";
@@ -157,6 +165,7 @@ export interface DockerRestoreOperationStatus {
       revoked: { grants: number; connections: number; nonces: number };
     };
     errorCode: string | null;
+    recovery?: null | { mode: "offline"; safetyKind: "forensic" };
   };
   workerLock:
     | { active: false; lockValid: true }
@@ -173,13 +182,13 @@ export interface DockerRestoreOperationStatus {
 }
 
 export interface DockerRestoreResult {
-  status: "restored" | "rolled_back";
+  status: "restored" | "rolled_back" | "forensic_rolled_back" | "forensic_rollback_aborted";
   operationId: string;
   backupId: string;
   safetyBackupId: string;
-  maintenanceCleared: true;
-  serviceReady: true;
-  reconnectRequired: true;
+  maintenanceCleared: boolean;
+  serviceReady: boolean;
+  reconnectRequired: boolean;
   worker: Record<string, unknown> | null;
 }
 
@@ -194,6 +203,20 @@ export interface DockerRestoreStaleLockResult {
   status: "stale_lock_cleared";
   operationId: string;
   containerId: string;
+}
+
+interface OfflinePreparationResult {
+  status: "prepared";
+  operationId: string;
+  backupId: string;
+  organizationId: string;
+  targetFilename: string;
+  targetSha256: string;
+  targetSizeBytes: number;
+  safetyBackupId: string;
+  safetyFilename: string;
+  safetySha256: string;
+  safetySizeBytes: number;
 }
 
 function parseJsonLine(value: string, label: string): Record<string, unknown> {
@@ -219,6 +242,35 @@ function assertOperationId(value: string): string {
 export function assertBackupId(value: string): string {
   if (!backupIdPattern.test(value)) throw new Error("--backup-id requires an exact managed FormaSpec backup ID.");
   return value;
+}
+
+async function openOfflineRestoreSource(source: OfflineRestoreSource): Promise<fs.ReadStream> {
+  if (!/^[a-f0-9]{64}$/.test(source.sha256)
+    || !Number.isSafeInteger(source.sizeBytes) || source.sizeBytes < 1
+    || source.sizeBytes > MAX_OFFLINE_RESTORE_BYTES) {
+    throw new Error("Offline restore source hash or size is invalid.");
+  }
+  const filename = path.resolve(source.path);
+  const before = await fs.promises.lstat(filename);
+  if (!before.isFile() || before.isSymbolicLink() || before.size !== source.sizeBytes) {
+    throw new Error("Offline restore source must remain the verified regular file.");
+  }
+  const handle = await fs.promises.open(
+    filename,
+    process.platform === "win32"
+      ? fs.constants.O_RDONLY
+      : fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+  );
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size !== before.size || opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error("Offline restore source changed before it could be pinned.");
+    }
+    return handle.createReadStream({ autoClose: true, start: 0 });
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 function acquireApplicationLock(projectRoot: string): () => void {
@@ -358,11 +410,17 @@ class DockerRestoreSupervisor {
     });
   }
 
-  async #dockerCommand(arguments_: readonly string[], label: string, timeoutMs = 180_000): Promise<string> {
+  async #dockerCommand(
+    arguments_: readonly string[],
+    label: string,
+    timeoutMs = 180_000,
+    input?: fs.ReadStream,
+  ): Promise<string> {
     const result = await this.#runner(this.#docker, arguments_, {
       cwd: this.#projectRoot,
       env: this.#environment,
       timeoutMs,
+      ...(input ? { input } : {}),
     });
     if (result.exitCode !== 0) {
       throw new Error(`${label} failed.`);
@@ -375,12 +433,14 @@ class DockerRestoreSupervisor {
     command: readonly string[],
     label: string,
     timeoutMs = 180_000,
+    input?: fs.ReadStream,
   ): Promise<string> {
     const binding = await this.#verifiedBinding();
     return this.#dockerCommand(
-      buildHardenedDockerRunArguments(binding, { containerName, command }),
+      buildHardenedDockerRunArguments(binding, { containerName, command, interactive: input !== undefined }),
       label,
       timeoutMs,
+      input,
     );
   }
 
@@ -434,6 +494,42 @@ class DockerRestoreSupervisor {
     return envelope.preflight as Record<string, unknown>;
   }
 
+  async offlinePrepare(source: OfflineRestoreSource, operationId: string): Promise<OfflinePreparationResult> {
+    const stream = await openOfflineRestoreSource(source);
+    try {
+      const output = await this.#oneShot(
+        `fs-offline-${assertOperationId(operationId)}`,
+        [
+          "node", "apps/server/dist/restore-worker.js", "offline-prepare",
+          "--operation-id", operationId,
+          "--expected-sha256", source.sha256,
+          "--expected-size", String(source.sizeBytes),
+        ],
+        "Offline restore preparation",
+        30 * 60_000,
+        stream,
+      );
+      const envelope = parseJsonLine(output, "Offline restore preparation");
+      if (envelope.ok !== true || typeof envelope.preparation !== "object" || envelope.preparation === null) {
+        throw new Error("Offline restore preparation returned an invalid result envelope.");
+      }
+      const preparation = envelope.preparation as Partial<OfflinePreparationResult>;
+      if (preparation.status !== "prepared" || preparation.operationId !== operationId
+        || typeof preparation.backupId !== "string" || !backupIdPattern.test(preparation.backupId)
+        || preparation.targetSha256 !== source.sha256 || preparation.targetSizeBytes !== source.sizeBytes
+        || typeof preparation.safetyBackupId !== "string" || !backupIdPattern.test(preparation.safetyBackupId)
+        || typeof preparation.targetFilename !== "string" || typeof preparation.safetyFilename !== "string"
+        || typeof preparation.organizationId !== "string"
+        || typeof preparation.safetySha256 !== "string" || !/^[a-f0-9]{64}$/.test(preparation.safetySha256)
+        || !Number.isSafeInteger(preparation.safetySizeBytes) || (preparation.safetySizeBytes ?? 0) < 1) {
+        throw new Error("Offline restore preparation returned invalid recovery metadata.");
+      }
+      return preparation as OfflinePreparationResult;
+    } finally {
+      stream.destroy();
+    }
+  }
+
   async stopApi(): Promise<void> {
     const binding = await this.#verifiedBinding();
     if (!await this.#boundContainerRunning(binding, binding.containers.designer, "Bound FormaSpec API")) return;
@@ -475,6 +571,23 @@ class DockerRestoreSupervisor {
     const envelope = parseJsonLine(output, "Restore worker");
     if (envelope.ok !== true || typeof envelope.result !== "object" || envelope.result === null) {
       throw new Error("Restore worker returned an invalid result envelope.");
+    }
+    return envelope.result as Record<string, unknown>;
+  }
+
+  async forensicRollback(operationId: string): Promise<Record<string, unknown>> {
+    const output = await this.#oneShot(
+      `fs-forensic-${assertOperationId(operationId)}`,
+      [
+        "node", "apps/server/dist/restore-worker.js", "forensic-rollback",
+        "--operation-id", operationId,
+      ],
+      "Forensic rollback worker",
+      30 * 60_000,
+    );
+    const envelope = parseJsonLine(output, "Forensic rollback worker");
+    if (envelope.ok !== true || typeof envelope.result !== "object" || envelope.result === null) {
+      throw new Error("Forensic rollback worker returned an invalid result envelope.");
     }
     return envelope.result as Record<string, unknown>;
   }
@@ -618,6 +731,27 @@ async function finishTerminalOperation(
   };
 }
 
+async function finishForensicRollback(
+  supervisor: DockerRestoreSupervisor,
+  status: DockerRestoreOperationStatus,
+  worker: Record<string, unknown> | null,
+): Promise<DockerRestoreResult> {
+  const operation = status.operation;
+  if (operation === null || operation.phase !== "rolled_back" || operation.recovery?.mode !== "offline") {
+    throw new Error("Forensic rollback has not reached its durable terminal state.");
+  }
+  return {
+    status: "forensic_rolled_back",
+    operationId: operation.operationId,
+    backupId: operation.backupId,
+    safetyBackupId: operation.safetyBackupId,
+    maintenanceCleared: false,
+    serviceReady: false,
+    reconnectRequired: false,
+    worker,
+  };
+}
+
 async function executeWorkerAndFinish(
   supervisor: DockerRestoreSupervisor,
   backupId: string,
@@ -720,7 +854,7 @@ export async function restoreDockerBackup(
       await supervisor.preflight(backupId);
     } catch (error) {
       throw new Error(
-        `${DOCKER_RESTORE_CAPABILITY}: supervised Docker/server restore requires a healthy current API and database for backup resolution and preflight; offline disaster recovery is not implemented.`,
+        `${DOCKER_RESTORE_CAPABILITY}: managed backup-ID restore requires a healthy current API and database for backup resolution and preflight. Use 'formaspecctl backup restore offline <bundle> --yes' for separately authorized offline recovery.`,
         { cause: error },
       );
     }
@@ -759,6 +893,105 @@ export async function restoreDockerBackup(
   }
 }
 
+export async function restoreDockerBackupOffline(
+  projectRoot: string,
+  source: OfflineRestoreSource,
+  io: DockerRestoreIo,
+  dependencies: DockerRestoreDependencies = {},
+): Promise<DockerRestoreResult> {
+  const release = acquireApplicationLock(projectRoot);
+  try {
+    const supervisor = new DockerRestoreSupervisor(projectRoot, dependencies);
+    const operationId = assertOperationId(
+      dependencies.createOperationId?.() ?? `restore_${randomUUID().replaceAll("-", "")}`,
+    );
+    const initial = await supervisor.control("status");
+    const fencedForensicRollback = initial.maintenance.active && initial.maintenance.markerValid
+      && initial.operation?.phase === "rolled_back"
+      && initial.operation.recovery?.mode === "offline"
+      && initial.operation.operationId === initial.maintenance.operationId;
+    if ((initial.maintenance.active && !fencedForensicRollback) || initial.workerLock.active
+      || (initial.operation !== null && initial.operation.phase !== "reconciled" && initial.operation.phase !== "rolled_back")) {
+      throw new Error("An existing restore operation must be resolved before offline disaster recovery starts.");
+    }
+    io.stdout(`${DOCKER_OFFLINE_RESTORE_CAPABILITY}: ${operationId}`);
+    await supervisor.ensureRenderer();
+    let fenced = false;
+    try {
+      await supervisor.control("set", operationId);
+      fenced = true;
+      await supervisor.stopApi();
+      const preparation = await supervisor.offlinePrepare(source, operationId);
+      const worker = await supervisor.worker(preparation.backupId, operationId);
+      const terminal = await supervisor.control("status", operationId);
+      return finishTerminalOperation(supervisor, terminal, worker);
+    } catch (error) {
+      if (fenced) {
+        const status = await supervisor.control("status", operationId).catch(() => null);
+        const owner = status?.maintenance.active && status.maintenance.markerValid
+          ? status.maintenance.operationId
+          : operationId;
+        throw new Error(
+          `Offline restore did not reach a safely finalized state. Maintenance remains active under ${owner}; rerun resume with --offline-bundle after correcting the failure.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  } finally {
+    release();
+  }
+}
+
+export async function resumeOfflineDockerRestore(
+  projectRoot: string,
+  source: OfflineRestoreSource,
+  dependencies: DockerRestoreDependencies = {},
+): Promise<DockerRestoreResult> {
+  const release = acquireApplicationLock(projectRoot);
+  try {
+    const supervisor = new DockerRestoreSupervisor(projectRoot, dependencies);
+    let status = await supervisor.control("status");
+    if (!status.maintenance.active || !status.maintenance.markerValid) {
+      throw new Error("Offline restore resume requires a valid active maintenance operation.");
+    }
+    if (status.workerLock.active) {
+      throw new Error(status.workerLock.lockValid
+        ? "A restore worker still owns the shared volume lock; inspect or clear it before resume."
+        : "Restore worker lock state is invalid and requires operator inspection.");
+    }
+    const operationId = assertOperationId(status.maintenance.operationId);
+    if (status.operation !== null && status.operation.operationId !== operationId
+      && (status.operation.phase !== "rolled_back" || status.operation.recovery?.mode !== "offline")) {
+      throw new Error("Offline restore maintenance and persisted operation ownership do not match.");
+    }
+    const activeOperation = status.operation?.operationId === operationId ? status.operation : null;
+    if (activeOperation?.phase === "reconciled") return finishTerminalOperation(supervisor, status, null);
+    if (activeOperation?.phase === "rolled_back") {
+      return activeOperation.recovery?.mode === "offline"
+        ? finishForensicRollback(supervisor, status, null)
+        : finishTerminalOperation(supervisor, status, null);
+    }
+    await supervisor.ensureRenderer();
+    await supervisor.stopApi();
+    let backupId: string;
+    if (activeOperation === null) {
+      backupId = (await supervisor.offlinePrepare(source, operationId)).backupId;
+      status = await supervisor.control("status", operationId);
+    } else {
+      if (activeOperation.recovery?.mode !== "offline") {
+        throw new Error("The active restore was not prepared through the offline disaster-recovery flow.");
+      }
+      backupId = activeOperation.backupId;
+    }
+    const worker = await supervisor.worker(backupId, operationId);
+    const terminal = await supervisor.control("status", operationId);
+    return finishTerminalOperation(supervisor, terminal, worker);
+  } finally {
+    release();
+  }
+}
+
 export async function resumeDockerRestore(
   projectRoot: string,
   explicitBackupId: string | undefined,
@@ -776,6 +1009,14 @@ export async function resumeDockerRestore(
       }
       if (status.operation?.phase !== "reconciled" && status.operation?.phase !== "rolled_back") {
         throw new Error("No active or durably completed restore operation is available to resume.");
+      }
+      if (status.operation.phase === "rolled_back" && status.operation.recovery?.mode === "offline") {
+        await supervisor.control("set", status.operation.operationId);
+        return finishForensicRollback(
+          supervisor,
+          await supervisor.control("status", status.operation.operationId),
+          null,
+        );
       }
       await supervisor.verifyReady();
       return {
@@ -806,7 +1047,9 @@ export async function resumeDockerRestore(
       status = await supervisor.control("status", operationId);
     }
     if (status.operation?.phase === "reconciled" || status.operation?.phase === "rolled_back") {
-      return finishTerminalOperation(supervisor, status, null);
+      return status.operation.phase === "rolled_back" && status.operation.recovery?.mode === "offline"
+        ? finishForensicRollback(supervisor, status, null)
+        : finishTerminalOperation(supervisor, status, null);
     }
     const backupId = status.operation?.backupId ?? explicitBackupId;
     if (backupId === undefined) {
@@ -866,6 +1109,15 @@ export async function rollbackDockerRestore(
         : "Restore worker lock state is invalid and requires operator inspection.");
     }
     if (status.operation.phase === "rolled_back") {
+      if (status.operation.recovery?.mode === "offline") {
+        if (status.maintenance.active) return finishForensicRollback(supervisor, status, null);
+        await supervisor.control("set", status.operation.operationId);
+        return finishForensicRollback(
+          supervisor,
+          await supervisor.control("status", status.operation.operationId),
+          null,
+        );
+      }
       if (status.maintenance.active) return finishTerminalOperation(supervisor, status, null);
       await supervisor.verifyReady();
       return {
@@ -881,6 +1133,28 @@ export async function rollbackDockerRestore(
     }
     if (status.operation.phase !== "reconciled") {
       throw new Error("An interrupted restore must be resumed first; its verified rollback state is not yet conclusive.");
+    }
+    if (status.operation.recovery?.mode === "offline") {
+      const operationId = status.operation.operationId;
+      if (status.maintenance.active) await finishTerminalOperation(supervisor, status, null);
+      else await supervisor.verifyReady();
+      io.stdout(`Forensic rollback operation: ${operationId}`);
+      await supervisor.control("set", operationId);
+      await supervisor.stopApi();
+      try {
+        const worker = await supervisor.forensicRollback(operationId);
+        const terminal = await supervisor.control("status", operationId);
+        if (worker.status === "forensic_rollback_aborted") {
+          const ready = await finishTerminalOperation(supervisor, terminal, worker);
+          return { ...ready, status: "forensic_rollback_aborted" };
+        }
+        return finishForensicRollback(supervisor, terminal, worker);
+      } catch (error) {
+        throw new Error(
+          "Forensic rollback did not reach a safely finalized state and maintenance remains active.",
+          { cause: error },
+        );
+      }
     }
     const safetyBackupId = status.operation.safetyBackupId;
     if (status.maintenance.active) await finishTerminalOperation(supervisor, status, null);

@@ -3,6 +3,7 @@ import { defineConfig } from "playwright/test";
 const host = "127.0.0.1";
 const port = 4317;
 const baseURL = `http://${host}:${port}`;
+const nodeCommand = JSON.stringify(process.execPath);
 const browserChannel = process.env.FORMASPEC_E2E_BROWSER_CHANNEL
   ?? (process.platform === "darwin" ? "chrome" : undefined);
 
@@ -27,7 +28,7 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   webServer: {
-    command: "node dist/index.js",
+    command: `${nodeCommand} dist/index.js`,
     url: `${baseURL}/health/ready`,
     reuseExistingServer: false,
     timeout: 60_000,

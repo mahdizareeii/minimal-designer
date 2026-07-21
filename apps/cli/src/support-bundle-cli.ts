@@ -97,6 +97,7 @@ export async function runSupportBundleCli(
     const common: SupportBundleOptions = {
       projectRoot: dependencies.projectRoot,
       now: () => fixedNow,
+      ...(dependencies.environment === undefined ? {} : { environment: dependencies.environment }),
       ...(dependencies.applicationVersion === undefined ? {} : { applicationVersion: dependencies.applicationVersion }),
       ...(dependencies.homeDirectory === undefined ? {} : { homeDirectory: dependencies.homeDirectory }),
       ...(dependencies.migrationReader === undefined ? {} : { migrationReader: dependencies.migrationReader }),
@@ -112,7 +113,7 @@ export async function runSupportBundleCli(
       throw new Error("support-bundle create is disabled until you review 'support-bundle preview' and rerun with explicit --yes.");
     }
     const outputPath = parsed.outputPath === undefined
-      ? defaultSupportBundlePath(dependencies.projectRoot, fixedNow)
+      ? defaultSupportBundlePath(dependencies.projectRoot, fixedNow, dependencies.environment)
       : path.resolve(parsed.outputPath);
     const created = await createSupportBundle({
       ...common,

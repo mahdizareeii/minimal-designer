@@ -25,4 +25,20 @@ Database migrations are forward-only and the ledger is immutable. The server
 refuses a database newer than its supported version. Never delete or rewrite
 migration rows, snapshots, or historical revisions to force a downgrade.
 
-A supported maintenance-mode restore/rollback command is not implemented yet.
+Supported source and pinned Docker/server maintenance commands now cover managed
+restore, separately authorized offline restore, status, resume, rollback, abort,
+and stale-lock recovery:
+
+```bash
+pnpm formaspecctl -- backup restore --backup-id backup_<40-lowercase-hex> --yes
+pnpm formaspecctl -- backup restore offline /safe/path/formaspec-backup.tar --yes
+pnpm formaspecctl -- backup restore status
+pnpm formaspecctl -- backup restore resume --yes
+pnpm formaspecctl -- backup restore resume --offline-bundle /safe/path/formaspec-backup.tar --yes
+pnpm formaspecctl -- backup restore rollback --yes
+```
+
+Managed backup-ID restore requires a healthy current API and database for
+resolution and preflight; the offline command verifies an operator-selected
+bundle without opening that database. These are maintenance foundations, not a
+release-qualified upgrade/downgrade or privileged native-package lifecycle.

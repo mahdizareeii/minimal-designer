@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { resolveRuntimePaths } from "./runtime-paths.js";
+
 function loopbackHttpOrigin(value: string): string {
   const url = new URL(value);
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -11,8 +13,8 @@ function loopbackHttpOrigin(value: string): string {
   return url.origin;
 }
 
-export function localApiOrigin(projectRoot: string): string {
-  const runDirectory = path.join(projectRoot, ".designer", "run");
+export function localApiOrigin(projectRoot: string, environment: NodeJS.ProcessEnv = process.env): string {
+  const runDirectory = resolveRuntimePaths(projectRoot, environment).runDirectory;
   const urlFile = path.join(runDirectory, "url");
   if (fs.existsSync(urlFile)) return loopbackHttpOrigin(fs.readFileSync(urlFile, "utf8").trim());
   const portFile = path.join(runDirectory, "api-port");
@@ -22,9 +24,14 @@ export function localApiOrigin(projectRoot: string): string {
   return `http://127.0.0.1:${port}`;
 }
 
-export async function localApiRequest<T>(projectRoot: string, pathname: string, init?: RequestInit): Promise<T> {
+export async function localApiRequest<T>(
+  projectRoot: string,
+  pathname: string,
+  init?: RequestInit,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<T> {
   if (!pathname.startsWith("/api/") || pathname.includes("..")) throw new Error("Invalid local FormaSpec API path.");
-  const response = await fetch(`${localApiOrigin(projectRoot)}${pathname}`, {
+  const response = await fetch(`${localApiOrigin(projectRoot, environment)}${pathname}`, {
     ...init,
     headers: {
       ...(init?.body === undefined ? {} : { "content-type": "application/json" }),

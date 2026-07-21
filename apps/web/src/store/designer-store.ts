@@ -34,6 +34,15 @@ import {
   type TokenId,
 } from "../domain";
 import { canonicalizeNodeSelection } from "../lib/canvas-geometry";
+import {
+  createConflictRecovery,
+  latestRevisionFromConflictDetails,
+  loadPersistedConflictRecovery,
+  persistConflictRecovery,
+  removePersistedConflictRecovery,
+  type ConflictRecovery,
+} from "../lib/conflict-recovery";
+import type { InspectorPanelTab } from "../lib/editor-information-architecture";
 import { clampCanvasZoom, type ViewportState } from "../lib/viewport-transform";
 import {
   ApiError,
@@ -41,6 +50,7 @@ import {
   commitRevision,
   createArchivePreview,
   createDesign as createRemoteDesign,
+  duplicateConflictDraft as duplicateConflictDraftRemote,
   listDesigns,
   listHistory,
   readDesign,
@@ -48,10 +58,10 @@ import {
   subscribeToEvents,
   updateContext,
   uploadAsset,
+  type DuplicateConflictDraftResult,
 } from "../lib/api";
 
 type EditorTool = "select" | "hand" | "text" | "shape";
-type InspectorTab = "design" | "tokens" | "history";
 
 interface CommandBatch {
   operations: DesignOperation[];
@@ -77,7 +87,7 @@ interface DesignerState {
   zoom: number;
   pan: { x: number; y: number };
   tool: EditorTool;
-  inspectorTab: InspectorTab;
+  inspectorTab: InspectorPanelTab;
   dashboardLoading: boolean;
   editorLoading: boolean;
   creating: boolean;
@@ -95,6 +105,8 @@ interface DesignerState {
   prototypePageId: PageId | null;
   sidebarsHidden: boolean;
   archiveReview: ArchiveReview | null;
+  conflictRecovery: ConflictRecovery | null;
+  conflictRecoveryDurable: boolean;
   loadProjects: () => Promise<void>;
   createProject: (name: string, preset: DevicePreset) => Promise<string>;
   openDesign: (id: string) => Promise<void>;
@@ -105,7 +117,7 @@ interface DesignerState {
   setPan: (pan: { x: number; y: number }) => void;
   setViewport: (viewport: ViewportState) => void;
   setTool: (tool: EditorTool) => void;
-  setInspectorTab: (tab: InspectorTab) => void;
+  setInspectorTab: (tab: InspectorPanelTab) => void;
   setNotice: (notice: string | null) => void;
   setSidebarsHidden: (hidden: boolean) => void;
   setProductBrief: (brief: string) => void;
@@ -129,7 +141,10 @@ interface DesignerState {
   undo: () => void;
   redo: () => void;
   save: () => Promise<void>;
+  loadLatestForConflict: () => Promise<void>;
   reloadConflict: () => Promise<void>;
+  duplicateConflictDraft: (name?: string) => Promise<DuplicateConflictDraftResult | null>;
+  discardConflictRecovery: () => Promise<void>;
   loadHistory: () => Promise<void>;
   restoreRevision: (version: number) => Promise<void>;
   openPrototype: () => void;
@@ -151,6 +166,36 @@ function syncDeepLink(pageId: PageId | null, nodeId?: NodeId): void {
 }
 
 let activeSavePromise: Promise<void> | null = null;
+
+function baseRevisionIdFor(state: DesignerState, designId: string, baseVersion: number): string | undefined {
+  const project = state.projects.find((candidate) => candidate.id === designId && candidate.version === baseVersion);
+  return project?.revisionId;
+}
+
+async function captureConflictRecovery(input: {
+  state: DesignerState;
+  designId: string;
+  baseVersion: number;
+  operations: DesignOperation[];
+  details: unknown;
+}): Promise<{ recovery: ConflictRecovery; durable: boolean }> {
+  let latestRevision: ReturnType<typeof latestRevisionFromConflictDetails>;
+  try {
+    latestRevision = latestRevisionFromConflictDetails(input.details);
+  } catch {
+    latestRevision = undefined;
+  }
+  const recovery = await createConflictRecovery({
+    designId: input.designId,
+    baseVersion: input.baseVersion,
+    ...(baseRevisionIdFor(input.state, input.designId, input.baseVersion)
+      ? { baseRevisionId: baseRevisionIdFor(input.state, input.designId, input.baseVersion) }
+      : {}),
+    ...(latestRevision ? { latestRevision } : {}),
+    operations: input.operations,
+  });
+  return { recovery, durable: persistConflictRecovery(recovery) };
+}
 
 function applyOptimistic(
   document: DesignDocument,
@@ -185,6 +230,16 @@ function inversePatch(node: DesignNode, patch: UpdateNodePatch): UpdateNodePatch
     inverse.metadata = structuredClone(node.metadata);
     inverse.metadata_mode = "replace";
   }
+  if (patch.accessibility_label !== undefined) {
+    if (typeof node.metadata.accessible_label === "string") {
+      inverse.accessibility_label = node.metadata.accessible_label;
+    } else if (Object.prototype.hasOwnProperty.call(node.metadata, "accessible_label")) {
+      inverse.metadata = structuredClone(node.metadata);
+      inverse.metadata_mode = "replace";
+    } else {
+      inverse.accessibility_label = null;
+    }
+  }
   for (const key of [
     "content", "direction", "asset_id", "alt", "object_fit", "icon_name", "label",
     "component_id", "overrides", "clip_content", "role", "component_key", "description",
@@ -203,6 +258,9 @@ function executeBatch(
   options: { trackUndo?: boolean; redoable?: boolean } = {},
 ): Partial<DesignerState> {
   if (!state.document) return {};
+  if (state.conflictRecovery) {
+    return { notice: "Export, duplicate, or explicitly discard the protected conflict recovery before making more edits." };
+  }
   try {
     const shouldAdvance = state.pendingOperations.length === 0 && !state.saving && state.document.revision === state.baseVersion;
     const next: Partial<DesignerState> = {
@@ -287,6 +345,8 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   prototypePageId: null,
   sidebarsHidden: false,
   archiveReview: null,
+  conflictRecovery: null,
+  conflictRecoveryDurable: false,
 
   loadProjects: async () => {
     set({ dashboardLoading: true, error: null });
@@ -326,9 +386,22 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   },
 
   openDesign: async (id) => {
-    set({ editorLoading: true, error: null, selectedIds: [], pendingOperations: [], undoStack: [], redoStack: [], archiveReview: null });
+    set({
+      editorLoading: true,
+      error: null,
+      selectedIds: [],
+      pendingOperations: [],
+      undoStack: [],
+      redoStack: [],
+      archiveReview: null,
+      conflictRecovery: null,
+      conflictRecoveryDurable: false,
+    });
     try {
-      const document = await readDesign(id);
+      const [document, conflictRecovery] = await Promise.all([
+        readDesign(id),
+        loadPersistedConflictRecovery(id),
+      ]);
       const requestedPage = new URLSearchParams(window.location.search).get("page") as PageId | null;
       const requestedNode = new URLSearchParams(window.location.search).get("node") as NodeId | null;
       const activePageId = requestedPage && document.pages.some((page) => page.id === requestedPage)
@@ -345,6 +418,11 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         editorLoading: false,
         offline: false,
         saveState: "saved",
+        conflictRecovery,
+        conflictRecoveryDurable: Boolean(conflictRecovery),
+        ...(conflictRecovery
+          ? { notice: `Recovered ${conflictRecovery.operations.length} protected local operation${conflictRecovery.operations.length === 1 ? "" : "s"}.` }
+          : {}),
       });
       void updateContext({
         designId: document.id,
@@ -372,6 +450,8 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     revisions: [],
     prototypeOpen: false,
     archiveReview: null,
+    conflictRecovery: null,
+    conflictRecoveryDurable: false,
     saving: false,
     saveState: "idle",
     error: null,
@@ -588,14 +668,31 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       });
     } catch (error) {
       if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
-        set((latest) => ({
+        const latest = get();
+        const operations = [...review.operations, ...latest.pendingOperations];
+        set({
           archiveReview: null,
-          pendingOperations: [...review.operations, ...latest.pendingOperations],
+          pendingOperations: operations,
           saving: false,
           saveState: "conflict",
           offline: false,
-          error: "The project changed before the destructive preview was committed. Reload the latest revision to review the deletion again.",
-          notice: "Archive preview conflict: no automatic merge was performed.",
+          error: "The project changed before the destructive preview was committed. Load the latest revision; the exact local operations remain protected.",
+          notice: "Archive preview conflict: protecting the exact local operations…",
+        });
+        const captured = await captureConflictRecovery({
+          state: get(),
+          designId,
+          baseVersion: review.baseVersion,
+          operations,
+          details: error.details,
+        });
+        set(() => ({
+          pendingOperations: captured.recovery.operations,
+          conflictRecovery: captured.recovery,
+          conflictRecoveryDurable: captured.durable,
+          notice: captured.durable
+            ? "Archive preview conflict: recovery was saved and no automatic merge was performed."
+            : "Archive preview conflict: no automatic merge was performed. Recovery is protected only in this tab; export the patch now because browser storage is unavailable.",
         }));
         return;
       }
@@ -748,7 +845,12 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   }),
 
   uploadImage: async (nodeId, file) => {
-    const document = get().document;
+    const current = get();
+    if (current.conflictRecovery) {
+      set({ notice: "Export, duplicate, or explicitly discard the protected conflict recovery before uploading assets." });
+      return;
+    }
+    const document = current.document;
     const node = document?.nodes[nodeId];
     if (!document || !node || node.type !== "image") return;
     set({ notice: "Uploading image asset…", error: null });
@@ -770,6 +872,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   },
 
   undo: () => set((state) => {
+    if (state.conflictRecovery) return { notice: "Export, duplicate, or explicitly discard the protected conflict recovery before editing." };
     const batch = state.undoStack.at(-1);
     if (!batch || !state.document) return state;
     try {
@@ -787,6 +890,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   }),
 
   redo: () => set((state) => {
+    if (state.conflictRecovery) return { notice: "Export, duplicate, or explicitly discard the protected conflict recovery before editing." };
     const batch = state.redoStack.at(-1);
     if (!batch || !state.document) return state;
     try {
@@ -807,6 +911,10 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     const state = get();
     if (state.archiveReview) {
       set({ notice: "Commit or discard the destructive preview before saving more changes." });
+      return Promise.resolve();
+    }
+    if (state.conflictRecovery) {
+      set({ notice: "Export, duplicate, or explicitly discard the protected conflict recovery before saving." });
       return Promise.resolve();
     }
     if (!state.document || state.saveState === "conflict" || state.pendingOperations.length === 0) return Promise.resolve();
@@ -860,13 +968,34 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         });
       } catch (error) {
         if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
-          set((latest) => latest.document?.id !== designId ? { saving: false } : {
-              pendingOperations: [...operations, ...latest.pendingOperations],
-              saving: false,
-              saveState: "conflict",
-              offline: false,
-              error: "The design changed on the server. Reload the latest revision to review it; your local draft has not been committed.",
-              notice: "Version conflict: no automatic merge was performed.",
+          const latest = get();
+          if (latest.document?.id !== designId) {
+            set({ saving: false });
+            return;
+          }
+          const pendingOperations = [...operations, ...latest.pendingOperations];
+          set({
+            pendingOperations,
+            saving: false,
+            saveState: "conflict",
+            offline: false,
+            error: "The design changed on the server. Load the latest revision to review it; the exact local operations remain protected.",
+            notice: "Version conflict: protecting the exact local operations…",
+          });
+          const captured = await captureConflictRecovery({
+            state: get(),
+            designId,
+            baseVersion,
+            operations: pendingOperations,
+            details: error.details,
+          });
+          set((current) => current.document?.id !== designId ? { saving: false } : {
+              pendingOperations: captured.recovery.operations,
+              conflictRecovery: captured.recovery,
+              conflictRecoveryDurable: captured.durable,
+              notice: captured.durable
+                ? "Version conflict: recovery was saved and no automatic merge was performed."
+                : "Version conflict: no automatic merge was performed. Recovery is protected only in this tab; export the patch now because browser storage is unavailable.",
             });
           return;
         }
@@ -886,9 +1015,13 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     return activeSavePromise;
   },
 
-  reloadConflict: async () => {
+  loadLatestForConflict: async () => {
     const current = get();
-    if (!current.document || current.saveState !== "conflict") return;
+    if (!current.document || !current.conflictRecovery) return;
+    if (current.saveState !== "conflict" && current.pendingOperations.length === 0) {
+      set({ notice: "The latest server revision is already loaded. Conflict recovery remains available until discarded." });
+      return;
+    }
     set({ editorLoading: true });
     try {
       const fresh = await readDesign(current.document.id);
@@ -909,7 +1042,9 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         saveState: "saved",
         offline: false,
         error: null,
-        notice: "Loaded the latest server revision. The conflicting local draft was discarded.",
+        conflictRecovery: current.conflictRecovery,
+        conflictRecoveryDurable: current.conflictRecoveryDurable,
+        notice: "Loaded the latest server revision. The exact conflicting operations remain available in recovery.",
       });
       syncDeepLink(activePageId, selectedIds[0]);
     } catch (error) {
@@ -919,6 +1054,91 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         error: error instanceof Error ? error.message : "Could not load the latest revision.",
       });
     }
+  },
+
+  reloadConflict: () => get().loadLatestForConflict(),
+
+  duplicateConflictDraft: async (name) => {
+    const current = get();
+    const recovery = current.conflictRecovery;
+    if (!recovery) return null;
+    set({ notice: "Duplicating the protected local draft…", error: null });
+    try {
+      const result = await duplicateConflictDraftRemote(
+        recovery.design.id,
+        recovery.baseRevision.version,
+        recovery.operations,
+        createClientKey("conflict-duplicate"),
+        name,
+      );
+      const updatedAt = new Date().toISOString();
+      set((state) => ({
+        projects: mergeProjects([
+          {
+            id: result.project.id,
+            name: result.project.name,
+            version: result.project.version,
+            revisionId: result.project.revisionId,
+            updatedAt,
+          },
+          ...state.projects.filter((project) => project.id !== result.project.id),
+        ]),
+        notice: `Created “${result.project.name}” as an independent project. The original recovery remains protected.`,
+        error: null,
+      }));
+      return result;
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : "The conflict draft could not be duplicated.",
+        notice: "Conflict recovery was not changed.",
+      });
+      return null;
+    }
+  },
+
+  discardConflictRecovery: async () => {
+    const current = get();
+    const recovery = current.conflictRecovery;
+    if (!current.document || !recovery) return;
+    if (current.saveState === "conflict") {
+      set({ editorLoading: true });
+      try {
+        const fresh = await readDesign(current.document.id);
+        const activePageId = fresh.pages.some((page) => page.id === current.activePageId && !page.archived)
+          ? current.activePageId
+          : fresh.pages.find((page) => !page.archived)?.id ?? null;
+        const selectedIds = canonicalizeNodeSelection(fresh, current.selectedIds, activePageId);
+        removePersistedConflictRecovery(recovery.design.id);
+        set({
+          document: fresh,
+          baseVersion: fresh.revision,
+          activePageId,
+          selectedIds,
+          pendingOperations: [],
+          undoStack: [],
+          redoStack: [],
+          saving: false,
+          editorLoading: false,
+          saveState: "saved",
+          offline: false,
+          error: null,
+          conflictRecovery: null,
+          conflictRecoveryDurable: false,
+          notice: "Discarded conflict recovery and loaded the latest server revision.",
+        });
+        syncDeepLink(activePageId, selectedIds[0]);
+      } catch (error) {
+        set({
+          editorLoading: false,
+          saveState: "conflict",
+          error: error instanceof Error ? error.message : "Could not load the latest revision before discarding recovery.",
+          notice: "Conflict recovery was not changed.",
+        });
+      }
+      return;
+    }
+    removePersistedConflictRecovery(recovery.design.id);
+    set({ conflictRecovery: null, conflictRecoveryDurable: false, notice: "Discarded the saved conflict recovery.", error: null });
   },
 
   loadHistory: async () => {

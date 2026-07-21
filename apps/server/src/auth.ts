@@ -26,6 +26,19 @@ function bearerToken(request: FastifyRequest): string | undefined {
   return authorization.slice(7).trim() || undefined;
 }
 
+function requestPath(url: string): string {
+  return url.split("?", 1)[0] ?? url;
+}
+
+function isEventStreamPath(url: string): boolean {
+  const path = requestPath(url);
+  return path === "/events" || path === "/api/events";
+}
+
+function isPairingNoncePath(url: string): boolean {
+  return requestPath(url) === "/api/agent-connections/pair";
+}
+
 function actorIdFromScopedGrant(database: DesignerDatabase, token: string): string | undefined {
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const now = new Date().toISOString();
@@ -79,6 +92,42 @@ export function registerAuthentication(
       return;
     }
 
+    if (requestPath(request.url) === "/api/agent-authorization-context") {
+      const token = bearerToken(request);
+      if (!token) {
+        throw new DomainError("AUTH_REQUIRED", "A valid scoped agent grant is required.", 401);
+      }
+      const scopedActorId = actorIdFromScopedGrant(database, token);
+      if (!scopedActorId) {
+        throw new DomainError("AUTH_REQUIRED", "A valid scoped agent grant is required.", 401);
+      }
+      resolveAccess(database.sqlite, scopedActorId);
+      request.actorId = scopedActorId;
+      return;
+    }
+
+    if (isEventStreamPath(request.url)) {
+      const token = bearerToken(request);
+      if (token) {
+        const scopedActorId = actorIdFromScopedGrant(database, token);
+        if (scopedActorId) {
+          // Keep agent event streams on the same revocable, project-scoped
+          // authorization path as MCP. Browser EventSource requests without a
+          // bearer token continue through the local/trusted-user flow below.
+          resolveAccess(database.sqlite, scopedActorId);
+          request.actorId = scopedActorId;
+          return;
+        }
+        if (config.authToken && safeEqual(token, config.authToken)) {
+          const actorId = actorIdFromToken(token);
+          resolveAccess(database.sqlite, actorId);
+          request.actorId = actorId;
+          return;
+        }
+        throw new DomainError("AUTH_REQUIRED", "A valid bearer token is required for the event stream.", 401);
+      }
+    }
+
     if (request.url.startsWith("/mcp")) {
       const token = bearerToken(request);
       if (!token && config.appMode === "local") {
@@ -90,6 +139,10 @@ export function registerAuthentication(
       }
       const scopedActorId = actorIdFromScopedGrant(database, token);
       if (scopedActorId) {
+        // Re-evaluate organization policy at the HTTP boundary so MCP
+        // initialize and discovery cannot keep using a grant after its
+        // adapter, scopes, or project-restriction policy is revoked.
+        resolveAccess(database.sqlite, scopedActorId);
         request.actorId = scopedActorId;
         return;
       }
@@ -121,7 +174,24 @@ export function registerAuthentication(
       if (typeof identity !== "string" || !identity.trim()) {
         throw new DomainError("AUTH_REQUIRED", `Missing trusted identity header ${config.trustedUserHeader}.`, 401);
       }
-      request.actorId = `trusted:${identity.trim().slice(0, 200)}`;
+      const normalizedIdentity = identity.trim();
+      if (identity !== normalizedIdentity
+        || Buffer.byteLength(normalizedIdentity, "utf8") > 200
+        || /[\u0000-\u001f\u007f,]/.test(normalizedIdentity)) {
+        throw new DomainError(
+          "AUTH_REQUIRED",
+          `Trusted identity header ${config.trustedUserHeader} is ambiguous or malformed.`,
+          401,
+        );
+      }
+      const actorId = `trusted:${normalizedIdentity}`;
+      if (!isPairingNoncePath(request.url)) {
+        // Resolve identity mapping before route parsing or multipart work. The
+        // one-time pairing endpoint remains nonce-authorized by design; every
+        // other trusted-header surface must have a live mapped principal.
+        resolveAccess(database.sqlite, actorId);
+      }
+      request.actorId = actorId;
       return;
     }
 

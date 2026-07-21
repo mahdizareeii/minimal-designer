@@ -88,7 +88,13 @@ export function formaspecctlWrapper(): string {
   return `#!/bin/sh
 set -eu
 INSTALL_ROOT='${MACOS_INSTALL_ROOT}'
-export FORMASPEC_RUNTIME_DIR="\${FORMASPEC_RUNTIME_DIR:-\${HOME}/Library/Application Support/FormaSpec/runtime}"
+[ -n "\${HOME:-}" ] || { echo 'HOME is required for per-user FormaSpec state.' >&2; exit 2; }
+STATE_ROOT="\${HOME}/Library/Application Support/FormaSpec"
+export FORMASPEC_RUNTIME_DIR="\${FORMASPEC_RUNTIME_DIR:-\${STATE_ROOT}/runtime}"
+export FORMASPEC_DATA_DIR="\${FORMASPEC_DATA_DIR:-\${STATE_ROOT}/data}"
+export FORMASPEC_BACKUP_DIR="\${FORMASPEC_BACKUP_DIR:-\${STATE_ROOT}/backups}"
+export FORMASPEC_LOG_DIR="\${FORMASPEC_LOG_DIR:-\${STATE_ROOT}/logs}"
+export FORMASPEC_SUPPORT_DIR="\${FORMASPEC_SUPPORT_DIR:-\${STATE_ROOT}/support-bundles}"
 export PATH="\${INSTALL_ROOT}/runtime:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:\${PATH:-}"
 export PLAYWRIGHT_BROWSERS_PATH="\${INSTALL_ROOT}/runtime/ms-playwright"
 if [ "\${1:-}" = install ] && [ "$#" -eq 1 ]; then set -- install local; fi

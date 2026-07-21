@@ -185,9 +185,11 @@ describe("FormaSpec local bridge", () => {
                   "product_spec:read", "product_spec:preview", "product_spec:write",
                   "planning:read", "planning:write",
                   "task:read", "task:create", "task:claim", "task:update",
-                  "design_system:read", "workspace:inventory:read", "handoff:read",
+                  "design_system:read", "workspace:inventory:read",
+                  "implementation_mapping:read", "implementation_mapping:write", "handoff:read",
                   "redesign:read", "redesign:assessment", "redesign:review",
                   "redesign:interview", "redesign:proposal", "redesign:design", "redesign:handoff",
+                  "redesign:approve", "redesign:implement", "redesign:cancel",
                 ],
                 maximumExpirySeconds: 2_592_000,
                 requireProjectRestriction: false,
@@ -215,6 +217,20 @@ describe("FormaSpec local bridge", () => {
         response.end(JSON.stringify({
           connection: { id: "connection_test", status: "active", expiresAt: "2099-01-01T00:00:00.000Z" },
           grant: { token: "fsg_stored-secret" },
+        }));
+        return;
+      }
+      if (request.url === "/api/agent-authorization-context" && request.method === "GET") {
+        const scopes = observedConnectionRequest?.scopes;
+        if (!Array.isArray(scopes)) {
+          response.writeHead(500).end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          role: "agent",
+          scopes: [...scopes].reverse(),
+          projectIds: [],
         }));
         return;
       }
@@ -262,6 +278,13 @@ describe("FormaSpec local bridge", () => {
       displayName: "Codex through the local FormaSpec bridge",
       replaceExisting: true,
     });
+    const automaticScopes = observedConnectionRequest?.scopes as string[];
+    expect(automaticScopes).toContain("implementation_mapping:read");
+    expect(automaticScopes).toContain("implementation_mapping:write");
+    expect(automaticScopes).toContain("redesign:handoff");
+    expect(automaticScopes).not.toContain("redesign:approve");
+    expect(automaticScopes).not.toContain("redesign:implement");
+    expect(automaticScopes).not.toContain("redesign:cancel");
     expect(connectionsCreated).toBe(1);
 
     await bridge.close();
@@ -370,6 +393,169 @@ describe("FormaSpec local bridge", () => {
       replaceExisting: true,
     });
     expect(await credentialStore.read()).toBe("fsg_restricted-secret");
+  });
+
+  it.each([
+    {
+      name: "reuses exact reordered scope and project sets",
+      contextStatus: 200,
+      context: {
+        role: "agent",
+        scopes: ["task:read", "design:preview", "design:read", "organization_policy:read"],
+        projectIds: ["document_beta", "document_alpha"],
+      },
+      rotated: false,
+    },
+    {
+      name: "rotates a grant missing a currently required scope",
+      contextStatus: 200,
+      context: {
+        role: "agent",
+        scopes: ["organization_policy:read", "design:read", "task:read"],
+        projectIds: ["document_alpha", "document_beta"],
+      },
+      rotated: true,
+    },
+    {
+      name: "rotates an overbroad grant after the managed scope set narrows",
+      contextStatus: 200,
+      context: {
+        role: "agent",
+        scopes: ["organization_policy:read", "design:read", "design:preview", "task:read", "redesign:approve"],
+        projectIds: ["document_alpha", "document_beta"],
+      },
+      rotated: true,
+    },
+    {
+      name: "rotates a grant with a stale project restriction set",
+      contextStatus: 200,
+      context: {
+        role: "agent",
+        scopes: ["organization_policy:read", "design:read", "design:preview", "task:read"],
+        projectIds: ["document_alpha"],
+      },
+      rotated: true,
+    },
+    {
+      name: "rotates when authorization context is malformed",
+      contextStatus: 200,
+      context: {
+        role: "agent",
+        scopes: "design:read",
+        projectIds: ["document_alpha", "document_beta"],
+      },
+      rotated: true,
+    },
+    {
+      name: "rotates when authorization context is unavailable",
+      contextStatus: 503,
+      context: { error: "temporarily unavailable" },
+      rotated: true,
+    },
+  ])("$name", async ({ contextStatus, context, rotated }) => {
+    const requiredScopes = ["organization_policy:read", "design:read", "design:preview", "task:read"];
+    const requiredProjectIds = ["document_alpha", "document_beta"];
+    let connectionsCreated = 0;
+    let observedConnectionRequest: Record<string, unknown> | undefined;
+    let observedContextAuthorization: string | undefined;
+    const upstream = await startUpstream((request, response) => {
+      if (request.url === "/api/organization/policy" && request.method === "GET") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          organizationPolicy: {
+            policy: {
+              agents: {
+                enabled: true,
+                allowedAdapters: ["codex"],
+                allowedScopes: [...requiredScopes, "redesign:approve"],
+                maximumExpirySeconds: 3_600,
+                requireProjectRestriction: true,
+              },
+            },
+          },
+        }));
+        return;
+      }
+      if (request.url === "/api/designs?limit=100" && request.method === "GET") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          designs: requiredProjectIds.map((id) => ({ id })),
+          nextCursor: null,
+        }));
+        return;
+      }
+      if (request.url === "/mcp" && request.method === "POST") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"jsonrpc":"2.0","result":{}}');
+        return;
+      }
+      if (request.url === "/api/agent-authorization-context" && request.method === "GET") {
+        observedContextAuthorization = request.headers.authorization;
+        response.writeHead(contextStatus, { "content-type": "application/json" });
+        response.end(JSON.stringify(context));
+        return;
+      }
+      if (request.url === "/api/agent-connections" && request.method === "POST") {
+        connectionsCreated += 1;
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          observedConnectionRequest = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+          response.writeHead(201, { "content-type": "application/json" });
+          response.end(JSON.stringify({ connection: { id: "connection_rotated" }, nonce: "fspair_rotated" }));
+        });
+        return;
+      }
+      if (request.url === "/api/agent-connections/pair" && request.method === "POST") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          connection: { id: "connection_rotated", status: "active", expiresAt: "2099-01-01T00:00:00.000Z" },
+          grant: { token: "fsg_rotated-secret" },
+        }));
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    const credentialStore = new MemoryCredentialStore();
+    await credentialStore.write("fsg_existing-secret");
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "scope-upgrade-bridge",
+      credentialStore,
+    });
+    bridges.push(bridge);
+
+    const authorization = await fetch(`${bridge.url}/_control/authorize-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "scope-upgrade-bridge" }),
+    });
+
+    expect(authorization.status).toBe(200);
+    expect(observedContextAuthorization).toBe("Bearer fsg_existing-secret");
+    if (!rotated) {
+      expect(await authorization.json()).toMatchObject({ reused: true, credentialStored: true });
+      expect(connectionsCreated).toBe(0);
+      expect(observedConnectionRequest).toBeUndefined();
+      expect(await credentialStore.read()).toBe("fsg_existing-secret");
+      return;
+    }
+    expect(await authorization.json()).toMatchObject({
+      connectionId: "connection_rotated",
+      status: "active",
+      credentialStored: true,
+    });
+    expect(connectionsCreated).toBe(1);
+    expect(observedConnectionRequest).toEqual({
+      adapter: "codex",
+      displayName: "Codex through the local FormaSpec bridge",
+      scopes: requiredScopes,
+      projectIds: requiredProjectIds,
+      expiresInSeconds: 3_600,
+      replaceExisting: true,
+    });
+    expect(await credentialStore.read()).toBe("fsg_rotated-secret");
   });
 
   it.each([

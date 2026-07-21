@@ -204,6 +204,14 @@ export class OrganizationPolicyService {
     this.#now = options.now ?? (() => new Date());
   }
 
+  assertOrganizationAdministrationAllowed(actorId: string): void {
+    this.assertOrganizationAdmin(resolveAccess(this.database.sqlite, actorId));
+  }
+
+  assertOrganizationReadAllowed(actorId: string): void {
+    this.assertRead(resolveAccess(this.database.sqlite, actorId));
+  }
+
   read(actorId: string): LoadedOrganizationPolicy {
     const access = resolveAccess(this.database.sqlite, actorId);
     this.assertRead(access);

@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import { Inflate, zipSync } from "fflate";
 import {
   DesignDocumentSchema,
   DesignDocumentV2Schema,
   ENGINE_VERSIONS,
+  ProductSpecificationSchema,
   type AnyDesignDocument,
 } from "@designer/core";
 
@@ -136,15 +139,19 @@ function tokenType(token: Record<string, unknown>): string {
 }
 
 function toDtcgTokens(tokens: Record<string, unknown>): Record<string, unknown> {
-  const root: Record<string, unknown> = {};
-  for (const value of Object.values(tokens)) {
+  const createTokenGroup = (): Record<string, unknown> => Object.create(null) as Record<string, unknown>;
+  const root = createTokenGroup();
+  for (const tokenId of Object.keys(tokens).sort()) {
+    const value = tokens[tokenId];
     if (!value || typeof value !== "object") continue;
     const token = value as Record<string, unknown>;
     const path = String(token.path ?? token.name ?? token.id ?? "token").split(".").filter(Boolean);
     let cursor = root;
     for (const segment of path.slice(0, -1)) {
       const existing = cursor[segment];
-      if (!existing || typeof existing !== "object" || Array.isArray(existing) || "$value" in existing) cursor[segment] = {};
+      if (!existing || typeof existing !== "object" || Array.isArray(existing) || "$value" in existing) {
+        cursor[segment] = createTokenGroup();
+      }
       cursor = cursor[segment] as Record<string, unknown>;
     }
     const name = path.at(-1) ?? String(token.id);
@@ -160,6 +167,82 @@ function toDtcgTokens(tokens: Record<string, unknown>): Record<string, unknown> 
     };
   }
   return root;
+}
+
+function legacyProductBrief(document: AnyDesignDocument): string {
+  const value = (document.metadata as Record<string, unknown> | undefined)?.product_brief;
+  return typeof value === "string" ? value : "";
+}
+
+interface PortableSemanticSidecars {
+  productSpecification: unknown;
+  prototype: unknown;
+  designSystem: unknown;
+  tokens: unknown;
+  implementationMap: unknown;
+}
+
+function assertPortableSemanticEquality(entryName: string, actual: unknown, expected: unknown): void {
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      `Portable semantic sidecar conflicts with document.json: ${entryName}`,
+      422,
+    );
+  }
+}
+
+function validatePortableSemanticSidecars(
+  document: AnyDesignDocument,
+  sidecars: PortableSemanticSidecars,
+  designSystemVersion: number,
+): PortableSemanticSidecars {
+  const expectedDesignSystemVersion = document.schema_version === 2
+    ? document.design_system.release_version
+    : 1;
+  if (!Number.isSafeInteger(designSystemVersion)
+    || designSystemVersion !== expectedDesignSystemVersion) {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "Portable manifest design-system version conflicts with document.json.",
+      422,
+      { details: { expectedDesignSystemVersion, actualDesignSystemVersion: designSystemVersion } },
+    );
+  }
+  if (document.schema_version === 2) {
+    assertPortableSemanticEquality("product-spec.json", sidecars.productSpecification, document.product_specification);
+    assertPortableSemanticEquality("prototype.json", sidecars.prototype, document.prototype_links);
+    assertPortableSemanticEquality("design-system.json", sidecars.designSystem, {
+      pin: document.design_system,
+      components: document.component_definitions,
+    });
+    assertPortableSemanticEquality(
+      "tokens.dtcg.json",
+      sidecars.tokens,
+      toDtcgTokens(document.tokens as unknown as Record<string, unknown>),
+    );
+    assertPortableSemanticEquality("implementation-map.json", sidecars.implementationMap, document.implementation_mappings);
+    return sidecars;
+  }
+
+  const externalProductSpecification = ProductSpecificationSchema.safeParse(sidecars.productSpecification);
+  const placeholderProductSpecification = isRecord(sidecars.productSpecification)
+    && Object.keys(sidecars.productSpecification).every((key) => key === "natural_language_brief")
+    && typeof sidecars.productSpecification.natural_language_brief === "string";
+  if (!externalProductSpecification.success && !placeholderProductSpecification) {
+    throw new DomainError("VALIDATION_FAILED", "Portable V1 product-spec.json must be a strict product specification or the legacy brief placeholder.", 422, {
+      details: { issues: externalProductSpecification.error.issues.slice(0, 100) },
+    });
+  }
+  assertPortableSemanticEquality("prototype.json", sidecars.prototype, document.prototype_links);
+  assertPortableSemanticEquality("design-system.json", sidecars.designSystem, { pin: null, components: {} });
+  assertPortableSemanticEquality(
+    "tokens.dtcg.json",
+    sidecars.tokens,
+    toDtcgTokens(document.tokens as unknown as Record<string, unknown>),
+  );
+  assertPortableSemanticEquality("implementation-map.json", sidecars.implementationMap, {});
+  return sidecars;
 }
 
 function strictPortableDocument(value: unknown, schemaVersion: number, context: "export" | "import"): AnyDesignDocument {
@@ -228,17 +311,26 @@ export function createPortableProjectBundle(input: PortableExportInput): Buffer 
     creationTime: input.createdAt ?? new Date().toISOString(),
   };
   const v2Document = document.schema_version === 2 ? document : null;
+  const semanticSidecars = validatePortableSemanticSidecars(document, {
+    productSpecification: input.productSpecification
+      ?? v2Document?.product_specification
+      ?? { natural_language_brief: legacyProductBrief(document) },
+    prototype: input.prototype ?? document.prototype_links ?? {},
+    designSystem: input.designSystem ?? {
+      pin: v2Document?.design_system ?? null,
+      components: v2Document?.component_definitions ?? {},
+    },
+    tokens: input.tokens ?? toDtcgTokens((document.tokens as Record<string, unknown> | undefined) ?? {}),
+    implementationMap: input.implementationMap ?? v2Document?.implementation_mappings ?? {},
+  }, manifest.designSystemVersion);
   const entries: Record<string, Uint8Array> = {
     "manifest.json": jsonEntry(manifest),
     "document.json": jsonEntry(document),
-    "product-spec.json": jsonEntry(input.productSpecification ?? v2Document?.product_specification ?? { natural_language_brief: (document.metadata as Record<string, unknown> | undefined)?.product_brief ?? "" }),
-    "prototype.json": jsonEntry(input.prototype ?? document.prototype_links ?? {}),
-    "design-system.json": jsonEntry(input.designSystem ?? {
-      pin: v2Document?.design_system ?? null,
-      components: v2Document?.component_definitions ?? {},
-    }),
-    "tokens.dtcg.json": jsonEntry(input.tokens ?? toDtcgTokens((document.tokens as Record<string, unknown> | undefined) ?? {})),
-    "implementation-map.json": jsonEntry(input.implementationMap ?? v2Document?.implementation_mappings ?? {}),
+    "product-spec.json": jsonEntry(semanticSidecars.productSpecification),
+    "prototype.json": jsonEntry(semanticSidecars.prototype),
+    "design-system.json": jsonEntry(semanticSidecars.designSystem),
+    "tokens.dtcg.json": jsonEntry(semanticSidecars.tokens),
+    "implementation-map.json": jsonEntry(semanticSidecars.implementationMap),
   };
   for (const asset of assets) {
     if (sha256(asset.data) !== asset.sha256) throw new DomainError("VALIDATION_FAILED", `Asset hash mismatch: ${asset.id}`, 422);
@@ -726,14 +818,17 @@ export function readPortableProjectBundle(data: Buffer): ImportedPortableProject
       throw new DomainError("VALIDATION_FAILED", `Portable normalized asset metadata is inconsistent: ${assetId}`, 422);
     }
   }
-  return {
-    manifest,
-    document: validatedDocument,
+  const semanticSidecars = validatePortableSemanticSidecars(validatedDocument, {
     productSpecification: parse("product-spec.json"),
     prototype: parse("prototype.json"),
     designSystem: parse("design-system.json"),
     tokens: parse("tokens.dtcg.json"),
     implementationMap: parse("implementation-map.json"),
+  }, manifest.designSystemVersion);
+  return {
+    manifest,
+    document: validatedDocument,
+    ...semanticSidecars,
     assets,
     previews: Object.fromEntries(Object.entries(entries).filter(([name]) => name.startsWith("previews/")).map(([name, value]) => [name, Buffer.from(value)])),
   };
@@ -743,4 +838,487 @@ function pathAssetId(name: string): string {
   const base = name.slice("assets/".length);
   const dot = base.lastIndexOf(".");
   return dot === -1 ? base : base.slice(0, dot);
+}
+
+export interface StreamedPortableEntry {
+  readonly kind: "private_file";
+  readonly filename: string;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+}
+
+export interface StreamedImportedPortableProject {
+  manifest: PortableManifest;
+  document: AnyDesignDocument;
+  productSpecification: unknown;
+  prototype: unknown;
+  designSystem: unknown;
+  tokens: unknown;
+  implementationMap: unknown;
+  assets: Record<string, StreamedPortableEntry>;
+  previews: Record<string, StreamedPortableEntry>;
+}
+
+interface FileZipCentralDirectory extends ZipCentralDirectory {
+  archiveBytes: number;
+}
+
+async function readExact(handle: fs.promises.FileHandle, offset: number, length: number): Promise<Buffer> {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 0) {
+    throw malformedZip();
+  }
+  const output = Buffer.allocUnsafe(length);
+  let completed = 0;
+  while (completed < length) {
+    const result = await handle.read(output, completed, length - completed, offset + completed);
+    if (result.bytesRead === 0) throw malformedZip();
+    completed += result.bytesRead;
+  }
+  return output;
+}
+
+async function inspectCentralDirectoryFile(
+  handle: fs.promises.FileHandle,
+  archiveBytes: number,
+): Promise<FileZipCentralDirectory> {
+  if (archiveBytes > MAX_ARCHIVE_BYTES) {
+    throw new DomainError("PAYLOAD_TOO_LARGE", "Portable bundle exceeds the archive byte limit.", 413);
+  }
+  if (archiveBytes < 22) throw malformedZip("Portable bundle has no valid ZIP directory.");
+  const tailBytes = Math.min(archiveBytes, 65_557);
+  const tailOffset = archiveBytes - tailBytes;
+  const tail = await readExact(handle, tailOffset, tailBytes);
+  let relativeEocd = -1;
+  for (let index = tail.length - 22; index >= 0; index -= 1) {
+    if (tail.readUInt32LE(index) !== ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE) continue;
+    const commentLength = tail.readUInt16LE(index + 20);
+    if (tailOffset + index + 22 + commentLength === archiveBytes) {
+      relativeEocd = index;
+      break;
+    }
+  }
+  if (relativeEocd < 0) throw malformedZip("Portable bundle has no valid ZIP directory.");
+  const eocd = tailOffset + relativeEocd;
+  const diskNumber = tail.readUInt16LE(relativeEocd + 4);
+  const directoryDisk = tail.readUInt16LE(relativeEocd + 6);
+  const entriesOnDisk = tail.readUInt16LE(relativeEocd + 8);
+  const entryCount = tail.readUInt16LE(relativeEocd + 10);
+  const directorySize = tail.readUInt32LE(relativeEocd + 12);
+  const directoryOffset = tail.readUInt32LE(relativeEocd + 16);
+  if (diskNumber !== 0 || directoryDisk !== 0 || entriesOnDisk !== entryCount) {
+    throw malformedZip("Portable bundle uses unsupported multi-disk ZIP storage.");
+  }
+  if (entryCount === ZIP64_SENTINEL_16 || directorySize === ZIP64_SENTINEL_32 || directoryOffset === ZIP64_SENTINEL_32) {
+    throw malformedZip("Portable bundle uses unsupported ZIP64 storage.");
+  }
+  if (entryCount > MAX_ENTRIES) {
+    throw new DomainError("PAYLOAD_TOO_LARGE", "Portable bundle entry count exceeds the configured limit.", 413);
+  }
+  if (directoryOffset + directorySize !== eocd || directoryOffset > eocd) {
+    throw malformedZip("Portable bundle directory is malformed.");
+  }
+
+  const entries: ZipCentralEntry[] = [];
+  const seen = new Set<string>();
+  const seenOffsets = new Set<number>();
+  let expandedBytes = 0;
+  let cursor = directoryOffset;
+  const directoryEnd = eocd;
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    if (cursor + 46 > directoryEnd) throw malformedZip("Portable bundle directory is malformed.");
+    const header = await readExact(handle, cursor, 46);
+    if (header.readUInt32LE(0) !== ZIP_CENTRAL_HEADER_SIGNATURE) {
+      throw malformedZip("Portable bundle directory is malformed.");
+    }
+    const versionMadeBy = header.readUInt16LE(4);
+    const versionNeeded = header.readUInt16LE(6);
+    const flags = header.readUInt16LE(8);
+    const compression = header.readUInt16LE(10);
+    const modifiedTime = header.readUInt16LE(12);
+    const modifiedDate = header.readUInt16LE(14);
+    const crc = header.readUInt32LE(16);
+    const compressedBytes = header.readUInt32LE(20);
+    const entryBytes = header.readUInt32LE(24);
+    const nameLength = header.readUInt16LE(28);
+    const extraLength = header.readUInt16LE(30);
+    const commentLength = header.readUInt16LE(32);
+    const diskStart = header.readUInt16LE(34);
+    const externalAttributes = header.readUInt32LE(38);
+    const localHeaderOffset = header.readUInt32LE(42);
+    const variableLength = nameLength + extraLength + commentLength;
+    const entryEnd = cursor + 46 + variableLength;
+    if (entryEnd > directoryEnd) throw malformedZip("Portable bundle directory is malformed.");
+    if (entryBytes > MAX_ENTRY_BYTES) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", "A portable bundle entry exceeds the 64 MiB expansion limit.", 413);
+    }
+    if (compressedBytes === ZIP64_SENTINEL_32 || localHeaderOffset === ZIP64_SENTINEL_32) {
+      throw malformedZip("Portable bundle uses unsupported ZIP64 entries.");
+    }
+    const variable = await readExact(handle, cursor + 46, variableLength);
+    const rawName = Buffer.from(variable.subarray(0, nameLength));
+    const name = decodeZipEntryName(rawName, flags);
+    assertSupportedZipEntry(name, versionMadeBy, versionNeeded, flags, compression, externalAttributes, diskStart);
+    inspectZipExtraFields(variable, nameLength, extraLength);
+    expandedBytes += entryBytes;
+    if (expandedBytes > MAX_EXPANDED_BYTES) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", "Portable bundle expands beyond the configured limit.", 413);
+    }
+    if (seen.has(name)) throw malformedZip(`Portable bundle contains duplicate entry: ${name}`);
+    if (seenOffsets.has(localHeaderOffset)) throw malformedZip("Portable bundle contains overlapping local entries.");
+    seen.add(name);
+    seenOffsets.add(localHeaderOffset);
+    entries.push({
+      name,
+      rawName,
+      versionNeeded,
+      flags,
+      compression,
+      modifiedTime,
+      modifiedDate,
+      crc32: crc,
+      compressedBytes,
+      expandedBytes: entryBytes,
+      localHeaderOffset,
+      dataOffset: 0,
+      dataEnd: 0,
+    });
+    cursor = entryEnd;
+  }
+  if (cursor !== directoryEnd || entries.length !== entryCount) {
+    throw malformedZip("Portable bundle entry count is inconsistent.");
+  }
+
+  const localEntries = [...entries].sort((left, right) => left.localHeaderOffset - right.localHeaderOffset);
+  if (localEntries.length > 0 && localEntries[0]!.localHeaderOffset !== 0) {
+    throw malformedZip("Portable bundle contains data outside regular ZIP entries.");
+  }
+  for (let index = 0; index < localEntries.length; index += 1) {
+    const entry = localEntries[index]!;
+    const nextOffset = localEntries[index + 1]?.localHeaderOffset ?? directoryOffset;
+    const offset = entry.localHeaderOffset;
+    if (offset + 30 > nextOffset) throw malformedZip("Portable bundle local entry is malformed.");
+    const header = await readExact(handle, offset, 30);
+    if (header.readUInt32LE(0) !== ZIP_LOCAL_HEADER_SIGNATURE) {
+      throw malformedZip("Portable bundle local entry is malformed.");
+    }
+    const versionNeeded = header.readUInt16LE(4);
+    const flags = header.readUInt16LE(6);
+    const compression = header.readUInt16LE(8);
+    const modifiedTime = header.readUInt16LE(10);
+    const modifiedDate = header.readUInt16LE(12);
+    const crc = header.readUInt32LE(14);
+    const compressedBytes = header.readUInt32LE(18);
+    const expandedEntryBytes = header.readUInt32LE(22);
+    const nameLength = header.readUInt16LE(26);
+    const extraLength = header.readUInt16LE(28);
+    const headerEnd = offset + 30 + nameLength + extraLength;
+    if (headerEnd > nextOffset) throw malformedZip("Portable bundle local entry is malformed.");
+    const variable = await readExact(handle, offset + 30, nameLength + extraLength);
+    const rawName = Buffer.from(variable.subarray(0, nameLength));
+    if (!rawName.equals(entry.rawName)
+      || versionNeeded !== entry.versionNeeded
+      || flags !== entry.flags
+      || compression !== entry.compression
+      || modifiedTime !== entry.modifiedTime
+      || modifiedDate !== entry.modifiedDate) {
+      throw malformedZip("Portable bundle local and central entry metadata do not match.");
+    }
+    inspectZipExtraFields(variable, nameLength, extraLength);
+    const usesDescriptor = (flags & ZIP_DATA_DESCRIPTOR_FLAG) !== 0;
+    if (usesDescriptor) {
+      if ((crc !== 0 && crc !== entry.crc32)
+        || (compressedBytes !== 0 && compressedBytes !== entry.compressedBytes)
+        || (expandedEntryBytes !== 0 && expandedEntryBytes !== entry.expandedBytes)) {
+        throw malformedZip("Portable bundle local and central entry sizes do not match.");
+      }
+    } else if (crc !== entry.crc32
+      || compressedBytes !== entry.compressedBytes
+      || expandedEntryBytes !== entry.expandedBytes) {
+      throw malformedZip("Portable bundle local and central entry sizes do not match.");
+    }
+    if (entry.compression === 0 && entry.compressedBytes !== entry.expandedBytes) {
+      throw malformedZip(`Portable stored entry has inconsistent sizes: ${entry.name}`);
+    }
+    if (entry.compression === 8 && entry.compressedBytes === 0) {
+      throw malformedZip(`Portable bundle compressed stream is malformed: ${entry.name}`);
+    }
+    const dataEnd = headerEnd + entry.compressedBytes;
+    if (dataEnd > nextOffset) throw malformedZip("Portable bundle compressed entry exceeds its local record.");
+    if (usesDescriptor) {
+      const descriptorLength = nextOffset - dataEnd;
+      if (descriptorLength !== 12 && descriptorLength !== 16) {
+        throw malformedZip("Portable bundle data descriptor is malformed.");
+      }
+      const descriptor = await readExact(handle, dataEnd, descriptorLength);
+      let descriptorOffset = 0;
+      if (descriptorLength === 16) {
+        if (descriptor.readUInt32LE(0) !== ZIP_DATA_DESCRIPTOR_SIGNATURE) {
+          throw malformedZip("Portable bundle data descriptor is malformed.");
+        }
+        descriptorOffset = 4;
+      }
+      if (descriptor.readUInt32LE(descriptorOffset) !== entry.crc32
+        || descriptor.readUInt32LE(descriptorOffset + 4) !== entry.compressedBytes
+        || descriptor.readUInt32LE(descriptorOffset + 8) !== entry.expandedBytes) {
+        throw malformedZip("Portable bundle data descriptor does not match its central entry.");
+      }
+    } else if (dataEnd !== nextOffset) {
+      throw malformedZip("Portable bundle contains unlisted or overlapping local data.");
+    }
+    entry.dataOffset = headerEnd;
+    entry.dataEnd = dataEnd;
+  }
+  return { entries, expandedBytes, directoryOffset, archiveBytes };
+}
+
+async function extractPortableEntriesToFiles(
+  handle: fs.promises.FileHandle,
+  inspected: FileZipCentralDirectory,
+  extractionDirectory: string,
+): Promise<Record<string, StreamedPortableEntry>> {
+  const entries: Record<string, StreamedPortableEntry> = {};
+  let actualExpandedBytes = 0;
+  for (const [index, entry] of inspected.entries.entries()) {
+    const filename = path.join(extractionDirectory, `entry-${String(index).padStart(5, "0")}.bin`);
+    const output = await fs.promises.open(
+      filename,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    let outputOffset = 0;
+    let crc = 0xffff_ffff;
+    let sawFinal = entry.compression === 0;
+    const hash = createHash("sha256");
+    const emit = (chunk: Uint8Array, final: boolean): void => {
+      const nextEntryBytes = outputOffset + chunk.length;
+      const nextExpandedBytes = actualExpandedBytes + chunk.length;
+      if (nextEntryBytes > MAX_ENTRY_BYTES || nextExpandedBytes > MAX_EXPANDED_BYTES) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", "Portable bundle emitted data beyond the configured expansion limit.", 413);
+      }
+      if (nextEntryBytes > entry.expandedBytes) {
+        throw malformedZip(`Portable bundle entry emitted more data than declared: ${entry.name}`);
+      }
+      let written = 0;
+      while (written < chunk.length) {
+        const count = fs.writeSync(output.fd, chunk, written, chunk.length - written, outputOffset + written);
+        if (count <= 0) throw new Error("Portable extraction made no write progress.");
+        written += count;
+      }
+      outputOffset = nextEntryBytes;
+      actualExpandedBytes = nextExpandedBytes;
+      crc = updateCrc32(crc, chunk);
+      hash.update(chunk);
+      if (final) sawFinal = true;
+    };
+    try {
+      if (entry.compression === 0) {
+        for (let offset = entry.dataOffset; offset < entry.dataEnd; offset += ZIP_STREAM_CHUNK_BYTES) {
+          const length = Math.min(ZIP_STREAM_CHUNK_BYTES, entry.dataEnd - offset);
+          emit(await readExact(handle, offset, length), offset + length === entry.dataEnd);
+        }
+      } else {
+        const inflater = new Inflate((chunk, final) => emit(chunk, final));
+        if (entry.dataOffset === entry.dataEnd) inflater.push(new Uint8Array(), true);
+        else {
+          for (let offset = entry.dataOffset; offset < entry.dataEnd; offset += ZIP_STREAM_CHUNK_BYTES) {
+            const length = Math.min(ZIP_STREAM_CHUNK_BYTES, entry.dataEnd - offset);
+            inflater.push(await readExact(handle, offset, length), offset + length === entry.dataEnd);
+          }
+        }
+        assertInflateFullyConsumed(inflater, entry.name);
+      }
+      if (!sawFinal || outputOffset !== entry.expandedBytes) {
+        throw malformedZip(`Portable bundle entry emitted an unexpected byte count: ${entry.name}`);
+      }
+      if (((crc ^ 0xffff_ffff) >>> 0) !== entry.crc32) {
+        throw malformedZip(`Portable bundle entry failed its ZIP CRC check: ${entry.name}`);
+      }
+      await output.sync();
+      entries[entry.name] = {
+        kind: "private_file",
+        filename,
+        sizeBytes: outputOffset,
+        sha256: hash.digest("hex"),
+      };
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      throw new DomainError("VALIDATION_FAILED", `Portable bundle compressed stream is malformed: ${entry.name}`, 422, { cause: error });
+    } finally {
+      await output.close().catch(() => undefined);
+    }
+  }
+  if (actualExpandedBytes !== inspected.expandedBytes || Object.keys(entries).length !== inspected.entries.length) {
+    throw malformedZip("Portable bundle extraction did not cover every declared entry.");
+  }
+  return entries;
+}
+
+export async function readStreamedPortableEntry(entry: StreamedPortableEntry): Promise<Buffer> {
+  const handle = await fs.promises.open(entry.filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size !== entry.sizeBytes) {
+      throw new DomainError("VALIDATION_FAILED", "A staged portable entry changed during import.", 422);
+    }
+    const data = await readExact(handle, 0, entry.sizeBytes);
+    if (sha256(data) !== entry.sha256) {
+      throw new DomainError("VALIDATION_FAILED", "A staged portable entry changed during import.", 422);
+    }
+    return data;
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readPortableProjectBundleFile(
+  filename: string,
+  extractionDirectory: string,
+): Promise<StreamedImportedPortableProject> {
+  const archive = await fs.promises.open(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let entries: Record<string, StreamedPortableEntry>;
+  try {
+    const stat = await archive.stat();
+    if (!stat.isFile()) throw malformedZip("Portable bundle storage is not a regular file.");
+    const inspected = await inspectCentralDirectoryFile(archive, stat.size);
+    entries = await extractPortableEntriesToFiles(archive, inspected, extractionDirectory);
+  } finally {
+    await archive.close();
+  }
+  for (const required of [
+    "manifest.json",
+    "document.json",
+    "product-spec.json",
+    "prototype.json",
+    "design-system.json",
+    "tokens.dtcg.json",
+    "implementation-map.json",
+    "checksums.sha256",
+  ]) if (!entries[required]) throw new DomainError("VALIDATION_FAILED", `Portable bundle is missing ${required}.`, 422);
+
+  const checksumData = await readStreamedPortableEntry(entries["checksums.sha256"]!);
+  const checksumRows = checksumData.toString("utf8").split("\n").filter(Boolean);
+  const expected = new Map<string, string>();
+  for (const row of checksumRows) {
+    const match = /^([a-f0-9]{64})  (.+)$/.exec(row);
+    if (!match) throw new DomainError("VALIDATION_FAILED", "Portable checksum manifest is malformed.", 422);
+    const name = safeEntryName(match[2]!);
+    if (name === "checksums.sha256" || expected.has(name)) {
+      throw new DomainError("VALIDATION_FAILED", "Portable checksum manifest contains a duplicate or self-reference.", 422);
+    }
+    expected.set(name, match[1]!);
+  }
+  const payloadNames = Object.keys(entries).filter((name) => name !== "checksums.sha256");
+  if (expected.size !== payloadNames.length || [...expected.keys()].some((name) => !(name in entries))) {
+    throw new DomainError("VALIDATION_FAILED", "Portable checksum manifest does not exactly cover the archive payload.", 422);
+  }
+  for (const [name, entry] of Object.entries(entries)) {
+    if (name !== "checksums.sha256" && expected.get(name) !== entry.sha256) {
+      throw new DomainError("VALIDATION_FAILED", `Portable checksum failed: ${name}`, 422);
+    }
+  }
+  const parse = async (name: string): Promise<unknown> => {
+    try { return JSON.parse((await readStreamedPortableEntry(entries[name]!)).toString("utf8")) as unknown; }
+    catch (error) {
+      if (error instanceof DomainError) throw error;
+      throw new DomainError("VALIDATION_FAILED", `Portable JSON is malformed: ${name}`, 422);
+    }
+  };
+  const parsedManifest = await parse("manifest.json");
+  const parsedDocument = await parse("document.json");
+  if (!isRecord(parsedManifest) || !isRecord(parsedManifest.assetHashes)
+    || typeof parsedManifest.revisionId !== "string"
+    || typeof parsedManifest.revisionHash !== "string"
+    || !/^[a-f0-9]{64}$/.test(parsedManifest.revisionHash)
+    || typeof parsedManifest.creationTime !== "string"
+    || !Number.isFinite(Date.parse(parsedManifest.creationTime))) {
+    throw new DomainError("VALIDATION_FAILED", "Portable manifest is malformed.", 422);
+  }
+  const parsedAssetHashes = parsedManifest.assetHashes as Record<string, unknown>;
+  if (!Object.entries(parsedAssetHashes).every(([id, hash]) =>
+    safeLeafName(id, "Asset ID") === id && typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))) {
+    throw new DomainError("VALIDATION_FAILED", "Portable asset hash manifest is malformed.", 422);
+  }
+  const rawQuarantinedAssetIds = parsedManifest.quarantinedAssetIds ?? [];
+  if (!Array.isArray(rawQuarantinedAssetIds)
+    || rawQuarantinedAssetIds.some((id) => typeof id !== "string" || safeLeafName(id, "Asset ID") !== id)
+    || new Set(rawQuarantinedAssetIds).size !== rawQuarantinedAssetIds.length
+    || rawQuarantinedAssetIds.some((id) => id in parsedAssetHashes)) {
+    throw new DomainError("VALIDATION_FAILED", "Portable quarantined-asset manifest is malformed.", 422);
+  }
+  if (!isRecord(parsedDocument)) throw new DomainError("VALIDATION_FAILED", "Portable document must be a JSON object.", 422);
+  const manifest = { ...parsedManifest, quarantinedAssetIds: rawQuarantinedAssetIds } as unknown as PortableManifest;
+  const document = parsedDocument;
+  if (manifest.format !== "formaspec-project" || manifest.exportFormatVersion !== ENGINE_VERSIONS.exportFormat) {
+    throw new DomainError("VALIDATION_FAILED", "Portable export format is unsupported.", 422);
+  }
+  if (Number(document.schema_version) !== manifest.documentSchemaVersion || ![1, 2].includes(manifest.documentSchemaVersion)) {
+    throw new DomainError("VALIDATION_FAILED", "Portable document schema does not match its manifest.", 422);
+  }
+  for (const collectionName of ["nodes", "tokens", "assets", "prototype_links", "component_definitions", "implementation_mappings"]) {
+    const collection = document[collectionName];
+    if (!collection || typeof collection !== "object" || Array.isArray(collection)) continue;
+    for (const [id, value] of Object.entries(collection as Record<string, unknown>)) {
+      if (value && typeof value === "object" && "id" in value && String((value as { id: unknown }).id) !== id) {
+        throw new DomainError("VALIDATION_FAILED", `Portable ${collectionName} contains an ID/key mismatch.`, 422);
+      }
+    }
+  }
+  const validatedDocument = strictPortableDocument(document, manifest.documentSchemaVersion, "import");
+  const assets = Object.fromEntries(Object.entries(entries).filter(([name]) => name.startsWith("assets/")));
+  for (const name of Object.keys(assets)) {
+    if (!(pathAssetId(name) in manifest.assetHashes)) {
+      throw new DomainError("VALIDATION_FAILED", `Portable bundle contains an unlisted asset: ${name}`, 422);
+    }
+  }
+  for (const [assetId, hash] of Object.entries(manifest.assetHashes)) {
+    const match = Object.entries(assets).find(([name]) => pathAssetId(name) === assetId);
+    if (!match || match[1].sha256 !== hash) {
+      throw new DomainError("VALIDATION_FAILED", `Portable asset is missing or corrupt: ${assetId}`, 422);
+    }
+  }
+  const documentAssetIds = isRecord(validatedDocument.assets) ? Object.keys(validatedDocument.assets).sort() : [];
+  const manifestAssetIds = [...Object.keys(manifest.assetHashes), ...manifest.quarantinedAssetIds].sort();
+  if (documentAssetIds.length !== manifestAssetIds.length || documentAssetIds.some((id, index) => id !== manifestAssetIds[index])) {
+    throw new DomainError("VALIDATION_FAILED", "Portable asset manifest does not exactly match document asset references.", 422);
+  }
+  for (const assetId of manifest.quarantinedAssetIds) {
+    const documentAsset = validatedDocument.assets[assetId];
+    if (!documentAsset || !portableAssetRequiresQuarantine(documentAsset)) {
+      throw new DomainError("VALIDATION_FAILED", `Portable manifest quarantines a render-ready asset: ${assetId}`, 422);
+    }
+  }
+  for (const [assetId, hash] of Object.entries(manifest.assetHashes)) {
+    const documentAsset = validatedDocument.assets[assetId];
+    const match = Object.entries(assets).find(([name]) => pathAssetId(name) === assetId);
+    const expectedName = documentAsset && !portableAssetRequiresQuarantine(documentAsset)
+      ? `assets/${assetId}.${assetExtension(documentAsset.mime_type as PortableAsset["mimeType"])}`
+      : null;
+    if (!documentAsset || portableAssetRequiresQuarantine(documentAsset)
+      || documentAsset.sha256 !== hash
+      || documentAsset.size_bytes !== match?.[1].sizeBytes
+      || match?.[0] !== expectedName) {
+      throw new DomainError("VALIDATION_FAILED", `Portable normalized asset metadata is inconsistent: ${assetId}`, 422);
+    }
+  }
+  const [productSpecification, prototype, designSystem, tokens, implementationMap] = await Promise.all([
+    parse("product-spec.json"),
+    parse("prototype.json"),
+    parse("design-system.json"),
+    parse("tokens.dtcg.json"),
+    parse("implementation-map.json"),
+  ]);
+  const semanticSidecars = validatePortableSemanticSidecars(validatedDocument, {
+    productSpecification,
+    prototype,
+    designSystem,
+    tokens,
+    implementationMap,
+  }, manifest.designSystemVersion);
+  return {
+    manifest,
+    document: validatedDocument,
+    ...semanticSidecars,
+    assets,
+    previews: Object.fromEntries(Object.entries(entries).filter(([name]) => name.startsWith("previews/"))),
+  };
 }

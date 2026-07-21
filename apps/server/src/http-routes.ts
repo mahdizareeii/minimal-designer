@@ -10,8 +10,10 @@ import { appendAuditEvent, resolveAccess } from "./authorization.js";
 import { verifyBackupBundle, type BackupManager } from "./backup.js";
 import type { ServerConfig } from "./config.js";
 import { DomainError } from "./errors.js";
+import { canReadDesignerEvent } from "./event-authorization.js";
 import type { DesignerEvent, EventHub } from "./events.js";
 import type { MaintenanceStore } from "./maintenance.js";
+import type { OperationsService } from "./operations-service.js";
 import type { PngRenderer } from "./render.js";
 import { createPortableProjectBundle, readPortableProjectBundle } from "./portable-export.js";
 import {
@@ -106,6 +108,12 @@ function parseInteger(value: unknown, fallback?: number): number | undefined {
   return number;
 }
 
+function rawRequestField(value: unknown, field: string): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const candidate = (value as Record<string, unknown>)[field];
+  return typeof candidate === "string" ? candidate : "";
+}
+
 export function sendSse(
   reply: FastifyReply,
   events: EventHub,
@@ -113,6 +121,7 @@ export function sendSse(
   actorId: string,
   lastEventId: number | undefined,
 ): void {
+  service.authorizeEventRead(actorId);
   reply.hijack();
   reply.raw.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -134,7 +143,7 @@ export function sendSse(
     unsubscribe();
     reply.raw.end();
   };
-  const writeEvent = (event: DesignerEvent) => {
+  const writeEvent = (event: DesignerEvent, safeControlEvent = false) => {
     if (closed || event.id <= cursor) return;
     let access: ReturnType<typeof resolveAccess>;
     try {
@@ -144,7 +153,8 @@ export function sendSse(
       return;
     }
     if (event.organizationId && event.organizationId !== access.organizationId) return;
-    if (access.projectIds.length > 0 && (!event.designId || !access.projectIds.includes(event.designId))) return;
+    if (event.type === "events.gap" && !safeControlEvent) return;
+    if (!canReadDesignerEvent(access, event)) return;
     const data = JSON.stringify({ type: event.type, actorId: event.actorId, timestamp: event.timestamp, ...event.data });
     reply.raw.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${data}\n\n`);
     cursor = event.id;
@@ -173,16 +183,16 @@ export function sendSse(
           latestAvailableId: replay.latestId,
           recovery: "Refetch the authoritative project head and active context.",
         },
-      });
+      }, true);
     } else {
       for (const event of replay.events) writeEvent(event);
     }
   }
   replaying = false;
-  pending.sort((left, right) => left.id - right.id).forEach(writeEvent);
+  pending.sort((left, right) => left.id - right.id).forEach((event) => writeEvent(event));
   heartbeat = setInterval(() => {
     try {
-      resolveAccess(service.database.sqlite, actorId);
+      service.authorizeEventRead(actorId);
       reply.raw.write(": heartbeat\n\n");
     } catch {
       closeUnauthorized();
@@ -205,15 +215,17 @@ export function registerHttpRoutes(
     renderer: PngRenderer;
     backups: BackupManager;
     maintenance: MaintenanceStore;
+    operations: OperationsService;
   },
 ): void {
-  const { config, service, enterprise, events, renderer, backups, maintenance } = dependencies;
+  const { config, service, enterprise, events, renderer, backups, maintenance, operations } = dependencies;
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/health/live", async () => ({ ok: true, service: "formaspec-api" }));
   app.get("/ready", async () => ({ ok: true, database: "ready" }));
   app.get("/health/ready", async (_request, reply) => {
     const maintenanceStatus = await maintenance.read();
+    const backupSupervision = operations.backupSupervisionHealth();
     try {
       const render = await renderer.health();
       if (maintenanceStatus.active) {
@@ -223,6 +235,7 @@ export function registerHttpRoutes(
           database: "ready",
           migrations: service.database.schemaVersion(),
           render,
+          backupSupervision,
           maintenance: {
             active: true,
             phase: maintenanceStatus.phase,
@@ -235,6 +248,7 @@ export function registerHttpRoutes(
         database: "ready",
         migrations: service.database.schemaVersion(),
         render,
+        backupSupervision,
       };
     } catch {
       return reply.code(503).send({
@@ -249,6 +263,7 @@ export function registerHttpRoutes(
         } : {}),
         database: "ready",
         migrations: service.database.schemaVersion(),
+        backupSupervision,
         render: { ok: false, mode: renderer.remote ? "worker" : "in-process", renderer: "unavailable" },
       });
     }
@@ -267,23 +282,27 @@ export function registerHttpRoutes(
   });
 
   app.get("/api/designs", async (request) => {
+    service.authorizeDesignList(request.actorId);
     const query = z.object({ limit: z.coerce.number().int().min(1).max(100).optional(), cursor: z.string().optional() }).parse(request.query);
     return service.listDesigns(request.actorId, query.limit, query.cursor);
   });
 
   app.post("/api/designs", async (request, reply) => {
+    service.authorizeDesignCreation(request.actorId);
     const input = createDesignSchema.parse(request.body);
     const result = service.createDesign(request.actorId, input);
     return reply.code(201).send(revisionResponse(result));
   });
 
   app.get("/api/designs/:id", async (request) => {
+    service.authorizeDesignRead(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const query = request.query as Record<string, unknown>;
     return revisionResponse(service.getDesign(request.actorId, id, parseInteger(query.version)));
   });
 
   app.post("/api/designs/:id/previews", async (request, reply) => {
+    service.authorizePreviewCreation(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const input = previewSchema.parse(request.body);
     const preview = service.createPreview(request.actorId, id, {
@@ -295,12 +314,24 @@ export function registerHttpRoutes(
   });
 
   app.get("/api/designs/:id/previews/:previewId", async (request) => {
+    service.authorizePreviewRead(
+      request.actorId,
+      rawRequestField(request.params, "id"),
+      rawRequestField(request.params, "previewId"),
+      rawRequestField(request.query, "taskId") || undefined,
+    );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const query = z.object({ taskId: z.string().min(1).max(240).optional() }).strict().parse(request.query);
     return previewResponse(service.getPreview(request.actorId, params.id, params.previewId, query));
   });
 
   app.post("/api/designs/:id/previews/:previewId/commit", async (request) => {
+    service.authorizePreviewCommit(
+      request.actorId,
+      rawRequestField(request.params, "id"),
+      rawRequestField(request.params, "previewId"),
+      rawRequestField(request.body, "taskId") || undefined,
+    );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const input = z.object({
       expectedBaseVersion: z.number().int().positive(),
@@ -319,6 +350,7 @@ export function registerHttpRoutes(
   });
 
   app.post("/api/designs/:id/archive-previews", async (request, reply) => {
+    service.authorizePreviewCreation(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const input = previewSchema.parse(request.body);
     const preview = service.createPreview(request.actorId, id, {
@@ -331,6 +363,12 @@ export function registerHttpRoutes(
   });
 
   app.post("/api/designs/:id/archive-previews/:previewId/commit", async (request) => {
+    service.authorizePreviewCommit(
+      request.actorId,
+      rawRequestField(request.params, "id"),
+      rawRequestField(request.params, "previewId"),
+      rawRequestField(request.body, "taskId") || undefined,
+    );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const input = z.object({
       expectedBaseVersion: z.number().int().positive(),
@@ -349,6 +387,7 @@ export function registerHttpRoutes(
   });
 
   app.post("/api/designs/:id/revisions", async (request) => {
+    service.authorizeDesignRevision(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const input = revisionSchema.parse(request.body);
     return revisionResponse(service.applyRevision(request.actorId, id, {
@@ -360,6 +399,7 @@ export function registerHttpRoutes(
   });
 
   app.post("/api/designs/:id/migrations/v2", async (request) => {
+    service.authorizeDesignMigration(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const input = v2MigrationSchema.parse(request.body);
     const migrated = service.migrateDesignHeadToV2(request.actorId, id, input);
@@ -371,12 +411,14 @@ export function registerHttpRoutes(
   });
 
   app.get("/api/designs/:id/history", async (request) => {
+    service.authorizeDesignRead(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const query = z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }).parse(request.query);
     return { revisions: service.history(request.actorId, id, query.limit) };
   });
 
   app.get("/api/projects/:projectId/revisions/:revisionId/inspect", async (request) => {
+    service.authorizeDesignRead(request.actorId, rawRequestField(request.params, "projectId"));
     const params = z.object({ projectId: z.string().min(1).max(240), revisionId: z.string().min(1).max(240) }).strict().parse(request.params);
     // Authorize the project before resolving the opaque revision ID.
     service.getDesign(request.actorId, params.projectId);
@@ -446,11 +488,20 @@ export function registerHttpRoutes(
   });
 
   app.post("/api/designs/:id/restore", async (request) => {
+    service.authorizeDesignRestore(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
-    return revisionResponse(service.restoreRevision(request.actorId, id, restoreSchema.parse(request.body)));
+    const result = service.restoreRevision(request.actorId, id, restoreSchema.parse(request.body));
+    return {
+      ...revisionResponse(result),
+      restore: result.restore,
+      restorePolicy: {
+        designSystem: result.restore.designSystem.status,
+      },
+    };
   });
 
   app.get("/api/designs/:id/export", async (request, reply) => {
+    service.authorizeDesignRead(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const query = request.query as Record<string, unknown>;
     const result = service.getDesign(request.actorId, id, parseInteger(query.version));
@@ -486,6 +537,7 @@ export function registerHttpRoutes(
   };
 
   app.get("/api/designs/:id/render.png", async (request, reply) => {
+    service.authorizeDesignRead(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
     const query = request.query as Record<string, unknown>;
     const version = parseInteger(query.version);
@@ -499,6 +551,12 @@ export function registerHttpRoutes(
   });
 
   app.get("/api/designs/:id/previews/:previewId/render.png", async (request, reply) => {
+    service.authorizePreviewRead(
+      request.actorId,
+      rawRequestField(request.params, "id"),
+      rawRequestField(request.params, "previewId"),
+      rawRequestField(request.query, "taskId") || undefined,
+    );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const query = request.query as Record<string, unknown>;
     const rendered = await renderDocument(request.actorId, params.id, { previewId: params.previewId }, query);
@@ -510,8 +568,15 @@ export function registerHttpRoutes(
       .send(rendered.png);
   });
 
-  app.get("/api/context", async (request) => service.getContext(request.actorId));
+  app.get("/api/context", async (request) => {
+    service.authorizeContextRead(request.actorId);
+    return service.getContext(request.actorId);
+  });
   app.put("/api/context", async (request) => {
+    service.authorizeContextWrite(
+      request.actorId,
+      rawRequestField(request.body, "designId") || undefined,
+    );
     const input = contextSchema.parse(request.body);
     return service.setContext(request.actorId, {
       ...(input.designId !== undefined ? { designId: input.designId } : {}),
@@ -521,6 +586,7 @@ export function registerHttpRoutes(
   });
 
   const eventStream = async (request: FastifyRequest, reply: FastifyReply) => {
+    service.authorizeEventRead(request.actorId);
     const rawLastEventId = request.headers["last-event-id"];
     const value = Array.isArray(rawLastEventId) ? rawLastEventId[0] : rawLastEventId;
     let lastEventId: number | undefined;
@@ -536,8 +602,11 @@ export function registerHttpRoutes(
   app.get("/api/events", eventStream);
 
   app.post("/api/assets", async (request, reply) => {
+    const organizationId = service.authorizeAssetUpload(
+      request.actorId,
+      rawRequestField(request.query, "designId") || undefined,
+    );
     const query = z.object({ designId: z.string().optional() }).parse(request.query);
-    const organizationId = service.assetNormalizationOrganizationId(request.actorId, query.designId);
     const part = await request.file({ limits: { files: 1, fileSize: config.maxAssetBytes, fields: 8 } });
     if (!part) throw new DomainError("VALIDATION_FAILED", "A multipart file field is required.", 422);
     const data = await part.toBuffer();
@@ -582,6 +651,7 @@ export function registerHttpRoutes(
   });
 
   app.get("/api/assets/:id", async (request, reply) => {
+    service.authorizeAssetRead(request.actorId, rawRequestField(request.params, "id"));
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const asset = service.getAsset(request.actorId, id);
     return reply

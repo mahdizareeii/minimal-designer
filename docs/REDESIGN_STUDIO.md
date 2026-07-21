@@ -1,8 +1,9 @@
 # Redesign Studio
 
 Redesign Studio now has a persisted seven-stage workflow foundation. The
-dashboard creates a design-version-pinned assessment and opens a dedicated
-browser workspace. Every stage revision and decision is immutable and audited;
+dashboard requires explicit selection of a current design and one active
+single-platform Workspace Bridge inventory, then opens a dedicated browser
+workspace. Every stage revision and decision is immutable and audited;
 one-click creation records `sourceMutation: "none"` and never scans or rewrites
 source.
 
@@ -29,8 +30,17 @@ and REST/MCP expose create, read, revise, and transition operations. The browser
 shows the seven-stage track, immutable activity, current evidence, return,
 advance, approval, completion, and cancellation actions.
 
-This remains a foundation rather than a complete redesign program: automatic
-Workspace Bridge upload, stage-specific inventories/maps/findings, proposal and
-before/after artifacts, linked product-spec interview data, approved handoff
-creation, local implementation launch, and the full permission/E2E matrix are
-still incomplete.
+Entry into the future-state proposal additionally requires the exact current
+design revision/version, the sole active bound inventory, and at least one
+immutable implementation mapping. The server verifies the mapping's revision
+and snapshot hashes, canonical product-specification pin, inventory hash/
+fingerprint/platform, exact design entity, and opaque source entity. Missing,
+stale, or forged evidence fails closed; return and cancellation remain
+available.
+
+This remains a foundation rather than a complete redesign program: historical
+design-only assessments need safe inventory attachment/recreation UX, automatic
+mapping suggestions and incremental rescans are absent, and the full real-
+repository browser program, independently approved implementation decisions,
+portable mapping handoff, and permission/revocation E2E matrix remain
+incomplete.

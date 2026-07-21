@@ -14,19 +14,23 @@ import {
   clearStaleDockerRestoreLock,
   dockerRestoreStatus,
   restoreDockerBackup,
+  restoreDockerBackupOffline,
   resumeDockerRestore,
+  resumeOfflineDockerRestore,
   rollbackDockerRestore,
   type DockerRestoreDependencies,
   type DockerRestoreAbortResult,
   type DockerRestoreOperationStatus,
   type DockerRestoreResult,
   type DockerRestoreStaleLockResult,
+  type OfflineRestoreSource,
 } from "./docker-restore.js";
 import { runGenericMcpConfigCli } from "./generic-mcp-config.js";
 import { CLI_SUPPORTED_DATABASE_VERSION, defaultDatabasePath, readMigrationStatus } from "./migrations.js";
 import { localApiRequest } from "./local-api.js";
 import { findExecutable, runCommand, type CommandRunner } from "./process.js";
 import { findProjectRoot, launcherPath } from "./project.js";
+import { resolveRuntimePaths } from "./runtime-paths.js";
 import { runSupportBundleCli } from "./support-bundle-cli.js";
 
 export type RestoreVerifiedBackup = (
@@ -62,9 +66,20 @@ export interface CliDependencies {
     io: Pick<CliIo, "stdout">,
     dependencies?: DockerRestoreDependencies,
   ) => Promise<DockerRestoreResult>;
+  restoreDockerBackupOffline?: (
+    projectRoot: string,
+    source: OfflineRestoreSource,
+    io: Pick<CliIo, "stdout">,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreResult>;
   resumeDockerRestore?: (
     projectRoot: string,
     backupId: string | undefined,
+    dependencies?: DockerRestoreDependencies,
+  ) => Promise<DockerRestoreResult>;
+  resumeOfflineDockerRestore?: (
+    projectRoot: string,
+    source: OfflineRestoreSource,
     dependencies?: DockerRestoreDependencies,
   ) => Promise<DockerRestoreResult>;
   rollbackDockerRestore?: (
@@ -120,8 +135,9 @@ Usage:
   formaspecctl backup verify <formaspec-backup.tar> [--json]
   formaspecctl backup restore <formaspec-backup.tar> --yes [--json]
   formaspecctl backup restore --backup-id <id> --yes [--json]
+  formaspecctl backup restore offline <formaspec-backup.tar> --yes [--json]
   formaspecctl backup restore status [--json]
-  formaspecctl backup restore resume [--backup-id <id>] --yes [--json]
+  formaspecctl backup restore resume [--backup-id <id> | --offline-bundle <formaspec-backup.tar>] --yes [--json]
   formaspecctl backup restore rollback --yes [--json]
   formaspecctl backup restore abort --yes [--json]
   formaspecctl backup restore clear-stale-lock --yes [--json]
@@ -139,22 +155,26 @@ Global option:
 
 type RecordedRuntimeMode = "local" | "dev" | "docker" | "server";
 
-function optionalRuntimeFile(projectRoot: string, filename: string): string | undefined {
-  const target = path.join(projectRoot, ".designer", "run", filename);
+function optionalRuntimeFile(
+  projectRoot: string,
+  filename: string,
+  environment: NodeJS.ProcessEnv,
+): string | undefined {
+  const target = path.join(resolveRuntimePaths(projectRoot, environment).runDirectory, filename);
   if (!fs.existsSync(target)) return undefined;
   const value = fs.readFileSync(target, "utf8").trim();
   return value || undefined;
 }
 
-function recordedRuntimeMode(projectRoot: string): RecordedRuntimeMode | undefined {
-  const value = optionalRuntimeFile(projectRoot, "mode");
+function recordedRuntimeMode(projectRoot: string, environment: NodeJS.ProcessEnv): RecordedRuntimeMode | undefined {
+  const value = optionalRuntimeFile(projectRoot, "mode", environment);
   if (value === undefined) return undefined;
   if (value === "local" || value === "dev" || value === "docker" || value === "server") return value;
-  throw new Error(`Recorded FormaSpec runtime mode is unknown: ${value}. Run 'formaspecctl stop' and inspect .designer/run before restoring.`);
+  throw new Error(`Recorded FormaSpec runtime mode is unknown: ${value}. Run 'formaspecctl stop' and inspect the configured runtime run directory before restoring.`);
 }
 
-function managedPidIsAlive(projectRoot: string): boolean {
-  const value = optionalRuntimeFile(projectRoot, "pid");
+function managedPidIsAlive(projectRoot: string, environment: NodeJS.ProcessEnv): boolean {
+  const value = optionalRuntimeFile(projectRoot, "pid", environment);
   if (value === undefined) return false;
   if (!/^\d+$/.test(value)) throw new Error("Recorded FormaSpec PID is invalid; refusing an offline restore.");
   const pid = Number(value);
@@ -182,7 +202,16 @@ async function loadRestoreVerifiedBackup(projectRoot: string): Promise<RestoreVe
   return loaded.restoreVerifiedBackup as RestoreVerifiedBackup;
 }
 
-function assertSourceLocalRestoreMode(projectRoot: string, mode: RecordedRuntimeMode | undefined): void {
+function assertSourceLocalRestoreMode(
+  projectRoot: string,
+  mode: RecordedRuntimeMode | undefined,
+  environment: NodeJS.ProcessEnv,
+): void {
+  if (resolveRuntimePaths(projectRoot, environment).usesExternalStatePaths) {
+    throw new Error(
+      "Source-local restore is disabled for an environment-managed native runtime. Use a future supervised native restore workflow; no native data was changed.",
+    );
+  }
   if (mode === "docker") {
     throw new Error("backup restore supports only the source-local ./data directory. The recorded Docker runtime uses a managed volume; no Docker data was changed.");
   }
@@ -190,19 +219,28 @@ function assertSourceLocalRestoreMode(projectRoot: string, mode: RecordedRuntime
     throw new Error("A server runtime must restore an exact managed backup ID through the supervised maintenance workflow; arbitrary source-local bundle paths cannot target server volumes. No server data was changed.");
   }
   if (mode === undefined) {
-    const recordedEnvironment = optionalRuntimeFile(projectRoot, "env-file");
+    const recordedEnvironment = optionalRuntimeFile(projectRoot, "env-file", environment);
     if (recordedEnvironment !== undefined) {
       throw new Error("Runtime state references a Compose environment without a recorded mode. Refusing to guess whether the data is local, Docker, or server-managed.");
     }
-    if (managedPidIsAlive(projectRoot)) {
+    if (managedPidIsAlive(projectRoot, environment)) {
       throw new Error("A FormaSpec process is running without a recognized local runtime mode. Stop it explicitly before restoring.");
     }
   }
 }
 
-function preRestoreBackupPath(projectRoot: string, now: Date): string {
+function assertDockerRestoreMode(mode: RecordedRuntimeMode | undefined): void {
+  if (mode !== "docker" && mode !== "server") {
+    throw new Error("Offline disaster recovery requires the recorded Docker/server runtime and its pinned volume binding.");
+  }
+}
+
+function preRestoreBackupPath(projectRoot: string, now: Date, environment: NodeJS.ProcessEnv): string {
   const timestamp = now.toISOString().replaceAll(/[:.]/g, "-");
-  return path.join(projectRoot, ".designer", "backups", `pre-restore-${timestamp}-${randomUUID().slice(0, 8)}`);
+  return path.join(
+    resolveRuntimePaths(projectRoot, environment).backupDirectory,
+    `pre-restore-${timestamp}-${randomUUID().slice(0, 8)}`,
+  );
 }
 
 function validateStartArguments(arguments_: string[]): string[] {
@@ -255,6 +293,9 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       resolvedProjectRoot ??= findProjectRoot();
       return resolvedProjectRoot;
     };
+    const runtimePaths = () => resolveRuntimePaths(projectRoot(), environment);
+    const requestLocalApi = <T>(pathname: string, init?: RequestInit): Promise<T> =>
+      localApiRequest<T>(projectRoot(), pathname, init, environment);
     const bridge = (): BridgeController => {
       resolvedBridge ??= createBridgeController(projectRoot(), environment);
       return resolvedBridge;
@@ -377,7 +418,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       await bridge().stop();
       const exitCode = await delegate(["restart"]);
       if (exitCode !== 0) return exitCode;
-      if (["docker", "server"].includes(recordedRuntimeMode(projectRoot()) ?? "")) await recordDockerBinding();
+      if (["docker", "server"].includes(recordedRuntimeMode(projectRoot(), environment) ?? "")) await recordDockerBinding();
       const bridgeStatus = await bridge().ensureStarted();
       io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
       return 0;
@@ -389,7 +430,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (option !== undefined && option !== "--json") throw new Error(`Unexpected migrate status option: ${option}`);
       const json = option === "--json";
       if (arguments_.length > 0) throw new Error(`Unexpected migrate status option: ${arguments_[0]}`);
-      const database = defaultDatabasePath(projectRoot());
+      const database = defaultDatabasePath(projectRoot(), environment);
       if (!fs.existsSync(database)) throw new Error(`Database is not available at ${database}. Docker volume databases must be verified through a FormaSpec backup.`);
       const status = readMigrationStatus(database);
       if (json) io.stdout(JSON.stringify(status));
@@ -404,6 +445,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
     if (command === "support-bundle") {
       return await runSupportBundleCli(arguments_, {
         projectRoot: projectRoot(),
+        environment,
         io,
         assumeYes,
       });
@@ -446,8 +488,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         const option = arguments_.shift();
         if (option !== undefined && option !== "--json") throw new Error(`Unexpected audit retention list option: ${option}`);
         if (arguments_.length > 0) throw new Error(`Unexpected audit retention list option: ${arguments_[0]}`);
-        const { runs } = await localApiRequest<{ runs: RetentionRun[] }>(
-          projectRoot(),
+        const { runs } = await requestLocalApi<{ runs: RetentionRun[] }>(
           "/api/organization/audit-retention/runs",
         );
         if (option === "--json") io.stdout(JSON.stringify(runs));
@@ -461,8 +502,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         const option = arguments_.shift();
         if (option !== undefined && option !== "--json") throw new Error(`Unexpected audit retention preview option: ${option}`);
         if (arguments_.length > 0) throw new Error(`Unexpected audit retention preview option: ${arguments_[0]}`);
-        const { preview } = await localApiRequest<{ preview: RetentionPreview }>(
-          projectRoot(),
+        const { preview } = await requestLocalApi<{ preview: RetentionPreview }>(
           "/api/organization/audit-retention/previews",
           { method: "POST", body: JSON.stringify({}) },
         );
@@ -505,7 +545,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/.test(idempotencyKey)) {
           throw new Error("--idempotency-key must be 8-200 safe identifier characters.");
         }
-        const { result } = await localApiRequest<{ result: RetentionRun }>(projectRoot(), `/api/organization/audit-retention/previews/${previewId}/commit`, {
+        const { result } = await requestLocalApi<{ result: RetentionRun }>(`/api/organization/audit-retention/previews/${previewId}/commit`, {
           method: "POST",
           body: JSON.stringify({ expectedPlanHash: planHash, idempotencyKey }),
         });
@@ -547,15 +587,23 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           updatedAt: string | null;
           lastScheduledBackupAt: string | null;
           nextDueAt: string | null;
+          supervision?: {
+            status: "disabled" | "healthy" | "warning" | "critical";
+            dueAt: string | null;
+            graceEndsAt: string | null;
+            currentWindowCovered: boolean;
+            retention: { candidateCount: number; candidateBytes: number; protectedCount: number; planHash: string };
+            alerts: Array<{ code: string; severity: "warning" | "critical"; message: string }>;
+          };
         };
         if (scheduleCommand === "run") {
-          const result = await localApiRequest<{ run: {
+          const result = await requestLocalApi<{ run: {
             status: "disabled" | "already_completed" | "created";
             dueAt: string | null;
             nextDueAt: string | null;
             retentionClass: string | null;
             backup: { id: string; filename: string } | null;
-          } }>(projectRoot(), "/api/backups/schedule/run", { method: "POST", body: JSON.stringify({}) });
+          } }>("/api/backups/schedule/run", { method: "POST", body: JSON.stringify({}) });
           if (json) io.stdout(JSON.stringify(result.run));
           else if (result.run.status === "disabled") io.stdout("Managed backup scheduling is disabled.");
           else if (result.run.status === "already_completed") {
@@ -567,13 +615,13 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           return 0;
         }
 
-        const current = await localApiRequest<{ schedule: Schedule }>(projectRoot(), "/api/backups/schedule");
+        const current = await requestLocalApi<{ schedule: Schedule }>("/api/backups/schedule");
         let schedule = current.schedule;
         if (scheduleCommand === "enable" || scheduleCommand === "disable") {
           const cronExpression = at === undefined
             ? schedule.cronExpression
             : `${Number(at.slice(3, 5))} ${Number(at.slice(0, 2))} * * *`;
-          const updated = await localApiRequest<{ schedule: Schedule }>(projectRoot(), "/api/backups/schedule", {
+          const updated = await requestLocalApi<{ schedule: Schedule }>("/api/backups/schedule", {
             method: "PUT",
             body: JSON.stringify({ enabled: scheduleCommand === "enable", cronExpression }),
           });
@@ -584,6 +632,12 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           io.stdout(`Managed backup schedule: ${schedule.enabled ? "enabled" : "disabled"}`);
           io.stdout(`UTC cron: ${schedule.cronExpression}; retention: ${schedule.retention.daily} daily / ${schedule.retention.weekly} weekly / ${schedule.retention.monthly} monthly`);
           io.stdout(`Last scheduled backup: ${schedule.lastScheduledBackupAt ?? "never"}; next due: ${schedule.nextDueAt ?? "disabled"}`);
+          if (schedule.supervision) {
+            io.stdout(`Backup supervision: ${schedule.supervision.status}; current window covered: ${schedule.supervision.currentWindowCovered ? "yes" : "no"}; retention candidates: ${schedule.supervision.retention.candidateCount}`);
+            for (const alert of schedule.supervision.alerts) {
+              io.stdout(`  ${alert.severity.toUpperCase()} ${alert.code}: ${alert.message}`);
+            }
+          }
         }
         return 0;
       }
@@ -593,7 +647,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           const option = arguments_.shift();
           if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup prune preview option: ${option}`);
           if (arguments_.length > 0) throw new Error(`Unexpected backup prune preview option: ${arguments_[0]}`);
-          const preview = await localApiRequest<{ preview: {
+          const preview = await requestLocalApi<{ preview: {
             previewId: string;
             planHash: string;
             expiresAt: string;
@@ -602,7 +656,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
             manualExemptCount: number;
             protectedCount: number;
             totalCandidateBytes: number;
-          } }>(projectRoot(), "/api/backups/prune/previews", { method: "POST", body: JSON.stringify({}) });
+          } }>("/api/backups/prune/previews", { method: "POST", body: JSON.stringify({}) });
           if (option === "--json") io.stdout(JSON.stringify(preview.preview));
           else {
             io.stdout(`Prune preview: ${preview.preview.previewId}`);
@@ -630,13 +684,13 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           if (!assumeYes) throw new Error("backup prune is destructive. Create and review a preview, then rerun execute with explicit --yes authorization.");
           if (!previewId || !/^backup_prune_preview_[a-f0-9]{32}$/.test(previewId)) throw new Error("--preview-id requires an exact backup-prune preview ID.");
           if (!planHash || !/^[a-f0-9]{64}$/.test(planHash)) throw new Error("--plan-hash requires the exact preview SHA-256.");
-          const committed = await localApiRequest<{ result: {
+          const committed = await requestLocalApi<{ result: {
             previewId: string;
             planHash: string;
             prunedBackupIds: string[];
             prunedBytes: number;
             cleanupPending: boolean;
-          } }>(projectRoot(), `/api/backups/prune/previews/${previewId}/commit`, {
+          } }>(`/api/backups/prune/previews/${previewId}/commit`, {
             method: "POST",
             body: JSON.stringify({ expectedPlanHash: planHash }),
           });
@@ -655,13 +709,13 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         if (arguments_.length > 0) throw new Error(`Unexpected backup ${backupCommand} option: ${arguments_[0]}`);
         const json = option === "--json";
         if (backupCommand === "create") {
-          const result = await localApiRequest<{ backup: {
+          const result = await requestLocalApi<{ backup: {
             id: string;
             filename: string;
             status: string;
             bundleSha256: string | null;
             verifiedAt: string | null;
-          } }>(projectRoot(), "/api/backups", { method: "POST", body: JSON.stringify({}) });
+          } }>("/api/backups", { method: "POST", body: JSON.stringify({}) });
           if (json) io.stdout(JSON.stringify(result.backup));
           else {
             io.stdout(`Backup created: ${result.backup.filename}`);
@@ -670,13 +724,13 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           }
           return 0;
         }
-        const result = await localApiRequest<{ backups: Array<{
+        const result = await requestLocalApi<{ backups: Array<{
           id: string;
           filename: string;
           status: string;
           createdAt: string;
           verifiedAt: string | null;
-        }> }>(projectRoot(), "/api/backups");
+        }> }>("/api/backups");
         if (json) io.stdout(JSON.stringify(result.backups));
         else if (result.backups.length === 0) io.stdout("No managed FormaSpec backups were found.");
         else for (const backup of result.backups) {
@@ -695,12 +749,53 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           if (result.status === "restored") {
             io.stdout(`Managed backup restored: ${result.backupId}`);
             io.stdout(`Pre-restore safety backup: ${result.safetyBackupId}`);
-          } else {
+          } else if (result.status === "rolled_back") {
             io.stdout(`Restore operation rolled back safely: ${result.operationId}`);
+          } else if (result.status === "forensic_rolled_back") {
+            io.stdout(`Forensic pre-restore bytes restored: ${result.safetyBackupId}`);
+            io.stdout("The previous data may still contain corruption. The API remains stopped and maintenance stays active; apply another verified offline restore before serving traffic.");
+          } else {
+            io.stdout(`Forensic rollback was aborted safely; verified restored target ${result.backupId} remains active.`);
           }
-          io.stdout("FormaSpec passed database and deterministic renderer verification and is ready.");
-          io.stdout("All restored agent grants were revoked. Reconnect Codex with 'formaspecctl agent connect codex'.");
+          if (result.serviceReady) {
+            io.stdout("FormaSpec passed database and deterministic renderer verification and is ready.");
+            io.stdout("All restored agent grants were revoked. Reconnect Codex with 'formaspecctl agent connect codex'.");
+          }
         };
+        if (subject === "offline") {
+          const bundle = arguments_.shift();
+          if (bundle === undefined || bundle.startsWith("--")) {
+            throw new Error("backup restore offline requires an explicitly selected verified bundle path.");
+          }
+          const option = arguments_.shift();
+          if (option !== undefined && option !== "--json") throw new Error(`Unexpected offline restore option: ${option}`);
+          if (arguments_.length > 0) throw new Error(`Unexpected offline restore option: ${arguments_[0]}`);
+          if (!assumeYes) {
+            throw new Error("offline disaster recovery replaces the pinned Docker/server data volume. Rerun with explicit --yes authorization.");
+          }
+          const root = projectRoot();
+          assertDockerRestoreMode(recordedRuntimeMode(root, environment));
+          const resolvedBundle = path.resolve(bundle);
+          const verification = await (dependencies.backupVerifier ?? verifyBackup)(resolvedBundle);
+          if (verification.migrationVersion > CLI_SUPPORTED_DATABASE_VERSION) {
+            throw new Error(
+              `Backup database version ${verification.migrationVersion} is newer than this formaspecctl supports (${CLI_SUPPORTED_DATABASE_VERSION}); no data was changed.`,
+            );
+          }
+          await bridge().stop();
+          const result = await (dependencies.restoreDockerBackupOffline ?? restoreDockerBackupOffline)(
+            root,
+            {
+              path: resolvedBundle,
+              sha256: verification.bundleSha256,
+              sizeBytes: verification.bundleSizeBytes,
+            },
+            io,
+            dockerDependencies,
+          );
+          reportDockerResult(result, option === "--json");
+          return 0;
+        }
         if (subject === "status") {
           const option = arguments_.shift();
           if (option !== undefined && option !== "--json") throw new Error(`Unexpected backup restore status option: ${option}`);
@@ -757,6 +852,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         }
         if (subject === "resume") {
           let backupId: string | undefined;
+          let offlineBundle: string | undefined;
           let json = false;
           while (arguments_.length > 0) {
             const option = arguments_.shift();
@@ -765,15 +861,43 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
               const value = arguments_.shift();
               if (value === undefined) throw new Error("--backup-id requires a managed backup ID.");
               backupId = assertBackupId(value);
+            } else if (option === "--offline-bundle") {
+              const value = arguments_.shift();
+              if (value === undefined) throw new Error("--offline-bundle requires a verified bundle path.");
+              offlineBundle = path.resolve(value);
             } else throw new Error(`Unexpected backup restore resume option: ${option}`);
           }
           if (!assumeYes) throw new Error("backup restore resume may complete a database cutover. Rerun with explicit --yes authorization.");
+          if (backupId !== undefined && offlineBundle !== undefined) {
+            throw new Error("backup restore resume accepts either --backup-id or --offline-bundle, not both.");
+          }
           await bridge().stop();
-          const result = await (dependencies.resumeDockerRestore ?? resumeDockerRestore)(
-            projectRoot(),
-            backupId,
-            dockerDependencies,
-          );
+          let result: DockerRestoreResult;
+          if (offlineBundle !== undefined) {
+            const root = projectRoot();
+            assertDockerRestoreMode(recordedRuntimeMode(root, environment));
+            const verification = await (dependencies.backupVerifier ?? verifyBackup)(offlineBundle);
+            if (verification.migrationVersion > CLI_SUPPORTED_DATABASE_VERSION) {
+              throw new Error(
+                `Backup database version ${verification.migrationVersion} is newer than this formaspecctl supports (${CLI_SUPPORTED_DATABASE_VERSION}); no data was changed.`,
+              );
+            }
+            result = await (dependencies.resumeOfflineDockerRestore ?? resumeOfflineDockerRestore)(
+              root,
+              {
+                path: offlineBundle,
+                sha256: verification.bundleSha256,
+                sizeBytes: verification.bundleSizeBytes,
+              },
+              dockerDependencies,
+            );
+          } else {
+            result = await (dependencies.resumeDockerRestore ?? resumeDockerRestore)(
+              projectRoot(),
+              backupId,
+              dockerDependencies,
+            );
+          }
           reportDockerResult(result, json);
           return 0;
         }
@@ -825,8 +949,8 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         }
 
         const root = projectRoot();
-        const mode = recordedRuntimeMode(root);
-        assertSourceLocalRestoreMode(root, mode);
+        const mode = recordedRuntimeMode(root, environment);
+        assertSourceLocalRestoreMode(root, mode, environment);
         const resolvedBundle = path.resolve(bundle);
         const verification = await (dependencies.backupVerifier ?? verifyBackup)(resolvedBundle);
         if (verification.migrationVersion > CLI_SUPPORTED_DATABASE_VERSION) {
@@ -835,7 +959,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           );
         }
 
-        const dataDirectory = path.join(root, "data");
+        const dataDirectory = runtimePaths().dataDirectory;
         if (fs.existsSync(dataDirectory)) {
           const dataStat = fs.lstatSync(dataDirectory);
           if (!dataStat.isDirectory() || dataStat.isSymbolicLink()) {
@@ -849,13 +973,13 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           const stopExitCode = await delegate(["stop"]);
           if (stopExitCode !== 0) throw new Error("FormaSpec did not stop cleanly; restore was cancelled before data mutation.");
         }
-        if (managedPidIsAlive(root)) {
+        if (managedPidIsAlive(root, environment)) {
           throw new Error("The managed FormaSpec process is still running after stop; restore was cancelled before data mutation.");
         }
 
         let preRestoreBackup: string | null = null;
         if (fs.existsSync(dataDirectory)) {
-          preRestoreBackup = preRestoreBackupPath(root, dependencies.now?.() ?? new Date());
+          preRestoreBackup = preRestoreBackupPath(root, dependencies.now?.() ?? new Date(), environment);
           const backupExitCode = await delegate(["backup", preRestoreBackup]);
           if (backupExitCode !== 0) {
             throw new Error("The pre-restore safety backup failed; restore was cancelled and the active data directory was not replaced.");

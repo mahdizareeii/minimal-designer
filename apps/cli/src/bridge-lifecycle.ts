@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveRuntimePaths } from "./runtime-paths.js";
+
 interface BridgeState {
   schemaVersion: 1;
   pid: number;
@@ -118,14 +120,11 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
   const bridgePort = parsePort(environment.FORMASPEC_BRIDGE_PORT, 4312);
   const bridgeUrl = `http://127.0.0.1:${bridgePort}`;
   validateBridgeMcpUrl(`${bridgeUrl}/mcp`);
-  const configuredRuntimeDirectory = environment.FORMASPEC_RUNTIME_DIR;
-  if (configuredRuntimeDirectory !== undefined && !path.isAbsolute(configuredRuntimeDirectory)) {
-    throw new Error("FORMASPEC_RUNTIME_DIR must be an absolute path.");
-  }
-  const runtimeDirectory = path.resolve(configuredRuntimeDirectory ?? path.join(projectRoot, ".designer"));
-  const runDirectory = path.join(runtimeDirectory, "run");
+  const paths = resolveRuntimePaths(projectRoot, environment);
+  const runtimeDirectory = paths.runtimeDirectory;
+  const runDirectory = paths.runDirectory;
   const statePath = path.join(runDirectory, "formaspec-bridge.json");
-  const logPath = path.join(runtimeDirectory, "logs", "formaspec-bridge.log");
+  const logPath = path.join(paths.logDirectory, "formaspec-bridge.log");
   const builtEntry = fileURLToPath(new URL("../../local-bridge/dist/index.js", import.meta.url));
   const sourceEntry = fileURLToPath(new URL("../../local-bridge/src/index.ts", import.meta.url));
   const tsxEntry = fileURLToPath(new URL("../../../node_modules/tsx/dist/cli.mjs", import.meta.url));

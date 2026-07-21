@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createCodexConnection,
   organizationConfigurationUrl,
   readOrganizationPolicy,
   updateOrganizationPolicy,
@@ -52,5 +53,82 @@ describe("organization policy administration contract", () => {
 
   it("uses the fixed secret-free configuration-as-code download path", () => {
     expect(organizationConfigurationUrl()).toBe("/api/organization/configuration");
+  });
+
+  it("keeps automatic Codex grants out of human redesign decisions even when policy allows them", async () => {
+    const allowedScopes = [
+      "organization_policy:read",
+      "context:write",
+      "design:read",
+      "design:preview",
+      "design:write",
+      "product_spec:read",
+      "product_spec:preview",
+      "product_spec:write",
+      "planning:read",
+      "planning:write",
+      "task:read",
+      "task:create",
+      "task:claim",
+      "task:update",
+      "design_system:read",
+      "workspace:inventory:read",
+      "workspace:inventory:write",
+      "implementation_mapping:read",
+      "implementation_mapping:write",
+      "handoff:read",
+      "redesign:read",
+      "redesign:assessment",
+      "redesign:review",
+      "redesign:interview",
+      "redesign:proposal",
+      "redesign:design",
+      "redesign:handoff",
+      "redesign:approve",
+      "redesign:implement",
+      "redesign:cancel",
+    ];
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        organizationPolicy: {
+          organizationId: "organization_legacy",
+          organizationName: "FormaSpec workspace",
+          policy: {
+            agents: {
+              enabled: true,
+              allowedAdapters: ["codex"],
+              allowedScopes,
+              maximumExpirySeconds: 86_400,
+              requireProjectRestriction: false,
+            },
+          },
+          policyHash: "a".repeat(64),
+          configurationHash: "b".repeat(64),
+          source: "stored",
+          diagnostics: [],
+          updatedAt: "2026-07-20T12:00:00.000Z",
+        },
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        connection: { id: "connection_codex_default", scopes: [] },
+        nonce: "fspair_codex_default",
+        expiresAt: "2026-07-21T12:00:00.000Z",
+      }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }));
+
+    await createCodexConnection();
+    expect(fetch.mock.calls[1]?.[0]).toBe("/api/agent-connections");
+    const requestBody = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body)) as { scopes: string[] };
+    expect(requestBody.scopes).toContain("implementation_mapping:read");
+    expect(requestBody.scopes).toContain("implementation_mapping:write");
+    expect(requestBody.scopes).toContain("redesign:handoff");
+    expect(requestBody.scopes).not.toContain("redesign:approve");
+    expect(requestBody.scopes).not.toContain("redesign:implement");
+    expect(requestBody.scopes).not.toContain("redesign:cancel");
   });
 });

@@ -1,0 +1,96 @@
+name: Unsigned Linux package evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unsigned-linux-packages:
+    name: Ubuntu DEB and RPM foundation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+      - name: Activate pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          test "$(node --version)" = "v24.14.0"
+          test "$(pnpm --version)" = "11.9.0"
+      - name: Install native package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends rpm
+      - name: Frozen dependency installation
+        run: pnpm install --frozen-lockfile --strict-peer-dependencies
+      - name: Install Playwright 1.61.1 Chromium
+        run: pnpm --filter @designer/server exec playwright install --with-deps chromium
+      - name: Record exact Linux build toolchain
+        run: |
+          test "$(uname -m)" = "x86_64"
+          test "$(node --print 'process.arch')" = "x64"
+          mkdir -p artifacts/ci/linux-package-evidence
+          {
+            uname -srm
+            node --version
+            pnpm --version
+            pnpm --filter @designer/server exec playwright --version
+            dpkg-deb --version | head -n 1
+            rpmbuild --version
+          } > artifacts/ci/linux-package-evidence/toolchain.txt
+      - name: Build every workspace package
+        run: pnpm build
+      - name: Generate target source evidence
+        run: pnpm release:evidence:generate --output artifacts/ci/linux-source-evidence --target github-ubuntu-24.04-x64-linux-packaging
+      - name: Enforce target source evidence and license policy
+        run: pnpm release:evidence:check --output artifacts/ci/linux-source-evidence --target github-ubuntu-24.04-x64-linux-packaging
+      - name: Build unsigned DEB
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        run: node apps/installer/dist/build-linux-deb.js --output "$PWD/artifacts/ci/linux-packages"
+      - name: Build unsigned RPM
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        run: node apps/installer/dist/build-linux-rpm.js --output "$PWD/artifacts/ci/linux-packages"
+      - name: Generate bounded unsigned-package manifest
+        run: >-
+          node scripts/ci-linux-package-evidence.mjs
+          --artifacts artifacts/ci/linux-packages
+          --source-evidence artifacts/ci/linux-source-evidence
+          --output artifacts/ci/linux-package-manifest
+      - name: Inspect native package metadata without installing
+        run: |
+          dpkg-deb --info artifacts/ci/linux-packages/*.deb > artifacts/ci/linux-package-evidence/deb-info.txt
+          rpm --query --package --info artifacts/ci/linux-packages/*.rpm > artifacts/ci/linux-package-evidence/rpm-info.txt
+      - name: Retain unsigned artifacts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NO-GO-unsigned-linux-foundation-${{ github.sha }}
+          path: |
+            artifacts/ci/linux-packages/
+            artifacts/ci/linux-source-evidence/
+            artifacts/ci/linux-package-evidence/
+            artifacts/ci/linux-package-manifest/
+          if-no-files-found: error
+          retention-days: 30

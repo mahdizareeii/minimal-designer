@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyOperations,
   createComponentNode,
+  createIconNode,
+  createImageNode,
   createInstanceNode,
   createSequentialIdFactory,
   createStarterDocument,
+  lintDesignDocumentV2,
   mergeV1CompatibilityDocument,
   toV1CompatibleDesignDocument,
+  validateDesignDocument,
   V2CompatibilityError,
 } from "./index.js";
 import { DesignDocumentSchema } from "./model.js";
@@ -112,6 +117,99 @@ describe("FormaSpec V2", () => {
     expect(toV1CompatibleDesignDocument(first)).toEqual(validSource);
   });
 
+  it("projects a component instance to its exact active-state source root", () => {
+    const ids = createSequentialIdFactory("v2activecomponentstate");
+    const source = createStarterDocument({ now: "2026-01-01T00:00:00.000Z", idFactory: ids });
+    const frame = Object.values(source.nodes)[0]!;
+    const component = createComponentNode({ name: "Stateful button", component_key: "button.stateful" }, ids);
+    const instance = createInstanceNode({ component_id: component.id }, ids);
+    if (frame.type !== "frame") throw new Error("fixture frame missing");
+    frame.children.push(component.id, instance.id);
+    source.nodes[component.id] = component;
+    source.nodes[instance.id] = instance;
+
+    const migrated = migrateV1ToV2(DesignDocumentSchema.parse(source), {
+      migratedAt: "2026-02-01T00:00:00.000Z",
+    });
+    const migratedInstance = migrated.nodes[instance.id];
+    if (!migratedInstance || migratedInstance.type !== "component_instance") {
+      throw new Error("fixture component instance missing");
+    }
+    const definition = migrated.component_definitions[migratedInstance.component_definition_id];
+    if (!definition) throw new Error("fixture component definition missing");
+    const defaultRoot = migrated.nodes[definition.root_node_id];
+    if (!defaultRoot || defaultRoot.type !== "container") throw new Error("fixture component root missing");
+    const hoverRootId = ids("node");
+    const hoverRoot = structuredClone(defaultRoot);
+    hoverRoot.id = hoverRootId;
+    hoverRoot.name = "Stateful button / Hover";
+    hoverRoot.children = [];
+    migrated.nodes[hoverRootId] = hoverRoot;
+    const migratedFrame = migrated.nodes[frame.id];
+    if (!migratedFrame || migratedFrame.type !== "frame") throw new Error("migrated frame missing");
+    migratedFrame.children.push(hoverRootId);
+    definition.states.push({ key: "hover", name: "Hover", node_id: hoverRootId });
+    migratedInstance.active_state = "hover";
+
+    const strict = DesignDocumentV2Schema.parse(migrated);
+    const projected = toV1CompatibleDesignDocument(strict);
+    const projectedInstance = projected.nodes[instance.id];
+    expect(projectedInstance?.type).toBe("instance");
+    if (!projectedInstance || projectedInstance.type !== "instance") throw new Error("projected instance missing");
+    expect(projectedInstance.component_id).toBe(hoverRootId);
+
+    const invalid = structuredClone(strict);
+    const invalidInstance = invalid.nodes[instance.id];
+    if (!invalidInstance || invalidInstance.type !== "component_instance") throw new Error("invalid fixture instance missing");
+    invalidInstance.active_state = "pressed";
+    expect(() => toV1CompatibleDesignDocument(invalid)).toThrowError(V2CompatibilityError);
+  });
+
+  it("treats archived detached component masters as valid reusable source trees", () => {
+    const ids = createSequentialIdFactory("v2archivedcomponentmaster");
+    const source = createStarterDocument({ now: "2026-01-01T00:00:00.000Z", idFactory: ids });
+    const frame = Object.values(source.nodes)[0]!;
+    const component = createComponentNode({ name: "Archived master", component_key: "button.archived" }, ids);
+    const instance = createInstanceNode({ component_id: component.id }, ids);
+    if (frame.type !== "frame") throw new Error("fixture frame missing");
+    frame.children.push(component.id, instance.id);
+    source.nodes[component.id] = component;
+    source.nodes[instance.id] = instance;
+    const migrated = migrateV1ToV2(DesignDocumentSchema.parse(source), {
+      migratedAt: "2026-02-01T00:00:00.000Z",
+    });
+    const definition = Object.values(migrated.component_definitions)[0]!;
+    const master = migrated.nodes[definition.root_node_id];
+    const migratedFrame = migrated.nodes[frame.id];
+    if (!master || !migratedFrame || migratedFrame.type !== "frame") throw new Error("migrated master missing");
+    migratedFrame.children = migratedFrame.children.filter((nodeId) => nodeId !== master.id);
+    master.archived = true;
+    master.locked = true;
+
+    const strict = DesignDocumentV2Schema.parse(migrated);
+    const v2Codes = new Set(lintDesignDocumentV2(strict).map((diagnostic) => diagnostic.code));
+    expect(v2Codes).not.toContain("component_definition_detached");
+    expect(v2Codes).not.toContain("component_state_node_missing");
+    const projected = toV1CompatibleDesignDocument(strict);
+    expect(projected.nodes[master.id]).toMatchObject({ type: "component", archived: false });
+    const validationCodes = new Set(validateDesignDocument(projected).diagnostics.map((diagnostic) => diagnostic.code));
+    expect(validationCodes).not.toContain("orphan_active_node");
+    expect(validationCodes).not.toContain("invalid_component_reference");
+    const edited = structuredClone(projected);
+    const editedFrame = edited.nodes[frame.id];
+    if (!editedFrame) throw new Error("projected frame missing");
+    editedFrame.name = "Unrelated page edit";
+    edited.revision += 1;
+    edited.updated_at = "2026-03-01T00:00:00.000Z";
+    const merged = mergeV1CompatibilityDocument(strict, edited);
+    expect(merged.nodes[master.id]).toMatchObject({ archived: true, locked: true });
+    const illegalSourceEdit = structuredClone(projected);
+    illegalSourceEdit.nodes[master.id]!.name = "Illegal source edit";
+    illegalSourceEdit.revision += 1;
+    illegalSourceEdit.updated_at = "2026-03-01T00:00:00.000Z";
+    expect(() => mergeV1CompatibilityDocument(strict, illegalSourceEdit)).toThrowError(V2CompatibilityError);
+  });
+
   it("merges V1-compatible edits into a V2 snapshot without discarding V2-only fields", () => {
     const ids = createSequentialIdFactory("v2merge");
     const source = createStarterDocument({ now: "2026-01-01T00:00:00.000Z", idFactory: ids });
@@ -133,6 +231,119 @@ describe("FormaSpec V2", () => {
     expect(merged.product_specification).toEqual(migrated.product_specification);
     expect(merged.migration?.migrated_at).toBe("2026-02-01T00:00:00.000Z");
     expect(toV1CompatibleDesignDocument(merged).nodes[frameId]?.name).toBe("Edited through compatibility");
+  });
+
+  it("promotes the V1 accessibility compatibility field during deterministic migration", () => {
+    const source = createStarterDocument({
+      now: "2026-01-01T00:00:00.000Z",
+      idFactory: createSequentialIdFactory("v1a11ylabel"),
+    });
+    const frameId = source.pages[0]!.children[0]!;
+    const frame = source.nodes[frameId]!;
+    if (frame.type !== "frame") throw new Error("Expected starter frame");
+    frame.role = "button";
+    frame.metadata.accessible_label = "Continue to payment";
+    const image = createImageNode({ alt: "Receipt preview" }, createSequentialIdFactory("v1a11yimage"));
+    const explicitImage = createImageNode({
+      alt: "Decorative fallback",
+      metadata: { accessible_label: "Explicit image label" },
+    }, createSequentialIdFactory("v1a11yexplicitimage"));
+    const icon = createIconNode({
+      icon_name: "arrow-right",
+      label: "Continue icon",
+    }, createSequentialIdFactory("v1a11yicon"));
+    frame.children.push(image.id, explicitImage.id, icon.id);
+    source.nodes[image.id] = image;
+    source.nodes[explicitImage.id] = explicitImage;
+    source.nodes[icon.id] = icon;
+
+    const migrated = migrateV1ToV2(source, { migratedAt: "2026-02-01T00:00:00.000Z" });
+    expect(migrated.nodes[frameId]?.semantics.accessibility_label).toBe("Continue to payment");
+    expect(migrated.nodes[image.id]?.semantics.accessibility_label).toBe("Receipt preview");
+    expect(migrated.nodes[explicitImage.id]?.semantics.accessibility_label).toBe("Explicit image label");
+    expect(migrated.nodes[icon.id]?.semantics.accessibility_label).toBe("Continue icon");
+    expect(toV1CompatibleDesignDocument(migrated)).toEqual(source);
+  });
+
+  it("round-trips typed accessibility labels without losing V2 semantics or metadata", () => {
+    const ids = createSequentialIdFactory("v2a11ylabel");
+    const source = createStarterDocument({ now: "2026-01-01T00:00:00.000Z", idFactory: ids });
+    source.revision = 1;
+    const frameId = source.pages[0]!.children[0]!;
+    const sourceFrame = source.nodes[frameId]!;
+    if (sourceFrame.type !== "frame") throw new Error("Expected starter frame");
+    sourceFrame.role = "button";
+
+    const migrated = migrateV1ToV2(source, { migratedAt: "2026-02-01T00:00:00.000Z" });
+    const migratedFrame = migrated.nodes[frameId]!;
+    migratedFrame.semantics.accessibility_label = "Existing checkout label";
+    migratedFrame.semantics.description = "Preserve this V2-only description.";
+    migratedFrame.metadata.accessible_label = "Preserve this unrelated legacy metadata value.";
+    migratedFrame.metadata.nested = { source: "enterprise" };
+    expect(lintDesignDocumentV2(migrated).some((item) => item.code === "interactive_accessible_name_missing")).toBe(false);
+
+    const projected = toV1CompatibleDesignDocument(migrated);
+    expect(projected.nodes[frameId]?.metadata.accessible_label).toBe("Existing checkout label");
+    const edited = applyOperations(projected, [{
+      type: "update_node",
+      node_id: frameId,
+      patch: { accessibility_label: "Review and pay" },
+    }], {
+      expectedRevision: projected.revision,
+      now: "2026-03-01T00:00:00.000Z",
+    }).document;
+    const merged = mergeV1CompatibilityDocument(migrated, edited, {
+      accessibilityLabelEdits: new Map([[frameId, "Review and pay"]]),
+    });
+
+    expect(merged.nodes[frameId]?.semantics).toMatchObject({
+      role: "button",
+      accessibility_label: "Review and pay",
+      description: "Preserve this V2-only description.",
+    });
+    expect(merged.nodes[frameId]?.metadata).toEqual({
+      preset: "web",
+      accessible_label: "Preserve this unrelated legacy metadata value.",
+      nested: { source: "enterprise" },
+    });
+    expect(toV1CompatibleDesignDocument(merged).nodes[frameId]?.metadata.accessible_label).toBe("Review and pay");
+    expect(lintDesignDocumentV2(merged).some((item) => item.code === "interactive_accessible_name_missing")).toBe(false);
+
+    const untypedMetadataEdit = structuredClone(projected);
+    untypedMetadataEdit.nodes[frameId]!.metadata.accessible_label = "Do not reinterpret generic metadata";
+    untypedMetadataEdit.revision += 1;
+    untypedMetadataEdit.updated_at = "2026-03-01T12:00:00.000Z";
+    const untypedMerged = mergeV1CompatibilityDocument(migrated, untypedMetadataEdit);
+    expect(untypedMerged.nodes[frameId]?.semantics.accessibility_label).toBe("Existing checkout label");
+    expect(untypedMerged.nodes[frameId]?.metadata.accessible_label).toBe("Preserve this unrelated legacy metadata value.");
+
+    const missingLabel = structuredClone(migrated);
+    delete missingLabel.nodes[frameId]!.semantics.accessibility_label;
+    delete missingLabel.nodes[frameId]!.metadata.accessible_label;
+    expect(lintDesignDocumentV2(missingLabel).some((item) => item.code === "interactive_accessible_name_missing")).toBe(true);
+    const missingProjection = toV1CompatibleDesignDocument(missingLabel);
+    const directPromotion = mergeV1CompatibilityDocument(missingLabel, missingProjection, {
+      accessibilityLabelEdits: new Map([[frameId, "Direct typed promotion"]]),
+    });
+    expect(directPromotion.nodes[frameId]?.semantics.accessibility_label).toBe("Direct typed promotion");
+    const labeledProjection = applyOperations(missingProjection, [{
+      type: "update_node",
+      node_id: frameId,
+      patch: { accessibility_label: "Review and pay" },
+    }], {
+      expectedRevision: missingProjection.revision,
+      now: "2026-03-02T00:00:00.000Z",
+    }).document;
+    const labeled = mergeV1CompatibilityDocument(missingLabel, labeledProjection, {
+      accessibilityLabelEdits: new Map([[frameId, "Review and pay"]]),
+    });
+    expect(labeled.nodes[frameId]?.semantics).toMatchObject({
+      role: "button",
+      accessibility_label: "Review and pay",
+      description: "Preserve this V2-only description.",
+    });
+    expect(labeled.nodes[frameId]?.metadata).toEqual({ preset: "web", nested: { source: "enterprise" } });
+    expect(lintDesignDocumentV2(labeled).some((item) => item.code === "interactive_accessible_name_missing")).toBe(false);
   });
 
   it("rejects edits that would silently flatten V2-native token modes", () => {

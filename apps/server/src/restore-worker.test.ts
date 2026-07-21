@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -18,6 +19,8 @@ import {
   loadRestorePreflightConfig,
   loadRestoreWorkerConfig,
   restoreCapacityForecast,
+  runForensicRollback,
+  runOfflineRestorePreparation,
   runRestorePreflight,
   runRestoreWorker,
   type RestoreWorkerConfig,
@@ -237,6 +240,241 @@ async function createRestoreFixture(
 }
 
 describe("one-shot restore worker", () => {
+  it("prepares, restores, resumes, and forensically rolls back without opening a corrupt live database", async () => {
+    const fixture = await createRestoreFixture("offline-corrupt-database");
+    const targetBytes = await fs.promises.readFile(fixture.targetBundlePath);
+    const targetSha256 = createHash("sha256").update(targetBytes).digest("hex");
+    await fs.promises.rm(fixture.dataDirectory, { recursive: true, force: true });
+    await fs.promises.mkdir(path.join(fixture.dataDirectory, "assets", "quarantine"), { recursive: true });
+    await fs.promises.writeFile(fixture.databasePath, "corrupt-live-database-bytes");
+    await fs.promises.writeFile(
+      path.join(fixture.dataDirectory, "assets", "quarantine", "operator-note.txt"),
+      "preserve exact pre-restore bytes",
+    );
+    const renderer = new FakeRenderer();
+
+    const preparation = await runOfflineRestorePreparation({
+      dataDirectory: fixture.dataDirectory,
+      backupDirectory: fixture.backupDirectory,
+      operationId: fixture.operationId,
+      expectedSource: { sha256: targetSha256, sizeBytes: targetBytes.length },
+      renderTimeoutMs: 5_000,
+      maxAssetBytes: 2 * 1024 * 1024,
+      maxAssetPixels: 4_000_000,
+      renderMaxPixels: 4_000_000,
+      renderIpcMaxBytes: 2 * 1024 * 1024,
+      allowSystemChrome: false,
+      nodeEnvironment: "test",
+    }, Readable.from([targetBytes]), { renderer });
+
+    expect(preparation).toMatchObject({
+      status: "prepared",
+      operationId: fixture.operationId,
+      targetSha256,
+    });
+    expect(await fs.promises.readFile(fixture.databasePath, "utf8")).toBe("corrupt-live-database-bytes");
+    const prepared = await new RestoreOperationStore(fixture.backupDirectory).read();
+    expect(prepared).toMatchObject({
+      phase: "prepared",
+      recovery: { mode: "offline", safetyKind: "forensic" },
+      safety: { id: preparation.safetyBackupId, bundleSha256: preparation.safetySha256 },
+    });
+
+    const restored = await runRestoreWorker({
+      ...fixture.config,
+      backupId: preparation.backupId,
+    }, { renderer });
+    expect(restored).toMatchObject({ status: "restored", backupId: preparation.backupId });
+    const restoredDatabase = new DesignerDatabase(fixture.databasePath);
+    try {
+      expect(restoredDatabase.sqlite.pragma("integrity_check", { simple: true })).toBe("ok");
+      expect(restoredDatabase.sqlite.prepare("SELECT id FROM designs WHERE id = ?")
+        .get(fixture.retainedDesignId)).toBeDefined();
+      expect((restoredDatabase.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM agent_grants WHERE revoked_at IS NULL",
+      ).get() as { count: number }).count).toBe(0);
+      expect(restoredDatabase.sqlite.prepare("SELECT status FROM backup_records WHERE id = ?")
+        .get(preparation.backupId)).toEqual({ status: "restored" });
+      expect(restoredDatabase.sqlite.prepare("SELECT id FROM backup_records WHERE id = ?")
+        .get(preparation.safetyBackupId)).toBeUndefined();
+    } finally {
+      restoredDatabase.close();
+    }
+
+    const safetyPath = path.join(fixture.backupDirectory, preparation.safetyFilename);
+    const safetyBytes = await fs.promises.readFile(safetyPath);
+    await fs.promises.chmod(safetyPath, 0o600);
+    await fs.promises.appendFile(safetyPath, "tampered");
+    await fs.promises.chmod(safetyPath, 0o400);
+    await new MaintenanceStore(fixture.backupDirectory, fixture.dataDirectory).write({
+      schemaVersion: 1,
+      active: true,
+      phase: "restore",
+      operationId: fixture.operationId,
+      startedAt: "2026-07-20T00:03:00.000Z",
+    });
+    await expect(runForensicRollback({
+      dataDirectory: fixture.dataDirectory,
+      backupDirectory: fixture.backupDirectory,
+      operationId: fixture.operationId,
+    })).resolves.toMatchObject({ status: "forensic_rollback_aborted", maintenancePhase: "verification" });
+    await expect(new RestoreOperationStore(fixture.backupDirectory).read())
+      .resolves.toMatchObject({ phase: "reconciled" });
+    const stillRestored = new DesignerDatabase(fixture.databasePath);
+    stillRestored.close();
+
+    await fs.promises.chmod(safetyPath, 0o600);
+    await fs.promises.writeFile(safetyPath, safetyBytes);
+    await fs.promises.chmod(safetyPath, 0o400);
+    await new MaintenanceStore(fixture.backupDirectory, fixture.dataDirectory).write({
+      schemaVersion: 1,
+      active: true,
+      phase: "restore",
+      operationId: fixture.operationId,
+      startedAt: "2026-07-20T00:04:00.000Z",
+    });
+    await expect(runForensicRollback({
+      dataDirectory: fixture.dataDirectory,
+      backupDirectory: fixture.backupDirectory,
+      operationId: fixture.operationId,
+    })).resolves.toMatchObject({ status: "forensic_rolled_back" });
+    expect(await fs.promises.readFile(fixture.databasePath, "utf8")).toBe("corrupt-live-database-bytes");
+    expect(await fs.promises.readFile(
+      path.join(fixture.dataDirectory, "assets", "quarantine", "operator-note.txt"),
+      "utf8",
+    )).toBe("preserve exact pre-restore bytes");
+    await expect(new RestoreOperationStore(fixture.backupDirectory).read())
+      .resolves.toMatchObject({ phase: "rolled_back", errorCode: "OPERATOR_ROLLBACK" });
+
+    const replacementOperationId = "restore_offline_replacement_000000000001";
+    await new MaintenanceStore(fixture.backupDirectory, fixture.dataDirectory).write({
+      schemaVersion: 1,
+      active: true,
+      phase: "restore",
+      operationId: replacementOperationId,
+      startedAt: "2026-07-20T00:05:00.000Z",
+    });
+    await expect(runOfflineRestorePreparation({
+      dataDirectory: fixture.dataDirectory,
+      backupDirectory: fixture.backupDirectory,
+      operationId: replacementOperationId,
+      expectedSource: { sha256: targetSha256, sizeBytes: targetBytes.length },
+      renderTimeoutMs: 5_000,
+      maxAssetBytes: 2 * 1024 * 1024,
+      maxAssetPixels: 4_000_000,
+      renderMaxPixels: 4_000_000,
+      renderIpcMaxBytes: 2 * 1024 * 1024,
+      allowSystemChrome: false,
+      nodeEnvironment: "test",
+    }, Readable.from([targetBytes]), { renderer })).resolves.toMatchObject({
+      status: "prepared",
+      operationId: replacementOperationId,
+    });
+    await expect(new RestoreOperationStore(fixture.backupDirectory).read())
+      .resolves.toMatchObject({ phase: "prepared", operationId: replacementOperationId });
+    expect(await fs.promises.readdir(path.join(fixture.backupDirectory, ".formaspec", "restore-history")))
+      .toHaveLength(1);
+  });
+
+  it("rejects offline source reception before consuming stdin when backup capacity is insufficient", async () => {
+    const fixture = await createRestoreFixture("offline-receive-capacity");
+    const targetBytes = await fs.promises.readFile(fixture.targetBundlePath);
+    let consumed = false;
+    const input = Readable.from((async function* () {
+      consumed = true;
+      yield targetBytes;
+    })());
+    const statfs = vi.spyOn(fs.promises, "statfs").mockResolvedValue({
+      type: 0n,
+      bsize: 1n,
+      blocks: 1n,
+      bfree: 1n,
+      bavail: 1n,
+      files: 1n,
+      ffree: 1n,
+    } as never);
+    try {
+      await expect(runOfflineRestorePreparation({
+        dataDirectory: fixture.dataDirectory,
+        backupDirectory: fixture.backupDirectory,
+        operationId: fixture.operationId,
+        expectedSource: {
+          sha256: createHash("sha256").update(targetBytes).digest("hex"),
+          sizeBytes: targetBytes.length,
+        },
+        renderTimeoutMs: 5_000,
+        maxAssetBytes: 2 * 1024 * 1024,
+        maxAssetPixels: 4_000_000,
+        renderMaxPixels: 4_000_000,
+        renderIpcMaxBytes: 2 * 1024 * 1024,
+        allowSystemChrome: false,
+        nodeEnvironment: "test",
+      }, input, { renderer: new FakeRenderer() })).rejects.toMatchObject({
+        code: "TEMPORARILY_UNAVAILABLE",
+        statusCode: 507,
+      });
+    } finally {
+      statfs.mockRestore();
+    }
+    expect(consumed).toBe(false);
+    await expect(new RestoreOperationStore(fixture.backupDirectory).read()).resolves.toBeNull();
+    expect((await fs.promises.readdir(fixture.backupDirectory)).some((entry) => entry.startsWith(".offline-input-")))
+      .toBe(false);
+  });
+
+  it("rejects offline preparation after inspection but before retention or forensic copying when workflow capacity is insufficient", async () => {
+    const fixture = await createRestoreFixture("offline-workflow-capacity");
+    const targetBytes = await fs.promises.readFile(fixture.targetBundlePath);
+    const originalStatfs = fs.promises.statfs.bind(fs.promises);
+    let exactBackupChecks = 0;
+    const statfs = vi.spyOn(fs.promises, "statfs").mockImplementation(async (target, options) => {
+      if (path.resolve(String(target)) === path.resolve(fixture.backupDirectory)) {
+        exactBackupChecks += 1;
+        if (exactBackupChecks >= 2) {
+          return {
+            type: 0n,
+            bsize: 1n,
+            blocks: 1n,
+            bfree: 1n,
+            bavail: 1n,
+            files: 1n,
+            ffree: 1n,
+          } as never;
+        }
+      }
+      return originalStatfs(target, options as { bigint: true });
+    });
+    try {
+      await expect(runOfflineRestorePreparation({
+        dataDirectory: fixture.dataDirectory,
+        backupDirectory: fixture.backupDirectory,
+        operationId: fixture.operationId,
+        expectedSource: {
+          sha256: createHash("sha256").update(targetBytes).digest("hex"),
+          sizeBytes: targetBytes.length,
+        },
+        renderTimeoutMs: 5_000,
+        maxAssetBytes: 2 * 1024 * 1024,
+        maxAssetPixels: 4_000_000,
+        renderMaxPixels: 4_000_000,
+        renderIpcMaxBytes: 2 * 1024 * 1024,
+        allowSystemChrome: false,
+        nodeEnvironment: "test",
+      }, Readable.from([targetBytes]), { renderer: new FakeRenderer() })).rejects.toMatchObject({
+        code: "TEMPORARILY_UNAVAILABLE",
+        statusCode: 507,
+      });
+    } finally {
+      statfs.mockRestore();
+    }
+    expect(exactBackupChecks).toBeGreaterThanOrEqual(2);
+    await expect(new RestoreOperationStore(fixture.backupDirectory).read()).resolves.toBeNull();
+    const entries = await fs.promises.readdir(fixture.backupDirectory);
+    expect(entries.some((entry) => entry.startsWith(".offline-input-") || entry.startsWith(".forensic-")))
+      .toBe(false);
+    expect(entries.some((entry) => entry.startsWith("formaspec-backup-1970-"))).toBe(false);
+  });
+
   it("forecasts the complete safety-backup, pin, verification, and candidate capacity peak", () => {
     const reserve = 64 * 1024 * 1024;
     expect(restoreCapacityForecast({
@@ -276,7 +514,7 @@ describe("one-shot restore worker", () => {
       status: "verified",
       backupId: fixture.targetBackupId,
       organizationId: "organization_legacy",
-      databaseSchemaVersion: 11,
+      databaseSchemaVersion: 13,
       documentSchemaVersion: 2,
     });
     expect(result.sizeBytes).toBeGreaterThan(0);
@@ -526,7 +764,7 @@ describe("one-shot restore worker", () => {
       status: "restored",
       backupId: fixture.targetBackupId,
       operationId: fixture.operationId,
-      schemaVersion: 11,
+      schemaVersion: 13,
       renderedDesignId: fixture.retainedDesignId,
       revoked: { grants: 1, connections: 1, nonces: 1 },
       maintenancePhase: "verification",
@@ -574,7 +812,7 @@ describe("one-shot restore worker", () => {
           operationId: fixture.operationId,
           targetBackupId: fixture.targetBackupId,
           safetyBackupId: result.safetyBackupId,
-          schemaVersion: 11,
+          schemaVersion: 13,
           revokedGrants: 1,
           revokedConnections: 1,
           revokedNonces: 1,

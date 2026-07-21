@@ -10,6 +10,7 @@
     "types": ["node"]
   },
   "include": [
+    "./handoff-execution-decisions.spec.ts",
     "./product-manager-backup-restore.spec.ts",
     "./revision-inspect-immutability.spec.ts",
     "../playwright.release.config.ts"

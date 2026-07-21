@@ -26,6 +26,15 @@ interface Migration extends DatabaseMigrationLedgerEntry {
   up: (sqlite: Database.Database) => void;
 }
 
+// Migration 2 is immutable historical DDL. Runtime version bumps must update
+// current metadata and newly written rows without rewriting the SQL bytes of
+// every historical schema prefix.
+const MIGRATION_2_RUNTIME_DEFAULTS = Object.freeze({
+  commandEngine: "1",
+  renderer: "2",
+  fontBundle: "1",
+});
+
 const baselineSql = `
 CREATE TABLE IF NOT EXISTS designs (
   id TEXT PRIMARY KEY,
@@ -180,9 +189,9 @@ function addPersistenceIntegrity(sqlite: Database.Database): void {
   addColumn(sqlite, "previews", "temporary_id_map_json TEXT NOT NULL DEFAULT '{}'");
   addColumn(sqlite, "previews", "created_ids_json TEXT NOT NULL DEFAULT '{}'");
   addColumn(sqlite, "previews", "changed_node_ids_json TEXT NOT NULL DEFAULT '[]'");
-  addColumn(sqlite, "previews", `command_engine_version TEXT NOT NULL DEFAULT '${DEFAULT_RUNTIME_VERSIONS.commandEngine}'`);
-  addColumn(sqlite, "previews", `renderer_version TEXT NOT NULL DEFAULT '${DEFAULT_RUNTIME_VERSIONS.renderer}'`);
-  addColumn(sqlite, "previews", `font_bundle_version TEXT NOT NULL DEFAULT '${DEFAULT_RUNTIME_VERSIONS.fontBundle}'`);
+  addColumn(sqlite, "previews", `command_engine_version TEXT NOT NULL DEFAULT '${MIGRATION_2_RUNTIME_DEFAULTS.commandEngine}'`);
+  addColumn(sqlite, "previews", `renderer_version TEXT NOT NULL DEFAULT '${MIGRATION_2_RUNTIME_DEFAULTS.renderer}'`);
+  addColumn(sqlite, "previews", `font_bundle_version TEXT NOT NULL DEFAULT '${MIGRATION_2_RUNTIME_DEFAULTS.fontBundle}'`);
   addColumn(sqlite, "previews", "status TEXT NOT NULL DEFAULT 'ready'");
   addColumn(sqlite, "previews", "kind TEXT NOT NULL DEFAULT 'ordinary'");
   addColumn(sqlite, "previews", "committed_revision_id TEXT");
@@ -1479,6 +1488,159 @@ function addRenderJobPersistence(sqlite: Database.Database): void {
   `);
 }
 
+function addHandoffExecutionDecisions(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS handoff_execution_decisions (
+      id TEXT PRIMARY KEY,
+      handoff_id TEXT NOT NULL REFERENCES handoffs(id) ON DELETE RESTRICT,
+      handoff_version INTEGER NOT NULL CHECK(handoff_version > 0),
+      sequence INTEGER NOT NULL CHECK(sequence > 0),
+      kind TEXT NOT NULL CHECK(kind IN (
+        'plan_approval',
+        'isolation_choice',
+        'diff_review',
+        'validation_approval',
+        'commit_approval',
+        'push_authorization',
+        'pull_request_request'
+      )),
+      outcome TEXT NOT NULL,
+      supersedes_decision_id TEXT REFERENCES handoff_execution_decisions(id) ON DELETE RESTRICT,
+      evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json) = 1)
+        CHECK(length(evidence_json) BETWEEN 2 AND 32768),
+      evidence_hash TEXT NOT NULL CHECK(length(evidence_hash) = 64),
+      actor_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      UNIQUE(handoff_id, sequence),
+      FOREIGN KEY(handoff_id, handoff_version)
+        REFERENCES handoff_versions(handoff_id, version) ON DELETE RESTRICT,
+      CHECK(
+        (kind IN ('plan_approval', 'diff_review', 'validation_approval', 'commit_approval')
+          AND outcome IN ('approved', 'denied', 'revoked'))
+        OR (kind = 'isolation_choice'
+          AND outcome IN ('branch', 'worktree', 'denied', 'revoked'))
+        OR (kind = 'push_authorization'
+          AND outcome IN ('authorized', 'denied', 'revoked'))
+        OR (kind = 'pull_request_request'
+          AND outcome IN ('requested', 'not_requested', 'denied', 'revoked'))
+      )
+    );
+    CREATE INDEX IF NOT EXISTS handoff_execution_decisions_handoff_sequence
+      ON handoff_execution_decisions(handoff_id, sequence);
+    CREATE INDEX IF NOT EXISTS handoff_execution_decisions_handoff_kind_sequence
+      ON handoff_execution_decisions(handoff_id, kind, sequence DESC);
+
+    CREATE TRIGGER IF NOT EXISTS handoff_execution_decisions_insert_integrity
+    BEFORE INSERT ON handoff_execution_decisions
+    WHEN
+      NEW.sequence != COALESCE((
+        SELECT MAX(existing.sequence) + 1
+        FROM handoff_execution_decisions existing
+        WHERE existing.handoff_id = NEW.handoff_id
+      ), 1)
+      OR NEW.handoff_version != (
+        SELECT handoff.current_version FROM handoffs handoff WHERE handoff.id = NEW.handoff_id
+      )
+      OR (
+        NEW.supersedes_decision_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM handoff_execution_decisions existing
+          WHERE existing.handoff_id = NEW.handoff_id AND existing.kind = NEW.kind
+        )
+      )
+      OR (
+        NEW.supersedes_decision_id IS NOT NULL
+        AND NEW.supersedes_decision_id IS NOT (
+          SELECT existing.id
+          FROM handoff_execution_decisions existing
+          WHERE existing.handoff_id = NEW.handoff_id AND existing.kind = NEW.kind
+          ORDER BY existing.sequence DESC LIMIT 1
+        )
+      )
+      OR (
+        NEW.outcome = 'revoked'
+        AND (
+          NEW.supersedes_decision_id IS NULL
+          OR (SELECT previous.outcome FROM handoff_execution_decisions previous
+              WHERE previous.id = NEW.supersedes_decision_id) IN ('denied', 'revoked')
+        )
+      )
+      OR (
+        NEW.kind = 'plan_approval'
+        AND (SELECT handoff.status FROM handoffs handoff WHERE handoff.id = NEW.handoff_id)
+          NOT IN ('in_review', 'approved', 'implementing')
+      )
+      OR (
+        NEW.kind = 'isolation_choice'
+        AND (SELECT handoff.status FROM handoffs handoff WHERE handoff.id = NEW.handoff_id)
+          NOT IN ('approved', 'implementing')
+      )
+      OR (
+        NEW.kind IN ('diff_review', 'validation_approval', 'commit_approval',
+                     'push_authorization', 'pull_request_request')
+        AND (SELECT handoff.status FROM handoffs handoff WHERE handoff.id = NEW.handoff_id) != 'implementing'
+      )
+    BEGIN SELECT RAISE(ABORT, 'handoff execution decision violates append-only CAS or lifecycle integrity'); END;
+
+    CREATE TRIGGER IF NOT EXISTS handoff_execution_decisions_immutable_update
+    BEFORE UPDATE ON handoff_execution_decisions
+    BEGIN SELECT RAISE(ABORT, 'handoff execution decisions are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS handoff_execution_decisions_immutable_delete
+    BEFORE DELETE ON handoff_execution_decisions
+    BEGIN SELECT RAISE(ABORT, 'handoff execution decisions are immutable'); END;
+  `);
+}
+
+function addComponentSourcePersistence(sqlite: Database.Database): void {
+  addColumn(sqlite, "component_definitions", `source_json TEXT
+    CHECK(source_json IS NULL OR (
+      json_valid(source_json) = 1
+      AND length(CAST(source_json AS BLOB)) BETWEEN 2 AND 1048576
+    ))`);
+  addColumn(sqlite, "component_definitions", `source_hash TEXT
+    CHECK(source_hash IS NULL OR (
+      length(source_hash) = 64
+      AND source_hash NOT GLOB '*[^0-9a-f]*'
+    ))`);
+  addColumn(sqlite, "design_system_upgrade_previews", `base_revision_id TEXT
+    REFERENCES revisions(id) ON DELETE RESTRICT`);
+  addColumn(sqlite, "design_system_upgrade_previews", `base_snapshot_hash TEXT
+    REFERENCES snapshots(snapshot_hash) ON DELETE RESTRICT
+    CHECK(base_snapshot_hash IS NULL OR (
+      length(base_snapshot_hash) = 64
+      AND base_snapshot_hash NOT GLOB '*[^0-9a-f]*'
+    ))`);
+  addColumn(sqlite, "design_system_upgrade_previews", `result_snapshot_hash TEXT
+    REFERENCES snapshots(snapshot_hash) ON DELETE RESTRICT
+    CHECK(result_snapshot_hash IS NULL OR (
+      length(result_snapshot_hash) = 64
+      AND result_snapshot_hash NOT GLOB '*[^0-9a-f]*'
+    ))`);
+
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS component_definitions_source_insert_integrity
+    BEFORE INSERT ON component_definitions
+    WHEN (NEW.source_json IS NULL) != (NEW.source_hash IS NULL)
+    BEGIN SELECT RAISE(ABORT, 'component definition source metadata must be paired'); END;
+
+    CREATE TRIGGER IF NOT EXISTS design_system_upgrade_previews_exact_metadata_insert
+    BEFORE INSERT ON design_system_upgrade_previews
+    WHEN NOT (
+      (NEW.base_revision_id IS NULL AND NEW.base_snapshot_hash IS NULL AND NEW.result_snapshot_hash IS NULL)
+      OR
+      (NEW.base_revision_id IS NOT NULL AND NEW.base_snapshot_hash IS NOT NULL AND NEW.result_snapshot_hash IS NOT NULL)
+    )
+    BEGIN SELECT RAISE(ABORT, 'design-system upgrade preview exact metadata must be complete'); END;
+
+    CREATE TRIGGER IF NOT EXISTS design_system_upgrade_previews_exact_metadata_immutable
+    BEFORE UPDATE ON design_system_upgrade_previews
+    WHEN NEW.base_revision_id IS NOT OLD.base_revision_id
+      OR NEW.base_snapshot_hash IS NOT OLD.base_snapshot_hash
+      OR NEW.result_snapshot_hash IS NOT OLD.result_snapshot_hash
+    BEGIN SELECT RAISE(ABORT, 'design-system upgrade preview exact metadata is immutable'); END;
+  `);
+}
+
 const migrations: Migration[] = [
   { version: 1, name: "baseline_v1", up: (sqlite) => sqlite.exec(baselineSql) },
   { version: 2, name: "content_addressed_persistence", up: addPersistenceIntegrity },
@@ -1491,6 +1653,8 @@ const migrations: Migration[] = [
   { version: 9, name: "audit_retention_execution", up: addAuditRetentionExecution },
   { version: 10, name: "portable_import_provenance", up: addPortableImportProvenance },
   { version: 11, name: "render_job_persistence", up: addRenderJobPersistence },
+  { version: 12, name: "handoff_execution_decisions", up: addHandoffExecutionDecisions },
+  { version: 13, name: "component_source_persistence", up: addComponentSourcePersistence },
 ];
 
 const migrationNames = new Set<string>();
@@ -1796,6 +1960,118 @@ const requiredEnterpriseMigrationShapes: readonly RequiredMigrationShape[] = [
       },
     ],
   },
+  {
+    version: 12,
+    tables: [
+      {
+        name: "handoff_execution_decisions",
+        columns: [
+          "id", "handoff_id", "handoff_version", "sequence", "kind", "outcome",
+          "supersedes_decision_id", "evidence_json", "evidence_hash", "actor_id", "created_at",
+        ],
+        sqlFragments: [
+          "foreign key(handoff_id, handoff_version) references handoff_versions(handoff_id, version) on delete restrict",
+          "kind in ( 'plan_approval', 'isolation_choice', 'diff_review', 'validation_approval', 'commit_approval', 'push_authorization', 'pull_request_request' )",
+          "kind = 'isolation_choice' and outcome in ('branch', 'worktree', 'denied', 'revoked')",
+          "kind = 'push_authorization' and outcome in ('authorized', 'denied', 'revoked')",
+          "kind = 'pull_request_request' and outcome in ('requested', 'not_requested', 'denied', 'revoked')",
+          "json_valid(evidence_json) = 1",
+          "length(evidence_json) between 2 and 32768",
+          "length(evidence_hash) = 64",
+        ],
+      },
+    ],
+    indexes: [
+      {
+        name: "handoff_execution_decisions_handoff_sequence",
+        table: "handoff_execution_decisions",
+        columns: [{ name: "handoff_id" }, { name: "sequence" }],
+      },
+      {
+        name: "handoff_execution_decisions_handoff_kind_sequence",
+        table: "handoff_execution_decisions",
+        columns: [
+          { name: "handoff_id" },
+          { name: "kind" },
+          { name: "sequence", descending: true },
+        ],
+      },
+    ],
+    triggers: [
+      {
+        name: "handoff_execution_decisions_insert_integrity",
+        table: "handoff_execution_decisions",
+        sqlFragments: [
+          "before insert on handoff_execution_decisions",
+          "max(existing.sequence) + 1",
+          "new.handoff_version != ( select handoff.current_version",
+          "new.supersedes_decision_id is not ( select existing.id",
+          "new.outcome = 'revoked'",
+          "not in ('in_review', 'approved', 'implementing')",
+          "!= 'implementing'",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "handoff_execution_decisions_immutable_update",
+        table: "handoff_execution_decisions",
+        sqlFragments: ["before update on handoff_execution_decisions", "raise(abort"],
+      },
+      {
+        name: "handoff_execution_decisions_immutable_delete",
+        table: "handoff_execution_decisions",
+        sqlFragments: ["before delete on handoff_execution_decisions", "raise(abort"],
+      },
+    ],
+  },
+  {
+    version: 13,
+    tables: [
+      {
+        name: "component_definitions",
+        columns: ["source_json", "source_hash"],
+      },
+      {
+        name: "design_system_upgrade_previews",
+        columns: ["base_revision_id", "base_snapshot_hash", "result_snapshot_hash"],
+      },
+    ],
+    indexes: [],
+    triggers: [
+      {
+        name: "component_definitions_source_insert_integrity",
+        table: "component_definitions",
+        sqlFragments: [
+          "before insert on component_definitions",
+          "new.source_json is null",
+          "new.source_hash is null",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "design_system_upgrade_previews_exact_metadata_insert",
+        table: "design_system_upgrade_previews",
+        sqlFragments: [
+          "before insert on design_system_upgrade_previews",
+          "new.base_revision_id is null",
+          "new.base_snapshot_hash is null",
+          "new.result_snapshot_hash is null",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "design_system_upgrade_previews_exact_metadata_immutable",
+        table: "design_system_upgrade_previews",
+        sqlFragments: [
+          "before update on design_system_upgrade_previews",
+          "new.base_revision_id is not old.base_revision_id",
+          "new.base_snapshot_hash is not old.base_snapshot_hash",
+          "new.result_snapshot_hash is not old.result_snapshot_hash",
+          "raise(abort",
+        ],
+      },
+    ],
+  },
 ];
 
 function quotedSchemaIdentifier(value: string): string {
@@ -1911,7 +2187,14 @@ export function validateDatabaseSchemaShape(sqlite: Database.Database, appliedVe
   }
 }
 
-function runMigrations(sqlite: Database.Database): void {
+function runMigrations(
+  sqlite: Database.Database,
+  targetVersion = DATABASE_SCHEMA_VERSION,
+  appliedAt: (migration: DatabaseMigrationLedgerEntry) => string = () => new Date().toISOString(),
+): void {
+  if (!Number.isSafeInteger(targetVersion) || targetVersion < 1 || targetVersion > DATABASE_SCHEMA_VERSION) {
+    throw new Error(`Cannot migrate to unsupported database schema version ${String(targetVersion)}.`);
+  }
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -1923,8 +2206,14 @@ function runMigrations(sqlite: Database.Database): void {
     "SELECT version, name FROM schema_migrations ORDER BY version",
   ).all() as Array<{ version: number; name: string }>;
   const recordedVersion = validateDatabaseMigrationLedger(recorded, { allowEmpty: true });
+  if (recordedVersion > targetVersion) {
+    throw new Error(
+      `Database schema version ${recordedVersion} cannot be downgraded to ${targetVersion}.`,
+    );
+  }
   validateDatabaseSchemaShape(sqlite, recordedVersion);
   for (const migration of migrations) {
+    if (migration.version > targetVersion) break;
     const transaction = sqlite.transaction(() => {
       const applied = sqlite.prepare(
         "SELECT name FROM schema_migrations WHERE version = ?",
@@ -1939,11 +2228,30 @@ function runMigrations(sqlite: Database.Database): void {
       validateDatabaseSchemaShape(sqlite, migration.version);
       sqlite.prepare(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-      ).run(migration.version, migration.name, new Date().toISOString());
+      ).run(migration.version, migration.name, appliedAt(migration));
     });
     transaction.immediate();
   }
-  validateDatabaseSchemaShape(sqlite, DATABASE_SCHEMA_VERSION);
+  validateDatabaseSchemaShape(sqlite, targetVersion);
+}
+
+/**
+ * Builds a fresh, genuine historical schema for deterministic migration tests.
+ *
+ * This is deliberately prefix-only: it applies the same immutable migration
+ * functions used by production and refuses to downgrade an existing database.
+ * Fixture timestamps are stable so checked-in evidence does not depend on the
+ * wall clock. Production startup always calls the latest migration target.
+ */
+export function applyDatabaseMigrationPrefixForTesting(
+  sqlite: Database.Database,
+  targetVersion: number,
+): void {
+  runMigrations(
+    sqlite,
+    targetVersion,
+    (migration) => `2026-01-${String(migration.version).padStart(2, "0")}T00:00:00.000Z`,
+  );
 }
 
 export class DesignerDatabase {

@@ -354,11 +354,12 @@ describe("formaspecctl", () => {
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(9, "audit_retention_execution", "2026-01-09T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(10, "portable_import_provenance", "2026-01-10T00:00:00.000Z");
     sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(11, "render_job_persistence", "2026-01-11T00:00:00.000Z");
+    sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(12, "handoff_execution_decisions", "2026-01-12T00:00:00.000Z");
     sqlite.close();
     const io = collectingIo();
     const result = await runCli(["migrate", "status", "--json"], { projectRoot: root, bridge: fakeBridge(), io });
     expect(result).toBe(0);
-    expect(JSON.parse(io.output[0]!)).toMatchObject({ latestAppliedVersion: 11, supportedVersion: 11, state: "current" });
+    expect(JSON.parse(io.output[0]!)).toMatchObject({ latestAppliedVersion: 12, supportedVersion: 12, state: "current" });
   });
 
   it("creates and lists managed backups through the credential-free loopback API", async () => {
@@ -416,6 +417,14 @@ describe("formaspecctl", () => {
           updatedAt: null,
           lastScheduledBackupAt: null,
           nextDueAt: null,
+          supervision: {
+            status: "warning",
+            dueAt: null,
+            graceEndsAt: null,
+            currentWindowCovered: false,
+            retention: { candidateCount: 1, candidateBytes: 42, protectedCount: 0, planHash },
+            alerts: [{ code: "RETENTION_PRUNE_REQUIRED", severity: "warning", message: "1 verified scheduled backup requires a reviewed retention prune." }],
+          },
         } });
       }
       if (url.pathname === "/api/backups/schedule" && method === "PUT") {
@@ -471,6 +480,15 @@ describe("formaspecctl", () => {
     expect(JSON.parse(scheduleIo.output[0]!)).toMatchObject({ enabled: true, cronExpression: "15 3 * * *" });
     expect(JSON.parse(requests[1]!.body!)).toEqual({ enabled: true, cronExpression: "15 3 * * *" });
 
+    const showIo = collectingIo();
+    expect(await runCli(["backup", "schedule", "show"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io: showIo,
+    })).toBe(0);
+    expect(showIo.output.join("\n")).toContain("Backup supervision: warning");
+    expect(showIo.output.join("\n")).toContain("RETENTION_PRUNE_REQUIRED");
+
     expect(await runCli(["backup", "schedule", "run", "--json"], {
       projectRoot: root,
       bridge: fakeBridge(),
@@ -503,6 +521,7 @@ describe("formaspecctl", () => {
     expect(requests.map((request) => `${request.method} ${request.pathname}`)).toEqual([
       "GET /api/backups/schedule",
       "PUT /api/backups/schedule",
+      "GET /api/backups/schedule",
       "POST /api/backups/schedule/run",
       "POST /api/backups/prune/previews",
       `POST /api/backups/prune/previews/${previewId}/commit`,
@@ -668,6 +687,46 @@ describe("formaspecctl", () => {
     expect(JSON.parse(io.output[0]!)).toMatchObject({ status: "restored", backupId, serviceReady: true });
   });
 
+  it("routes an explicitly verified bundle through offline Docker disaster recovery", async () => {
+    const root = makeProject(temporaryDirectory());
+    fs.mkdirSync(path.join(root, ".designer", "run"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".designer", "run", "mode"), "docker\n");
+    const bundle = path.join(root, "operator-selected.tar");
+    fs.writeFileSync(bundle, "test bundle bytes");
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    let received: { path: string; sha256: string; sizeBytes: number } | undefined;
+
+    const result = await runCli(["backup", "restore", "offline", bundle, "--yes", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      backupVerifier: async (filename) => {
+        expect(filename).toBe(bundle);
+        return backupVerification(CLI_SUPPORTED_DATABASE_VERSION);
+      },
+      restoreDockerBackupOffline: async (receivedRoot, source) => {
+        expect(receivedRoot).toBe(root);
+        received = source;
+        return {
+          status: "restored",
+          operationId: "restore_0123456789abcdef0123456789abcdef",
+          backupId: `backup_${"c".repeat(40)}`,
+          safetyBackupId: `backup_${"d".repeat(40)}`,
+          maintenanceCleared: true,
+          serviceReady: true,
+          reconnectRequired: true,
+          worker: null,
+        };
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(received).toEqual({ path: bundle, sha256: "a".repeat(64), sizeBytes: 512 });
+    expect(bridge.stops).toBe(1);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({ status: "restored", serviceReady: true });
+  });
+
   it("reports Docker restore state without stopping the bridge", async () => {
     const root = makeProject(temporaryDirectory());
     const bridge = fakeBridge();
@@ -701,6 +760,31 @@ describe("formaspecctl", () => {
     expect(result).toBe(0);
     expect(bridge.stops).toBe(0);
     expect(JSON.parse(io.output[0]!)).toMatchObject({ operation: { phase: "reconciled" } });
+  });
+
+  it("reads migration status from the native data-directory contract", async () => {
+    const root = makeProject(temporaryDirectory());
+    const state = path.join(root, "native-user-state");
+    const database = path.join(state, "data", "designer.sqlite");
+    writeMigrationDatabase(database, CLI_SUPPORTED_DATABASE_VERSION);
+    const io = collectingIo();
+
+    const result = await runCli(["migrate", "status", "--json"], {
+      projectRoot: root,
+      environment: {
+        FORMASPEC_RUNTIME_DIR: path.join(state, "runtime"),
+        FORMASPEC_DATA_DIR: path.join(state, "data"),
+      },
+      io,
+    });
+
+    expect(result).toBe(0);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      databasePath: database,
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      state: "current",
+    });
+    expect(fs.existsSync(path.join(root, "data"))).toBe(false);
   });
 
   it("requires explicit authorization before changing Docker restore recovery state", async () => {
@@ -752,6 +836,44 @@ describe("formaspecctl", () => {
     expect(delegated).toBe(false);
     expect(bridge.stops).toBe(0);
     expect(io.errors[0]).toMatch(mode === "docker" ? /Docker runtime uses a managed volume/ : /managed backup ID through the supervised maintenance workflow/);
+  });
+
+  it("fails closed before a source-local restore can target native packaged state", async () => {
+    const root = makeProject(temporaryDirectory());
+    const state = path.join(root, "native-user-state");
+    const runtime = path.join(state, "runtime");
+    fs.mkdirSync(path.join(runtime, "run"), { recursive: true });
+    fs.writeFileSync(path.join(runtime, "run", "mode"), "local\n");
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    let verified = false;
+    let restored = false;
+    let delegated = false;
+
+    const result = await runCli(["backup", "restore", path.join(root, "incoming.tar"), "--yes"], {
+      projectRoot: root,
+      environment: {
+        FORMASPEC_RUNTIME_DIR: runtime,
+        FORMASPEC_DATA_DIR: path.join(state, "data"),
+        FORMASPEC_BACKUP_DIR: path.join(state, "backups"),
+        FORMASPEC_LOG_DIR: path.join(state, "logs"),
+        FORMASPEC_SUPPORT_DIR: path.join(state, "support-bundles"),
+      },
+      bridge,
+      io,
+      backupVerifier: async () => { verified = true; return backupVerification(); },
+      restoreVerifiedBackup: async () => { restored = true; },
+      commandRunner: async () => { delegated = true; return { exitCode: 0, stdout: "", stderr: "" }; },
+    });
+
+    expect(result).toBe(1);
+    expect(verified).toBe(false);
+    expect(restored).toBe(false);
+    expect(delegated).toBe(false);
+    expect(bridge.stops).toBe(0);
+    expect(io.errors[0]).toContain("Source-local restore is disabled for an environment-managed native runtime");
+    expect(fs.existsSync(path.join(root, "data"))).toBe(false);
+    expect(fs.existsSync(path.join(root, ".designer"))).toBe(false);
   });
 
   it("verifies, stops local services, creates a safety copy, and invokes the atomic restore engine", async () => {
@@ -844,7 +966,7 @@ describe("formaspecctl", () => {
       projectRoot: root,
       bridge,
       io,
-      backupVerifier: async () => backupVerification(12),
+      backupVerifier: async () => backupVerification(CLI_SUPPORTED_DATABASE_VERSION + 1),
       commandRunner: async () => { delegated = true; return { exitCode: 0, stdout: "", stderr: "" }; },
       restoreVerifiedBackup: async () => undefined,
     });

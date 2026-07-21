@@ -61,6 +61,15 @@ evidence; today they are caller-supplied self-attestation, not code-signing
 credentials, a source-controlled/signed release lock, or proof of runtime
 behavior.
 
+## Implemented source hardening
+
+The source foundation now uses one cross-architecture UpgradeCode so x64 and
+ARM64 packages cannot intentionally coexist as separate product families. It
+copies verified payload files into a private staging snapshot before WiX reads
+them, invokes WiX with a minimal allowlisted environment, and gives external
+packaging commands an absolute deadline. Focused tests cover these contracts.
+They reduce build-time risk but do not prove a valid MSI or Windows runtime.
+
 ## Known foundation defects
 
 The current source must not be promoted until these design defects are fixed
@@ -70,18 +79,14 @@ and verified on Windows:
   restricted identities, ProgramData/named-pipe ACLs, renderer egress denial,
   or descendant containment. Loopback `AUTH_MODE=none` is not an acceptable
   shared-machine trust boundary.
-- x64 and ARM64 products use architecture-specific upgrade families while
-  owning the same paths/services/registry resources, allowing unsafe side-by-
-  side installation on Windows ARM64.
 - WiX and service-host provenance does not bind a trusted source archive or the
-  full WiX distribution, and the WiX subprocess inherits the ambient build
-  environment.
-- Payload verification is not identity-bound to the bytes WiX later reads;
-  reparse-point, hardlink, replacement-race, and extracted-MSI equality tests
-  are missing.
+  full WiX distribution. Caller-supplied matching provenance remains self-
+  attestation.
+- MSI output validation still accepts a compound-file header without checking
+  Windows Installer tables or extracting and comparing the packaged payload.
 - PE checks prove only header/machine shape, not a functional Node, Chromium,
-  or service host. Protocol parsing and external-command deadlines/process-tree
-  cleanup are also unverified.
+  or service host. The real service host, strict protocol parsing, service stop
+  behavior, and Windows process-tree containment are absent or unverified.
 
 Production release remains **NO-GO** until the repository-wide release
 checklist and every Windows-specific gate pass.

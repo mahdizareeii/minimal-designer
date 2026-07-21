@@ -1,15 +1,16 @@
 # FormaSpec deployment
 
-Last audited: 2026-07-20
+Last audited: 2026-07-21
 
 ## Deployment decision
 
 FormaSpec is **not ready for production or public deployment**. The repository
 can be used for local development and controlled, access-restricted evaluation,
 and the hardened local Docker API/renderer split plus externally supervised
-Docker/server planned-restore command foundation exist, but release-qualified
-native packages, clean server planned-restore/reverse-proxy evidence, offline
-disaster recovery, installer matrix, signed backup
+Docker/server planned and explicitly authorized offline restore foundations
+exist, but release-qualified native packages, clean server planned/offline
+restore and reverse-proxy lifecycle evidence, remote/off-site disaster
+recovery, installer matrix, signed backup
 provenance, and complete release evidence do not exist yet. One isolated local-Docker A/B restore and
 safety-restore exercise has passed; it does not qualify the server deployment
 path.
@@ -88,23 +89,61 @@ Host/Origin, trusted-proxy, CSRF, and container-local variables. The local MCP
 bridge is not in the image; the source CLI starts it as a separate host process on
 `127.0.0.1:4312`.
 
-The local topology was verified with a fresh isolated Compose project: both
-services reached health, a real worker render succeeded, and a created project
-survived API restart. The installed default volume subsequently migrated from
+The exact-current local source checkpoint was verified with project
+`formaspeccischema118e2818fed6`, built from source identity
+`local-uncommitted-final437-eventauth-sqlbounded-cli`: readiness reported
+migration 12, Playwright worker, and no fallback; design
+`document_0e6b4b61e3964110b9a4533ef2a63398` at revision
+`revision_aea2807b70cb4c8c9b6588c191de0218` rendered a real 512×339 PNG with
+SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`;
+and the same design/version survived API-only restart
+and rerendered identically. API/renderer ran as `pwuser` from identical image
+`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`,
+with read-only roots, capability drop, no-new-privileges, PID/memory/CPU bounds,
+and renderer networking disabled. The renderer-egress canary returned DNS
+`EAI_AGAIN`, TCP `ENETUNREACH`, and zero external interfaces. Data/backup/socket volumes were local/local
+with null options and distinct mountpoints; cleanup removed all containers and
+volumes. The temporary summary is
+`/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
+(SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`);
+it is exact-current local `NO-GO` evidence, not retained-CI or provenance
+evidence. This final reviewed image also passed Firefox/WebKit 12/12 once and a
+same-machine source-to-clean-target copied-bundle restore with independent
+volumes and exact state/render equality. The cross-browser summary is
+`/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json`
+(SHA-256 `2b723c3ddac0404bea7a1124559945ec78f69a6a6ced48923f9d170456c71b9b`).
+The immediately prior fit-sync image passed three consecutive 12/12 runs; its
+main, `-repeat2`, and `-repeat3` summaries are byte-identical with SHA-256
+`0b28b9a0f78ec5687496cd61a7b930fa00d0f276c5dfbb0c0901ce7410a9938b`.
+The final recovery summary is
+`/private/tmp/formaspec-offhost-restore-20260721-final437-eventauth-sqlbounded-cli/NO-GO-SUMMARY.json`
+(SHA-256 `2a7bf59d47579f4c5f6f20bf779976e9dd4a6260b6670e73f245753ef3abbdc9`).
+Neither is real remote-host/network/TLS/off-site recovery or hosted release
+evidence. The retained pre-current-SSE-authorization unsigned macOS checkpoint
+under `artifacts/candidates/schema12-current/` retains passing frozen package-
+integrity and non-installing extracted-runtime evidence but was not installed;
+current-source verification records expected drift and same-host outer
+PKG bytes are nondeterministic and release remains `NO-GO`. The preserved
+`schema11-current` checkpoint is historical only. The installed default volume
+previously migrated from
 schema 7 to schema 8 while preserving its project, 31 revisions, representative
 asset, and worker render. Current gaps include:
 
 - no release-qualified Windows named-pipe/native worker/service-host packaging;
-- no continuous canary-egress, crash, saturation, or long-running load proof;
-- no installed schedule supervisor; online create/list/verify/download and
-  supervisor-callable schedule/prune use the mounted backup volume;
+- the exact-current local Docker smoke passes DNS/direct-TCP/non-loopback
+  renderer-egress canaries, but no retained hosted/native canary, crash,
+  saturation, or long-running load proof exists;
+- no installed schedule supervisor or external alert delivery; online create/
+  list/verify/download and supervisor-callable schedule/prune use the mounted
+  backup volume, while ready health and CLI expose bounded schedule diagnostics;
 - a tested externally supervised restore foundation supports the exact
   launcher-recorded local-Docker/server runtime, but the disposable A/B
   exercise covers only local Docker and no server deployment automation or
   alerting has been qualified;
-- the Docker/server restore capability is `HEALTHY_PLANNED_RESTORE_ONLY`; it
-  requires a healthy current API/database for backup-ID resolution and preflight
-  and is not offline disaster recovery;
+- managed-ID Docker/server restore is `HEALTHY_PLANNED_RESTORE_ONLY` and
+  requires a healthy current API/database for backup-ID resolution and
+  preflight; the separate explicit offline-bundle path exists, but neither path
+  has clean server-mode or real remote/off-site lifecycle evidence;
 - no release evidence proving the strict server-mode reverse-proxy path,
   upgrade, restore, or multi-user long-duration behavior.
 
@@ -152,8 +191,11 @@ copy upstream grants into TOML.
 The application has a fail-closed `APP_MODE=server` configuration. The server
 initializer and Compose overrides now emit the strict public URL, proxy,
 Host/Origin, identity, CSRF, and container-mode contract without rewriting
-legacy secret files. This is not a production deployment endorsement because
-the real proxy/direct-port and recovery matrices remain incomplete.
+legacy secret files. A controlled actual-socket loopback harness now verifies
+header replacement, raw-peer/direct-port rejection, and restart-bound hop-secret
+rotation. This is not a production deployment endorsement because real
+Nginx/TLS, host-firewall, identity-provider, and recovery matrices remain
+incomplete.
 
 Required security values include:
 
@@ -237,8 +279,11 @@ location / {
     proxy_pass http://127.0.0.1:4310;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
+    proxy_set_header Forwarded "";
     proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Company-Identity $remote_user;
     proxy_set_header X-FormaSpec-Proxy-Secret "REPLACE_FROM_SECURE_SECRET_STORE";
     proxy_set_header Authorization $http_authorization;
@@ -248,8 +293,11 @@ location ~ ^/(events|api/events)$ {
     proxy_pass http://127.0.0.1:4310;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
+    proxy_set_header Forwarded "";
     proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Company-Identity $remote_user;
     proxy_set_header X-FormaSpec-Proxy-Secret "REPLACE_FROM_SECURE_SECRET_STORE";
     proxy_buffering off;
@@ -258,12 +306,46 @@ location ~ ^/(events|api/events)$ {
 }
 ```
 
-Nginx `proxy_set_header` overwrites the inbound header; equivalent proxies must
-also replace rather than append. Direct requests from an allowlisted raw peer
-without the hop credential are accepted only for the exact minimal health
-probe routes (`/health`, `/ready`, `/health/live`, `/health/ready`, and
-`/health/render`). Raw-peer allowlisting by itself is not browser or API
-authentication.
+Nginx `proxy_set_header` overwrites the inbound header, while an empty value
+removes it. `$remote_addr` intentionally replaces, rather than appends to, any
+caller-supplied forwarding chain. Equivalent proxies must provide the same
+replace-or-remove behavior. Direct requests from an allowlisted raw peer without
+the hop credential are accepted only for the exact minimal health probe routes
+(`/health`, `/ready`, `/health/live`, `/health/ready`, and `/health/render`).
+Raw-peer allowlisting by itself is not browser or API authentication.
+
+### Controlled proxy lifecycle evidence
+
+`apps/server/src/reverse-proxy-lifecycle.test.ts` uses actual TCP listeners and
+separate loopback address families instead of Fastify request injection:
+
+- the reverse proxy reaches the backend from allowlisted IPv6 loopback, while a
+  direct IPv4-loopback client is rejected even when it presents the correct hop
+  secret and a forged trusted identity;
+- caller-supplied trusted identity, hop-secret, Host, `Forwarded`,
+  `X-Forwarded-*`, and `X-Real-IP` values are removed and replaced before the
+  request reaches FormaSpec;
+- only the proxy-established canonical identity is bootstrapped; forged
+  identities never enter the principal table;
+- append-style identity forwarding is rejected as ambiguous, and append-style
+  hop-secret forwarding fails the constant-time credential comparison;
+- exact health routes remain credential-free only through an allowlisted raw
+  peer; the same direct untrusted peer is denied;
+- changing the proxy to a new hop secret fails against the still-running old
+  backend, succeeds only after a backend restart with the new secret, and makes
+  the old secret fail after restart.
+
+The hop secret is a startup configuration snapshot; there is no dual-secret
+grace window. Rotate it during a drained maintenance window: prepare the new
+secret in both protected stores, stop accepting user traffic, restart the API
+with the new value, reload the proxy with the same value, verify proxied health
+and an authenticated request, then destroy the old value. Updating either side
+alone intentionally causes non-health requests to fail closed.
+
+This harness proves application behavior across real local sockets. It does not
+prove a particular Nginx build, TLS certificate lifecycle, external identity
+provider, container/host firewall, routing policy, or public backend-port
+inaccessibility. Those remain deployment release gates.
 
 The example is incomplete without the company's authentication configuration,
 network policy, certificate management, secret delivery, and trusted-proxy
@@ -309,9 +391,12 @@ curl --fail --silent --show-error http://127.0.0.1:4310/health/render
 
 For an HTTPS proxy evaluation, run the equivalent checks through the public
 origin where policy allows. `/health/live` is process liveness.
-`/health/ready` reports database/migration readiness. `/health/render` reports
-renderer configuration but does not perform a real Chromium job. A deployment
-gate must additionally render a representative frame and verify the PNG.
+`/health/ready` reports database/migration readiness plus bounded aggregate
+backup overdue/stalled/failed-run/retention-backlog diagnostics. Failed or
+stalled attempts remain critical even when the current window has a valid backup.
+`/health/render` reports renderer configuration but does not perform a real
+Chromium job. A deployment gate must additionally render a representative frame
+and verify the PNG.
 
 The image health check uses the compiled, credential-free FormaSpec probe for
 `/health/ready`. It always connects to the container over
@@ -351,7 +436,9 @@ primitives. Bundle verification includes exact archive/checksum/asset coverage,
 normalized image and legacy BLOB integrity, canonical strict V1/V2 snapshots,
 revision hash chains, and exact project heads. The running application and
 Administration UI expose create/list/re-verify/download. Supervisor-callable
-schedule execution and preview-first retention pruning are implemented. The CLI
+schedule execution, durable attempt start/success/failure audit/outbox evidence,
+bounded health/CLI diagnostics, and preview-first retention pruning are
+implemented. The CLI
 supports both explicitly authorized source-local restore and an externally
 supervised launcher-pinned Docker/server restore by opaque managed backup ID:
 
@@ -492,13 +579,15 @@ migration fixtures, operator-approved cleanup, and rollback evidence exist.
 Production deployment remains **NO-GO** until evidence exists for all of these:
 
 - Windows native service-host/named-pipe renderer IPC, ACL/process-tree
-  packaging plus continuous egress, crash,
-  saturation, and load evidence beyond the verified local Docker worker;
-- strict server-mode proxy/direct-port, `HEALTHY_PLANNED_RESTORE_ONLY`/
-  rollback, upgrade, alerting, and long-running Compose evidence, plus a
-  separately authorized offline disaster-recovery path;
-- broader local-Docker V1/V2, asset/hash/render and historical-fixture recovery
-  evidence beyond the isolated A/B exercise, signed provenance, durable `/data`
+  packaging plus retained hosted/native egress, crash, saturation, and load
+  evidence beyond the passing exact-current local Docker worker;
+- strict server-mode proxy/direct-port, managed-ID/offline restore and rollback,
+  upgrade, installed scheduling, external alert delivery, and long-running
+  Compose evidence; both restore command paths exist but lack clean server and
+  remote/off-site lifecycle qualification;
+- broader local-Docker V1/V2, asset/hash/render and anonymized real-customer
+  recovery evidence beyond the deterministic historical fixtures and isolated
+  A/B exercise, signed provenance, durable `/data`
   and `/backups` operational proof, and complete scheduling/retention/pruning
   failure recovery;
 - release evidence for the implemented server-mode supervisor covering
@@ -510,18 +599,20 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
   performance budgets;
 - full organization/role/scope/revocation/CSRF/Host/Origin/archive/asset/
   traversal/decompression/renderer-egress/secret-exclusion security suites;
-- current self-contained macOS PKG, Windows MSI, Linux DEB/RPM, service supervision,
+- release-qualified macOS PKG, Windows MSI, Linux DEB/RPM, service supervision,
   autostart, protocol registration, clean install/upgrade/uninstall/reinstall,
-  signing, and notarization workflows;
+  signing, and notarization workflows; the retained unsigned macOS checkpoint
+  passed frozen non-installing extraction/runtime checks only and is not current-source;
 - real packaged Windows DPAPI service/ACL/lifecycle verification;
-- framework-aware Workspace Bridge mapping upload and the broader approved
-  plan/diff/validation/commit/PR workflow around the implemented selected-
-  workspace Codex launch; connected
-  grants already persist bounded path-free inventories automatically;
+- automatic Workspace Bridge mapping suggestions, incremental rescans, portable
+  mapping round trips, and the broader approved plan/diff/validation/commit/
+  push/PR workflow around the implemented selected-workspace Codex launch;
+  connected grants already persist bounded path-free inventories and explicit
+  exact-revision mappings through the authorized local MCP bridge;
 - complete Redesign Studio and product-manager workflow UI beyond the passing
   20-step PM-to-backup-restore integration scenario;
 - artifact-specific container/native SBOMs, dependency/image/OS scanning,
   reproducibility, unsigned/signed artifact instructions, and zero unresolved
-  critical/high security findings. The earlier Sharp-free schema-10 source-
-  workspace gate passed but requires a schema-11 rerun and never replaces
-  target-artifact evidence.
+  critical/high security findings. The current Sharp-free schema-12 source-
+  workspace gate passes with 342 components and zero policy violations but
+  never replaces target-artifact evidence.

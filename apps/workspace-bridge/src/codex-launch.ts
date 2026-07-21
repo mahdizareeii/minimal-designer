@@ -24,7 +24,7 @@ export interface CodexLaunchPlan {
   schemaVersion: 1;
   grantId: string;
   handoffId: string;
-  handoffStatus: "approved" | "implementing";
+  handoffStatus: "implementing";
   handoffVersion: number;
   inventoryId: string;
   inventoryHash: string;
@@ -62,10 +62,10 @@ export interface ExecuteCodexLaunchOptions extends PrepareCodexLaunchOptions {
   processLauncher?: CodexProcessLauncher;
 }
 
-interface ApprovedHandoff {
+interface ImplementationHandoff {
   id: string;
   inventoryId: string;
-  status: "approved" | "implementing";
+  status: "implementing";
   currentVersion: number;
 }
 
@@ -185,15 +185,15 @@ async function readApiRecord(
   return readBoundedResponseObject(response, label);
 }
 
-function parseApprovedHandoff(value: unknown, expectedId: string): ApprovedHandoff {
+function parseImplementationHandoff(value: unknown, expectedId: string): ImplementationHandoff {
   const handoff = recordValue(value);
   if (handoff === null
     || handoff.id !== expectedId
     || typeof handoff.inventoryId !== "string" || !INVENTORY_ID.test(handoff.inventoryId)
-    || (handoff.status !== "approved" && handoff.status !== "implementing")
+    || handoff.status !== "implementing"
     || typeof handoff.currentVersion !== "number" || !Number.isSafeInteger(handoff.currentVersion) || handoff.currentVersion < 1
     || !Array.isArray(handoff.transitions)) {
-    throw new Error("FormaSpec handoff is not an approved implementation handoff.");
+    throw new Error("FormaSpec handoff is not explicitly authorized for implementation.");
   }
   const transitions = handoff.transitions.map(recordValue);
   if (transitions.some((transition) => transition === null)
@@ -223,15 +223,14 @@ function parseApprovedHandoff(value: unknown, expectedId: string): ApprovedHando
     || approvalDetails.implementationPlanConfirmed !== true) {
     throw new Error("FormaSpec handoff approval metadata is incomplete or does not match its immutable version.");
   }
-  if (handoff.status === "implementing") {
-    const implementation = [...transitions].reverse().find((transition) => transition?.toStatus === "implementing");
-    const implementationDetails = recordValue(implementation?.details);
-    if (implementation?.fromStatus !== "approved"
-      || implementationDetails?.decision !== "implementation_authorized"
-      || implementationDetails.authorization !== "start_implementation"
-      || implementationDetails.approvedVersion !== handoff.currentVersion) {
-      throw new Error("FormaSpec handoff implementation authorization is incomplete or stale.");
-    }
+  const implementation = transitions.at(-1);
+  const implementationDetails = recordValue(implementation?.details);
+  if (implementation?.fromStatus !== "approved"
+    || implementation?.toStatus !== "implementing"
+    || implementationDetails?.decision !== "implementation_authorized"
+    || implementationDetails.authorization !== "start_implementation"
+    || implementationDetails.approvedVersion !== handoff.currentVersion) {
+    throw new Error("FormaSpec handoff implementation authorization is incomplete or stale.");
   }
   const specification = recordValue(handoff.specification);
   const implementationPolicy = recordValue(specification?.implementationPolicy);
@@ -271,7 +270,7 @@ async function readCentralLaunchContext(
   connection: RepositoryPolicyConnection,
   handoffId: string,
   fetchImplementation: typeof fetch,
-): Promise<{ handoff: ApprovedHandoff; inventory: CentralRepositoryInventory }> {
+): Promise<{ handoff: ImplementationHandoff; inventory: CentralRepositoryInventory }> {
   let handoffBody: Record<string, unknown>;
   if (connection.mcpUrl !== undefined) {
     handoffBody = await callMcpTool(connection, "handoff_read", { handoff_id: handoffId }, fetchImplementation);
@@ -283,7 +282,7 @@ async function readCentralLaunchContext(
       fetchImplementation,
     );
   }
-  const handoff = parseApprovedHandoff(handoffBody.handoff, handoffId);
+  const handoff = parseImplementationHandoff(handoffBody.handoff, handoffId);
   let inventoryBody: Record<string, unknown>;
   if (connection.mcpUrl !== undefined) {
     inventoryBody = await callMcpTool(

@@ -1,24 +1,31 @@
 # FormaSpec security
 
-Last audited: 2026-07-20
+Last audited: 2026-07-21
 
 ## Current security posture
 
-The current MVP is suitable for loopback development or an SSH-tunnel-only
+The current FormaSpec build is suitable for loopback development or an SSH-tunnel-only
 evaluation. It is **not approved for direct production exposure** and does not
 yet meet the FormaSpec enterprise security model.
 
 Organization/project authorization, scoped grants, exact commits, strict
 server trust configuration, and a network-denied renderer are now implemented
-foundations. Production remains blocked by incomplete exhaustive authorization,
+foundations. Production remains blocked by broader combinatorial authorization,
 proxy, browser, restore, image-worker, prompt-injection, secret-exclusion,
 installer, and long-running operational evidence. An isolated local-Docker
-restore/safety-restore exercise now passes, but the server command is only
-`HEALTHY_PLANNED_RESTORE_ONLY`, not offline disaster recovery. Clean server
-planned-restore supervision, broader recovery evidence, and signed provenance
-remain unverified. Additional proxy-origin authentication hardening is active
-in the current working tree and must be rerun through the full deployment
-matrix before its details are treated as verified release evidence.
+planned restore/safety-restore exercise now passes. A separately authorized
+offline bundle path also exists and can preserve corrupt pre-state bytes without
+opening SQLite. A disposable unique-Compose worker/control smoke passed a real
+corrupt-database restore, revocation, and forensic byte rollback without
+touching the user's live stack; source/Compose CLI recovery smokes also pass.
+Clean server planned/offline supervision, packaged lifecycle proof, broader
+recovery evidence, and signed provenance remain unverified. Server mode now
+requires a separate internal proxy hop
+secret on every non-health request in addition to raw-peer validation; focused
+server/launcher tests pass. A controlled actual-socket 1/1 lifecycle checkpoint
+proves header replacement, direct-peer denial, ambiguous append rejection, and
+restart-bound rotation. Real Nginx/TLS, identity-provider, public-port/firewall,
+and compromise-response deployment evidence remains open.
 
 ## Current controls that are retained
 
@@ -34,14 +41,16 @@ matrix before its details are treated as verified release evidence.
 | Revision immutability | SQLite triggers reject revision update and delete. Restore creates a new revision. |
 | MCP annotations | Read, write, preview, and destructive tools have approval hints. |
 | Organization policy | A strict schema-version-1 policy is read through REST/MCP, edited by an Organization Administrator with an expected configuration hash, exported as secret-free YAML, and enforced for agents, identity mappings, repositories, assets, backups, and portable bundle export/import. Corrupt post-policy configuration fails closed; unproven legacy free-form configuration is quarantined. |
-| Portable import boundary | Read-only validation is separate from Organization Administrator mutation. Import requires scoped idempotency, preserve-ID conflict failure or deterministic clone remapping, strict V1/V2/product-spec validation, isolated raster normalization, database rollback on failure, and immutable migration-10 provenance. |
-| Live event authorization | SSE resolves the actor again before every delivered event and every 15-second heartbeat, so revocation or policy denial closes an already-open stream. |
+| Portable import boundary | Read-only validation is separate from Organization Administrator mutation. Import requires scoped idempotency, preserve-ID conflict failure or deterministic clone remapping, strict V1/V2/product-spec validation, isolated raster normalization, database rollback on failure, and immutable migration-10 provenance. Multipart bytes stream into a private file; ZIP entries stream independently into private files with bounded expansion, CRC, hash, and pinned file metadata rather than retaining the whole request/extracted set in memory. |
+| Live event authorization | `/events` and `/api/events` authenticate bearer tokens as scoped grant actors, while bearer-less browser EventSource requests retain the local/trusted-user flow. SSE resolves the actor again before every delivered event and every 15-second heartbeat, so revocation or policy denial closes an already-open stream. Real loopback HTTP tests cover replay/live filtering, marker non-leakage, revocation closure, and rejected reconnect. |
 | Container isolation | Docker runs API and renderer separately. The renderer is `pwuser`, network-disabled, read-only, capability-free, no-new-privileges, and resource-limited. Linux startup inspects the mount table and refuses `/data`, `/backups`, or nested production mounts; the rebuilt renderer exposes only `/run/formaspec`. |
-| Restore fencing | Launcher-pinned Docker/server planned restore is externally supervised against a mode-`0600` exact runtime binding, a non-expiring shared worker lock, fail-closed maintenance, and crash-resumable operation/journal state. Every capture/verification requires local-driver/local-scope Docker volumes with no options, bounded absolute and distinct backing mountpoints; plugin, NFS, bind-backed, and aliased volumes fail closed. Fastify never restores its own open database and refuses to open SQLite during incomplete cutover. The path requires a healthy current API/database and is not offline disaster recovery. |
-| Restore source identity | Restore and verified download use `O_NOFOLLOW` plus private descriptor-pinned bytes, expected size/SHA-256 validation, and only the opened pin for later reads. Whole-workflow capacity is checked before maintenance and every copy/extraction step rechecks available space. Active-operation source-pin orphans are preserved; committed journal evidence survives cleanup failure. |
-| Local agent bridge | The token-free Codex URL is a loopback proxy that requires an OS-stored scoped grant upstream, validates its bound Host, rejects browser-origin requests, strips caller credentials, fails closed when no grant is available, and is automatically restarted when its runtime fingerprint is stale. |
+| Restore fencing | Launcher-pinned Docker/server planned and offline restore are externally supervised against a mode-`0600` exact runtime binding, a non-expiring shared worker lock, fail-closed maintenance, and crash-resumable operation/journal state. Every capture/verification requires local-driver/local-scope Docker volumes with no options, bounded absolute and distinct backing mountpoints; plugin, NFS, bind-backed, and aliased volumes fail closed. Fastify never restores its own open database and refuses to open SQLite during incomplete cutover. Managed-ID restore requires a healthy current API/database; offline restore instead requires a separately verified operator-selected bundle and explicit `--yes`. |
+| Restore source identity | Restore and verified download use `O_NOFOLLOW` plus private descriptor-pinned bytes, expected size/SHA-256 validation, and only the opened pin for later reads. Offline recovery checks receive capacity before consuming stdin; both paths run a whole-workflow forecast and every copy/extraction step rechecks available space. Spawned child stdout/stderr shares one combined 4 MiB budget by default, with a 5-second SIGKILL fallback for children that ignore SIGTERM. Active-operation source-pin orphans are preserved; committed journal evidence survives cleanup failure. |
+| Offline recovery pre-state | Offline restore passes no host path into the worker: the CLI pins the verified regular file by device/inode/size and streams only stdin with an authorized SHA-256/size. Before cutover the worker applies bounded tree and capacity checks, then creates and verifies a checksummed forensic bundle of the exact current data bytes, including a corrupt database. Standard post-cutover schema/render/audit/outbox/revocation checks still apply. Every offline failure after fencing remains in maintenance for explicit resume; it never auto-aborts or restarts the API. During takeover, the forensic predecessor remains durable until replacement preparation succeeds; resumed `offlinePrepare` and the replacement worker use the current maintenance owner rather than the predecessor ID. Forensic rollback keeps maintenance active/API stopped with `maintenanceCleared: false` and `serviceReady: false`. Restore control rejects direct clearing; only atomic handoff to a newly verified offline restore is supported. Pristine/prepared abort re-verifies the unchanged database; corrupt/non-SQLite open or query failures become structured `VALIDATION_FAILED`, so corrupt state cannot use abort to escape the fence. |
+| Local agent bridge | The token-free Codex URL is a loopback proxy that requires an OS-stored scoped grant upstream, validates its bound Host, rejects browser-origin requests, strips caller credentials, fails closed when no grant is available, and is automatically restarted when its runtime fingerprint is stale. Authorized reconnect uses a bearer-only, no-store self-authorization endpoint and reuses the grant only for exact least-privilege scope/project set equality; stale or overbroad credentials rotate through one-time pairing. |
 | Render-job metadata | Migration 11 persists only bounded API-owned lifecycle metadata: organization/internal scope, hashes, versions, dimensions, bounded warnings, and safe errors. It does not store documents, raw assets, PNG bytes, paths, or filenames. Owner leases/heartbeats recover only expired work; terminal deletion requires scoped permits at the exact 30-day cutoff. The renderer remains database-free. |
-| Selected-workspace launch | The Workspace Bridge binds a local grant to the exact central inventory and approved handoff, launches Codex with `shell: false`, exact repository `cwd`, one secret-free task reference, and a minimal environment, then monitors revocation/policy/handoff/inventory state. POSIX process groups are terminated on withdrawal; Windows Job Object/equivalent descendant containment remains a release blocker. |
+| Implementation mappings | Mapping writes accept only exact V2 design entities and opaque inventory entity IDs. The server derives source symbols/opaque locations from a hash-pinned active inventory, records immutable revision/product-spec/inventory pins, and rejects caller-supplied paths or source metadata. |
+| Selected-workspace launch | The Workspace Bridge binds a local grant to the exact central inventory and requires the final immutable `approved` → `implementing` `start_implementation` transition, launches Codex with `shell: false`, exact repository `cwd`, one secret-free task reference, and a minimal environment, then monitors revocation/policy/handoff/inventory state. POSIX process groups are terminated on withdrawal; Windows Job Object/equivalent descendant containment remains a release blocker. |
 | Prompt/data separation | MCP instructions tell agents to treat design text and metadata as untrusted data rather than instructions. |
 
 These controls reduce risk but do not by themselves close the release gates.
@@ -83,7 +92,9 @@ unreachable except from the verified proxy and the proxy removes every
 client-provided copy of the identity header.
 
 Trusted identities honor exact policy role mappings whose claim is `identity`,
-`external_id`, or `trusted_user`. A first trusted identity may bootstrap as
+`external_id`, or `trusted_user`. Policy validation rejects duplicate effective
+identity values across those aliases so mapping order cannot change a user's
+role. A first trusted identity may bootstrap as
 Organization Administrator only while the organization still has default or
 quarantined legacy configuration and no other non-local principal exists;
 stored-policy operation does not retain that bootstrap exception.
@@ -97,8 +108,11 @@ browser/agent credential, and must be stripped and overwritten by the reverse
 proxy. Exact minimal health probes remain credential-free after raw-peer and
 Host validation.
 Per-project authorization, scoped grants, and audit exist. Treat the mode as an
-implemented foundation, not enterprise readiness, until the real
-reverse-proxy/direct-port matrix and all role/scope cases pass.
+implemented foundation, not enterprise readiness. A controlled actual-socket
+loopback harness verifies replace/remove behavior, direct raw-peer rejection,
+and restart-bound hop-secret rotation; real Nginx/TLS, identity-provider,
+firewall/routing, public-port, and all role/scope deployment matrices remain
+release gates.
 
 The launcher can generate a placeholder-safe configuration without printing the
 token:
@@ -115,17 +129,17 @@ chat transcripts.
 
 | Severity | Finding | Evidence | Required correction |
 | --- | --- | --- | --- |
-| Critical | Object authorization was absent | **Implemented foundation:** organization/project authorization now covers service lookups and scoped grants. | Complete the exhaustive route/resource/role/scope/ID matrix before release. |
-| High | SSE crossed actors and could not replay | **Implemented foundation:** persisted organization-scoped outbox, replay, monotonic IDs, `Last-Event-ID`, gaps, and per-event/per-heartbeat reauthorization exist. Revocation closes active streams. | Add load, retention, reconnect, and publisher-failure tests. |
+| Critical | Object authorization was absent | **Implemented foundation:** organization/project authorization covers service lookups and scoped grants; a 106-route manifest closes the public inventory; all routes reject missing/malformed identities before parsing; non-pairing routes reject unmapped/disabled identities; and direct role/foreign-ID/swapped-ID/non-leak/no-mutation plus scoped-agent/revocation evidence now covers all 106 protected routes with zero uncovered across planning/tasks/design-system/mappings, product specifications, the complete handoff lifecycle, Redesign Studio assessments, Agent Connections, Repository Inventory, backup artifact control, organization policy/audit retention, and the remaining core design/catalog routes. The matrices fixed exact principal/design/revision-scoped mapping cleanup, principal-scoped handoff cleanup, denied-plan bypass, SQL project filtering before `LIMIT`, Redesign lifecycle/version leakage, authorization-after-schema-validation leaks, and direct release access outside a project's allowed current pins. A separate project/revision-bound interface reads the exact historical release without exposing the organization catalog. | Keep the 106-route direct suite release-blocking and complete the broader human-role/project/parent-child combinatorial lifecycle matrix before release. |
+| High | SSE crossed actors and could not replay | **Implemented foundation:** persisted organization-scoped outbox, replay, monotonic IDs, `Last-Event-ID`, gaps, bearer-to-scoped-grant authentication on both public event routes, and per-event/per-heartbeat reauthorization exist. Real HTTP tests prove project/organization filtering and revocation closure. | Add long-running load/backpressure, server-mode proxy, retention-gap, reconnect-storm, and publisher-failure tests. |
 | High | Preview commit was not exact/fully atomic | **Implemented foundation:** exact content-addressed snapshots commit inside one immediate transaction and publish afterward. | Extend fault injection, concurrent CAS, restart, and corruption evidence. |
 | High | Destructive approval boundary was bypassable | **Implemented foundation:** ordinary commits reject archive operations; archive has separate preview/commit paths. | Finish negative coverage and client approval annotations. |
-| High | Server trust mode was not fail-closed | **Implemented foundation:** strict local/server modes, HTTPS/public URL, proxy ranges, Host/Origin/CSRF, and security headers exist. | Prove the real reverse-proxy/direct-port deployment matrix. |
-| High | Renderer lacked an egress/process boundary | **Implemented foundation:** Docker uses a separate non-root worker, bounded Unix-socket IPC, `network_mode: none`, read-only root, dropped capabilities, per-job contexts, resource/time limits, fail-closed production-volume mount validation, and migration-11 persistent bounded job lifecycle metadata. | Add real named-pipe/native packaging, canary egress automation, stress/crash/recovery evidence, retention operations/UI, and server deployment proof. |
+| High | Server trust mode was not fail-closed | **Implemented foundation:** strict local/server modes, HTTPS/public URL, proxy ranges, a separate server-generated internal hop secret required on every non-health request, Host/Origin/CSRF, and security headers exist. Health remains credential-free; launcher generation/storage/scrubbing and support-bundle exclusion have focused coverage. A controlled actual-socket loopback suite verifies proxy replacement, direct raw-peer rejection, ambiguous append rejection, and restart-bound secret rotation. | Prove the real Nginx/TLS, external identity-provider, firewall/routing, public-port, zero/low-downtime rotation, lifecycle, and compromise-response deployment matrices. |
+| High | Renderer lacked an egress/process boundary | **Implemented foundation:** Docker uses a separate non-root worker, bounded Unix-socket IPC, `network_mode: none`, read-only root, dropped capabilities, per-job contexts, resource/time limits, fail-closed production-volume mount validation, and migration-11 persistent bounded job lifecycle metadata. The exact-current image's canary fails closed with DNS `EAI_AGAIN`, direct TCP `ENETUNREACH`, and zero non-loopback external interfaces; 8/8 workflow-contract tests prevent silent removal. | Retain hosted evidence and add real named-pipe/native packaging, stress/crash/recovery evidence, retention operations/UI, and server deployment proof. |
 | Medium | Raster files were not normalized | Full PNG/JPEG/WebP decode now runs through the pinned Chromium renderer worker; APNG/animated WebP/MPO/SVG/malformed input is rejected, EXIF orientation is applied, metadata is stripped, output is deterministic PNG, API/worker limits are versioned and matched, and content-addressed storage plus legacy-BLOB fallback is verified. The same full-decode verifier is required by backup creation/verification, restore preflight, safety-backup verification, and final cutover. | Add operator-approved legacy quarantine cleanup, a larger malformed corpus, and upload-storm/queue evidence. |
 | Medium | CSRF/CSP/security header policy was missing | Origin/Host/CSRF intent and CSP/framing/MIME/referrer/transport headers now exist. | Complete browser and reverse-proxy coverage. |
-| Medium | MCP schemas have permissive fallbacks | Generic passthrough output and record-shaped temporary operation fallback reduce schema strictness. | Strict discriminated input/output schemas for each tool. |
-| Medium | Audit and revocation were absent | Append-only audit events plus expiring/revocable scoped grants and Agent Connections controls exist. Managed re-authorization atomically rotates exact matching connections, production authentication checks the owning connection, Codex scope/expiry/project restrictions come from policy, and restart/rollback tests cover invalidation. Audit retention now uses an admin-only exact preview/commit, minimum-policy cutoff, bounded batches, atomic temporary delete permits, restart-safe idempotency, retained audit/outbox evidence, and an immutable SHA-256 run chain. | Complete stable managed-connection identity, scheduled retention supervision/alerting, administration UX, and the full lifecycle matrix. |
-| Medium | Backups were not integrity verified | Online checksummed bundles, strict V1/V2 document and asset ownership/reference verification, descriptor-pinned verify/download/restore bytes, whole-workflow capacity preflight, post-trigger credential revocation checks, audit, source-local restore, and externally supervised launcher-pinned Docker/server planned restore exist. Runtime volume identity is revalidated live and recovery/lock/health failure paths fail closed. An isolated A-only then A+B safety-restore exercise preserved IDs/revisions and revoked restored credentials. | Add a separately authorized offline disaster-recovery path, clean server planned-restore evidence, approved signing/provenance, OS-native no-replace cutover support, broader recovery fixtures, and the full release E2E. |
+| Medium | MCP schemas had permissive fallbacks | **Implemented foundation:** every tool input is strict and bounded, task/redesign inputs are discriminated, temporary preview operations mirror the exact ten-operation core union, every success family uses an exact nested DTO with ID/hash/version/state correlation, and `handoff_list` now returns bounded dedicated summaries through authorization-bound checksummed keyset pagination. Bounded generic JSON remains only inside structured `error.details`. | Keep the contract matrix release-blocking and add cursor-rotation plus large-history load evidence. |
+| Medium | Audit and revocation were absent | Append-only audit events plus expiring/revocable scoped grants and Agent Connections controls exist. Managed re-authorization atomically rotates exact matching connections, production authentication checks the owning connection, Codex scope/expiry/project restrictions come from policy, and restart/rollback tests cover invalidation. Audit retention now uses an admin-only exact preview/commit, minimum-policy cutoff, bounded batches, atomic temporary delete permits, restart-safe idempotency, retained audit/outbox evidence, and an immutable SHA-256 run chain. The Administration surface provides a guided 12-section policy form, Expert JSON, secret-free YAML export, and optimistic configuration-hash updates. | Complete stable managed-connection identity, delegated administration, installed external schedule invocation and alert delivery, policy rollout/version migration, and the broader organization lifecycle matrix. |
+| Medium | Backups were not integrity verified | Online checksummed bundles, strict V1/V2 document and asset ownership/reference verification, descriptor-pinned verify/download/restore bytes, whole-workflow capacity preflight, post-trigger credential revocation checks, audit, source-local restore, launcher-pinned planned restore, and explicit offline recovery exist. Scheduled runs now record durable start/success/failure audit/outbox evidence; overdue and retention-backlog diagnostics feed ready health and bounded CLI warnings; failed or stalled attempts remain critical even when the current window already has a valid backup. Offline preparation uses stdin-only pinned transfer, complete target/raster verification, and an exact forensic pre-state bundle before standard verified restore/revocation. Runtime volume identity is revalidated live and recovery/lock/health failure paths fail closed. An isolated A-only then A+B planned restore exercise preserved IDs/revisions and revoked restored credentials; a separate unique-Compose worker/control smoke restored a real design from corrupt live bytes, revoked credentials, and forensically restored those exact corrupt bytes under a retained fence. The exact-current image also passes the same-machine copied-bundle recovery gate. | Add installed external scheduling and alert delivery, real server planned/offline lifecycle evidence, approved signing/provenance, OS-native no-replace cutover support, broader recovery fixtures, and real remote-host/TLS/off-site disaster-recovery exercises. |
 
 ## Required security invariants
 
@@ -160,9 +174,10 @@ only in route handlers:
   Portable ZIP validation rejects unsafe/duplicate paths, unsupported
   compression, encryption, non-regular entries, local/central mismatches,
   descriptor/CRC/checksum errors, hidden trailing data, and
-  archive/entry/count/aggregate expansion limits before mutation. Entries are
-  inflated independently in bounded 16 KiB chunks; multipart bodies and
-  extracted entry buffers remain memory-resident within the configured caps.
+  archive/entry/count/aggregate expansion limits before mutation. Multipart
+  bytes stream to private storage and entries inflate independently in bounded
+  16 KiB chunks into private files. Individual JSON/raster entries are loaded
+  only when parsed or normalized under the 64 MiB per-entry cap.
 - A running Fastify process never replaces its own open database; restore is
   externally supervised and uses exact runtime, worker-lock, maintenance, and
   journal ownership.
@@ -222,7 +237,8 @@ Production release is blocked until automated tests cover:
   animated images, SVG rejection, and metadata stripping;
 - renderer external-network denial and process isolation;
 - restore worker/container identity, shared-lock ownership, crash recovery,
-  server-supervisor lifecycle, and continued pinned-source regression coverage;
+  server-supervisor planned/offline lifecycle, corrupt-database forensic
+  rollback, and continued pinned-source regression coverage;
 - prompt-like text inside designs, specifications, and repositories;
 - secret exclusion from logs, audit views, exports, task payloads, backups, and
   support bundles.

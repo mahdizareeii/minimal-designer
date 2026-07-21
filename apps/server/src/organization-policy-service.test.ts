@@ -146,6 +146,51 @@ describe("organization policy", () => {
     }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
   });
 
+  it("rejects ambiguous duplicate trusted identity mappings without mutating governed state", () => {
+    const opened = setup();
+    const current = opened.policies.read("local");
+    const governedState = () => ({
+      configuration: opened.database.sqlite.prepare(
+        "SELECT config_json FROM organizations WHERE id = 'organization_legacy'",
+      ).get(),
+      auditEvents: opened.database.sqlite.prepare("SELECT COUNT(*) AS count FROM audit_events").get(),
+      outboxEvents: opened.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get(),
+    });
+    const before = governedState();
+    const policy = mutableDefaultPolicy();
+    policy.identity.roleMappings = [
+      { claim: "identity", value: " alice@example.com ", role: "viewer" },
+      { claim: "trusted_user", value: "alice@example.com", role: "organization_admin" },
+    ];
+
+    expect(captureThrown(() => opened.policies.update("local", {
+      expectedConfigurationHash: current.configurationHash,
+      policy,
+    }))).toMatchObject({
+      code: "VALIDATION_FAILED",
+      statusCode: 422,
+      details: {
+        issues: [expect.objectContaining({
+          path: "identity.roleMappings.1.value",
+          message: "Trusted identity mapping values must be unique across all claim aliases.",
+        })],
+      },
+    });
+    expect(governedState()).toEqual(before);
+
+    policy.identity.roleMappings[1] = {
+      claim: "trusted_user",
+      value: "bob@example.com",
+      role: "organization_admin",
+    };
+    opened.policies.update("local", {
+      expectedConfigurationHash: current.configurationHash,
+      policy,
+    });
+    expect(resolveAccess(opened.database.sqlite, "trusted:alice@example.com").role).toBe("viewer");
+    expect(resolveAccess(opened.database.sqlite, "trusted:bob@example.com").role).toBe("organization_admin");
+  });
+
   it("preserves unknown legacy configuration as non-exported quarantine until an explicit save", () => {
     const opened = setup();
     opened.database.sqlite.prepare(

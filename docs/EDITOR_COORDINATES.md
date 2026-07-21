@@ -1,10 +1,9 @@
 # Editor coordinate system
 
-Last audited: 2026-07-19
+Last audited: 2026-07-21
 
-This document records the reproduced selection-overlay defect and the coordinate
-contract required to fix it. The contract is approved; the current editor does
-not yet satisfy it.
+This document records the reproduced selection-overlay defect, the coordinate
+contract used to fix it, and the current verified status.
 
 ## Reproduced defect
 
@@ -31,7 +30,7 @@ The error matches the pan delta within measurement tolerance. This is strong
 evidence that the target node uses the new canvas transform while Moveable uses
 stale geometry.
 
-## Current implementation
+## Baseline implementation at reproduction
 
 `Canvas.tsx` stores pan and zoom in the designer store and renders:
 
@@ -132,11 +131,8 @@ callbacks must be disconnected on unmount and must not cause render loops.
 
 ## Performance contract
 
-The current recursive renderer and guideline discovery are not proven for
-1,000-node projects. No benchmark harness exists, so no baseline numbers are
-recorded.
-
-Phase 1 must add a representative 1,000-node fixture and measure:
+A representative 1,000-node browser fixture and release-budget harness now
+measure:
 
 - initial interactive load;
 - selection response;
@@ -147,7 +143,9 @@ Phase 1 must add a representative 1,000-node fixture and measure:
 - 1440 by 900 PNG rendering;
 - preview validation excluding rendering.
 
-The release budgets are recorded in
+The current exact-source run passes all recorded budgets. The harness remains
+a local engineering gate until retained hosted and supported-platform evidence
+exists. Exact thresholds and results are recorded in
 [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md).
 
 ## Acceptance matrix
@@ -175,11 +173,29 @@ still open**.
 
 `ViewportTransform`, the untransformed interaction overlay, stable target
 wrappers, coalesced geometry invalidation, and imperative Moveable refresh are
-implemented. Chrome at DPR 1/2 passes four browser tests covering the primary
-zoom/pan/LTR/RTL/single/multi-selection alignment cases plus auto-layout
+implemented. Chrome at DPR 1/2 passes 12 browser checks covering every
+required zoom endpoint (12/25/50/100/149/200/320%, plus 150%), fractional pan,
+LTR/RTL/mixed text, nested rotated RTL, image geometry, fractional single and
+multi-selection, hidden/locked exclusion, nested scrolling, font-ready and
+image-load invalidation, one-revision fractional group drag, and auto-layout
 reorder, reparent, and constraint resize without x/y or rotation loss.
 
-Release sign-off still requires the complete acceptance cross-product above,
-including nested scroll, font/image transition cases, all node/layout types,
-wrapped/grid edge cases, fractional group selection, and supported
-cross-browser/OS evidence.
+React Moveable 0.56 rounds target offsets internally when it derives a group
+rectangle. FormaSpec therefore keeps Moveable as the group drag/snapping engine
+but draws the non-resizable multi-selection border from the exact union of the
+selected targets' client rectangles. This prevents upstream world-coordinate
+rounding from exceeding the 0.75 CSS px budget at high zoom.
+
+The cross-browser gate also exposed a WebKit initial-fit race: the old delayed
+`requestAnimationFrame` fit could run after an immediate user or test pan and
+overwrite it. Initial fitting now runs synchronously in `useLayoutEffect` once
+the editor root, document, and active page exist. The final reviewed image
+passed Firefox/WebKit 12/12 once with summary SHA-256
+`b4602ad1a40a6c32a73c118101a0b1b0d6970e8affcd939a18061939ed5c1aad`.
+The immediately prior fit-sync image passed three consecutive 12/12 runs; its
+main, `-repeat2`, and `-repeat3` summaries are byte-identical with SHA-256
+`0b28b9a0f78ec5687496cd61a7b930fa00d0f276c5dfbb0c0901ce7410a9938b`.
+
+Release sign-off still requires retained hosted and supported-OS evidence plus
+the broader complete acceptance cross-product beyond the passing local Chrome,
+Firefox, and WebKit foundations.

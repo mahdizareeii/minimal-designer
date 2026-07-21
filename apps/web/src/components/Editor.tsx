@@ -28,13 +28,16 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { navigate } from "../App";
 import { DEVICE_PRESETS, type DevicePreset } from "../domain";
 import { exportUrl, portableExportUrl, previewRenderUrl, renderUrl, updateContext } from "../lib/api";
+import { createConflictPatchArtifact } from "../lib/conflict-recovery";
+import { CENTER_WORKSPACE_TABS, type CenterWorkspaceTab } from "../lib/editor-information-architecture";
 import { useDesignerStore } from "../store/designer-store";
 import { Canvas, PrototypeCanvas } from "./Canvas";
+import { ConflictRecoveryPanel } from "./ConflictRecoveryPanel";
 import { InspectorPanel } from "./InspectorPanel";
 import { LayersPanel } from "./LayersPanel";
 import { ProductBriefPanel } from "./ProductBriefPanel";
@@ -46,6 +49,17 @@ async function downloadFile(url: string, filename: string): Promise<void> {
   if (!response.ok) throw new Error(`Export failed with status ${response.status}.`);
   const blob = await response.blob();
   const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+function downloadTextFile(contents: string, mediaType: string, filename: string): void {
+  const objectUrl = URL.createObjectURL(new Blob([contents], { type: mediaType }));
   const anchor = document.createElement("a");
   anchor.href = objectUrl;
   anchor.download = filename;
@@ -73,13 +87,17 @@ export function Editor({ designId }: { designId: string }) {
   const prototypePageId = useDesignerStore((state) => state.prototypePageId);
   const sidebarsHidden = useDesignerStore((state) => state.sidebarsHidden);
   const archiveReview = useDesignerStore((state) => state.archiveReview);
+  const conflictRecovery = useDesignerStore((state) => state.conflictRecovery);
+  const conflictRecoveryDurable = useDesignerStore((state) => state.conflictRecoveryDurable);
   const openDesign = useDesignerStore((state) => state.openDesign);
   const closeDesign = useDesignerStore((state) => state.closeDesign);
   const connectEvents = useDesignerStore((state) => state.connectEvents);
   const save = useDesignerStore((state) => state.save);
   const undo = useDesignerStore((state) => state.undo);
   const redo = useDesignerStore((state) => state.redo);
-  const reloadConflict = useDesignerStore((state) => state.reloadConflict);
+  const loadLatestForConflict = useDesignerStore((state) => state.loadLatestForConflict);
+  const duplicateConflictDraft = useDesignerStore((state) => state.duplicateConflictDraft);
+  const discardConflictRecovery = useDesignerStore((state) => state.discardConflictRecovery);
   const setTool = useDesignerStore((state) => state.setTool);
   const select = useDesignerStore((state) => state.select);
   const addNode = useDesignerStore((state) => state.addNode);
@@ -94,8 +112,12 @@ export function Editor({ designId }: { designId: string }) {
   const setNotice = useDesignerStore((state) => state.setNotice);
   const setSidebarsHidden = useDesignerStore((state) => state.setSidebarsHidden);
   const [frameMenu, setFrameMenu] = useState(false);
+  const [stageTab, setStageTab] = useState<CenterWorkspaceTab>("canvas");
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [exporting, setExporting] = useState<"json" | "png" | "bundle" | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState<"load" | "export" | "duplicate" | "discard" | null>(null);
   const copiedNodeIds = useRef<typeof selectedIds>([]);
+  const archiveDialogRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void openDesign(designId);
@@ -141,6 +163,40 @@ export function Editor({ designId }: { designId: string }) {
   }, [notice, setNotice]);
 
   useEffect(() => {
+    if (!archiveReview) {
+      setArchiveDialogOpen(false);
+      return;
+    }
+    setStageTab("before-after");
+    setArchiveDialogOpen(true);
+  }, [archiveReview?.previewId]);
+
+  useEffect(() => {
+    if (!archiveDialogOpen || !archiveReview) return;
+    const dialog = archiveDialogRef.current;
+    if (!dialog) return;
+    const previousFocus = window.document.activeElement instanceof HTMLElement
+      ? window.document.activeElement
+      : null;
+    const editorRoot = dialog.parentElement?.parentElement;
+    const background = editorRoot
+      ? [...editorRoot.children].filter((element) => !element.classList.contains("archive-review-backdrop"))
+      : [];
+    for (const element of background) {
+      element.setAttribute("inert", "");
+      element.setAttribute("aria-hidden", "true");
+    }
+    window.requestAnimationFrame(() => dialog.focus());
+    return () => {
+      for (const element of background) {
+        element.removeAttribute("inert");
+        element.removeAttribute("aria-hidden");
+      }
+      if (previousFocus?.isConnected) window.requestAnimationFrame(() => previousFocus.focus());
+    };
+  }, [archiveDialogOpen, archiveReview]);
+
+  useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       const current = useDesignerStore.getState();
       if (!current.saving
@@ -155,6 +211,13 @@ export function Editor({ designId }: { designId: string }) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (archiveDialogOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setArchiveDialogOpen(false);
+        }
+        return;
+      }
       const target = event.target as HTMLElement | null;
       const typing = target?.matches("input, textarea, select, [contenteditable=true]");
       const modifier = event.metaKey || event.ctrlKey;
@@ -181,7 +244,32 @@ export function Editor({ designId }: { designId: string }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [save, undo, redo, duplicate, deleteSelection, setTool, addNode, prototypeOpen, closePrototype, select, selectedIds, setNotice]);
+  }, [save, undo, redo, duplicate, deleteSelection, setTool, addNode, prototypeOpen, closePrototype, select, selectedIds, setNotice, archiveDialogOpen]);
+
+  const handleArchiveDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setArchiveDialogOpen(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const dialog = archiveDialogRef.current;
+    if (!dialog) return;
+    const focusable = [...dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => !element.hasAttribute("inert"));
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const currentIndex = focusable.indexOf(window.document.activeElement as HTMLElement);
+    const nextIndex = event.shiftKey
+      ? currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1
+      : currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1;
+    event.preventDefault();
+    focusable[nextIndex]!.focus();
+  };
 
   const performExport = async (kind: "json" | "png" | "bundle") => {
     if (!document) return;
@@ -213,6 +301,52 @@ export function Editor({ designId }: { designId: string }) {
       setNotice(cause instanceof Error ? cause.message : "Export failed.");
     } finally {
       setExporting(null);
+    }
+  };
+
+  const loadLatestRecovery = async () => {
+    setRecoveryBusy("load");
+    try {
+      await loadLatestForConflict();
+    } finally {
+      setRecoveryBusy(null);
+    }
+  };
+
+  const exportRecoveryPatch = async () => {
+    const recovery = useDesignerStore.getState().conflictRecovery;
+    if (!recovery) return;
+    setRecoveryBusy("export");
+    try {
+      const artifact = await createConflictPatchArtifact(recovery);
+      downloadTextFile(artifact.json, artifact.mediaType, artifact.filename);
+      setNotice(`Conflict patch exported · SHA-256 ${artifact.sha256.slice(0, 12)}…`);
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : "Conflict patch export failed.");
+    } finally {
+      setRecoveryBusy(null);
+    }
+  };
+
+  const duplicateRecoveryDraft = async () => {
+    const currentDocument = useDesignerStore.getState().document;
+    if (!currentDocument) return;
+    setRecoveryBusy("duplicate");
+    try {
+      const suffix = " — recovered draft";
+      await duplicateConflictDraft(`${currentDocument.name.slice(0, Math.max(1, 160 - suffix.length))}${suffix}`);
+    } finally {
+      setRecoveryBusy(null);
+    }
+  };
+
+  const discardRecovery = async () => {
+    if (!window.confirm("Discard the protected conflict recovery? This cannot be undone. If the conflicting draft is still on the canvas, the latest server revision will be loaded first.")) return;
+    setRecoveryBusy("discard");
+    try {
+      await discardConflictRecovery();
+    } finally {
+      setRecoveryBusy(null);
     }
   };
 
@@ -255,9 +389,23 @@ export function Editor({ designId }: { designId: string }) {
         ? <CloudOff size={12} />
         : <Check size={12} />;
   const page = document.pages.find((item) => item.id === prototypePageId);
+  const inlinePrototypePageId = prototypePageId
+    ?? activePageId
+    ?? document.pages.find((item) => !item.archived)?.id
+    ?? null;
+  const comparisonBasePageId = archiveReview
+    ? (activePageId && archiveReview.baseDocument.pages.some((item) => item.id === activePageId)
+      ? activePageId
+      : archiveReview.baseDocument.pages.find((item) => !item.archived)?.id ?? null)
+    : null;
+  const comparisonPreviewPageId = archiveReview
+    ? (comparisonBasePageId && archiveReview.previewDocument.pages.some((item) => item.id === comparisonBasePageId)
+      ? comparisonBasePageId
+      : archiveReview.previewDocument.pages.find((item) => !item.archived)?.id ?? null)
+    : null;
 
   return (
-    <div className="editor-shell">
+    <div className={`editor-shell ${conflictRecovery ? "has-conflict-recovery" : ""}`}>
       <header className="editor-topbar">
         <div className="editor-topbar-left">
           <button className="topbar-home" onClick={() => void leaveEditor()} aria-label="Back to projects"><Sparkles size={14} /></button>
@@ -287,20 +435,68 @@ export function Editor({ designId }: { designId: string }) {
         </div>
         <div className="editor-topbar-right">
           <div className={`save-status is-${saveState}`}>{saveIcon}{saveState === "saving" ? "Saving" : saveState === "dirty" ? "Unsaved" : saveState === "review" ? "Review archive" : saveState === "error" ? "Retry save" : saveState === "conflict" ? "Conflict" : "Saved"}</div>
-          {saveState === "conflict" && <button className="button button-secondary" style={{ minHeight: 30, padding: "0 9px", fontSize: 9 }} onClick={() => {
-            if (window.confirm("Load the latest server revision and discard this conflicting local draft?")) void reloadConflict();
-          }}>Reload latest</button>}
           <button className="tool-button" onClick={() => void save()} disabled={saving || pendingCount === 0 || saveState === "conflict"} title="Save now"><Save size={13} /></button>
-          <button className="tool-button" onClick={() => void performExport("json")} disabled={Boolean(exporting) || saveState === "conflict"} title="Export JSON">{exporting === "json" ? <LoaderCircle size={13} /> : <FileJson size={13} />}</button>
-          <button className="tool-button" onClick={() => void performExport("png")} disabled={Boolean(exporting) || saveState === "conflict"} title="Export PNG">{exporting === "png" ? <LoaderCircle size={13} /> : <ImageDown size={13} />}</button>
-          <button className="tool-button" onClick={() => void performExport("bundle")} disabled={Boolean(exporting) || saveState === "conflict"} title="Export portable FormaSpec bundle">{exporting === "bundle" ? <LoaderCircle size={13} /> : <Download size={13} />}</button>
+          <button className="tool-button" onClick={() => void performExport("json")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export JSON">{exporting === "json" ? <LoaderCircle size={13} /> : <FileJson size={13} />}</button>
+          <button className="tool-button" onClick={() => void performExport("png")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export PNG">{exporting === "png" ? <LoaderCircle size={13} /> : <ImageDown size={13} />}</button>
+          <button className="tool-button" onClick={() => void performExport("bundle")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export portable FormaSpec bundle">{exporting === "bundle" ? <LoaderCircle size={13} /> : <Download size={13} />}</button>
           <button className="button button-secondary" style={{ minHeight: 30, padding: "0 10px", fontSize: 10 }} onClick={openPrototype}><Play size={12} /> Preview</button>
         </div>
       </header>
 
+      {conflictRecovery && (
+        <ConflictRecoveryPanel
+          recovery={conflictRecovery}
+          durable={conflictRecoveryDurable}
+          canLoadLatest={saveState === "conflict" || pendingCount > 0}
+          busy={recoveryBusy}
+          onLoadLatest={() => void loadLatestRecovery()}
+          onExportPatch={() => void exportRecoveryPatch()}
+          onDuplicate={() => void duplicateRecoveryDraft()}
+          onDiscard={() => void discardRecovery()}
+        />
+      )}
+
       <main className={`editor-main ${sidebarsHidden ? "sidebars-hidden" : ""}`}>
         <LayersPanel />
-        <Canvas />
+        <section className="editor-stage">
+          <nav className="editor-stage-tabs" aria-label="Design workspace">
+            {CENTER_WORKSPACE_TABS.map((item) => (
+              <button
+                key={item}
+                className={stageTab === item ? "is-active" : ""}
+                aria-pressed={stageTab === item}
+                onClick={() => setStageTab(item)}
+              >
+                {item === "before-after" ? "Before–After" : item[0]!.toUpperCase() + item.slice(1)}
+              </button>
+            ))}
+            <span>{stageTab === "canvas" ? "Editable structured DOM" : stageTab === "prototype" ? "Click-through flow" : "Immutable proposal review"}</span>
+          </nav>
+          <div className="editor-stage-content">
+            {stageTab === "canvas" && <Canvas />}
+            {stageTab === "prototype" && inlinePrototypePageId && (
+              <div className="editor-inline-prototype">
+                <PrototypeCanvas document={document} pageId={inlinePrototypePageId} onNavigate={goToPrototypePage} />
+              </div>
+            )}
+            {stageTab === "prototype" && !inlinePrototypePageId && <div className="editor-stage-empty"><Play size={20} /><strong>No prototype page</strong><small>Add a page and frame to preview the flow.</small></div>}
+            {stageTab === "before-after" && archiveReview && comparisonBasePageId && comparisonPreviewPageId && (
+              <div className="editor-comparison-workspace">
+                <header>
+                  <div><strong>Archive comparison</strong><span>Base v{archiveReview.baseVersion} · {archiveReview.changedNodeIds.length} changed layer{archiveReview.changedNodeIds.length === 1 ? "" : "s"}</span></div>
+                  <button className="button button-secondary" onClick={() => setArchiveDialogOpen(true)}>Review commit actions</button>
+                </header>
+                <div className="editor-comparison-grid">
+                  <article><header><span>Before</span><strong>Version {archiveReview.baseVersion}</strong></header><div><PrototypeCanvas document={archiveReview.baseDocument} pageId={comparisonBasePageId} onNavigate={() => undefined} /></div></article>
+                  <article className="is-proposed"><header><span>After</span><strong>Archive preview</strong></header><div><PrototypeCanvas document={archiveReview.previewDocument} pageId={comparisonPreviewPageId} onNavigate={() => undefined} /></div></article>
+                </div>
+              </div>
+            )}
+            {stageTab === "before-after" && (!archiveReview || !comparisonBasePageId || !comparisonPreviewPageId) && (
+              <div className="editor-stage-empty"><Eye size={20} /><strong>No archive preview selected</strong><small>Create a destructive archive preview to compare exact before-and-after documents here. Agent proposals remain in the Activity review panel.</small></div>
+            )}
+          </div>
+        </section>
         <InspectorPanel />
       </main>
 
@@ -313,9 +509,17 @@ export function Editor({ designId }: { designId: string }) {
 
       {notice && <div className="toast"><Sparkles size={13} />{notice}<button className="icon-button" onClick={() => setNotice(null)}><X size={11} /></button></div>}
 
-      {archiveReview && (
+      {archiveReview && archiveDialogOpen && (
         <div className="archive-review-backdrop" role="presentation">
-          <section className="archive-review" role="dialog" aria-modal="true" aria-labelledby="archive-review-title">
+          <section
+            className="archive-review"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="archive-review-title"
+            tabIndex={-1}
+            ref={archiveDialogRef}
+            onKeyDown={handleArchiveDialogKeyDown}
+          >
             <header>
               <div className="archive-review-heading">
                 <span><ShieldAlert size={18} /></span>
@@ -327,6 +531,7 @@ export function Editor({ designId }: { designId: string }) {
               <div className="archive-review-meta">
                 <span>Base v{archiveReview.baseVersion}</span>
                 <span>{archiveReview.changedNodeIds.length} changed layer{archiveReview.changedNodeIds.length === 1 ? "" : "s"}</span>
+                <button className="icon-button" onClick={() => setArchiveDialogOpen(false)} aria-label="Minimize archive review"><X size={15} /></button>
               </div>
             </header>
             <div className="archive-review-grid">

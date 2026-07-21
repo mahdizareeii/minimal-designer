@@ -159,6 +159,23 @@ export function lintDesignDocument(document: DesignDocument): Diagnostic[] {
     if (!token.archived) tokenPaths.set(token.path, token.id);
   }
 
+  // Component definitions and their descendants are detached reusable source
+  // trees. They are intentionally absent from page reachability while active
+  // instances reference the component root.
+  const detachedComponentNodes = new Set<NodeId>();
+  const collectDetachedComponentNodes = (nodeId: NodeId): void => {
+    if (detachedComponentNodes.has(nodeId)) return;
+    const node = document.nodes[nodeId];
+    if (!node) return;
+    detachedComponentNodes.add(nodeId);
+    if (isContainerNode(node)) {
+      for (const childId of node.children) collectDetachedComponentNodes(childId);
+    }
+  };
+  for (const node of Object.values(document.nodes)) {
+    if (node.type === "component") collectDetachedComponentNodes(node.id);
+  }
+
   const parentCounts = new Map<NodeId, number>();
   const parentNodes = new Map<NodeId, NodeId>();
   const parentPages = new Map<NodeId, number>();
@@ -235,7 +252,7 @@ export function lintDesignDocument(document: DesignDocument): Diagnostic[] {
   }
 
   for (const node of Object.values(document.nodes)) {
-    if (!node.archived && !reachable.has(node.id)) {
+    if (!node.archived && !reachable.has(node.id) && !detachedComponentNodes.has(node.id)) {
       diagnostics.push(
         diagnostic("error", "orphan_active_node", `Active node is not reachable from an active page: ${node.id}`, ["nodes", node.id], node.id),
       );

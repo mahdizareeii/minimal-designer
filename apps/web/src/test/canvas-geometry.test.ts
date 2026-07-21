@@ -16,6 +16,7 @@ import {
   resizePatchForGesture,
   selectionGestureCapabilities,
   selectionUsesAbsoluteLayout,
+  unionClientRects,
 } from "../lib/canvas-geometry";
 import {
   clientPointInViewport,
@@ -69,6 +70,24 @@ describe("canvas gesture geometry", () => {
       "translate3d(4.1256px, -8.8755px, 0) rotate(27.5deg)",
     );
     expect(composeDraftTransform(27.5)).toBe("rotate(27.5deg)");
+  });
+
+  it("retains exact fractional client bounds for multi-selection overlays", () => {
+    expect(unionClientRects([
+      { left: 410.3747253417969, top: 659.625, right: 651.8747253417969, bottom: 780.625 },
+      { left: 831.124755859375, top: 780.375, right: 1111.499755859375, bottom: 901.25 },
+    ])).toEqual({
+      left: 410.3747253417969,
+      top: 659.625,
+      right: 1111.499755859375,
+      bottom: 901.25,
+      width: 701.1250305175781,
+      height: 241.625,
+    });
+    expect(unionClientRects([])).toBeNull();
+    expect(() => unionClientRects([{ left: 0, top: 0, right: Number.NaN, bottom: 1 }])).toThrow(
+      "Selection bounds must be finite.",
+    );
   });
 });
 

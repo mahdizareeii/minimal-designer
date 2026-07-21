@@ -376,7 +376,8 @@ async function measureHistoryAction(page: Page, action: "open" | "refresh"): Pro
     performance.clearResourceTimings();
     const buttons = [...document.querySelectorAll<HTMLButtonElement>("button")];
     const button = kind === "open"
-      ? buttons.find((candidate) => candidate.classList.contains("sidebar-tab") && candidate.textContent?.trim() === "History")
+      ? buttons.find((candidate) => candidate.closest("nav[aria-label='Inspector utilities']")
+        && candidate.textContent?.trim().toLowerCase() === "history")
       : buttons.find((candidate) => candidate.textContent?.includes("Refresh history"));
     if (!button) throw new Error(`The ${kind} history button is unavailable.`);
     const startedAt = performance.now();

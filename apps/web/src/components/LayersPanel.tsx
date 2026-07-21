@@ -22,7 +22,17 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { isNodeContainer, nodeChildren, type DesignNode, type NodeId, type NodeType } from "../domain";
+import {
+  isNodeContainer,
+  nodeChildren,
+  pageIdForNode,
+  type DesignDocument,
+  type DesignNode,
+  type NodeId,
+  type NodeType,
+  type PageId,
+} from "../domain";
+import { LEFT_PANEL_TABS, type LeftPanelTab } from "../lib/editor-information-architecture";
 import { activePage, useDesignerStore } from "../store/designer-store";
 
 function TypeIcon({ node }: { node: DesignNode }) {
@@ -44,6 +54,19 @@ const addItems: Array<{ type: NodeType; label: string; icon: typeof Square }> = 
   { type: "image", label: "Image", icon: Image },
   { type: "icon", label: "Icon", icon: Sparkles },
 ];
+
+export function selectNodeAcrossPages(
+  document: DesignDocument,
+  nodeId: NodeId,
+  setActivePage: (pageId: PageId) => void,
+  select: (nodeIds: NodeId[]) => void,
+): boolean {
+  const pageId = pageIdForNode(document, nodeId);
+  if (!pageId) return false;
+  setActivePage(pageId);
+  select([nodeId]);
+  return true;
+}
 
 function LayerRow({ nodeId, depth, collapsed, toggleCollapsed }: {
   nodeId: NodeId;
@@ -96,51 +119,120 @@ function LayerRow({ nodeId, depth, collapsed, toggleCollapsed }: {
 export function LayersPanel() {
   const document = useDesignerStore((state) => state.document);
   const activePageId = useDesignerStore((state) => state.activePageId);
+  const selectedIds = useDesignerStore((state) => state.selectedIds);
   const setActivePage = useDesignerStore((state) => state.setActivePage);
+  const select = useDesignerStore((state) => state.select);
   const addPage = useDesignerStore((state) => state.addPage);
   const addNode = useDesignerStore((state) => state.addNode);
   const insertTemplate = useDesignerStore((state) => state.insertTemplate);
+  const [tab, setTab] = useState<LeftPanelTab>("layers");
   const [collapsed, setCollapsed] = useState<Set<NodeId>>(new Set());
   const page = activePage(document, activePageId);
   const pages = useMemo(() => document?.pages.filter((candidate) => !candidate.archived) ?? [], [document]);
+  const components = useMemo(() => Object.values(document?.nodes ?? {})
+    .filter((node) => !node.archived && (node.type === "component" || node.type === "instance")), [document]);
+  const assets = useMemo(() => Object.values(document?.assets ?? {}), [document]);
+
+  const selectAssetUsage = (assetId: string) => {
+    if (!document) return;
+    const usage = Object.values(document.nodes).find((node) =>
+      !node.archived && node.type === "image" && node.asset_id === assetId);
+    if (usage) selectNodeAcrossPages(document, usage.id, setActivePage, select);
+  };
 
   return (
     <aside className="left-sidebar">
-      <div className="sidebar-tabs"><button className="sidebar-tab is-active">Layers</button></div>
-      <div className="sidebar-section">
-        <div className="sidebar-section-heading"><span>Pages</span><button onClick={addPage} aria-label="Add page"><Plus size={12} /></button></div>
-        <div className="pages-list">
-          {pages.map((item) => (
-            <button className={`page-row ${item.id === page?.id ? "is-active" : ""}`} key={item.id} onClick={() => setActivePage(item.id)}>
-              <File size={11} /><span>{item.name}</span>{item.id === page?.id && <Minus size={9} />}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="add-menu">
-        {addItems.map((item) => {
-          const Icon = item.icon;
-          return <button key={item.type} onClick={() => addNode(item.type)}><Icon size={12} />{item.label}</button>;
-        })}
-        <button onClick={() => insertTemplate("button")}><MousePointerClick size={12} />Button</button>
-        <button onClick={() => insertTemplate("card")}><PanelsTopLeft size={12} />Card</button>
-      </div>
-      <div className="sidebar-section-heading"><span>Layers</span><span>{page?.children.length ?? 0}</span></div>
-      <div className="layers-scroll">
-        {page?.children.map((nodeId) => (
-          <LayerRow
-            key={nodeId}
-            nodeId={nodeId}
-            depth={0}
-            collapsed={collapsed}
-            toggleCollapsed={(id) => setCollapsed((current) => {
-              const next = new Set(current);
-              if (next.has(id)) next.delete(id); else next.add(id);
-              return next;
-            })}
-          />
+      <nav className="sidebar-tabs sidebar-tabs-compact" aria-label="Project structure">
+        {LEFT_PANEL_TABS.map((item) => (
+          <button
+            key={item}
+            className={`sidebar-tab ${tab === item ? "is-active" : ""}`}
+            aria-pressed={tab === item}
+            onClick={() => setTab(item)}
+          >{item}</button>
         ))}
-      </div>
+      </nav>
+
+      {tab === "pages" && (
+        <div className="sidebar-pane">
+          <div className="sidebar-section-heading"><span>Pages</span><button onClick={addPage} aria-label="Add page"><Plus size={12} /></button></div>
+          <div className="pages-list pages-list-detailed">
+            {pages.map((item) => {
+              const activeChildren = item.children.filter((id) => !document?.nodes[id]?.archived);
+              return (
+                <button className={`page-row page-row-detailed ${item.id === page?.id ? "is-active" : ""}`} key={item.id} onClick={() => setActivePage(item.id)}>
+                  <File size={12} />
+                  <span><strong>{item.name}</strong><small>{activeChildren.length} root {activeChildren.length === 1 ? "frame" : "frames"}</small></span>
+                  {item.id === page?.id && <Minus size={9} />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {tab === "layers" && (
+        <div className="sidebar-pane">
+          <div className="add-menu">
+            {addItems.map((item) => {
+              const Icon = item.icon;
+              return <button key={item.type} onClick={() => addNode(item.type)}><Icon size={12} />{item.label}</button>;
+            })}
+            <button onClick={() => insertTemplate("button")}><MousePointerClick size={12} />Button</button>
+            <button onClick={() => insertTemplate("card")}><PanelsTopLeft size={12} />Card</button>
+          </div>
+          <div className="sidebar-section-heading"><span>{page?.name ?? "Layers"}</span><span>{page?.children.length ?? 0}</span></div>
+          <div className="layers-scroll">
+            {page?.children.map((nodeId) => (
+              <LayerRow
+                key={nodeId}
+                nodeId={nodeId}
+                depth={0}
+                collapsed={collapsed}
+                toggleCollapsed={(id) => setCollapsed((current) => {
+                  const next = new Set(current);
+                  if (next.has(id)) next.delete(id); else next.add(id);
+                  return next;
+                })}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "components" && (
+        <div className="sidebar-pane">
+          <div className="sidebar-pane-intro"><PanelsTopLeft size={14} /><div><strong>Components</strong><small>Project-local definitions and pinned instances.</small></div></div>
+          <div className="entity-list">
+            {components.map((node) => (
+              <button key={node.id} onClick={() => document && selectNodeAcrossPages(document, node.id, setActivePage, select)} className={selectedIds.includes(node.id) ? "is-active" : ""}>
+                <TypeIcon node={node} />
+                <span><strong>{node.name}</strong><small>{node.type === "component" ? node.component_key : node.type === "instance" ? `Instance · ${node.component_id.slice(-8)}` : node.type}</small></span>
+              </button>
+            ))}
+            {components.length === 0 && <div className="sidebar-empty"><Box size={17} /><strong>No linked components</strong><small>Templates remain detached in V1. V2 migration creates project-local definitions.</small></div>}
+          </div>
+        </div>
+      )}
+
+      {tab === "assets" && (
+        <div className="sidebar-pane">
+          <div className="sidebar-pane-intro"><Image size={14} /><div><strong>Assets</strong><small>Normalized, content-addressed project files.</small></div></div>
+          <div className="entity-list">
+            {assets.map((asset) => {
+              const usages = document ? Object.values(document.nodes).filter((node) =>
+                !node.archived && node.type === "image" && node.asset_id === asset.id).length : 0;
+              return (
+                <button key={asset.id} onClick={() => selectAssetUsage(asset.id)} disabled={usages === 0}>
+                  <Image size={12} />
+                  <span><strong>{asset.name}</strong><small>{asset.mime_type} · {usages} {usages === 1 ? "use" : "uses"}</small></span>
+                </button>
+              );
+            })}
+            {assets.length === 0 && <div className="sidebar-empty"><Image size={17} /><strong>No uploaded assets</strong><small>Add an image layer, then upload PNG, JPEG, or WebP from Content.</small><button onClick={() => addNode("image")}><Plus size={11} /> Add image layer</button></div>}
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

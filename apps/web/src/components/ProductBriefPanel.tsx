@@ -33,6 +33,7 @@ import {
 } from "../lib/api";
 import { useDesignerStore } from "../store/designer-store";
 import { createClientKey } from "../domain";
+import type { ActivityPanelTab } from "../lib/editor-information-architecture";
 import { PlanningInterview } from "./PlanningInterview";
 import { EngineeringHandoffPanel } from "./EngineeringHandoffPanel";
 import {
@@ -42,7 +43,6 @@ import {
 } from "./AgentPreviewReview";
 import type { DesignDocument } from "../domain";
 
-type PanelTab = "activity" | "diagnostics" | "revision" | "handoff";
 type SpecView = "brief" | "structured";
 
 const contextualActions = [
@@ -98,7 +98,7 @@ export function ProductBriefPanel() {
   const openDesign = useDesignerStore((state) => state.openDesign);
   const setNotice = useDesignerStore((state) => state.setNotice);
   const [collapsed, setCollapsed] = useState(false);
-  const [panelTab, setPanelTab] = useState<PanelTab>("activity");
+  const [panelTab, setPanelTab] = useState<ActivityPanelTab>("activity");
   const [specView, setSpecView] = useState<SpecView>("brief");
   const [brief, setBrief] = useState("");
   const [loadedBrief, setLoadedBrief] = useState("");
@@ -370,10 +370,10 @@ export function ProductBriefPanel() {
     <section className={`product-workspace-panel ${collapsed ? "is-collapsed" : ""}`} aria-label="Product specification and agent activity">
       <header className="product-panel-header">
         <nav aria-label="Workspace activity panels">
-          <button className={panelTab === "activity" ? "is-active" : ""} onClick={() => setPanelTab("activity")}><Sparkles size={11} /> Agent activity</button>
-          <button className={panelTab === "diagnostics" ? "is-active" : ""} onClick={() => setPanelTab("diagnostics")}><FileCheck2 size={11} /> Diagnostics</button>
-          <button className={panelTab === "revision" ? "is-active" : ""} onClick={() => setPanelTab("revision")}><Braces size={11} /> Revision preview</button>
-          <button className={panelTab === "handoff" ? "is-active" : ""} onClick={() => setPanelTab("handoff")}><Clipboard size={11} /> Engineering handoff</button>
+          <button className={panelTab === "activity" ? "is-active" : ""} aria-pressed={panelTab === "activity"} onClick={() => setPanelTab("activity")}><Sparkles size={11} /> Agent activity</button>
+          <button className={panelTab === "diagnostics" ? "is-active" : ""} aria-pressed={panelTab === "diagnostics"} onClick={() => setPanelTab("diagnostics")}><FileCheck2 size={11} /> Diagnostics</button>
+          <button className={panelTab === "revision" ? "is-active" : ""} aria-pressed={panelTab === "revision"} onClick={() => setPanelTab("revision")}><Braces size={11} /> Revision preview</button>
+          <button className={panelTab === "handoff" ? "is-active" : ""} aria-pressed={panelTab === "handoff"} onClick={() => setPanelTab("handoff")}><Clipboard size={11} /> Engineering handoff</button>
         </nav>
         <button className="icon-button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Expand product workspace" : "Collapse product workspace"}>{collapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
       </header>

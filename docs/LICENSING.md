@@ -57,21 +57,59 @@ one step, retain the directory as a build artifact, and then run the gate.
 
 ## Current verified result
 
-On 2026-07-20, after replacing Sharp/libvips with the pinned Playwright
-Chromium raster worker, the schema-10 Darwin ARM64 checkpoint produced 342
-distinct third-party package/version components. The deterministic generator,
-its eight focused tests, and the strict permissive-only policy all pass with
-zero violations. `apps/server/package.json`, `pnpm-lock.yaml`, and that rebuilt
+On 2026-07-21, after replacing Sharp/libvips with the pinned Playwright
+Chromium raster worker, current schema-12 Darwin ARM64 source evidence produced
+342 distinct third-party package/version components. The deterministic
+generator, its eight focused tests, and the strict permissive-only policy all
+pass with zero violations. The retained source SBOM SHA-256 is
+`571b39478f99c3ffdb3ff761c79e58c420f09296741961807cc13a06420c513a` and
+the retained license-evidence SHA-256 is
+`6ecc9a43fdd37beae32e9c6995503a71a175e40dffbf93672083eaf6de9c80bb`.
+`apps/server/package.json`, `pnpm-lock.yaml`, and the exact-current
 `formaspec/server:local` image manifest contain no Sharp or libvips package.
-Migration 11 and later source changes require a fresh source-workspace evidence
-run; the recorded 342-component result is not current-tree artifact evidence.
 
 Linux and Windows release targets must still generate and retain their own
 evidence because native optional dependencies and OS payloads are
 target-specific. Passing this source-workspace gate does not by itself approve
 a container or native installer artifact.
 
-## Verified unsigned macOS artifact
+## Retained schema-12 unsigned macOS checkpoint
+
+The retained engineering checkpoint is stored at
+`artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`.
+Its size is 185,279,180 bytes and its SHA-256 is
+`9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`.
+Package integrity passes with 349 npm/workspace components, all seven exact
+workspace trees, and two bundled runtimes. The payload-tree SHA-256 is
+`375daa2689cebdac26c1bd88322e3ea124e30c4c234f364faab4880a65b1d110`
+and the workspace-tree SHA-256 is
+`5478d6e03ab5ac6bac4fe57e2f26c4bf78802c1c5424da9ef5eb7f77617329c1`.
+The non-installing extracted-runtime smoke passes for the frozen bytes, but the
+package was not installed and does not match the current workspace's exhaustive
+SSE and project/revision historical-release interfaces. Its checksum-bound
+summary SHA-256 is
+`c1719a9ebab5c7d241fa329df1d3bb6b19bb34b252c063abc276818e48c41964`.
+
+Release remains **NO-GO**. Chromium headless shell revision 1228 has a complete
+component/notice inventory, but its composite notice file contains LGPL
+notices and is not approved by the permissive-only release policy. The package
+also lacks a Developer ID Installer signature, notarization/stapling evidence,
+and artifact/native-binary/Chromium/OS vulnerability scan evidence. A same-host
+repeat build produced identical payload and workspace trees but different
+outer PKG bytes and size, so reproducibility is demonstrably not achieved. The
+negative diagnostic summary SHA-256 is
+`570d1fb98fb61bc8b2f56b75a4a4379575d7ef2c6bf10bb2a1000ad69a2de710`.
+
+## Retained historical schema-11 checkpoint
+
+The preserved package under `artifacts/candidates/schema11-current/` is a
+pre-final-patch historical checkpoint. Its SHA-256 is
+`3aad0cd887a7ce83e59cd85e0527500083e71eb31e9340d96dec2eca958017c2` and
+its historical size is 176.3 MiB. It was not installed, and its packaged
+`packages/core/dist` does not match the current workspace. It must not be
+presented as the current-source candidate.
+
+## Historical schema-10 unsigned macOS artifact
 
 The earlier exact unsigned Darwin ARM64 package
 `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
@@ -100,9 +138,8 @@ is not allowlisted by the permissive-only release policy. Consequently the
 artifact gate fails closed with
 `CHROMIUM_RUNTIME_CONTAINS_LGPL_NOTICES`. Signing, notarization,
 reproducibility, and vulnerability-scan evidence are also absent, producing
-exactly five artifact blockers. This artifact is also stale relative to the
-schema-11 source and remains **NO-GO** for distribution. Do not install or
-present it as the current candidate.
+exactly five artifact blockers. This artifact is historical and remains
+**NO-GO** for distribution. Do not present it as the current candidate.
 
 See [Unsigned macOS PKG evidence](./MACOS_PKG_EVIDENCE.md) for the artifact
 hashes, runtime evidence, verification procedure, and complete blocker list.
@@ -116,12 +153,11 @@ report, or native lifecycle evidence has been produced. The Windows builder
 requires an externally supplied service host plus caller-supplied service-host
 and WiX provenance; current checks prove internal consistency, not a trust
 anchor or real WiX compile. It does not discover, download, fabricate, or sign
-them. The
-macOS evidence proves the bytes and component
-linkage of one exact unsigned PKG only; it does not approve Chromium's
-composite notices, scan operating-system packages or binaries for known
-vulnerabilities, establish reproducibility, exercise a native lifecycle
-matrix, or sign/prove artifact provenance. Those legal reviews,
+them. The macOS checkpoint evidence records the bytes and component linkage of
+one exact retained unsigned PKG and historical predecessors. It does not
+approve Chromium's composite notices, scan operating-system packages or
+binaries for known vulnerabilities, establish reproducibility, exercise a
+native lifecycle matrix, or sign/prove artifact provenance. Those legal reviews,
 artifact-specific scans, reproducibility comparisons, signing/notarization,
 cross-platform evidence, and native-installer CI steps remain release
 blockers.

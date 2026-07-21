@@ -84,6 +84,9 @@ the boundary:
 - canonical SHA-256 identity, exact retry deduplication, and
   active/superseded/revoked lifecycle;
 - rejection of path-, command-, shell-, execution-, and unknown fields;
+- immutable, idempotent implementation-mapping batches pinned to exact design,
+  product-specification, and active-inventory hashes, with all source metadata
+  derived from opaque inventory entities;
 - revision- and inventory-pinned handoff specifications;
 - immutable handoff versions and append-only review/approval/implementation
   transitions;
@@ -99,10 +102,11 @@ the private local grant. Grants created before this binding existed remain
 readable but must be recreated through a connected `grant` command before they
 can launch Codex.
 
-`launch-codex` accepts only a handoff whose central status is `approved` or
-`implementing`, whose immutable transition details confirm the exact approved
-version and explicit implementation safeguards, and whose active central
-inventory ID/hash/fingerprint match the local grant. `--dry-run` and
+`launch-codex` accepts only a handoff whose central status is `implementing`
+and whose final immutable transition is the exact `approved` → `implementing`
+`start_implementation` authorization for the current handoff version. Its
+active central inventory ID/hash/fingerprint must also match the local grant.
+`--dry-run` and
 `--print-plan` perform the same validation and print the exact executable,
 working directory, and single secret-free task reference without starting a
 process. A real launch repeats all checks after plan review to catch expiry,
@@ -118,12 +122,13 @@ is expected to edit that repository.
 
 ## Not yet implemented
 
-Framework-aware mapping review and automatic mapping upload, packaged
+Automatic mapping suggestions, incremental rescans, packaged
 supervision, native credential storage on Windows, broader secret-exclusion
 fixtures, and the full local plan/diff/validation/commit/PR execution handoff
 remain required. Direct REST use in a trusted-header deployment also needs a
 supported workstation identity channel; using the authorized local MCP bridge
-avoids that limitation for policy, inventory, handoff, and launch validation.
+avoids that limitation for policy, inventory, implementation mapping, handoff,
+and launch validation.
 Packaged Windows process-tree containment still requires Job Object or
 equivalent retained evidence; the current Windows fallback terminates the
 direct Codex child only.

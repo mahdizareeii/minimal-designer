@@ -316,7 +316,7 @@ export function lintDesignDocumentV2(document: DesignDocumentV2): Diagnostic[] {
 
   for (const definition of Object.values(document.component_definitions)) {
     const root = document.nodes[definition.root_node_id];
-    if (!root || root.archived || !reachable.has(root.id)) {
+    if (!root || (!root.archived && !reachable.has(root.id))) {
       add(diagnostic(
         "warning",
         "component_definition_detached",
@@ -327,7 +327,7 @@ export function lintDesignDocumentV2(document: DesignDocumentV2): Diagnostic[] {
     }
     for (const state of definition.states) {
       const stateNode = document.nodes[state.node_id];
-      if (!stateNode || stateNode.archived) add(diagnostic(
+      if (!stateNode) add(diagnostic(
         "error",
         "component_state_node_missing",
         `Component ${definition.name} state ${state.key} references a missing or archived node.`,

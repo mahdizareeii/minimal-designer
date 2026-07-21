@@ -1,6 +1,6 @@
 # FormaSpec architecture
 
-Last audited: 2026-07-20
+Last audited: 2026-07-21
 
 This document distinguishes the architecture that exists in the repository
 today from the approved FormaSpec target. A target description is not evidence
@@ -16,12 +16,12 @@ The repository is an incremental pnpm TypeScript workspace:
 | --- | --- |
 | Shared model | `packages/core`: frozen strict V1 schemas, separate strict V2 schemas, deterministic V1→V2 conversion, typed operations, validation/linting, layout rules, product-specification types, the Foundation System, and bounded token exporters. |
 | Browser editor | `apps/web`: React/Vite, Zustand, structured DOM rendering, one viewport transform, Moveable/Selecto in an untransformed interaction overlay, product specification, planning, design-system administration, engineering handoff, Redesign Studio, inspect, history, prototype, JSON/PNG, and portable export/import surfaces. |
-| HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, organization/project authorization, SQLite persistence, exact previews, revision-pinned inspection, design-system releases/pins/upgrades, path-free inventories, handoffs, Redesign Studio, audit/outbox, portable export/import, backups, and render orchestration. |
-| Persistence | Better SQLite3 with a numbered version-10 migration ledger, WAL, content-addressed Brotli snapshots, immutable revision hash chains, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, and immutable portable-import provenance. |
+| HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, organization/project authorization, SQLite persistence, exact previews, revision-pinned inspection, design-system releases/pins/upgrades plus project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, backups, and render orchestration. |
+| Persistence | Better SQLite3 with a numbered version-12 migration ledger, WAL, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, and append-only handoff execution decisions. |
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
 | Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; `formaspecctl` configures token-free Codex MCP plus the managed Minimal UI plugin/skill. |
-| Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge; the server persists strict inventories and revision-pinned handoffs. Richer mapping upload and approved local implementation launch remain incomplete. |
-| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. A fresh unsigned self-contained macOS ARM64 engineering PKG has current-tree integrity/component/tree/runtime evidence but remains `NO-GO`; Windows/Linux native packages are not delivered. |
+| Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
+| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. The runtime build context excludes documentation, CI control files, scripts, and prior evidence so recording an image does not alter its bytes. The retained pre-current-SSE-authorization unsigned macOS ARM64 engineering checkpoint is `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg` (SHA-256 `9724f2874c520b5b2b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`, 185,279,180 bytes). Its frozen source/license and package-integrity checks pass, and a non-installing extracted-runtime smoke verifies bundled Node/Chromium, schema-12 health, real PNG rendering, the exact 51-tool/25-resource MCP inventory, and native state paths. It was not installed, and current-source verification records expected interface drift. A same-host repeat produced identical payload/workspace trees but different outer PKG bytes, so reproducibility, Chromium LGPL-notice approval, vulnerability scanning, signing/notarization, and clean native lifecycle evidence remain blockers; `schema11-current` is retained historical evidence only. Exact-current Docker project `formaspeccischema118e2818fed6`, built from source identity `local-uncommitted-final437-eventauth-sqlbounded-cli`, passes migration 12, deterministic restart rendering, backup-supervision readiness, and the DNS/TCP/interface egress canary with image `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`; that exact image also passes Firefox/WebKit 12/12 once and the same-machine independent-target copied-bundle recovery simulation. The immediately prior fit-sync image contributes three identical Firefox/WebKit 12/12 repeats as historical browser-stability evidence. All of this remains local `NO-GO` evidence rather than hosted provenance, privileged native lifecycle, or remote/off-site proof. Linux DEB/RPM and Windows WiX source-builder foundations exist, but no release-qualified artifact or native lifecycle evidence is delivered for those targets. |
 
 ```mermaid
 flowchart LR
@@ -32,7 +32,7 @@ flowchart LR
     A --> D[("SQLite WAL, snapshots, audit, outbox")]
     A -->|bounded Unix-socket IPC| R["Sandboxed renderer worker"]
     A --> F["Static React application"]
-    W["Workspace Bridge"] -->|bounded path-free inventory| A
+    W["Workspace Bridge"] -->|bounded path-free inventory and opaque mappings| A
     W --> Q["Explicitly granted local repository"]
 ```
 
@@ -61,10 +61,11 @@ isolated worker, rebases the document and optional product specification to
 local version 1, and commits project/revision/specification/provenance/audit/
 outbox state together. The imported source revision hash remains an explicit
 provenance claim; the new local revision receives its own verified snapshot and
-revision hashes. ZIP entries are inflated independently in bounded 16 KiB
-chunks after strict metadata/type/CRC/descriptor/size validation. The multipart
-body and extracted entry buffers are still memory-resident within the caps, so
-end-to-end request-body streaming remains future hardening.
+revision hashes. The multipart body streams to a private archive while ZIP
+entries inflate independently in bounded 16 KiB chunks into pinned private
+files after strict metadata/type/CRC/descriptor/size validation. The complete
+request and extracted set are not held in memory simultaneously; individual
+bounded JSON or raster entries are loaded only when parsed or normalized.
 
 ### Current storage model
 
@@ -78,24 +79,30 @@ end-to-end request-body streaming remains future hardening.
 | `render_jobs` | Bounded request/output hashes and lifecycle metadata for render and raster-normalization jobs; owner leases protect rolling processes, and exact permit-based 30-day retention deletes one organization/internal scope per bounded batch. Raw documents, assets, paths, and PNG bytes are never stored. | Organization-configurable retention, dashboards, and packaged load evidence remain incomplete. |
 | `event_outbox` | Organization/project-scoped replayable SSE source with guarded retention of published rows and explicit replay gaps | Operational lag monitoring and high-load reconnect evidence remain. |
 | `audit_retention_previews` / `audit_retention_runs` | Exact expiring retention plans plus immutable SHA-256 chained execution evidence | Administration UI and long-running scheduled execution remain. |
-| `portable_imports` | Immutable organization-scoped source bundle/revision hash claims, target revision, canonical ID map, manifest, diagnostics, actor, and timestamp | The source revision hash is preserved as a provenance claim; it is not revalidated as a local revision chain. Per-entry inflation is streaming, but the request archive and extracted entry buffers remain memory-resident within configured limits. |
-| Enterprise workflow tables | Organizations, principals, roles, grants, audit, product specs, planning, tasks, connections, design systems/releases/pins, repository inventories, handoffs, redesign assessments, backup/export metadata, and locks | V2-head migration, full authoring/mapping/implementation integration, policy administration, and complete retention workflows remain foundations only. |
+| `portable_imports` | Immutable organization-scoped source bundle/revision hash claims, target revision, canonical ID map, manifest, diagnostics, actor, and timestamp | The source revision hash is preserved as a provenance claim; it is not revalidated as a local revision chain. Multipart and per-entry disk staging are bounded, but larger adversarial/concurrent-import and packaged cross-platform evidence remain incomplete. |
+| `handoff_execution_decisions` | Append-only, handoff-version-pinned plan/isolation/diff/validation/commit/push/PR decisions with evidence hashes, explicit supersession, and lifecycle/CAS triggers | Broader packaged-agent and real-repository execution evidence remains incomplete. |
+| Enterprise workflow tables | Organizations, principals, roles, grants, audit, product specs, planning, tasks, connections, design systems/releases/pins, repository inventories, handoffs, redesign assessments, backup/export metadata, and locks | V2-head migration, full authoring/mapping/implementation integration, delegated administration, policy rollout/version migration, and complete retention workflows remain incomplete. |
 
 The `schema_migrations` ledger and database, document, command-engine,
 renderer, font, application, and export versions are explicit and synchronized
-between server and CLI at database schema version 11. Migration 8 is an
+between server and CLI at database schema version 12. Migration 8 is an
 expand-only correction that adds the previously missing design-system,
 repository-inventory, handoff, implementation-mapping, and Redesign Studio
 tables. Migration 9 adds bounded preview-first audit/outbox retention with
 temporary exact-delete permits and an immutable run hash chain. Migration 10
 adds immutable portable-import provenance. Migration 11 adds bounded persistent
 render-job lifecycle records and strict transition/immutability constraints.
-None of these migrations changes V1 revisions or removes legacy columns.
+Migration 12 adds append-only handoff execution decisions and their exact
+sequence/supersession/lifecycle integrity triggers. None of these migrations
+changes V1 revisions or removes legacy columns.
 
 The migration ledger is necessary but not sufficient. Database startup and
-backup/restore verification validate the required migration-9/10/11 tables,
+backup/restore verification validate the required migration-9/10/11/12 tables,
 columns, indexes, trigger targets/SQL, and forbidden legacy triggers. A database
 that claims a ledger version without the required schema shape fails closed.
+Deterministic historical fixtures build schema 1 and schema 7–11 by applying
+the real migration prefix to a fresh database, with reviewed schema/data
+digests; they do not derive old schemas by dropping current tables.
 
 ### Current renderer topology
 
@@ -123,30 +130,36 @@ The reproduced approximately 149% zoom/pan selection drift is corrected by one
 `ViewportTransform`, a viewport-coordinate interaction overlay, explicit
 Moveable root/container relationships, accurate positioning, and coalesced
 geometry invalidation. The automated Chrome gate currently passes DPR 1/2,
-25/100/150/200% zoom, positive/negative fractional pan, LTR/RTL single
-selection, and integer-coordinate multi-selection within 0.75 CSS px.
+12/25/50/100/149/150/200/320% zoom, positive/negative fractional pan,
+LTR/RTL/mixed and nested rotated single selection, and fractional-coordinate
+multi-selection within 0.75 CSS px at DPR 1 and 2.
 
 Remaining risks are explicit:
 
 - React Moveable still rounds fractional child offsets for group selections;
-  fractional-coordinate multi-selection is a release-gate gap.
+  FormaSpec keeps Moveable as the group gesture engine and renders the
+  non-resizable group border from an exact client-space target union.
 - Auto-layout drag/reparent/constraint semantics are not complete.
 - The representative 1,000-node service and 20-sample pinned-Chromium browser
   gates pass locally, but their reports are not yet retained across pinned
   release CI images and supported platforms.
 - Verified backup/retention and launcher-local Docker supervision exist, and an
-  isolated 20-step source-local restore scenario passes; server-mode external
-  supervision, signed provenance, historical fixtures, and the full asset/
-  failure-injection recovery matrix remain incomplete.
+  isolated 20-step source-local restore scenario plus deterministic schema 1
+  and schema 7–11 fixtures pass; server-mode external supervision, signed
+  provenance, anonymized real-customer fixtures, and the full asset/failure-
+  injection recovery matrix remain incomplete.
 - Strict V2 heads, immutable release pinning/upgrades, and backup-gated
   migration foundations exist; complete component-authoring and upgrade-review
   UI remains incomplete.
-- The Workspace Bridge persists bounded inventories and handoffs, but the
-  explicitly approved selected-workspace implementation launch is not complete.
-- Native installers, Windows named pipes and packaged DPAPI verification,
-  artifact-specific SBOM/scanning evidence, cross-platform visual regression,
-  and the full security matrix remain release blockers. The Sharp-free source
-  license gate now passes with zero violations.
+- The Workspace Bridge persists bounded inventories, exact opaque mappings,
+  and handoffs. Selected-workspace launch now requires the immutable
+  `start_implementation` transition; the broader independently approved
+  plan/diff/validation/commit/push/PR execution workflow is not complete.
+- Privileged native lifecycle, Windows named pipes and packaged DPAPI
+  verification, container/Windows/Linux artifact evidence, vulnerability and OS
+  scanning, retained hosted/OS visual regression, and the full security matrix
+  remain release blockers. The Sharp-free source license gate and current
+  macOS package SBOM/integrity evidence pass with zero policy violations.
 
 ## Approved target architecture
 
@@ -163,7 +176,7 @@ flowchart LR
     O --> SSE["Replayable SSE"]
     API -->|bounded IPC| RW["Renderer worker"]
     RW --> CH["Pinned sandboxed Chromium"]
-    WB["Workspace Bridge"] -->|bounded inventories and task state| API
+    WB["Workspace Bridge"] -->|bounded inventories, opaque mappings, and task state| API
     WB --> REPO["Explicitly granted local repository"]
 ```
 
@@ -210,7 +223,8 @@ The current repository records the first seven implementation slices, an
 eighth expand-only corrective migration for domain tables that were not yet
 materialized by the earlier broad workflow migrations, migration 9 for guarded
 audit/outbox retention execution, and migration 10 for immutable portable-
-import provenance.
+import provenance, migration 11 for persistent render-job lifecycle state, and
+migration 12 for append-only handoff execution decisions.
 
 No V2 project-head migration may run before a verified backup and clean restore
 test. The deterministic V1-to-V2 migration must preserve project, page, frame,

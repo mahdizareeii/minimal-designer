@@ -8,11 +8,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   createDesignSystemComponentDraft,
+  listDesigns,
+  listHistory,
   readDesignSystemComponentCatalog,
+  readRevisionInspect,
   transitionDesignSystemComponent,
+  type ComponentSourceReference,
+  type ComponentDefinitionSubmission,
   type ComponentDefinitionCatalogRecord,
   type DesignSystemRecord,
+  type RevisionInspectResult,
 } from "../lib/api";
+import type { DesignProjectSummary, RevisionSummary } from "../domain";
 
 const PROPERTY_TYPES = ["text", "boolean", "enum", "icon", "asset", "node_slot"] as const;
 const STATE_TYPES = ["default", "hover", "pressed", "focused", "disabled", "loading", "error", "selected"] as const;
@@ -48,7 +55,7 @@ export interface ComponentStateDraft {
 }
 
 export interface ComponentAuthoringDraft {
-  componentId: string;
+  componentId: string | null;
   expectedLatestVersion: number;
   key: string;
   name: string;
@@ -61,10 +68,6 @@ export interface ComponentAuthoringDraft {
   allowAssets: boolean;
   allowIcons: boolean;
   preservedDefinition: ComponentDefinition | null;
-}
-
-function opaqueId(prefix: "component" | "node"): string {
-  return `${prefix}_${globalThis.crypto.randomUUID().replaceAll("-", "")}`;
 }
 
 function propertyDraft(): ComponentPropertyDraft {
@@ -92,22 +95,34 @@ function slotDraft(): ComponentSlotDraft {
 }
 
 export function createBlankComponentDraft(): ComponentAuthoringDraft {
-  const rootNodeId = opaqueId("node");
   return {
-    componentId: opaqueId("component"),
+    componentId: null,
     expectedLatestVersion: 0,
     key: "component.new",
     name: "New component",
-    rootNodeId,
+    rootNodeId: "",
     summary: "",
     properties: [propertyDraft()],
     slots: [],
-    states: [{ key: "default", name: "Default", nodeId: rootNodeId }],
+    states: [{ key: "default", name: "Default", nodeId: "" }],
     allowText: true,
     allowAssets: false,
     allowIcons: false,
     preservedDefinition: null,
   };
+}
+
+export interface ComponentSourceNodeOption {
+  id: string;
+  name: string;
+}
+
+export function componentSourceNodeOptions(inspect: RevisionInspectResult | null): ComponentSourceNodeOption[] {
+  if (!inspect || inspect.document.schema_version !== 2) return [];
+  return Object.values(inspect.document.nodes)
+    .filter((node) => node.type === "container" && node.visible && !node.archived)
+    .map((node) => ({ id: node.id, name: node.name }))
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
 function splitValues(value: string): string[] {
@@ -160,12 +175,12 @@ function propertyFromDraft(property: ComponentPropertyDraft, preserved?: Compone
   };
 }
 
-export function buildComponentDraftDefinition(draft: ComponentAuthoringDraft): ComponentDefinition {
+export function buildComponentDraftDefinition(draft: ComponentAuthoringDraft): ComponentDefinitionSubmission {
   const preservedProperties = new Map(
     (draft.preservedDefinition?.properties_schema ?? []).map((property) => [property.key, property]),
   );
-  return ComponentDefinitionSchema.parse({
-    id: draft.componentId,
+  const definition = ComponentDefinitionSchema.parse({
+    id: draft.componentId ?? "component_clientvalidation0001",
     key: draft.key.trim(),
     name: draft.name.trim(),
     version: draft.expectedLatestVersion + 1,
@@ -203,6 +218,9 @@ export function buildComponentDraftDefinition(draft: ComponentAuthoringDraft): C
       dont_list: draft.preservedDefinition?.documentation.dont_list ?? [],
     },
   });
+  if (draft.componentId !== null) return definition;
+  const { id: _serverGeneratedId, ...submission } = definition;
+  return submission;
 }
 
 function editorDefaultValue(property: ComponentProperty): string {
@@ -260,6 +278,12 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
   const [selectedSystemId, setSelectedSystemId] = useState("");
   const [components, setComponents] = useState<ComponentDefinitionCatalogRecord[]>([]);
   const [draft, setDraft] = useState<ComponentAuthoringDraft | null>(null);
+  const [sourceDesigns, setSourceDesigns] = useState<DesignProjectSummary[]>([]);
+  const [sourceDesignId, setSourceDesignId] = useState("");
+  const [sourceRevisions, setSourceRevisions] = useState<RevisionSummary[]>([]);
+  const [sourceRevisionId, setSourceRevisionId] = useState("");
+  const [sourceInspect, setSourceInspect] = useState<RevisionInspectResult | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(false);
   const [replacementByComponent, setReplacementByComponent] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -300,10 +324,105 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  useEffect(() => {
+    if (!canAuthorComponents) {
+      setSourceDesigns([]);
+      setSourceDesignId("");
+      setSourceRevisions([]);
+      setSourceRevisionId("");
+      setSourceInspect(null);
+      return;
+    }
+    let active = true;
+    setSourceLoading(true);
+    void listDesigns().then((designs) => {
+      if (!active) return;
+      setSourceDesigns(designs);
+      setSourceDesignId((current) => designs.some((design) => design.id === current)
+        ? current
+        : designs[0]?.id ?? "");
+    }).catch((cause) => {
+      if (active) setError(issueMessage(cause));
+    }).finally(() => {
+      if (active) setSourceLoading(false);
+    });
+    return () => { active = false; };
+  }, [canAuthorComponents]);
+
+  useEffect(() => {
+    if (!sourceDesignId) {
+      setSourceRevisions([]);
+      setSourceRevisionId("");
+      setSourceInspect(null);
+      return;
+    }
+    let active = true;
+    setSourceLoading(true);
+    void listHistory(sourceDesignId).then((revisions) => {
+      if (!active) return;
+      const ordered = [...revisions].sort((left, right) => right.version - left.version);
+      setSourceRevisions(ordered);
+      setSourceRevisionId((current) => ordered.some((revision) => revision.id === current)
+        ? current
+        : ordered[0]?.id ?? "");
+    }).catch((cause) => {
+      if (!active) return;
+      setSourceRevisions([]);
+      setSourceRevisionId("");
+      setSourceInspect(null);
+      setError(issueMessage(cause));
+    }).finally(() => {
+      if (active) setSourceLoading(false);
+    });
+    return () => { active = false; };
+  }, [sourceDesignId]);
+
+  useEffect(() => {
+    if (!sourceDesignId || !sourceRevisionId) {
+      setSourceInspect(null);
+      return;
+    }
+    let active = true;
+    setSourceLoading(true);
+    void readRevisionInspect(sourceDesignId, sourceRevisionId).then((inspect) => {
+      if (!active) return;
+      setSourceInspect(inspect);
+    }).catch((cause) => {
+      if (!active) return;
+      setSourceInspect(null);
+      setError(issueMessage(cause));
+    }).finally(() => {
+      if (active) setSourceLoading(false);
+    });
+    return () => { active = false; };
+  }, [sourceDesignId, sourceRevisionId]);
+
+  const sourceNodes = useMemo(() => componentSourceNodeOptions(sourceInspect), [sourceInspect]);
+  const sourceReference = useMemo<ComponentSourceReference | null>(() => (
+    sourceInspect?.document.schema_version === 2 && sourceDesignId && sourceRevisionId
+      ? { designId: sourceDesignId, revisionId: sourceRevisionId }
+      : null
+  ), [sourceDesignId, sourceInspect, sourceRevisionId]);
+
+  useEffect(() => {
+    if (!draft || draft.rootNodeId || sourceNodes.length === 0) return;
+    const rootNodeId = sourceNodes[0]!.id;
+    setDraft({
+      ...draft,
+      rootNodeId,
+      states: draft.states.map((state) => state.key === "default" ? { ...state, nodeId: rootNodeId } : state),
+    });
+  }, [draft, sourceNodes]);
+
   const publishedReplacements = useMemo(
     () => components.filter((component) => component.status === "published"),
     [components],
   );
+
+  const requireSourceReference = (): ComponentSourceReference => {
+    if (!sourceReference) throw new Error("Choose an exact V2 project revision before authoring a component.");
+    return sourceReference;
+  };
 
   const mutate = async (key: string, action: () => Promise<void>) => {
     setBusy(key);
@@ -346,13 +465,47 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
           }}>
             {designSystems.map((system) => <option key={system.id} value={system.id}>{system.name}</option>)}
           </select>
-          {permissionLoaded && canAuthorComponents && <button className="button button-primary" disabled={busy !== null} onClick={() => setDraft(createBlankComponentDraft())}><Plus size={14} /> New component</button>}
+          {permissionLoaded && canAuthorComponents && <button
+            className="button button-primary"
+            disabled={busy !== null || !sourceReference || sourceNodes.length === 0}
+            title={!sourceReference || sourceNodes.length === 0 ? "Choose a V2 source revision with at least one visible container." : undefined}
+            onClick={() => setDraft(createBlankComponentDraft())}
+          ><Plus size={14} /> New component</button>}
         </div>}
       </div>
 
       {error && <div className="component-authoring-message is-error"><CircleAlert size={14} /> {error}</div>}
       {notice && <div className="component-authoring-message"><Check size={14} /> {notice}</div>}
       {permissionLoaded && !canAuthorComponents && <div className="component-authoring-message"><Boxes size={14} /> Read-only component catalog. Your current organization role cannot create drafts or change component lifecycle state.</div>}
+      {permissionLoaded && canAuthorComponents && <div className="component-source-picker">
+        <div>
+          <strong>Exact component source</strong>
+          <small>Choose an immutable V2 revision. State roots are selected from real visible container nodes; source bytes and hashes are captured by the server.</small>
+        </div>
+        <label>Project<select aria-label="Component source project" value={sourceDesignId} disabled={sourceLoading || sourceDesigns.length === 0} onChange={(event) => {
+          setSourceDesignId(event.target.value);
+          setSourceRevisionId("");
+          setSourceInspect(null);
+          setDraft(null);
+        }}>
+          {sourceDesigns.length === 0 && <option value="">No projects</option>}
+          {sourceDesigns.map((design) => <option key={design.id} value={design.id}>{design.name}</option>)}
+        </select></label>
+        <label>Revision<select aria-label="Component source revision" value={sourceRevisionId} disabled={sourceLoading || sourceRevisions.length === 0} onChange={(event) => {
+          setSourceRevisionId(event.target.value);
+          setSourceInspect(null);
+          setDraft(null);
+        }}>
+          {sourceRevisions.length === 0 && <option value="">No revisions</option>}
+          {sourceRevisions.map((revision) => <option key={revision.id} value={revision.id}>v{revision.version} · {revision.message}</option>)}
+        </select></label>
+        <div className={`component-source-status ${sourceReference && sourceNodes.length > 0 ? "is-ready" : "is-blocked"}`}>
+          {sourceLoading ? <><LoaderCircle className="spin" size={14} /> Verifying revision…</>
+            : sourceInspect?.document.schema_version !== 2 ? <><CircleAlert size={14} /> Select a strict V2 revision.</>
+            : sourceNodes.length === 0 ? <><CircleAlert size={14} /> This revision has no visible container roots.</>
+            : <><Check size={14} /> {sourceNodes.length} eligible container root{sourceNodes.length === 1 ? "" : "s"} · snapshot {sourceInspect.revision.snapshotHash.slice(0, 12)}</>}
+        </div>
+      </div>}
 
       {designSystems.length === 0 ? (
         <div className="administration-empty"><Boxes size={24} /><strong>Create a design system first</strong><span>Component definitions belong to an organization design system.</span></div>
@@ -367,11 +520,12 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
                 <span className={`component-status is-${component.status}`}>{component.status}</span>
               </div>
               <small>v{component.version} · {component.versionCount} immutable version{component.versionCount === 1 ? "" : "s"} · {component.definition.properties_schema.length} properties · {component.definition.slots.length} slots · {component.definition.states.length} states</small>
+              <small>{component.source.kind === "verified" ? `Verified source · ${component.source.nodeCount} nodes · ${component.source.hash.slice(0, 12)}` : "Legacy source unavailable · cannot publish"}</small>
               {component.replacement && <small className="component-replacement">Replacement: {component.replacement.name} v{component.replacement.version}</small>}
               {component.diagnostics.map((diagnostic) => <div className={`component-diagnostic is-${diagnostic.severity}`} key={diagnostic.code}><CircleAlert size={12} /><span>{diagnostic.message}</span></div>)}
               {canAuthorComponents && <div className="component-catalog-controls">
                 {component.status !== "deprecated" && <button className="button button-secondary" disabled={busy !== null} onClick={() => setDraft(draftFromComponent(component))}>{component.status === "draft" ? "Revise draft" : "New draft"}</button>}
-                {component.status === "draft" && <button className="button button-primary" disabled={busy !== null} onClick={() => {
+                {component.status === "draft" && <button className="button button-primary" disabled={busy !== null || !sourceReference} onClick={() => {
                   if (!window.confirm(`Publish ${component.definition.name} as immutable version ${component.version + 1}?`)) return;
                   void mutate(`publish-${component.componentId}`, async () => {
                     await transitionDesignSystemComponent({
@@ -379,6 +533,7 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
                       componentId: component.componentId,
                       expectedLatestVersion: component.version,
                       targetStatus: "published",
+                      source: requireSourceReference(),
                     });
                     setDraft(null);
                     setNotice(`${component.definition.name} was published as version ${component.version + 1}.`);
@@ -396,7 +551,7 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
                       <option key={candidate.componentId} value={candidate.componentId}>{candidate.definition.name}</option>
                     ))}
                   </select>
-                  <button className="button button-secondary is-danger" disabled={busy !== null} onClick={() => {
+                  <button className="button button-secondary is-danger" disabled={busy !== null || !sourceReference} onClick={() => {
                     if (!window.confirm(`Deprecate ${component.definition.name} by creating immutable version ${component.version + 1}?`)) return;
                     void mutate(`deprecate-${component.componentId}`, async () => {
                       await transitionDesignSystemComponent({
@@ -405,6 +560,7 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
                         expectedLatestVersion: component.version,
                         targetStatus: "deprecated",
                         replacementComponentId: replacementByComponent[component.componentId] || null,
+                        source: requireSourceReference(),
                       });
                       setDraft(null);
                       setNotice(`${component.definition.name} was deprecated as version ${component.version + 1}.`);
@@ -425,6 +581,7 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
               designSystemId: selectedSystemId,
               expectedLatestVersion: draft.expectedLatestVersion,
               definition,
+              source: requireSourceReference(),
             });
             setDraft(null);
             setNotice(`${created.definition.name} draft v${created.version} was saved without changing prior versions.`);
@@ -435,7 +592,7 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
           <div className="component-contract-fields">
             <label>Name<input required maxLength={240} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
             <label>Stable key<input required maxLength={200} value={draft.key} onChange={(event) => setDraft({ ...draft, key: event.target.value })} /></label>
-            <label className="wide">Root node ID<input required value={draft.rootNodeId} onChange={(event) => {
+            <label className="wide">Default state root<select required aria-label="Component default state root" value={draft.rootNodeId} onChange={(event) => {
               const previousRoot = draft.rootNodeId;
               setDraft({
                 ...draft,
@@ -444,7 +601,10 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
                   ? { ...state, nodeId: event.target.value }
                   : state),
               });
-            }} /></label>
+            }}>
+              <option value="">Choose a real container node</option>
+              {sourceNodes.map((node) => <option key={node.id} value={node.id}>{node.name} · {node.id}</option>)}
+            </select></label>
             <label className="wide">Documentation summary<textarea maxLength={10_000} value={draft.summary} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} /></label>
           </div>
 
@@ -477,12 +637,16 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
             <div><strong>Visual states</strong><button type="button" className="button button-secondary" disabled={draft.states.length >= STATE_TYPES.length} onClick={() => {
               const key = STATE_TYPES.find((candidate) => !draft.states.some((state) => state.key === candidate));
               if (!key) return;
-              setDraft({ ...draft, states: [...draft.states, { key, name: key[0]!.toUpperCase() + key.slice(1), nodeId: opaqueId("node") }] });
+              const nodeId = sourceNodes.find((node) => !draft.states.some((state) => state.nodeId === node.id))?.id ?? "";
+              setDraft({ ...draft, states: [...draft.states, { key, name: key[0]!.toUpperCase() + key.slice(1), nodeId }] });
             }}><Plus size={12} /> State</button></div>
             {draft.states.map((state, index) => <div className="component-contract-row state-row" key={index}>
               <select aria-label={`State ${index + 1} type`} value={state.key} disabled={state.key === "default"} onChange={(event) => updateState(index, { key: event.target.value as StateType })}>{STATE_TYPES.map((type) => <option key={type} value={type} disabled={draft.states.some((candidate, candidateIndex) => candidateIndex !== index && candidate.key === type)}>{type}</option>)}</select>
               <input aria-label={`State ${index + 1} name`} required value={state.name} onChange={(event) => updateState(index, { name: event.target.value })} />
-              <input aria-label={`State ${index + 1} node ID`} required value={state.nodeId} onChange={(event) => updateState(index, { nodeId: event.target.value })} />
+              <select aria-label={`State ${index + 1} source root`} required value={state.nodeId} disabled={state.key === "default"} onChange={(event) => updateState(index, { nodeId: event.target.value })}>
+                <option value="">Choose a real container node</option>
+                {sourceNodes.map((node) => <option key={node.id} value={node.id} disabled={draft.states.some((candidate, candidateIndex) => candidateIndex !== index && candidate.nodeId === node.id)}>{node.name} · {node.id}</option>)}
+              </select>
               {state.key !== "default" && <button type="button" className="icon-button is-danger" aria-label={`Remove state ${index + 1}`} onClick={() => setDraft({ ...draft, states: draft.states.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={12} /></button>}
             </div>)}
           </section>
@@ -494,7 +658,7 @@ export function DesignSystemComponentAuthoring({ designSystems }: { designSystem
             <label className="component-checkbox"><input type="checkbox" checked={draft.allowIcons} onChange={(event) => setDraft({ ...draft, allowIcons: event.target.checked })} /> Icons</label>
           </section>
 
-          <footer><button type="button" className="button button-secondary" onClick={() => setDraft(null)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy !== null}>{busy === "save-component-draft" ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />} Save immutable draft v{draft.expectedLatestVersion + 1}</button></footer>
+          <footer><button type="button" className="button button-secondary" onClick={() => setDraft(null)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy !== null || !sourceReference || draft.states.some((state) => !state.nodeId)}>{busy === "save-component-draft" ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />} Save immutable draft v{draft.expectedLatestVersion + 1}</button></footer>
         </form>}
       </div>}
     </section>

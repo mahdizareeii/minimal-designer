@@ -5,6 +5,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createForensicRecoveryBundle } from "./backup.js";
 import { DesignerDatabase } from "./db/database.js";
 import { MaintenanceStore } from "./maintenance.js";
 import { loadRestoreControlConfig, runRestoreControl } from "./restore-control.js";
@@ -251,6 +252,8 @@ describe("external restore control", () => {
 
   it("aborts only a pristine matching pre-cutover maintenance state", async () => {
     const config = await fixture();
+    const database = new DesignerDatabase(path.join(config.dataDirectory, "designer.sqlite"));
+    database.close();
     await runRestoreControl(["set", "--operation-id", operationId], config, () => new Date(timestamp));
 
     const aborted = await runRestoreControl(["abort", "--operation-id", operationId], config);
@@ -259,6 +262,18 @@ describe("external restore control", () => {
       operation: null,
       workerLock: { active: false, lockValid: true },
     });
+  });
+
+  it("does not clear pristine restore maintenance when the live database cannot be verified", async () => {
+    const config = await fixture();
+    await fs.promises.writeFile(path.join(config.dataDirectory, "designer.sqlite"), "corrupt-live-database");
+    await runRestoreControl(["set", "--operation-id", operationId], config, () => new Date(timestamp));
+
+    await expect(runRestoreControl(["abort", "--operation-id", operationId], config))
+      .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(new MaintenanceStore(config.backupDirectory, config.dataDirectory).read())
+      .resolves.toMatchObject({ active: true, operationId });
+    await expect(new RestoreOperationStore(config.backupDirectory).read()).resolves.toBeNull();
   });
 
   it("cancels a prepared restore only after proving the untouched live database and absent journal", async () => {
@@ -277,6 +292,72 @@ describe("external restore control", () => {
     expect(fs.existsSync(path.join(config.dataDirectory, "designer.sqlite"))).toBe(true);
     const history = await fs.promises.readdir(path.join(config.backupDirectory, ".formaspec", "restore-history"));
     expect(history).toHaveLength(1);
+  });
+
+  it("keeps an offline prepared restore fenced when the unchanged database is corrupt", async () => {
+    const config = await fixture();
+    const databasePath = path.join(config.dataDirectory, "designer.sqlite");
+    await fs.promises.writeFile(databasePath, "corrupt-pre-restore-database");
+    const forensic = await createForensicRecoveryBundle(
+      config.dataDirectory,
+      config.backupDirectory,
+      operationId,
+    );
+    const state = preparedState();
+    state.recovery = { mode: "offline", safetyKind: "forensic" };
+    state.safety = {
+      ...state.safety,
+      filename: forensic.filename,
+      bundleSha256: forensic.bundleSha256,
+      sizeBytes: forensic.sizeBytes,
+      createdAt: forensic.createdAt,
+    };
+    await new RestoreOperationStore(config.backupDirectory).write(state);
+    await runRestoreControl(["set", "--operation-id", operationId], config, () => new Date(timestamp));
+
+    await expect(runRestoreControl(["abort", "--operation-id", operationId], config))
+      .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(await fs.promises.readFile(databasePath, "utf8")).toBe("corrupt-pre-restore-database");
+    await expect(new MaintenanceStore(config.backupDirectory, config.dataDirectory).read())
+      .resolves.toMatchObject({ active: true, operationId });
+    await expect(new RestoreOperationStore(config.backupDirectory).read())
+      .resolves.toMatchObject({ phase: "prepared", operationId });
+  });
+
+  it("hands an active forensic-rollback fence directly to a new recovery operation without an unfenced gap", async () => {
+    const config = await fixture();
+    const nextOperationId = "restore_ffffffffffffffffffffffffffffffff";
+    const state = rolledBackState();
+    state.recovery = { mode: "offline", safetyKind: "forensic" };
+    await new RestoreOperationStore(config.backupDirectory).write(state);
+    await new MaintenanceStore(config.backupDirectory, config.dataDirectory).write({
+      schemaVersion: 1,
+      active: true,
+      phase: "rollback",
+      operationId,
+      startedAt: timestamp,
+    });
+
+    await expect(runRestoreControl(["clear", "--operation-id", operationId], config))
+      .rejects.toMatchObject({
+        code: "VERSION_CONFLICT",
+        message: expect.stringMatching(/cannot be unfenced directly/),
+      });
+
+    await expect(runRestoreControl(
+      ["set", "--operation-id", nextOperationId],
+      config,
+      () => new Date("2026-07-19T13:00:00.000Z"),
+    )).resolves.toMatchObject({
+      maintenance: {
+        active: true,
+        markerValid: true,
+        phase: "restore",
+        operationId: nextOperationId,
+      },
+      operation: { phase: "rolled_back", operationId },
+    });
+    expect(fs.existsSync(path.join(config.backupDirectory, ".formaspec", "restore-history"))).toBe(false);
   });
 
   it("refuses prepared cancellation when a current ledger masks a missing migration-10 table", async () => {

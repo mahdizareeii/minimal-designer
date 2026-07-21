@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { buildDebFromPayload, debianControl } from "./build-linux-deb.js";
-import { buildRpmFromPayload, rpmSpec } from "./build-linux-rpm.js";
+import { buildDebFromPayload, debianControl, linuxDebBuildUsage } from "./build-linux-deb.js";
+import { buildRpmFromPayload, linuxRpmBuildUsage, rpmSpec } from "./build-linux-rpm.js";
 import {
   assertExecutableFile,
   assertLinuxPackagingHost,
@@ -195,6 +195,8 @@ describe("strict package command runner", () => {
     expect(() => runPackageCommand(runner, "dpkg-deb", ["--version"])).toThrow(/absolute executable path/);
     expect(() => runPackageCommand(runner, "/usr/bin/dpkg-deb", ["bad\0argument"])).toThrow(/control characters/);
     expect(() => runPackageCommand(runner, "/usr/bin/dpkg-deb", ["bad\nargument"])).toThrow(/control characters/);
+    expect(() => runPackageCommand(runner, "/usr/bin/dpkg-deb", ["--version"], { timeoutMs: 0 }))
+      .toThrow(/timeout must be a whole number/);
     expect(calls).toBe(0);
   });
 
@@ -205,9 +207,25 @@ describe("strict package command runner", () => {
     expect(() => runPackageCommand(runner, "/usr/bin/dpkg-deb", ["--build"]))
       .toThrow(/exit code 2: package metadata rejected/);
   });
+
+  it("reports an absolute packaging-command deadline explicitly", () => {
+    const timeout = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+    const runner: PackageCommandRunner = {
+      run: () => ({ status: null, stdout: "", stderr: "", error: timeout }),
+    };
+    expect(() => runPackageCommand(runner, "/usr/bin/dpkg-deb", ["--build"], { timeoutMs: 50 }))
+      .toThrow(/exceeded its absolute deadline/);
+  });
 });
 
 describe("workspace Linux packaging entry points", () => {
+  it("documents native-only DEB and RPM builders without running a package tool", () => {
+    expect(linuxDebBuildUsage()).toContain("Usage: build-linux-deb");
+    expect(linuxDebBuildUsage()).toContain("runs only on Linux");
+    expect(linuxRpmBuildUsage()).toContain("Usage: build-linux-rpm");
+    expect(linuxRpmBuildUsage()).toContain("never downloads, signs, installs, or starts");
+  });
+
   it("builds the workspace before invoking each native package builder", () => {
     const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
     const rootPackage = JSON.parse(fs.readFileSync(path.join(workspaceRoot, "package.json"), "utf8")) as {

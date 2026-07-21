@@ -120,6 +120,7 @@ exec "\${INSTALL_ROOT}/runtime/node" "\${INSTALL_ROOT}/app/apps/server/dist/inde
 
 function userRuntimePreamble(): string {
   return `INSTALL_ROOT='${LINUX_INSTALL_ROOT}'
+SYSTEM_STATE_ROOT='${LINUX_STATE_ROOT}'
 if [ -n "\${FORMASPEC_RUNTIME_DIR:-}" ]; then
   RUNTIME_ROOT="\${FORMASPEC_RUNTIME_DIR}"
 elif [ -n "\${XDG_STATE_HOME:-}" ]; then
@@ -130,6 +131,10 @@ else
 fi
 case "\${RUNTIME_ROOT}" in /*) ;; *) echo 'FORMASPEC_RUNTIME_DIR must be absolute.' >&2; exit 2 ;; esac
 export FORMASPEC_RUNTIME_DIR="\${RUNTIME_ROOT}"
+export FORMASPEC_DATA_DIR="\${FORMASPEC_DATA_DIR:-\${SYSTEM_STATE_ROOT}/data}"
+export FORMASPEC_BACKUP_DIR="\${FORMASPEC_BACKUP_DIR:-\${SYSTEM_STATE_ROOT}/backups}"
+export FORMASPEC_LOG_DIR="\${FORMASPEC_LOG_DIR:-\${RUNTIME_ROOT}/logs}"
+export FORMASPEC_SUPPORT_DIR="\${FORMASPEC_SUPPORT_DIR:-\${RUNTIME_ROOT}/support-bundles}"
 export PATH="\${INSTALL_ROOT}/runtime:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\${PATH:-}"
 export PLAYWRIGHT_BROWSERS_PATH="\${INSTALL_ROOT}/runtime/ms-playwright"
 `;

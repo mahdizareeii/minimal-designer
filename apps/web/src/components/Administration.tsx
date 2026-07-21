@@ -12,8 +12,6 @@ import {
   Palette,
   Plus,
   RefreshCcw,
-  Save,
-  Settings2,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -24,6 +22,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { navigate } from "../App";
 import { DesignSystemComponentAuthoring } from "./DesignSystemComponentAuthoring";
+import { DesignSystemProjectPins } from "./DesignSystemProjectPins";
+import { OrganizationPolicyEditor } from "./OrganizationPolicyEditor";
 import {
   backupDownloadUrl,
   createBackup,
@@ -33,7 +33,6 @@ import {
   listAgentConnections,
   listBackups,
   listDesignSystems,
-  organizationConfigurationUrl,
   readOrganizationPolicy,
   reconnectAgentConnection,
   revokeAgentConnection,
@@ -89,7 +88,6 @@ export function Administration() {
   const [portableImportMode, setPortableImportMode] = useState<PortableImportMode>("conflict_fail");
   const [pairingLink, setPairingLink] = useState<string | null>(null);
   const [organizationPolicy, setOrganizationPolicy] = useState<OrganizationPolicyRecord | null>(null);
-  const [organizationPolicyText, setOrganizationPolicyText] = useState("");
   const [canAdministerOrganization, setCanAdministerOrganization] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
@@ -113,7 +111,6 @@ export function Administration() {
         setBackups([]);
         setConnections([]);
         setOrganizationPolicy(null);
-        setOrganizationPolicyText("");
       } else {
         if (backupsResult.status === "rejected") throw backupsResult.reason;
         if (connectionsResult.status === "rejected") throw connectionsResult.reason;
@@ -121,7 +118,6 @@ export function Administration() {
         setBackups(backupsResult.value);
         setConnections(connectionsResult.value);
         setOrganizationPolicy(policyResult.value);
-        setOrganizationPolicyText(JSON.stringify(policyResult.value.policy, null, 2));
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Administration data could not be loaded.");
@@ -131,6 +127,15 @@ export function Administration() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  const reportNotice = useCallback((message: string) => {
+    setError(null);
+    setNotice(message);
+  }, []);
+  const reportError = useCallback((message: string) => {
+    setNotice(null);
+    setError(message);
+  }, []);
 
   const run = async (key: string, action: () => Promise<void>) => {
     setBusy(key);
@@ -142,7 +147,7 @@ export function Administration() {
   };
 
   const connectCodex = async () => {
-    if (!window.confirm("Authorize Codex with scoped FormaSpec design, product-specification, planning, and task access for 24 hours?")) return;
+    if (!window.confirm("Authorize Codex for 24 hours with scoped access to organization policy, editor context, designs, product specifications, planning and tasks, design-system reads, workspace inventories, handoffs, and redesign planning/design? Approval, implementation completion, and cancellation remain human-only.")) return;
     await run("connect-codex", async () => {
       const challenge = await createCodexConnection();
       setPairingLink(openPairingChallenge(challenge));
@@ -274,51 +279,27 @@ export function Administration() {
             </div>
           </section>
 
-          {canAdministerOrganization !== false && <section className="administration-card organization-policy-card">
-            <div className="administration-card-heading">
-              <div><span><Settings2 size={18} /></span><div><h2>Organization policy</h2><p>Secret-free, versioned defaults and enforced agent/repository boundaries.</p></div></div>
-              <div className="organization-policy-actions">
-                <a className="button button-secondary" href={organizationConfigurationUrl()} download="organization.formaspec.yaml"><Download size={14} /> Export YAML</a>
-                <button className="button button-primary" disabled={busy !== null || !organizationPolicy} onClick={() => {
-                  if (!organizationPolicy) return;
-                  let parsed: unknown;
-                  try { parsed = JSON.parse(organizationPolicyText) as unknown; }
-                  catch { setError("Organization policy JSON is not valid."); return; }
-                  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-                    setError("Organization policy must be a JSON object.");
-                    return;
-                  }
-                  if (!window.confirm("Save this organization policy? New and existing agent grants and repository uploads will be checked against it immediately.")) return;
-                  void run("save-organization-policy", async () => {
-                    const updated = await updateOrganizationPolicy(
-                      organizationPolicy.configurationHash,
-                      parsed as Record<string, unknown>,
-                    );
-                    setOrganizationPolicy(updated);
-                    setOrganizationPolicyText(JSON.stringify(updated.policy, null, 2));
-                    setNotice("Organization policy was validated, saved, audited, and applied.");
-                  });
-                }}>{busy === "save-organization-policy" ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />} Save policy</button>
-              </div>
-            </div>
-            {organizationPolicy ? <div className="organization-policy-editor">
-              <div className="organization-policy-meta">
-                <span>Source: <strong>{organizationPolicy.source.replaceAll("_", " ")}</strong></span>
-                <span>Policy SHA-256: <code>{organizationPolicy.policyHash}</code></span>
-                <span>Updated {dateTime(organizationPolicy.updatedAt)}</span>
-              </div>
-              {organizationPolicy.diagnostics.map((diagnostic) => (
-                <div className={`administration-alert is-${diagnostic.severity}`} key={diagnostic.code}><ShieldCheck size={14} /><span>{diagnostic.message}</span></div>
-              ))}
-              <textarea
-                aria-label="Organization policy JSON"
-                spellCheck={false}
-                value={organizationPolicyText}
-                onChange={(event) => setOrganizationPolicyText(event.target.value)}
-              />
-              <small>No passwords, bearer grants, Keychain values, repository paths, or signing credentials are accepted or exported by this policy schema.</small>
-            </div> : <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading organization policy…</div>}
-          </section>}
+          <DesignSystemProjectPins
+            designSystems={designSystems}
+            canAdminister={canAdministerOrganization !== false}
+            onNotice={reportNotice}
+            onError={reportError}
+          />
+
+          {canAdministerOrganization !== false && <OrganizationPolicyEditor
+            record={organizationPolicy}
+            loading={loading}
+            disabled={busy !== null}
+            saving={busy === "save-organization-policy"}
+            onError={reportError}
+            onSave={async (expectedConfigurationHash, policy) => {
+              await run("save-organization-policy", async () => {
+                const updated = await updateOrganizationPolicy(expectedConfigurationHash, policy);
+                setOrganizationPolicy(updated);
+                setNotice("Organization policy was validated, saved, audited, and applied.");
+              });
+            }}
+          />}
         </div>
 
         <DesignSystemComponentAuthoring designSystems={designSystems.filter((system) => system.status === "active")} />

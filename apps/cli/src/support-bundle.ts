@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import tar from "tar-stream";
 
-import { CLI_SUPPORTED_DATABASE_VERSION, defaultDatabasePath, readMigrationStatus } from "./migrations.js";
+import { CLI_SUPPORTED_DATABASE_VERSION, readMigrationStatus } from "./migrations.js";
+import { resolveRuntimePaths, type FormaSpecRuntimePaths } from "./runtime-paths.js";
 
 export const SUPPORT_BUNDLE_LIMITS = Object.freeze({
   maxConfigFileBytes: 64 * 1024,
@@ -76,6 +77,7 @@ export interface CreatedSupportBundle {
 
 export interface SupportBundleOptions {
   projectRoot: string;
+  environment?: NodeJS.ProcessEnv;
   now?: () => Date;
   applicationVersion?: string;
   homeDirectory?: string;
@@ -221,12 +223,12 @@ function stripOuterQuotes(value: string): string {
   return value;
 }
 
-function collectConfigInventory(projectRoot: string): ConfigInventory {
+function collectConfigInventory(paths: FormaSpecRuntimePaths): ConfigInventory {
   const sources: ConfigInventory["diagnostic"]["sources"] = [];
   const valuesToRedact = new Set<string>();
   for (const file of CONFIG_FILES) {
     const read = readBoundedRegularFile(
-      path.join(projectRoot, ".designer", "env", file),
+      path.join(paths.environmentDirectory, file),
       SUPPORT_BUNDLE_LIMITS.maxConfigFileBytes,
     );
     const keys = new Set<string>();
@@ -290,9 +292,9 @@ function defaultPidIsAlive(pid: number): boolean | null {
   }
 }
 
-function scalarState(projectRoot: string, name: string): { state: BoundedRead["state"]; value?: string } {
+function scalarState(paths: FormaSpecRuntimePaths, name: string): { state: BoundedRead["state"]; value?: string } {
   const read = readBoundedRegularFile(
-    path.join(projectRoot, ".designer", "run", name),
+    path.join(paths.runDirectory, name),
     SUPPORT_BUNDLE_LIMITS.maxStateFileBytes,
   );
   if (read.state !== "available" || read.data === undefined) return { state: read.state };
@@ -300,18 +302,18 @@ function scalarState(projectRoot: string, name: string): { state: BoundedRead["s
   return { state: "available", value };
 }
 
-function collectRuntimeState(projectRoot: string, pidIsAlive: (pid: number) => boolean | null): unknown {
-  const modeState = scalarState(projectRoot, "mode");
-  const pidState = scalarState(projectRoot, "pid");
-  const apiPortState = scalarState(projectRoot, "api-port");
-  const webPortState = scalarState(projectRoot, "web-port");
-  const urlState = scalarState(projectRoot, "url");
-  const environmentFileState = scalarState(projectRoot, "env-file");
+function collectRuntimeState(paths: FormaSpecRuntimePaths, pidIsAlive: (pid: number) => boolean | null): unknown {
+  const modeState = scalarState(paths, "mode");
+  const pidState = scalarState(paths, "pid");
+  const apiPortState = scalarState(paths, "api-port");
+  const webPortState = scalarState(paths, "web-port");
+  const urlState = scalarState(paths, "url");
+  const environmentFileState = scalarState(paths, "env-file");
   const knownModes = new Set(["local", "dev", "docker", "server"]);
   const parsedPid = pidState.value !== undefined && /^\d+$/.test(pidState.value) ? Number(pidState.value) : null;
   const validPid = parsedPid !== null && Number.isSafeInteger(parsedPid) && parsedPid > 1 ? parsedPid : null;
   const bridgeRead = readBoundedRegularFile(
-    path.join(projectRoot, ".designer", "run", "formaspec-bridge.json"),
+    path.join(paths.runDirectory, "formaspec-bridge.json"),
     SUPPORT_BUNDLE_LIMITS.maxStateFileBytes,
   );
   let bridge: Record<string, unknown> = { state: bridgeRead.state };
@@ -333,7 +335,7 @@ function collectRuntimeState(projectRoot: string, pidIsAlive: (pid: number) => b
   }
   let launcherLockPresent = false;
   try {
-    const lock = fs.lstatSync(path.join(projectRoot, ".designer", "run", "launcher.lock"));
+    const lock = fs.lstatSync(path.join(paths.runDirectory, "launcher.lock"));
     launcherLockPresent = lock.isDirectory() && !lock.isSymbolicLink();
   } catch {
     launcherLockPresent = false;
@@ -358,8 +360,8 @@ function collectRuntimeState(projectRoot: string, pidIsAlive: (pid: number) => b
   };
 }
 
-function collectMigrationStatus(projectRoot: string, migrationReader: typeof readMigrationStatus): unknown {
-  const database = defaultDatabasePath(projectRoot);
+function collectMigrationStatus(paths: FormaSpecRuntimePaths, migrationReader: typeof readMigrationStatus): unknown {
+  const database = path.join(paths.dataDirectory, "designer.sqlite");
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(database);
@@ -482,17 +484,21 @@ function limitSanitizedLog(text: string): { text: string; truncated: boolean } {
   return { text, truncated };
 }
 
-function collectLogEntries(projectRoot: string, homeDirectory: string, explicitValues: readonly string[]): PayloadEntry[] {
+function collectLogEntries(
+  paths: FormaSpecRuntimePaths,
+  homeDirectory: string,
+  explicitValues: readonly string[],
+): PayloadEntry[] {
   const entries: PayloadEntry[] = [];
   for (const log of LOG_FILES) {
-    const read = readLogTail(path.join(projectRoot, ".designer", "logs", log.source));
+    const read = readLogTail(path.join(paths.logDirectory, log.source));
     if (read.state !== "available" || read.data === undefined) continue;
     let source = read.data.toString("utf8");
     if (read.sourceTruncated) {
       const firstLineEnd = source.indexOf("\n");
       source = firstLineEnd >= 0 ? source.slice(firstLineEnd + 1) : "";
     }
-    const redacted = redactSupportLog(source, { projectRoot, homeDirectory, explicitValues });
+    const redacted = redactSupportLog(source, { projectRoot: paths.projectRoot, homeDirectory, explicitValues });
     const limited = limitSanitizedLog(redacted.text);
     entries.push({
       path: log.archivePath,
@@ -545,21 +551,22 @@ function assertPayloadBounds(payload: readonly PayloadEntry[]): void {
 
 function prepareSupportBundle(options: SupportBundleOptions): PreparedSupportBundle {
   const projectRoot = path.resolve(options.projectRoot);
+  const paths = resolveRuntimePaths(projectRoot, options.environment ?? process.env);
   const now = options.now?.() ?? new Date();
   if (!Number.isFinite(now.getTime())) throw new Error("Support bundle creation time is invalid.");
   const applicationVersion = options.applicationVersion ?? packageVersion();
   const homeDirectory = options.homeDirectory ?? os.homedir();
-  const config = collectConfigInventory(projectRoot);
+  const config = collectConfigInventory(paths);
   const pidIsAlive = options.pidIsAlive ?? defaultPidIsAlive;
   const payload: PayloadEntry[] = [
     diagnosticEntry("diagnostics/versions.json", versionsDiagnostic(applicationVersion)),
     diagnosticEntry(
       "diagnostics/migration-status.json",
-      collectMigrationStatus(projectRoot, options.migrationReader ?? readMigrationStatus),
+      collectMigrationStatus(paths, options.migrationReader ?? readMigrationStatus),
     ),
-    diagnosticEntry("diagnostics/runtime-state.json", collectRuntimeState(projectRoot, pidIsAlive)),
+    diagnosticEntry("diagnostics/runtime-state.json", collectRuntimeState(paths, pidIsAlive)),
     diagnosticEntry("diagnostics/config-keys.json", config.diagnostic),
-    ...collectLogEntries(projectRoot, homeDirectory, config.valuesToRedact),
+    ...collectLogEntries(paths, homeDirectory, config.valuesToRedact),
   ].sort((left, right) => left.path.localeCompare(right.path));
   assertPayloadBounds(payload);
   const entries = payload.map((entry): SupportBundleEntryManifest => ({
@@ -580,7 +587,7 @@ function prepareSupportBundle(options: SupportBundleOptions): PreparedSupportBun
       reviewRequiredBeforeSharing: true,
       included: [
         "bounded FormaSpec/runtime version metadata",
-        "read-only migration status when the source-local ledger is readable",
+        "read-only migration status when the configured local ledger is readable",
         "sanitized launcher and local-bridge state metadata",
         "configuration key names with every value redacted",
         "bounded tails of allowlisted logs after secret and private-path redaction",
@@ -702,8 +709,15 @@ export async function createSupportBundle(options: CreateSupportBundleOptions): 
   };
 }
 
-export function defaultSupportBundlePath(projectRoot: string, now = new Date()): string {
+export function defaultSupportBundlePath(
+  projectRoot: string,
+  now = new Date(),
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
   if (!Number.isFinite(now.getTime())) throw new Error("Support bundle creation time is invalid.");
   const timestamp = now.toISOString().replaceAll(/[:.]/g, "-");
-  return path.join(path.resolve(projectRoot), ".designer", "support-bundles", `formaspec-support-${timestamp}.tar`);
+  return path.join(
+    resolveRuntimePaths(projectRoot, environment).supportDirectory,
+    `formaspec-support-${timestamp}.tar`,
+  );
 }

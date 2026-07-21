@@ -37,10 +37,11 @@ function principalIdForActor(actorId: string): string {
 function parseJsonArray(value: string): string[] {
   try {
     const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed;
   } catch {
-    return [];
+    // Report one fail-closed authorization error below.
   }
+  throw new DomainError("AUTH_REQUIRED", "The agent grant has invalid authorization metadata.", 401);
 }
 
 export function resolveAccess(sqlite: Database.Database, actorId: string): AccessContext {
@@ -120,9 +121,18 @@ export function resolveAccess(sqlite: Database.Database, actorId: string): Acces
     `SELECT COUNT(*) AS count FROM principals
      WHERE organization_id = ? AND kind <> 'local'`,
   ).get(LEGACY_ORGANIZATION_ID) as { count: number }).count;
+  const existingTrustedMembership = trustedIdentity === null ? undefined : sqlite.prepare(
+    `SELECT m.role FROM principals p
+     JOIN memberships m ON m.organization_id = p.organization_id AND m.principal_id = p.id
+     WHERE p.id = ? AND p.organization_id = ? AND p.disabled_at IS NULL`,
+  ).get(principalId, LEGACY_ORGANIZATION_ID) as { role: OrganizationRole } | undefined;
   const bootstrapTrustedAdmin = trustedIdentity !== null
-    && existingNonLocalPrincipals === 0
-    && (loadedPolicy.source === "default" || loadedPolicy.source === "legacy_quarantined");
+    && (loadedPolicy.source === "default" || loadedPolicy.source === "legacy_quarantined")
+    && (existingNonLocalPrincipals === 0
+      || existingTrustedMembership?.role === "organization_admin");
+  if (trustedIdentity !== null && !mappedRole && !bootstrapTrustedAdmin) {
+    throw new DomainError("AUTH_REQUIRED", "The trusted identity is not mapped by organization policy.", 401);
+  }
   const defaultRole: OrganizationRole = actorId === "local"
     ? "organization_admin"
     : agent
@@ -139,8 +149,8 @@ export function resolveAccess(sqlite: Database.Database, actorId: string): Acces
   ).run(LEGACY_ORGANIZATION_ID, principalId, defaultRole, now);
   if (mappedRole) {
     sqlite.prepare(
-      "UPDATE memberships SET role = ? WHERE organization_id = ? AND principal_id = ?",
-    ).run(mappedRole, LEGACY_ORGANIZATION_ID, principalId);
+      "UPDATE memberships SET role = ? WHERE organization_id = ? AND principal_id = ? AND role <> ?",
+    ).run(mappedRole, LEGACY_ORGANIZATION_ID, principalId, mappedRole);
   }
   const row = sqlite.prepare(
     `SELECT p.organization_id, p.disabled_at, p.created_at, m.role
@@ -251,6 +261,13 @@ function boundedBackupEventDetails(action: string, details: Record<string, unkno
     40,
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/,
   );
+  const addScheduleRun = () => {
+    addString("runId", 52, /^backup_schedule_run_[a-f0-9]{32}$/);
+    addIsoTime("dueAt");
+    addIsoTime("nextDueAt");
+    addIsoTime("startedAt");
+    addIsoTime("completedAt");
+  };
 
   switch (action) {
     case "backup.create":
@@ -270,10 +287,18 @@ function boundedBackupEventDetails(action: string, details: Record<string, unkno
       if (details.timezone === "UTC") result.timezone = "UTC";
       addRetention();
       break;
+    case "backup.schedule_run_started":
+      addScheduleRun();
+      break;
     case "backup.schedule_run":
-      addIsoTime("dueAt");
-      addIsoTime("nextDueAt");
+      addScheduleRun();
+      addString("status", 24, /^(created|already_completed)$/);
       addRetentionClass();
+      break;
+    case "backup.schedule_run_failed":
+      addScheduleRun();
+      addString("errorCode", 64, /^[A-Z][A-Z0-9_]*$/);
+      if (typeof details.retryable === "boolean") result.retryable = details.retryable;
       break;
     case "backup.prune_preview":
       addString("planHash", 64, /^[a-f0-9]{64}$/);
@@ -353,6 +378,8 @@ export function appendAuditEvent(
       ? "organization_policy.changed"
       : action.startsWith("repository_inventory.")
         ? "repository_inventory.changed"
+        : action.startsWith("implementation_mapping.")
+          ? "implementation_mapping.changed"
         : action.startsWith("handoff.")
           ? "handoff.transitioned"
           : action.startsWith("redesign.")

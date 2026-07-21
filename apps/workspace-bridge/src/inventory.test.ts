@@ -64,6 +64,109 @@ describe("Workspace Bridge inventory", () => {
     expect((await scanRepository(genericRoot)).platforms).toEqual(["generic-git"]);
   });
 
+  it("binds standard Git worktree pointer metadata without exposing its local path", async () => {
+    const main = temporaryDirectory();
+    const worktree = temporaryDirectory();
+    const commonGit = path.join(main, ".git");
+    const worktreeGit = path.join(commonGit, "worktrees", "feature");
+    const commit = "c".repeat(40);
+    write(worktreeGit, "HEAD", "ref: refs/heads/feature\n");
+    write(worktreeGit, "gitdir", `${path.join(worktree, ".git")}\n`);
+    write(worktreeGit, "commondir", "../..\n");
+    write(commonGit, "refs/heads/feature", `${commit}\n`);
+    write(worktree, ".git", `gitdir: ${worktreeGit}\n`);
+    write(worktree, "src/App.tsx", "export function App() { return null; }\n");
+
+    const inventory = await scanRepository(worktree);
+    expect(inventory.gitHead).toBe(commit);
+    expect(JSON.stringify(inventoryForUpload(inventory))).not.toContain(path.resolve(main));
+
+    const traversal = temporaryDirectory();
+    write(traversal, ".git", "gitdir: ../../outside\n");
+    await expect(scanRepository(traversal)).rejects.toThrow("may not traverse");
+
+    const symlinked = temporaryDirectory();
+    const symlinkTarget = temporaryDirectory();
+    write(symlinkTarget, "HEAD", `${commit}\n`);
+    const link = path.join(symlinked, "git-target");
+    fs.symlinkSync(symlinkTarget, link, "dir");
+    write(symlinked, ".git", `gitdir: ${link}\n`);
+    await expect(scanRepository(symlinked)).rejects.toThrow("non-symlinked directory");
+
+    const unrelated = temporaryDirectory();
+    write(unrelated, ".git", `gitdir: ${worktreeGit}\n`);
+    await expect(scanRepository(unrelated)).rejects.toThrow("does not point back");
+  });
+
+  it("detects nested mobile projects and keeps semantic mappings stable across line-only edits", async () => {
+    const root = temporaryDirectory();
+    write(root, "package.json", JSON.stringify({ devDependencies: { "react-native": "1.0.0" } }));
+    write(root, "android/settings.gradle.kts", "rootProject.name = \"Example\"\n");
+    write(root, "ios/Example.xcodeproj/project.pbxproj", "// project\n");
+    write(root, "ios/Example/Assets.xcassets/Brand.imageset/Contents.json", "{}\n");
+    write(root, "ios/Example/Assets.xcassets/Brand.colorset/Contents.json", "{}\n");
+    write(root, "src/screens/HomeScreen.tsx", [
+      "export function HomeScreen() { return null; }",
+      "export const routeName = '/home';",
+      "",
+    ].join("\n"));
+
+    const first = await scanRepository(root, { now: new Date("2026-01-01T00:00:00.000Z") });
+    expect(first.platforms).toEqual(["android", "ios", "react-native", "web"]);
+    const firstMappings = new Map(first.entities.map((entity) => [`${entity.kind}:${entity.name}`, entity]));
+    expect(firstMappings.get("asset:Brand")).toBeDefined();
+    expect(firstMappings.get("token:Brand")).toBeDefined();
+    expect((await scanRepository(root, { excludedPatterns: ["android/**", "ios/**"] })).platforms)
+      .toEqual(["react-native", "web"]);
+    write(root, "src/screens/HomeScreen.tsx", [
+      "",
+      "",
+      "export function HomeScreen() { return null; }",
+      "export const routeName = '/home';",
+      "",
+    ].join("\n"));
+    const shifted = await scanRepository(root, { now: new Date("2026-01-01T00:00:01.000Z") });
+    for (const key of ["screen:HomeScreen", "route:/home"]) {
+      expect(shifted.entities.find((entity) => `${entity.kind}:${entity.name}` === key)).toMatchObject({
+        id: firstMappings.get(key)?.id,
+        locationId: firstMappings.get(key)?.locationId,
+      });
+    }
+    expect(shifted.repositoryFingerprint).not.toBe(first.repositoryFingerprint);
+    const upload = inventoryForUpload(shifted);
+    expect(JSON.stringify(upload)).not.toContain("HomeScreen.tsx");
+    expect(JSON.stringify(upload)).not.toContain(path.resolve(root));
+  });
+
+  it("detects bounded nested web, React Native, Flutter, and Android markers in monorepos", async () => {
+    const root = temporaryDirectory();
+    write(root, "apps/web/package.json", JSON.stringify({ dependencies: { react: "1.0.0" } }));
+    write(root, "apps/mobile/package.json", JSON.stringify({ dependencies: { "react-native": "1.0.0" } }));
+    write(root, "packages/flutter/pubspec.yaml", "name: nested_flutter\n");
+    write(root, "platform/android/settings.gradle.kts", "rootProject.name = \"Nested\"\n");
+    write(root, "apps/web/src/App.tsx", "export function App() { return null; }\n");
+    write(root, "packages/flutter/lib/home.dart", "class HomeScreen {}\n");
+
+    expect((await scanRepository(root)).platforms).toEqual(["android", "flutter", "react-native", "web"]);
+    expect((await scanRepository(root, { excludedPatterns: ["packages/flutter/**"] })).platforms)
+      .toEqual(["android", "react-native", "web"]);
+  });
+
+  it("reports marker depth and aggregate metadata exhaustion as a truncated inventory", async () => {
+    const deep = temporaryDirectory();
+    write(deep, `${Array.from({ length: 10 }, (_, index) => `level${index}`).join("/")}/package.json`, "{}\n");
+    const deepInventory = await scanRepository(deep);
+    expect(deepInventory.truncated).toBe(true);
+    expect(deepInventory.excluded).toContainEqual({ category: "limit", count: 1 });
+
+    const aggregate = temporaryDirectory();
+    write(aggregate, "apps/a/package.json", JSON.stringify({ name: "a", description: "x".repeat(80) }));
+    write(aggregate, "apps/b/package.json", JSON.stringify({ name: "b", description: "y".repeat(80) }));
+    const aggregateInventory = await scanRepository(aggregate, { limits: { maximumTotalBytesRead: 128 } });
+    expect(aggregateInventory.truncated).toBe(true);
+    expect(aggregateInventory.excluded).toContainEqual({ category: "limit", count: 1 });
+  });
+
   it("content-hashes included metadata and assets so same-size changes invalidate the repository fingerprint", async () => {
     const root = temporaryDirectory();
     write(root, "package.json", JSON.stringify({ name: "aaaa", dependencies: {} }));
@@ -124,6 +227,52 @@ describe("Workspace Bridge inventory", () => {
       { category: "generated", count: 1 },
       { category: "symlink", count: 1 },
     ]));
+  });
+
+  it("fails closed when a checked ancestor directory is swapped to an outside symlink before recursion", async () => {
+    const root = temporaryDirectory();
+    const outside = temporaryDirectory();
+    write(root, "src/Inside.ts", "export const Inside = true;\n");
+    write(outside, "Outside.ts", "export const OutsideSecret = 'must-not-be-read';\n");
+    const sourceDirectory = path.join(root, "src");
+    const displacedDirectory = path.join(root, "src-before-swap");
+    let swapped = false;
+    await expect(scanRepository(root, {
+      beforeDirectoryRead: (_directory, relativePath) => {
+        if (swapped || relativePath !== "src") return;
+        fs.renameSync(sourceDirectory, displacedDirectory);
+        fs.symlinkSync(outside, sourceDirectory, "dir");
+        swapped = true;
+      },
+    })).rejects.toThrow();
+    expect(swapped).toBe(true);
+  });
+
+  it("rejects a directory swapped only while pathname-based opendir is being bound", async () => {
+    const root = temporaryDirectory();
+    const outside = temporaryDirectory();
+    write(root, "src/Inside.ts", "export const Inside = true;\n");
+    write(outside, "Outside.ts", "export const OutsideSecret = 'must-not-be-enumerated';\n");
+    const sourceDirectory = path.join(root, "src");
+    const displacedDirectory = path.join(root, "src-inside-handle");
+    let swapped = false;
+    let restored = false;
+
+    await expect(scanRepository(root, {
+      afterDirectoryHandleVerified: (_directory, relativePath) => {
+        if (swapped || relativePath !== "src") return;
+        fs.renameSync(sourceDirectory, displacedDirectory);
+        fs.symlinkSync(outside, sourceDirectory, "dir");
+        swapped = true;
+      },
+      afterDirectoryOpened: (_directory, relativePath) => {
+        if (!swapped || restored || relativePath !== "src") return;
+        fs.unlinkSync(sourceDirectory);
+        fs.renameSync(displacedDirectory, sourceDirectory);
+        restored = true;
+      },
+    })).rejects.toThrow("changed while it was being inspected");
+    expect({ swapped, restored }).toEqual({ swapped: true, restored: true });
   });
 
   it("bounds and refuses symlinked package and Git discovery metadata before scanning", async () => {

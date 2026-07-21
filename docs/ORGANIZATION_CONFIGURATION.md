@@ -13,9 +13,11 @@ The strict schema-version-1 policy now covers locales/direction, platforms and
 presets, design-system/font/icon rules, assets, naming, accessibility, agents,
 repositories, backups/retention, trusted identity role mappings, audit, and
 exports. Organization Administrators can read/update it through REST and the
-Administration JSON editor; agents read it through `organization_policy_read`
-or `formaspec://organizations/current/policy`. Updates require the expected
-configuration hash.
+guided 12-section Administration form or Expert JSON view; agents read it
+through `organization_policy_read` or
+`formaspec://organizations/current/policy`. Updates require the expected
+configuration hash, so concurrent edits fail optimistically rather than
+silently overwriting policy.
 
 `organization.formaspec.yaml` is a secret-free export generated from the
 validated database policy, never a credential store. Format-2 backups generate
@@ -23,6 +25,13 @@ and verify the same configuration against the staged database; historical
 format-1 backups remain accepted. Policy is enforced for agent connection,
 legacy MCP tokens, repositories, assets, backup scheduling/retention, and
 portable bundle export/import.
+
+Backup schedule supervision records durable attempt-start, success, and failure
+audit/outbox events. Organization-ready health and `formaspecctl backup schedule
+show` expose bounded overdue, stalled, failed-run, and retention-backlog
+diagnostics. Failed or stalled attempts remain critical even if the current
+schedule window already has a valid backup. An installed external scheduler and external alert delivery are
+still required for production operation.
 
 The audit policy is executable through an Organization Administrator-only,
 preview-first retention workflow. A preview fixes the current configuration
@@ -50,5 +59,6 @@ are `formaspecctl audit retention preview`,
 `formaspecctl audit retention list`, and the explicitly authorized
 `formaspecctl audit retention execute ... --yes`. This destructive
 organization-administration capability is deliberately not exposed through
-agent MCP tools. Complete form-based administration, delegated policy roles,
-and policy migration UX remain future work.
+agent MCP tools. Delegated administration and policy roles, installed external
+schedule invocation and alert delivery, policy rollout/version migration, and broader
+organization lifecycle evidence remain future work.

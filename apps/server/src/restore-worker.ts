@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { AnyDesignDocumentSchema, type AnyDesignDocument } from "@designer/core";
@@ -10,10 +11,16 @@ import { z } from "zod";
 import { appendAuditEvent, type AccessContext } from "./authorization.js";
 import {
   BackupManager,
+  MAX_BACKUP_BUNDLE_BYTES,
   RESTORE_JOURNAL_MAX_BYTES,
   committedRestoreJournalMatches,
+  createForensicRecoveryBundle,
+  finalizeTerminalRestoreJournal,
+  inspectBackupBundle,
+  inspectRestoreJournal,
   restoreVerifiedBackup,
   verifyPinnedBackupBundle,
+  verifyPinnedForensicRecoveryBundle,
   type BackupRasterVerifier,
   type BackupVerificationResult,
 } from "./backup.js";
@@ -47,9 +54,10 @@ const operationIdSchema = z.string().min(16).max(120)
 const managedBackupFilename = /^formaspec-backup-[0-9TZ-]+\.tar$/;
 const workerContainerIdSchema = z.string().min(1).max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const SYSTEM_ACTOR_ID = "system:restore-worker";
 const SYSTEM_PRINCIPAL_ID = "system_restore_worker";
-const ABANDONED_BACKUP_WORK_DIRECTORY = /^(?:\.formaspec-restore-source-|\.verify-|\.staging-|\.formaspec-orphan-cleanup-)[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const ABANDONED_BACKUP_WORK_DIRECTORY = /^(?:\.formaspec-restore-source-|\.verify-|\.staging-|\.forensic-|\.forensic-bundle-|\.offline-input-|\.formaspec-orphan-cleanup-)[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const RESTORE_CAPACITY_RESERVE_BYTES = 64 * 1024 * 1024;
 const RESTORE_CAPACITY_MAX_ENTRIES = 20_000;
 const RESTORE_CAPACITY_MAX_TREE_BYTES = 16 * 1024 * 1024 * 1024;
@@ -119,6 +127,51 @@ export interface RestorePreflightResult {
   extractedBytes: number;
 }
 
+export interface OfflineRestorePreparationConfig {
+  dataDirectory: string;
+  backupDirectory: string;
+  operationId: string;
+  expectedSource: { sha256: string; sizeBytes: number };
+  renderSocket?: string;
+  renderTimeoutMs: number;
+  maxAssetBytes: number;
+  maxAssetPixels: number;
+  renderMaxPixels: number;
+  renderIpcMaxBytes: number;
+  allowSystemChrome: boolean;
+  nodeEnvironment: "development" | "test" | "production";
+}
+
+export interface OfflineRestorePreparationResult {
+  status: "prepared";
+  operationId: string;
+  backupId: string;
+  organizationId: string;
+  targetFilename: string;
+  targetSha256: string;
+  targetSizeBytes: number;
+  safetyBackupId: string;
+  safetyFilename: string;
+  safetySha256: string;
+  safetySizeBytes: number;
+}
+
+export interface ForensicRollbackResult {
+  status: "forensic_rolled_back" | "forensic_rollback_aborted";
+  operationId: string;
+  backupId: string;
+  safetyBackupId: string;
+  maintenancePhase: "rollback" | "verification";
+  errorCode?: string;
+}
+
+export interface ForensicRollbackConfig {
+  dataDirectory: string;
+  backupDirectory: string;
+  operationId: string;
+  containerId?: string;
+}
+
 export interface RestoreWorkerRenderer {
   health(): Promise<RenderHealth>;
   render(
@@ -184,6 +237,18 @@ interface SafetyBackupRecord extends BackupRecordSnapshot {
   completedAt: string;
 }
 
+interface ForensicSafetyRecord extends BackupRecordSnapshot {
+  status: "valid";
+  retentionClass: "manual";
+  manifestJson: null;
+  verifiedAt: string;
+  sizeBytes: number;
+  verificationJson: null;
+  completedAt: string;
+}
+
+type RestoreSafetyRecord = SafetyBackupRecord | ForensicSafetyRecord;
+
 interface RestoreSmokeResult {
   schemaVersion: number;
   renderedDesignId: string | null;
@@ -220,11 +285,12 @@ function recordFromOperationState(
 }
 
 function preparedOperationState(
-  config: RestoreWorkerConfig,
+  config: Pick<RestoreWorkerConfig, "operationId" | "backupId">,
   target: VerifiedManagedBackup,
-  safety: SafetyBackupRecord,
+  safety: RestoreSafetyRecord,
   monotonicFloor: { auditEventId: number; outboxEventId: number },
   now: string,
+  recovery?: { mode: "offline"; safetyKind: "forensic" },
 ): Extract<RestoreOperationState, { phase: "prepared" }> {
   return {
     format: "formaspec-restore-operation",
@@ -235,6 +301,7 @@ function preparedOperationState(
     target: operationRecord({ ...target.record, sizeBytes: target.sizeBytes }),
     safety: { ...operationRecord(safety), retentionClass: "manual" },
     monotonicFloor,
+    ...(recovery ? { recovery } : {}),
     smoke: null,
     result: null,
     errorCode: null,
@@ -423,6 +490,87 @@ export function loadRestorePreflightConfig(
     renderIpcMaxBytes: parsed.FORMASPEC_RENDER_IPC_MAX_BYTES,
     allowSystemChrome: parsed.FORMASPEC_ALLOW_SYSTEM_CHROME,
     requireRasterVerifier: true,
+  };
+}
+
+function strictFlagValues(arguments_: string[], allowed: readonly string[]): Map<string, string> {
+  if (arguments_.length !== allowed.length * 2) {
+    throw new Error(`Restore command requires exactly ${allowed.join(", ")}.`);
+  }
+  const values = new Map<string, string>();
+  for (let index = 0; index < arguments_.length; index += 2) {
+    const flag = arguments_[index];
+    const value = arguments_[index + 1];
+    if (!flag || !value || !allowed.includes(flag) || values.has(flag)) {
+      throw new Error(`Restore command accepts only one of each: ${allowed.join(", ")}.`);
+    }
+    values.set(flag, value);
+  }
+  return values;
+}
+
+export function loadOfflineRestorePreparationConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  argv: string[] = process.argv.slice(2),
+  platform: NodeJS.Platform = process.platform,
+): OfflineRestorePreparationConfig {
+  const values = strictFlagValues(argv, ["--operation-id", "--expected-sha256", "--expected-size"]);
+  const parsed = workerEnvironmentSchema.parse(environment);
+  const dataDirectory = path.resolve(parsed.DATA_DIR);
+  const backupDirectory = path.resolve(parsed.BACKUP_DIR ?? path.join(dataDirectory, "..", "backups"));
+  const sizeBytes = Number(values.get("--expected-size"));
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > MAX_BACKUP_BUNDLE_BYTES) {
+    throw new Error("Offline restore expected source size is invalid.");
+  }
+  if (parsed.FORMASPEC_RENDER_SOCKET) validateRendererEndpoint(parsed.FORMASPEC_RENDER_SOCKET, platform);
+  if (parsed.NODE_ENV === "production" && !parsed.FORMASPEC_RENDER_SOCKET) {
+    throw new Error("Production offline restore preparation requires the configured renderer-worker socket.");
+  }
+  if (parsed.NODE_ENV === "production" && parsed.FORMASPEC_ALLOW_SYSTEM_CHROME) {
+    throw new Error("Production offline restore preparation requires pinned Chromium.");
+  }
+  const maxAssetBytes = parsed.DESIGNER_MAX_ASSET_BYTES ?? parsed.MAX_UPLOAD_BYTES;
+  const maxAssetPixels = parsed.DESIGNER_MAX_ASSET_PIXELS ?? parsed.FORMASPEC_RENDER_MAX_PIXELS;
+  validateRendererLimitParity({
+    maxAssetBytes,
+    maxAssetPixels,
+    renderMaxPixels: parsed.FORMASPEC_RENDER_MAX_PIXELS,
+    renderIpcMaxBytes: parsed.FORMASPEC_RENDER_IPC_MAX_BYTES,
+  });
+  new MaintenanceStore(backupDirectory, dataDirectory);
+  return {
+    dataDirectory,
+    backupDirectory,
+    operationId: operationIdSchema.parse(values.get("--operation-id")),
+    expectedSource: {
+      sha256: sha256Schema.parse(values.get("--expected-sha256")),
+      sizeBytes,
+    },
+    ...(parsed.FORMASPEC_RENDER_SOCKET ? { renderSocket: parsed.FORMASPEC_RENDER_SOCKET } : {}),
+    renderTimeoutMs: parsed.FORMASPEC_RENDER_TIMEOUT_MS,
+    maxAssetBytes,
+    maxAssetPixels,
+    renderMaxPixels: parsed.FORMASPEC_RENDER_MAX_PIXELS,
+    renderIpcMaxBytes: parsed.FORMASPEC_RENDER_IPC_MAX_BYTES,
+    allowSystemChrome: parsed.FORMASPEC_ALLOW_SYSTEM_CHROME,
+    nodeEnvironment: parsed.NODE_ENV,
+  };
+}
+
+export function loadForensicRollbackConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  argv: string[] = process.argv.slice(2),
+): ForensicRollbackConfig {
+  const values = strictFlagValues(argv, ["--operation-id"]);
+  const parsed = workerEnvironmentSchema.parse(environment);
+  const dataDirectory = path.resolve(parsed.DATA_DIR);
+  const backupDirectory = path.resolve(parsed.BACKUP_DIR ?? path.join(dataDirectory, "..", "backups"));
+  new MaintenanceStore(backupDirectory, dataDirectory);
+  return {
+    dataDirectory,
+    backupDirectory,
+    operationId: operationIdSchema.parse(values.get("--operation-id")),
+    ...(parsed.FORMASPEC_RESTORE_CONTAINER_ID ? { containerId: parsed.FORMASPEC_RESTORE_CONTAINER_ID } : {}),
   };
 }
 
@@ -844,6 +992,305 @@ export async function runRestorePreflight(
   }
 }
 
+function offlineBackupId(bundleSha256: string): string {
+  return `backup_${createHash("sha256").update(`offline\0${bundleSha256}`).digest("hex").slice(0, 40)}`;
+}
+
+function offlineManagedFilename(bundleSha256: string): string {
+  const decimal = BigInt(`0x${createHash("sha256").update(`target\0${bundleSha256}`).digest("hex").slice(0, 24)}`)
+    .toString(10)
+    .padStart(29, "0");
+  return `formaspec-backup-1970-01-01T00-00-00-000Z-${decimal}.tar`;
+}
+
+async function digestFile(filename: string): Promise<{ sha256: string; sizeBytes: number }> {
+  const hash = createHash("sha256");
+  let sizeBytes = 0;
+  for await (const chunk of fs.createReadStream(filename)) {
+    const buffer = Buffer.from(chunk as Buffer | Uint8Array);
+    sizeBytes += buffer.length;
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes > MAX_BACKUP_BUNDLE_BYTES) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", "Offline restore source exceeds its fixed limit.", 413);
+    }
+    hash.update(buffer);
+  }
+  return { sha256: hash.digest("hex"), sizeBytes };
+}
+
+async function receiveOfflineRestoreSource(
+  input: Readable,
+  backupDirectory: string,
+  expected: { sha256: string; sizeBytes: number },
+): Promise<{ path: string; release(): Promise<void> }> {
+  const root = path.resolve(backupDirectory);
+  const directory = path.join(root, `.offline-input-${randomUUID()}`);
+  await fs.promises.mkdir(directory, { mode: 0o700 });
+  const filename = path.join(directory, "bundle.tar");
+  let output: fs.promises.FileHandle | undefined;
+  try {
+    output = await fs.promises.open(filename, "wx", 0o600);
+    const hash = createHash("sha256");
+    let sizeBytes = 0;
+    for await (const chunk of input) {
+      const buffer = Buffer.from(chunk as Buffer | Uint8Array | string);
+      sizeBytes += buffer.length;
+      if (!Number.isSafeInteger(sizeBytes) || sizeBytes > expected.sizeBytes
+        || sizeBytes > MAX_BACKUP_BUNDLE_BYTES) {
+        throw new DomainError("PAYLOAD_TOO_LARGE", "Offline restore input exceeded its authorized size.", 413);
+      }
+      hash.update(buffer);
+      let written = 0;
+      while (written < buffer.length) {
+        const result = await output.write(buffer, written, buffer.length - written, sizeBytes - buffer.length + written);
+        if (result.bytesWritten < 1) throw new Error("Offline restore input write made no progress.");
+        written += result.bytesWritten;
+      }
+    }
+    if (sizeBytes !== expected.sizeBytes || hash.digest("hex") !== expected.sha256) {
+      throw new DomainError("VALIDATION_FAILED", "Offline restore input did not match its authorized hash and size.", 422);
+    }
+    await output.sync();
+    await output.close();
+    output = undefined;
+    await fs.promises.chmod(filename, 0o400);
+    return {
+      path: filename,
+      release: async () => fs.promises.rm(directory, { recursive: true, force: true }),
+    };
+  } catch (error) {
+    await output?.close().catch(() => undefined);
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function requireOfflineReceiveCapacity(
+  backupDirectory: string,
+  expectedSizeBytes: number,
+): Promise<void> {
+  const root = path.resolve(backupDirectory);
+  const [stat, filesystem] = await Promise.all([
+    fs.promises.lstat(root),
+    fs.promises.statfs(root, { bigint: true }),
+  ]);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new DomainError("VALIDATION_FAILED", "Offline restore requires a real backup directory.", 422);
+  }
+  const required = BigInt(expectedSizeBytes) + BigInt(RESTORE_CAPACITY_RESERVE_BYTES);
+  const available = filesystem.bavail * filesystem.bsize;
+  if (available < required) {
+    throw new DomainError(
+      "TEMPORARILY_UNAVAILABLE",
+      "Insufficient backup-volume capacity to receive the authorized offline restore source.",
+      507,
+      {
+        retryable: true,
+        details: {
+          volume: "backup",
+          availableBytes: boundedCapacityBytes(available),
+          requiredBytes: boundedCapacityBytes(required),
+        },
+      },
+    );
+  }
+}
+
+async function retainOfflineTarget(
+  stagedPath: string,
+  backupDirectory: string,
+  expected: { sha256: string; sizeBytes: number },
+): Promise<{ path: string; filename: string }> {
+  const root = path.resolve(backupDirectory);
+  const filename = offlineManagedFilename(expected.sha256);
+  const destination = path.join(root, filename);
+  const existing = await fs.promises.lstat(destination).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (existing) {
+    if (!existing.isFile() || existing.isSymbolicLink()) {
+      throw new DomainError("VALIDATION_FAILED", "Offline restore target path is not a regular file.", 422);
+    }
+    const digest = await digestFile(destination);
+    if (digest.sha256 !== expected.sha256 || digest.sizeBytes !== expected.sizeBytes) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "Offline restore target path already contains different bytes.", 409);
+    }
+    return { path: destination, filename };
+  }
+  await fs.promises.rename(stagedPath, destination);
+  await fs.promises.chmod(destination, 0o400);
+  await syncDirectory(root);
+  return { path: destination, filename };
+}
+
+function bestEffortMonotonicFloor(databasePath: string): { auditEventId: number; outboxEventId: number } {
+  let sqlite: SqliteDatabase.Database | undefined;
+  try {
+    const stat = fs.lstatSync(databasePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return { auditEventId: 0, outboxEventId: 0 };
+    sqlite = new SqliteDatabase(databasePath, { readonly: true, fileMustExist: true });
+    sqlite.pragma("query_only = ON");
+    const readFloor = (table: "audit_events" | "event_outbox"): number => {
+      const exists = sqlite!.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+      if (!exists) return 0;
+      const row = sqlite!.prepare(`SELECT MAX(id) AS id FROM ${table}`).get() as { id: number | null };
+      const hasSequence = sqlite!.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'").get();
+      const sequence = hasSequence
+        ? sqlite!.prepare("SELECT seq FROM sqlite_sequence WHERE name = ?").get(table) as { seq: number } | undefined
+        : undefined;
+      return Math.max(row.id ?? 0, sequence?.seq ?? 0);
+    };
+    return { auditEventId: readFloor("audit_events"), outboxEventId: readFloor("event_outbox") };
+  } catch {
+    return { auditEventId: 0, outboxEventId: 0 };
+  } finally {
+    sqlite?.close();
+  }
+}
+
+function offlinePreparationResult(
+  state: Extract<RestoreOperationState, { phase: "prepared" }>,
+): OfflineRestorePreparationResult {
+  if (state.recovery?.mode !== "offline") {
+    throw new DomainError("VERSION_CONFLICT", "Persisted restore state is not an offline recovery preparation.", 409);
+  }
+  return {
+    status: "prepared",
+    operationId: state.operationId,
+    backupId: state.backupId,
+    organizationId: state.target.organizationId,
+    targetFilename: state.target.filename,
+    targetSha256: state.target.bundleSha256,
+    targetSizeBytes: state.target.sizeBytes,
+    safetyBackupId: state.safety.id,
+    safetyFilename: state.safety.filename,
+    safetySha256: state.safety.bundleSha256,
+    safetySizeBytes: state.safety.sizeBytes,
+  };
+}
+
+export async function runOfflineRestorePreparation(
+  config: OfflineRestorePreparationConfig,
+  input: Readable,
+  dependencies: Pick<RestoreWorkerDependencies, "renderer" | "now"> = {},
+): Promise<OfflineRestorePreparationResult> {
+  const maintenance = new MaintenanceStore(config.backupDirectory, config.dataDirectory);
+  const operationStore = new RestoreOperationStore(config.backupDirectory);
+  const lockStore = new RestoreWorkerLockStore(config.backupDirectory);
+  const environmentContainerId = workerContainerIdSchema.safeParse(
+    process.env.FORMASPEC_RESTORE_CONTAINER_ID ?? process.env.HOSTNAME,
+  );
+  const lease = await lockStore.acquire({
+    operationId: config.operationId,
+    ...(environmentContainerId.success ? { containerId: environmentContainerId.data } : {}),
+  });
+  let renderer: RestoreWorkerRenderer | undefined;
+  let received: Awaited<ReturnType<typeof receiveOfflineRestoreSource>> | undefined;
+  let forensicPredecessorOperationId: string | undefined;
+  try {
+    await requireMaintenance(maintenance, config.operationId, ["restore"]);
+    const existing = await operationStore.read();
+    if (existing !== null) {
+      if (existing.operationId === config.operationId && existing.phase === "prepared"
+        && existing.target.bundleSha256 === config.expectedSource.sha256
+        && existing.target.sizeBytes === config.expectedSource.sizeBytes) {
+        return offlinePreparationResult(existing);
+      }
+      if (existing.operationId !== config.operationId && existing.phase === "rolled_back"
+        && existing.recovery?.mode === "offline") {
+        forensicPredecessorOperationId = existing.operationId;
+      } else {
+        throw new DomainError("VERSION_CONFLICT", "A different restore operation is already prepared.", 409);
+      }
+    }
+    await cleanupAbandonedBackupWorkDirectories(config.backupDirectory, { preserveRestoreSources: false });
+    await requireOfflineReceiveCapacity(config.backupDirectory, config.expectedSource.sizeBytes);
+    received = await receiveOfflineRestoreSource(input, config.backupDirectory, config.expectedSource);
+    renderer = dependencies.renderer ?? createRenderer(config);
+    const rasterVerifier = backupRasterVerifier(renderer, config);
+    const inspection = await inspectBackupBundle(received.path, {
+      rasterVerifier,
+      requireRasterVerifier: true,
+    });
+    if (inspection.organizationIds.length < 1) {
+      throw new DomainError("VALIDATION_FAILED", "Offline restore target has no organization.", 422);
+    }
+    const organizationId = inspection.organizationIds.includes("organization_legacy")
+      ? "organization_legacy"
+      : inspection.organizationIds[0]!;
+    const targetId = offlineBackupId(config.expectedSource.sha256);
+    const targetFilename = offlineManagedFilename(config.expectedSource.sha256);
+    const now = dependencies.now ?? (() => new Date());
+    const verifiedAt = now().toISOString();
+    const targetRecord: BackupRecordSnapshot = {
+      id: targetId,
+      organizationId,
+      filename: targetFilename,
+      bundleSha256: config.expectedSource.sha256,
+      status: "valid",
+      manifestJson: JSON.stringify(inspection.verification.manifest),
+      createdBy: SYSTEM_PRINCIPAL_ID,
+      createdAt: inspection.verification.manifest.createdAt,
+      verifiedAt,
+      sizeBytes: config.expectedSource.sizeBytes,
+      verificationJson: JSON.stringify(inspection.verification),
+      retentionClass: "manual",
+      completedAt: verifiedAt,
+    };
+    const target: VerifiedManagedBackup = {
+      record: targetRecord,
+      bundlePath: received.path,
+      sizeBytes: config.expectedSource.sizeBytes,
+      verification: inspection.verification,
+    };
+    await requireWholeRestoreCapacity(config.dataDirectory, config.backupDirectory, target);
+    const retained = await retainOfflineTarget(received.path, config.backupDirectory, config.expectedSource);
+    target.bundlePath = retained.path;
+    const forensic = await createForensicRecoveryBundle(
+      config.dataDirectory,
+      config.backupDirectory,
+      config.operationId,
+      dependencies.now ?? (() => new Date()),
+    );
+    const safety: ForensicSafetyRecord = {
+      id: safetyBackupId(forensic.filename, forensic.bundleSha256),
+      organizationId,
+      filename: forensic.filename,
+      bundleSha256: forensic.bundleSha256,
+      status: "valid",
+      manifestJson: null,
+      createdBy: SYSTEM_PRINCIPAL_ID,
+      createdAt: forensic.createdAt,
+      verifiedAt: forensic.createdAt,
+      sizeBytes: forensic.sizeBytes,
+      verificationJson: null,
+      retentionClass: "manual",
+      completedAt: forensic.createdAt,
+    };
+    if (safety.id === targetId) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "Offline target and forensic safety identifiers collided.", 409);
+    }
+    const timestamp = now().toISOString();
+    const state = preparedOperationState(
+      { operationId: config.operationId, backupId: targetId },
+      target,
+      safety,
+      bestEffortMonotonicFloor(path.join(config.dataDirectory, "designer.sqlite")),
+      timestamp,
+      { mode: "offline", safetyKind: "forensic" },
+    );
+    if (forensicPredecessorOperationId) {
+      await operationStore.archiveTerminal(forensicPredecessorOperationId);
+    }
+    await operationStore.write(state);
+    return offlinePreparationResult(state);
+  } finally {
+    await received?.release().catch(() => undefined);
+    if (!dependencies.renderer) await renderer?.close().catch(() => undefined);
+    await lease.release();
+  }
+}
+
 function safetyBackupId(filename: string, bundleSha256: string): string {
   return `backup_${createHash("sha256").update(`${filename}\0${bundleSha256}`).digest("hex").slice(0, 40)}`;
 }
@@ -982,7 +1429,7 @@ async function verifiedBackupsFromState(
   state: RestoreOperationState,
   config: Pick<RestoreWorkerConfig, "backupDirectory" | "dataDirectory">,
   rasterVerifier: BackupRasterVerifier,
-): Promise<{ target: VerifiedManagedBackup; safety: SafetyBackupRecord }> {
+): Promise<{ target: VerifiedManagedBackup; safety: RestoreSafetyRecord }> {
   const targetRecord = recordFromOperationState(state.target, "valid");
   const sourceIndependent = state.phase === "cutover_committed"
     || state.phase === "reconciled"
@@ -996,24 +1443,47 @@ async function verifiedBackupsFromState(
       verification: null,
     }
     : await verifyManagedBackupRecord(targetRecord, config.backupDirectory, rasterVerifier);
-  const verifiedSafety = await verifyManagedBackupRecord(
-    recordFromOperationState(state.safety, "valid"),
-    config.backupDirectory,
-    rasterVerifier,
-  );
-  if (!verifiedSafety.verification) {
-    throw new DomainError("INTERNAL_ERROR", "Persisted safety backup verification metadata is missing.", 500);
+  let safety: RestoreSafetyRecord;
+  if (state.recovery?.mode === "offline") {
+    const safetyPath = await assertManagedBundlePath(config.backupDirectory, state.safety.filename);
+    const verified = await verifyPinnedForensicRecoveryBundle(safetyPath, {
+      expectedSource: {
+        sha256: state.safety.bundleSha256,
+        sizeBytes: state.safety.sizeBytes,
+      },
+      sourcePinDirectory: config.backupDirectory,
+      expectedOperationId: state.operationId,
+    });
+    safety = {
+      ...recordFromOperationState(state.safety, "valid"),
+      status: "valid",
+      retentionClass: "manual",
+      manifestJson: null,
+      verifiedAt: state.safety.createdAt,
+      sizeBytes: verified.sizeBytes,
+      verificationJson: null,
+      completedAt: state.safety.createdAt,
+    };
+  } else {
+    const verifiedSafety = await verifyManagedBackupRecord(
+      recordFromOperationState(state.safety, "valid"),
+      config.backupDirectory,
+      rasterVerifier,
+    );
+    if (!verifiedSafety.verification) {
+      throw new DomainError("INTERNAL_ERROR", "Persisted safety backup verification metadata is missing.", 500);
+    }
+    safety = {
+      ...verifiedSafety.record,
+      status: "valid",
+      retentionClass: "manual",
+      manifestJson: JSON.stringify(verifiedSafety.verification.manifest),
+      verifiedAt: state.safety.createdAt,
+      sizeBytes: verifiedSafety.sizeBytes,
+      verificationJson: JSON.stringify(verifiedSafety.verification),
+      completedAt: state.safety.createdAt,
+    };
   }
-  const safety: SafetyBackupRecord = {
-    ...verifiedSafety.record,
-    status: "valid",
-    retentionClass: "manual",
-    manifestJson: JSON.stringify(verifiedSafety.verification.manifest),
-    verifiedAt: state.safety.createdAt,
-    sizeBytes: verifiedSafety.sizeBytes,
-    verificationJson: JSON.stringify(verifiedSafety.verification),
-    completedAt: state.safety.createdAt,
-  };
   return { target, safety };
 }
 
@@ -1214,16 +1684,49 @@ function verifySafetyRecord(database: DesignerDatabase, safety: SafetyBackupReco
 async function appendRollbackAudit(
   config: RestoreWorkerConfig,
   target: VerifiedManagedBackup,
-  safety: SafetyBackupRecord,
+  safety: RestoreSafetyRecord,
   error: unknown,
   maintenance: MaintenanceStore,
   operationStore: RestoreOperationStore,
   operationState: RestoreOperationState,
   recordedAt: string,
 ): Promise<void> {
+  if (operationState.recovery?.mode === "offline") {
+    let database: DesignerDatabase | undefined;
+    try {
+      database = new DesignerDatabase(config.databasePath);
+      const organization = database.sqlite.prepare("SELECT id FROM organizations WHERE id = ?")
+        .get(target.record.organizationId);
+      if (organization) {
+        const transaction = database.sqlite.transaction(() => {
+          appendAuditEvent(database!.sqlite, systemAccess(target.record.organizationId), "backup.restore_rolled_back", "backup", target.record.id, {
+            operationId: config.operationId,
+            targetBackupId: target.record.id,
+            safetyBackupId: safety.id,
+            safetyKind: "forensic",
+            errorCode: errorCode(error),
+          });
+        });
+        transaction.immediate();
+        database.sqlite.pragma("wal_checkpoint(TRUNCATE)");
+      }
+    } catch {
+      // The exact pre-restore bytes may intentionally contain a corrupt
+      // database. Durable operation/maintenance state remains the recovery
+      // audit source when an application audit row cannot be appended.
+    } finally {
+      database?.close();
+    }
+    await operationStore.write(rolledBackOperationState(operationState, errorCode(error), recordedAt));
+    await setMaintenancePhase(maintenance, config.operationId, "rollback");
+    return;
+  }
   let database: DesignerDatabase | undefined;
   try {
     database = new DesignerDatabase(config.databasePath);
+    if (safety.manifestJson === null) {
+      throw new DomainError("INTERNAL_ERROR", "Verified restore rollback lost its safety-backup metadata.", 500);
+    }
     verifySafetyRecord(database, safety);
     const transaction = database.sqlite.transaction(() => {
       appendAuditEvent(database!.sqlite, systemAccess(target.record.organizationId), "backup.restore_rolled_back", "backup", target.record.id, {
@@ -1246,7 +1749,7 @@ function existingReconciliation(
   database: DesignerDatabase,
   config: RestoreWorkerConfig,
   target: VerifiedManagedBackup,
-  safety: SafetyBackupRecord,
+  safety: RestoreSafetyRecord,
   smoke: RestoreSmokeResult,
 ): Omit<RestoreWorkerResult, "status" | "backupId" | "operationId" | "safetyBackupId" | "maintenancePhase"> | null {
   const audit = database.sqlite.prepare(
@@ -1284,7 +1787,7 @@ function existingReconciliation(
 function reconcileAfterRestore(
   config: RestoreWorkerConfig,
   target: VerifiedManagedBackup,
-  safety: SafetyBackupRecord,
+  safety: RestoreSafetyRecord,
   smoke: RestoreSmokeResult,
   monotonicFloor: { auditEventId: number; outboxEventId: number },
   now: Date,
@@ -1316,7 +1819,7 @@ function reconcileAfterRestore(
       ensureSequenceAtLeast(database, "audit_events", monotonicFloor.auditEventId);
       ensureSequenceAtLeast(database, "event_outbox", monotonicFloor.outboxEventId);
       insertBackupRecord(database, restoredTarget);
-      insertBackupRecord(database, safety);
+      if (safety.manifestJson !== null) insertBackupRecord(database, safety);
       const grants = database.sqlite.prepare(
         "UPDATE agent_grants SET revoked_at = COALESCE(revoked_at, ?) WHERE revoked_at IS NULL",
       ).run(completedAt).changes;
@@ -1337,6 +1840,7 @@ function reconcileAfterRestore(
           operationId: config.operationId,
           targetBackupId: target.record.id,
           safetyBackupId: safety.id,
+          safetyKind: safety.manifestJson === null ? "forensic" : "verified",
           schemaVersion: smoke.schemaVersion,
           renderedDesignId: smoke.renderedDesignId,
           revokedGrants: grants,
@@ -1461,7 +1965,7 @@ async function runRestoreWorkerWithLockHeld(
   let rendererUsed = false;
   let database: DesignerDatabase | undefined;
   let target: VerifiedManagedBackup | undefined;
-  let safety: SafetyBackupRecord | undefined;
+  let safety: RestoreSafetyRecord | undefined;
   try {
     renderer = dependencies.renderer ?? createRenderer(config);
     const rasterVerifier = backupRasterVerifier(renderer, config, () => {
@@ -1616,8 +2120,106 @@ export async function runRestoreWorker(
   }
 }
 
+export async function runForensicRollback(
+  config: ForensicRollbackConfig,
+): Promise<ForensicRollbackResult> {
+  const maintenance = new MaintenanceStore(config.backupDirectory, config.dataDirectory);
+  const operationStore = new RestoreOperationStore(config.backupDirectory);
+  const lockStore = new RestoreWorkerLockStore(config.backupDirectory);
+  const environmentContainerId = workerContainerIdSchema.safeParse(
+    config.containerId ?? process.env.FORMASPEC_RESTORE_CONTAINER_ID ?? process.env.HOSTNAME,
+  );
+  const lease = await lockStore.acquire({
+    operationId: config.operationId,
+    ...(environmentContainerId.success ? { containerId: environmentContainerId.data } : {}),
+  });
+  try {
+    await requireMaintenance(maintenance, config.operationId, ["restore", "rollback"]);
+    const state = await operationStore.read();
+    if (!state || state.operationId !== config.operationId || state.phase !== "reconciled"
+      || state.recovery?.mode !== "offline") {
+      throw new DomainError("VERSION_CONFLICT", "A reconciled offline restore is required for forensic rollback.", 409);
+    }
+    const safetyPath = await assertManagedBundlePath(config.backupDirectory, state.safety.filename);
+    try {
+      await verifyPinnedForensicRecoveryBundle(safetyPath, {
+        expectedSource: {
+          sha256: state.safety.bundleSha256,
+          sizeBytes: state.safety.sizeBytes,
+        },
+        sourcePinDirectory: config.backupDirectory,
+        expectedOperationId: config.operationId,
+      });
+      await restoreVerifiedBackup(safetyPath, config.dataDirectory, {
+        databaseClosed: true,
+        expectedSource: {
+          sha256: state.safety.bundleSha256,
+          sizeBytes: state.safety.sizeBytes,
+        },
+        sourcePinDirectory: config.backupDirectory,
+        sourceFormat: "forensic-recovery",
+        expectedForensicOperationId: config.operationId,
+      });
+    } catch (error) {
+      const journal = await inspectRestoreJournal(config.dataDirectory);
+      if (journal.present && journal.phase === "committed") {
+        await finalizeTerminalRestoreJournal(config.dataDirectory, "committed");
+      } else if (journal.present && journal.phase === "rolled-back") {
+        await finalizeTerminalRestoreJournal(config.dataDirectory, "rolled-back");
+      } else if (journal.present) {
+        throw error;
+      } else {
+        await setMaintenancePhase(maintenance, config.operationId, "verification");
+        return {
+          status: "forensic_rollback_aborted",
+          operationId: config.operationId,
+          backupId: state.backupId,
+          safetyBackupId: state.safety.id,
+          maintenancePhase: "verification",
+          errorCode: errorCode(error),
+        };
+      }
+      if (journal.phase === "rolled-back") {
+        await setMaintenancePhase(maintenance, config.operationId, "verification");
+        return {
+          status: "forensic_rollback_aborted",
+          operationId: config.operationId,
+          backupId: state.backupId,
+          safetyBackupId: state.safety.id,
+          maintenancePhase: "verification",
+          errorCode: errorCode(error),
+        };
+      }
+    }
+    await operationStore.write(rolledBackOperationState(state, "OPERATOR_ROLLBACK", new Date().toISOString()));
+    await setMaintenancePhase(maintenance, config.operationId, "rollback");
+    return {
+      status: "forensic_rolled_back",
+      operationId: config.operationId,
+      backupId: state.backupId,
+      safetyBackupId: state.safety.id,
+      maintenancePhase: "rollback",
+    };
+  } finally {
+    await lease.release();
+  }
+}
+
 async function main(): Promise<void> {
   const arguments_ = process.argv.slice(2);
+  if (arguments_[0] === "offline-prepare") {
+    const result = await runOfflineRestorePreparation(
+      loadOfflineRestorePreparationConfig(process.env, arguments_.slice(1)),
+      process.stdin,
+    );
+    process.stdout.write(`${JSON.stringify({ ok: true, preparation: result })}\n`);
+    return;
+  }
+  if (arguments_[0] === "forensic-rollback") {
+    const result = await runForensicRollback(loadForensicRollbackConfig(process.env, arguments_.slice(1)));
+    process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
+    return;
+  }
   if (arguments_[0] === "preflight") {
     const result = await runRestorePreflight(loadRestorePreflightConfig(process.env, arguments_.slice(1)));
     process.stdout.write(`${JSON.stringify({ ok: true, preflight: result })}\n`);
@@ -1636,7 +2238,11 @@ if (entrypoint === fileURLToPath(import.meta.url)) {
         code: errorCode(error),
         message: process.argv[2] === "preflight"
           ? "FormaSpec restore preflight did not complete; no restore state was created."
-          : "FormaSpec restore worker did not complete; maintenance remains active.",
+          : process.argv[2] === "offline-prepare"
+            ? "FormaSpec offline restore preparation did not complete; live data was not cut over."
+            : process.argv[2] === "forensic-rollback"
+              ? "FormaSpec forensic rollback did not complete; maintenance remains active."
+              : "FormaSpec restore worker did not complete; maintenance remains active.",
       },
     })}\n`);
     process.exitCode = 1;

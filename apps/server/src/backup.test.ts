@@ -6,20 +6,37 @@ import { pipeline } from "node:stream/promises";
 
 import Database from "better-sqlite3";
 import tar from "tar-stream";
+import { ComponentDefinitionSchema } from "@designer/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   BackupManager,
   RESTORE_JOURNAL_MAX_BYTES,
+  createForensicRecoveryBundle,
   inspectRestoreJournal,
   restoreVerifiedBackup,
   verifyBackupBundle,
+  verifyForensicRecoveryBundle,
   type BackupManifest,
 } from "./backup.js";
-import { createDocument } from "./core-adapter.js";
 import { DesignerDatabase } from "./db/database.js";
+import { DesignSystemService } from "./design-system-service.js";
+import {
+  DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES,
+  DESIGN_SYSTEM_RELEASE_JSON_MAX_BYTES,
+} from "./design-system-limits.js";
 import { EventHub } from "./events.js";
+import { canonicalJson } from "./ids.js";
 import { DesignerService } from "./service.js";
+import {
+  HISTORICAL_FIXTURE_DIGESTS,
+  HISTORICAL_FIXTURE_IDS,
+  createHistoricalDatabaseFixture,
+  schemaElevenPreservationFingerprint,
+  schemaTwelvePreservationFingerprint,
+  type HistoricalFixtureEvidence,
+  type HistoricalFixtureVersion,
+} from "../test-fixtures/historical-database.js";
 
 const temporaryDirectories: string[] = [];
 let mutatedBundleSequence = 0;
@@ -64,6 +81,141 @@ async function createVerifiedBundle(root: string): Promise<string> {
       message: "Create revision chain fixture",
     });
     return (await new BackupManager(database, data, backups).create()).path;
+  } finally {
+    database.close();
+  }
+}
+
+async function createHistoricalVerifiedBundle(
+  root: string,
+  version: HistoricalFixtureVersion,
+): Promise<{ path: string; evidence: HistoricalFixtureEvidence }> {
+  const data = path.join(root, `historical-schema-${version}-data`);
+  const backups = path.join(root, `historical-schema-${version}-backups`);
+  const fixture = createHistoricalDatabaseFixture(path.join(data, "designer.sqlite"), version);
+  try {
+    expect(fixture.evidence.schemaFingerprint).toBe(HISTORICAL_FIXTURE_DIGESTS.schema[version]);
+    const created = await new BackupManager(fixture, data, backups).create();
+    return { path: created.path, evidence: fixture.evidence };
+  } finally {
+    fixture.sqlite.close();
+  }
+}
+
+function seedVerifiedMigrationBackup(
+  database: DesignerDatabase,
+  id: string,
+  createdAt: string,
+): void {
+  const manifest = {
+    format: "formaspec-backup",
+    formatVersion: 2,
+    createdAt,
+    databaseSchemaVersion: database.schemaVersion(),
+  };
+  const verification = {
+    valid: true,
+    manifest,
+    sqliteIntegrity: "ok",
+    foreignKeyViolations: 0,
+    extractedBytes: 1,
+    entryCount: 1,
+  };
+  database.sqlite.prepare(
+    `INSERT INTO backup_records
+     (id, organization_id, filename, bundle_sha256, status, manifest_json, created_by, created_at, verified_at,
+      size_bytes, verification_json, retention_class, completed_at)
+     VALUES (?, 'organization_legacy', 'backup-v2-integrity-gate.tar', ?, 'valid', ?, 'principal_local', ?, ?, 1, ?, 'manual', ?)`,
+  ).run(id, "a".repeat(64), JSON.stringify(manifest), createdAt, createdAt, JSON.stringify(verification), createdAt);
+}
+
+async function createDesignSystemIntegrityBundle(
+  root: string,
+  head: "foundation_v2" | "custom_v2" | "transitional_v1",
+): Promise<{
+  path: string;
+  designId: string;
+  designSystemId: string;
+  releaseId: string;
+  releaseVersion: number;
+  historicalReleaseId: string | null;
+}> {
+  const data = path.join(root, `design-system-${head}-data`);
+  const backups = path.join(root, `design-system-${head}-backups`);
+  await fs.promises.mkdir(data, { recursive: true });
+  const database = new DesignerDatabase(path.join(data, "designer.sqlite"));
+  try {
+    const events = new EventHub();
+    const service = new DesignerService(database, events, 900);
+    const systems = new DesignSystemService(database, {
+      designerService: service,
+      upgradePreviewTtlSeconds: 900,
+    });
+    const created = service.createDesign("local", {
+      name: `Backup ${head}`,
+      preset: "phone",
+      idempotencyKey: `backup-${head}-create-0001`,
+    });
+    const system = systems.createDesignSystem("local", { name: `Backup ${head} system` });
+    const release = systems.createRelease("local", system.id, {
+      expectedLatestVersion: 0,
+      name: "Release 1",
+      status: "published",
+      tokenVersions: [],
+      componentVersions: [],
+    });
+    let activeRelease = release;
+    if (head === "transitional_v1") {
+      systems.pinProject("local", {
+        designId: created.document.id,
+        releaseId: release.id,
+        expectedCurrentReleaseId: null,
+      });
+    } else {
+      const backupId = `backup_${head}_migration_0001`;
+      seedVerifiedMigrationBackup(database, backupId, created.design.updatedAt);
+      service.migrateDesignHeadToV2("local", created.document.id, {
+        expectedBaseVersion: 1,
+        backupId,
+        idempotencyKey: `backup-${head}-migrate-0001`,
+      });
+      if (head === "custom_v2") {
+        systems.pinProject("local", {
+          designId: created.document.id,
+          releaseId: release.id,
+          expectedCurrentReleaseId: null,
+        });
+        const nextRelease = systems.createRelease("local", system.id, {
+          expectedLatestVersion: 1,
+          name: "Release 2",
+          status: "published",
+          tokenVersions: [],
+          componentVersions: [],
+        });
+        const preview = systems.previewProjectUpgrade("local", {
+          designId: created.document.id,
+          targetReleaseId: nextRelease.id,
+        });
+        systems.commitProjectUpgrade("local", {
+          previewId: preview.id,
+          expectedPreviewHash: preview.previewHash,
+        });
+        activeRelease = nextRelease;
+      }
+    }
+    const now = "2026-07-20T00:00:00.000Z";
+    database.sqlite.prepare(
+      `INSERT INTO organizations (id, name, config_json, created_at, updated_at)
+       VALUES ('organization_backup_other', 'Other backup organization', '{}', ?, ?)`,
+    ).run(now, now);
+    return {
+      path: (await new BackupManager(database, data, backups).create()).path,
+      designId: created.document.id,
+      designSystemId: system.id,
+      releaseId: activeRelease.id,
+      releaseVersion: activeRelease.version,
+      historicalReleaseId: head === "custom_v2" ? release.id : null,
+    };
   } finally {
     database.close();
   }
@@ -170,6 +322,89 @@ async function mutateDatabasePayload(
 }
 
 describe("verified FormaSpec backups", () => {
+  it("captures and restores exact forensic bytes even when the live database is corrupt", async () => {
+    const root = await temporaryDirectory();
+    const data = path.join(root, "corrupt-live-data");
+    const backups = path.join(root, "forensic-backups");
+    const destination = path.join(root, "forensic-destination");
+    const operationId = "restore_forensic_corrupt_database_0001";
+    await fs.promises.mkdir(path.join(data, "assets", "quarantine"), { recursive: true });
+    await fs.promises.writeFile(path.join(data, "designer.sqlite"), Buffer.from("not-a-sqlite-database"));
+    await fs.promises.writeFile(path.join(data, "designer.sqlite-wal"), Buffer.from("retained-wal-bytes"));
+    await fs.promises.writeFile(path.join(data, "assets", "quarantine", "legacy.bin"), Buffer.from([1, 2, 3, 4]));
+
+    const created = await createForensicRecoveryBundle(data, backups, operationId);
+    const repeated = await createForensicRecoveryBundle(data, backups, operationId);
+    expect(repeated.path).toBe(created.path);
+    expect(repeated.bundleSha256).toBe(created.bundleSha256);
+    const verified = await verifyForensicRecoveryBundle(created.path, { expectedOperationId: operationId });
+    expect(verified.manifest.format).toBe("formaspec-forensic-recovery");
+    expect(verified.manifest.files.map((file) => file.path)).toContain("recovery-data/designer.sqlite");
+
+    await fs.promises.mkdir(destination);
+    await fs.promises.writeFile(path.join(destination, "replacement-only.txt"), "remove during rollback");
+    await restoreVerifiedBackup(created.path, destination, {
+      databaseClosed: true,
+      expectedSource: { sha256: created.bundleSha256, sizeBytes: created.sizeBytes },
+      sourcePinDirectory: backups,
+      sourceFormat: "forensic-recovery",
+      expectedForensicOperationId: operationId,
+    });
+    expect(await fs.promises.readFile(path.join(destination, "designer.sqlite"), "utf8"))
+      .toBe("not-a-sqlite-database");
+    expect(await fs.promises.readFile(path.join(destination, "designer.sqlite-wal"), "utf8"))
+      .toBe("retained-wal-bytes");
+    expect(await fs.promises.readFile(path.join(destination, "assets", "quarantine", "legacy.bin")))
+      .toEqual(Buffer.from([1, 2, 3, 4]));
+    expect(fs.existsSync(path.join(destination, "replacement-only.txt"))).toBe(false);
+    expect(fs.existsSync(path.join(destination, "forensic-recovery-manifest.json"))).toBe(false);
+    expect(fs.existsSync(path.join(destination, ".formaspec-restore-journal"))).toBe(false);
+  });
+
+  it("rejects symbolic links while taking a forensic safety snapshot", async () => {
+    if (process.platform === "win32") return;
+    const root = await temporaryDirectory();
+    const data = path.join(root, "forensic-symlink-data");
+    const outside = path.join(root, "outside-secret.txt");
+    await fs.promises.mkdir(data);
+    await fs.promises.writeFile(outside, "must not enter recovery snapshot");
+    await fs.promises.symlink(outside, path.join(data, "linked-secret"));
+    await expect(createForensicRecoveryBundle(
+      data,
+      path.join(root, "forensic-symlink-backups"),
+      "restore_forensic_symlink_rejection_0001",
+    )).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
+  it("checks forensic snapshot capacity before copying live data into the backup volume", async () => {
+    const root = await temporaryDirectory();
+    const data = path.join(root, "forensic-capacity-data");
+    const backups = path.join(root, "forensic-capacity-backups");
+    await fs.promises.mkdir(data);
+    await fs.promises.writeFile(path.join(data, "designer.sqlite"), Buffer.alloc(4096, 7));
+    const statfs = vi.spyOn(fs.promises, "statfs").mockResolvedValue({
+      type: 0n,
+      bsize: 1n,
+      blocks: 1n,
+      bfree: 1n,
+      bavail: 1n,
+      files: 1n,
+      ffree: 1n,
+    } as never);
+    try {
+      await expect(createForensicRecoveryBundle(
+        data,
+        backups,
+        "restore_forensic_capacity_check_0001",
+      )).rejects.toMatchObject({ code: "TEMPORARILY_UNAVAILABLE", statusCode: 507 });
+    } finally {
+      statfs.mockRestore();
+    }
+    expect((await fs.promises.readdir(backups)).filter((entry) => entry.startsWith(".forensic-")))
+      .toEqual([]);
+    expect(await fs.promises.readFile(path.join(data, "designer.sqlite"))).toEqual(Buffer.alloc(4096, 7));
+  });
+
   it("creates, verifies, and restores a consistent bundle without replacing the source-local mount root", async () => {
     const root = await temporaryDirectory();
     const data = path.join(root, "data");
@@ -223,6 +458,201 @@ describe("verified FormaSpec backups", () => {
     }
   });
 
+  it("verifies Foundation V2 heads, custom V2 pins, and valid transitional V1 pins", async () => {
+    const root = await temporaryDirectory();
+    const foundation = await createDesignSystemIntegrityBundle(root, "foundation_v2");
+    const custom = await createDesignSystemIntegrityBundle(root, "custom_v2");
+    const transitional = await createDesignSystemIntegrityBundle(root, "transitional_v1");
+
+    await expect(verifyBackupBundle(foundation.path)).resolves.toMatchObject({ valid: true });
+    await expect(verifyBackupBundle(custom.path)).resolves.toMatchObject({ valid: true });
+    await expect(verifyBackupBundle(transitional.path)).resolves.toMatchObject({ valid: true });
+
+    if (!custom.historicalReleaseId) throw new Error("Custom fixture did not retain an older release.");
+    const deprecatedHistory = await mutateBundle(root, custom.path, async (entries) => {
+      await mutateDatabasePayload(root, entries, (sqlite) => {
+        const row = sqlite.prepare(
+          "SELECT release_json FROM design_system_releases WHERE id = ?",
+        ).get(custom.historicalReleaseId) as { release_json: string };
+        const payload = JSON.parse(row.release_json) as { release: { status: string } };
+        payload.release.status = "deprecated";
+        sqlite.exec("DROP TRIGGER design_system_releases_immutable_update");
+        sqlite.prepare(
+          "UPDATE design_system_releases SET status = 'deprecated', release_json = ? WHERE id = ?",
+        ).run(canonicalJson(payload), custom.historicalReleaseId);
+        sqlite.exec(`
+          CREATE TRIGGER design_system_releases_immutable_update
+          BEFORE UPDATE ON design_system_releases
+          BEGIN SELECT RAISE(ABORT, 'design system releases are immutable'); END;
+        `);
+      });
+    });
+    await expect(verifyBackupBundle(deprecatedHistory)).resolves.toMatchObject({ valid: true });
+
+    const deprecatedCurrentPin = await mutateBundle(root, custom.path, async (entries) => {
+      await mutateDatabasePayload(root, entries, (sqlite) => {
+        const row = sqlite.prepare(
+          "SELECT release_json FROM design_system_releases WHERE id = ?",
+        ).get(custom.releaseId) as { release_json: string };
+        const payload = JSON.parse(row.release_json) as { release: { status: string } };
+        payload.release.status = "deprecated";
+        sqlite.exec("DROP TRIGGER design_system_releases_immutable_update");
+        sqlite.prepare(
+          "UPDATE design_system_releases SET status = 'deprecated', release_json = ? WHERE id = ?",
+        ).run(canonicalJson(payload), custom.releaseId);
+        sqlite.exec(`
+          CREATE TRIGGER design_system_releases_immutable_update
+          BEFORE UPDATE ON design_system_releases
+          BEGIN SELECT RAISE(ABORT, 'design system releases are immutable'); END;
+        `);
+      });
+    });
+    await expect(verifyBackupBundle(deprecatedCurrentPin)).resolves.toMatchObject({ valid: true });
+  });
+
+  it("rejects checksum-valid backups with missing or inconsistent custom project pins", async () => {
+    const root = await temporaryDirectory();
+    const source = await createDesignSystemIntegrityBundle(root, "custom_v2");
+    const mutations: Array<{
+      name: string;
+      apply: (sqlite: Database.Database) => void;
+    }> = [
+      {
+        name: "missing head pin",
+        apply: (sqlite) => sqlite.prepare(
+          "DELETE FROM project_design_system_pins WHERE design_id = ?",
+        ).run(source.designId),
+      },
+      {
+        name: "release version mismatch",
+        apply: (sqlite) => sqlite.prepare(
+          "UPDATE project_design_system_pins SET release_version = ? WHERE design_id = ?",
+        ).run(source.releaseVersion + 1, source.designId),
+      },
+      {
+        name: "organization mismatch",
+        apply: (sqlite) => sqlite.prepare(
+          "UPDATE project_design_system_pins SET organization_id = 'organization_backup_other' WHERE design_id = ?",
+        ).run(source.designId),
+      },
+      {
+        name: "reserved Foundation system collision",
+        apply: (sqlite) => sqlite.prepare(
+          `INSERT INTO design_systems
+           (id, organization_id, name, description, status, created_by, created_at, updated_at)
+           VALUES ('system_formaspec_foundation', 'organization_legacy', 'Shadow Foundation', '', 'active',
+                   'principal_local', '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z')`,
+        ).run(),
+      },
+      {
+        name: "release selects a missing backing token version",
+        apply: (sqlite) => {
+          const row = sqlite.prepare(
+            "SELECT release_json FROM design_system_releases WHERE id = ?",
+          ).get(source.releaseId) as { release_json: string };
+          const payload = JSON.parse(row.release_json) as {
+            release: { token_ids: string[] };
+            token_versions: Array<{ token_id: string; version: number }>;
+          };
+          payload.release.token_ids = ["token_backupmissingversion0001"];
+          payload.token_versions = [{ token_id: "token_backupmissingversion0001", version: 1 }];
+          sqlite.exec("DROP TRIGGER design_system_releases_immutable_update");
+          sqlite.prepare("UPDATE design_system_releases SET release_json = ? WHERE id = ?")
+            .run(canonicalJson(payload), source.releaseId);
+          sqlite.exec(`
+            CREATE TRIGGER design_system_releases_immutable_update
+            BEFORE UPDATE ON design_system_releases
+            BEGIN SELECT RAISE(ABORT, 'design system releases are immutable'); END;
+          `);
+        },
+      },
+      {
+        name: "canonical component exceeds the runtime entity limit",
+        apply: (sqlite) => {
+          const documentationEntry = (index: number): string => {
+            const prefix = `Entry ${index}: `;
+            return `${prefix}${"x".repeat(4_000 - prefix.length)}`;
+          };
+          const documentation = Array.from({ length: 100 }, (_, index) => documentationEntry(index));
+          const definition = ComponentDefinitionSchema.parse({
+            id: "component_backupoversized0001",
+            key: "backup.oversized",
+            name: "Oversized backup component",
+            version: 1,
+            status: "draft",
+            root_node_id: "node_backupoversizedroot0001",
+            properties_schema: [],
+            slots: [],
+            states: [{ key: "default", name: "Default", node_id: "node_backupoversizedroot0001" }],
+            allowed_overrides: {
+              allow_text: false,
+              allow_assets: false,
+              allow_icons: false,
+              allowed_token_families: [],
+              allowed_style_paths: [],
+            },
+            platform_mappings: [],
+            documentation: {
+              summary: "",
+              usage: documentation,
+              accessibility: documentation,
+              do_list: documentation,
+              dont_list: documentation,
+            },
+          });
+          const definitionJson = canonicalJson(definition);
+          expect(Buffer.byteLength(definitionJson, "utf8")).toBeGreaterThan(DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES);
+          expect(Buffer.byteLength(definitionJson, "utf8")).toBeLessThan(16 * 1_048_576);
+          sqlite.prepare(
+            `INSERT INTO component_definitions
+             (design_system_id, component_id, version, status, definition_json, replacement_component_id,
+              created_by, created_at)
+             VALUES (?, ?, 1, 'draft', ?, NULL, 'principal_local', '2026-07-20T00:00:00.000Z')`,
+          ).run(source.designSystemId, definition.id, definitionJson);
+        },
+      },
+      {
+        name: "canonical release exceeds the runtime release limit",
+        apply: (sqlite) => {
+          const row = sqlite.prepare(
+            "SELECT release_json FROM design_system_releases WHERE id = ?",
+          ).get(source.releaseId) as { release_json: string };
+          const payload = JSON.parse(row.release_json) as {
+            diagnostics: Array<Record<string, unknown>>;
+          };
+          payload.diagnostics = Array.from({ length: 2_100 }, (_, index) => ({
+            code: `BACKUP_CAP_${index}`,
+            severity: "info",
+            safety: "safe",
+            message: "x".repeat(4_000),
+            entityKind: "release",
+            entityId: source.releaseId,
+          }));
+          const releaseJson = canonicalJson(payload);
+          expect(Buffer.byteLength(releaseJson, "utf8")).toBeGreaterThan(DESIGN_SYSTEM_RELEASE_JSON_MAX_BYTES);
+          expect(Buffer.byteLength(releaseJson, "utf8")).toBeLessThan(16 * 1_048_576);
+          sqlite.exec("DROP TRIGGER design_system_releases_immutable_update");
+          sqlite.prepare("UPDATE design_system_releases SET release_json = ? WHERE id = ?")
+            .run(releaseJson, source.releaseId);
+          sqlite.exec(`
+            CREATE TRIGGER design_system_releases_immutable_update
+            BEFORE UPDATE ON design_system_releases
+            BEGIN SELECT RAISE(ABORT, 'design system releases are immutable'); END;
+          `);
+        },
+      },
+    ];
+
+    for (const mutation of mutations) {
+      const tampered = await mutateBundle(root, source.path, async (entries) => {
+        await mutateDatabasePayload(root, entries, (sqlite) => mutation.apply(sqlite));
+      });
+      await expect(verifyBackupBundle(tampered), mutation.name).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+      });
+    }
+  });
+
   it("fails before verification extraction when filesystem capacity is insufficient", async () => {
     const root = await temporaryDirectory();
     const bundle = await createVerifiedBundle(root);
@@ -247,154 +677,22 @@ describe("verified FormaSpec backups", () => {
       .toEqual([]);
   });
 
-  it("accepts and restores schema-7 through schema-11 migration-ledger prefixes", async () => {
+  it("accepts and restores genuine schema-7 through schema-12 migration-prefix fixtures", async () => {
     const root = await temporaryDirectory();
-    const schemaEleven = await createVerifiedBundle(root);
-    await expect(verifyBackupBundle(schemaEleven)).resolves.toMatchObject({
+    const schemaThirteen = await createVerifiedBundle(root);
+    await expect(verifyBackupBundle(schemaThirteen)).resolves.toMatchObject({
       valid: true,
-      manifest: { databaseSchemaVersion: 11 },
+      manifest: { databaseSchemaVersion: 13 },
     });
-
-    const schemaTen = await mutateBundle(root, schemaEleven, async (entries) => {
-      await mutateDatabasePayload(root, entries, (sqlite, manifest) => {
-        sqlite.exec(`
-          PRAGMA foreign_keys = OFF;
-          DROP TRIGGER schema_migrations_immutable_update;
-          DROP TRIGGER schema_migrations_immutable_delete;
-          DROP TRIGGER render_jobs_initial_insert;
-          DROP TRIGGER render_jobs_lifecycle_update;
-          DROP TRIGGER render_jobs_retention_delete;
-
-          DROP TABLE render_job_delete_permits;
-          DROP TABLE render_jobs;
-
-          DELETE FROM schema_migrations WHERE version = 11;
-          UPDATE system_metadata SET value = '10' WHERE key = 'database_schema_version';
-
-          CREATE TRIGGER schema_migrations_immutable_update
-          BEFORE UPDATE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          CREATE TRIGGER schema_migrations_immutable_delete
-          BEFORE DELETE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          PRAGMA foreign_keys = ON;
-        `);
-        manifest.databaseSchemaVersion = 10;
+    for (const sourceVersion of [7, 8, 9, 10, 11, 12] as const) {
+      const historical = await createHistoricalVerifiedBundle(root, sourceVersion);
+      await expect(verifyBackupBundle(historical.path)).resolves.toMatchObject({
+        valid: true,
+        manifest: { databaseSchemaVersion: sourceVersion },
       });
-    });
-    await expect(verifyBackupBundle(schemaTen)).resolves.toMatchObject({
-      valid: true,
-      manifest: { databaseSchemaVersion: 10 },
-    });
-
-    const schemaNine = await mutateBundle(root, schemaTen, async (entries) => {
-      await mutateDatabasePayload(root, entries, (sqlite, manifest) => {
-        sqlite.exec(`
-          PRAGMA foreign_keys = OFF;
-          DROP TRIGGER schema_migrations_immutable_update;
-          DROP TRIGGER schema_migrations_immutable_delete;
-          DROP TRIGGER portable_imports_immutable_update;
-          DROP TRIGGER portable_imports_immutable_delete;
-
-          DROP TABLE portable_imports;
-
-          DELETE FROM schema_migrations WHERE version = 10;
-          UPDATE system_metadata SET value = '9' WHERE key = 'database_schema_version';
-
-          CREATE TRIGGER schema_migrations_immutable_update
-          BEFORE UPDATE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          CREATE TRIGGER schema_migrations_immutable_delete
-          BEFORE DELETE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          PRAGMA foreign_keys = ON;
-        `);
-        manifest.databaseSchemaVersion = 9;
-      });
-    });
-    await expect(verifyBackupBundle(schemaNine)).resolves.toMatchObject({
-      valid: true,
-      manifest: { databaseSchemaVersion: 9 },
-    });
-
-    const schemaEight = await mutateBundle(root, schemaNine, async (entries) => {
-      await mutateDatabasePayload(root, entries, (sqlite, manifest) => {
-        sqlite.exec(`
-          PRAGMA foreign_keys = OFF;
-          DROP TRIGGER schema_migrations_immutable_update;
-          DROP TRIGGER schema_migrations_immutable_delete;
-          DROP TRIGGER audit_events_retention_delete;
-          DROP TRIGGER event_outbox_retention_delete;
-          DROP TRIGGER audit_retention_runs_immutable_update;
-          DROP TRIGGER audit_retention_runs_immutable_delete;
-
-          DROP TABLE audit_retention_delete_permits;
-          DROP TABLE audit_retention_runs;
-          DROP TABLE audit_retention_previews;
-
-          DELETE FROM schema_migrations WHERE version = 9;
-          UPDATE system_metadata SET value = '8' WHERE key = 'database_schema_version';
-
-          CREATE TRIGGER audit_events_immutable_delete
-          BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT, 'audit events are immutable'); END;
-          CREATE TRIGGER schema_migrations_immutable_update
-          BEFORE UPDATE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          CREATE TRIGGER schema_migrations_immutable_delete
-          BEFORE DELETE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          PRAGMA foreign_keys = ON;
-        `);
-        manifest.databaseSchemaVersion = 8;
-      });
-    });
-    await expect(verifyBackupBundle(schemaEight)).resolves.toMatchObject({
-      valid: true,
-      manifest: { databaseSchemaVersion: 8 },
-    });
-
-    const schemaSeven = await mutateBundle(root, schemaEight, async (entries) => {
-      await mutateDatabasePayload(root, entries, (sqlite, manifest) => {
-        sqlite.exec(`
-          PRAGMA foreign_keys = OFF;
-          DROP TRIGGER schema_migrations_immutable_update;
-          DROP TRIGGER schema_migrations_immutable_delete;
-
-          DROP TABLE redesign_transitions;
-          DROP TABLE redesign_assessment_versions;
-          DROP TABLE redesign_assessments;
-          DROP TABLE handoff_transitions;
-          DROP TABLE handoff_versions;
-          DROP TABLE handoffs;
-          DROP TABLE implementation_mappings;
-          DROP TABLE repository_inventories;
-          DROP TABLE design_system_upgrade_previews;
-          DROP TABLE project_design_system_pins;
-          DROP TABLE design_system_releases;
-          DROP TABLE component_definitions;
-          DROP TABLE design_system_tokens;
-          DROP TABLE design_systems;
-
-          DELETE FROM schema_migrations WHERE version = 8;
-          UPDATE system_metadata SET value = '7' WHERE key = 'database_schema_version';
-
-          CREATE TRIGGER schema_migrations_immutable_update
-          BEFORE UPDATE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          CREATE TRIGGER schema_migrations_immutable_delete
-          BEFORE DELETE ON schema_migrations BEGIN SELECT RAISE(ABORT, 'schema migrations are immutable'); END;
-          PRAGMA foreign_keys = ON;
-        `);
-        manifest.databaseSchemaVersion = 7;
-      });
-    });
-    await expect(verifyBackupBundle(schemaSeven)).resolves.toMatchObject({
-      valid: true,
-      manifest: { databaseSchemaVersion: 7 },
-    });
-
-    for (const [sourceVersion, bundle] of [
-      [10, schemaTen],
-      [9, schemaNine],
-      [8, schemaEight],
-      [7, schemaSeven],
-    ] as const) {
       const restored = path.join(root, `restored-schema-${sourceVersion}`);
       await fs.promises.mkdir(restored);
-      await restoreVerifiedBackup(bundle, restored, {
+      await restoreVerifiedBackup(historical.path, restored, {
         databaseClosed: true,
         healthCheck: async (directory) => {
           const upgraded = new DesignerDatabase(path.join(directory, "designer.sqlite"));
@@ -403,8 +701,8 @@ describe("verified FormaSpec backups", () => {
       });
       const upgraded = new DesignerDatabase(path.join(restored, "designer.sqlite"));
       try {
-        expect(upgraded.schemaVersion()).toBe(11);
-        expect(upgraded.metadata("database_schema_version")).toBe("11");
+        expect(upgraded.schemaVersion()).toBe(13);
+        expect(upgraded.metadata("database_schema_version")).toBe("13");
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_retention_runs'",
         ).get()).toEqual({ name: "audit_retention_runs" });
@@ -414,19 +712,97 @@ describe("verified FormaSpec backups", () => {
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'render_jobs'",
         ).get()).toEqual({ name: "render_jobs" });
+        expect(upgraded.sqlite.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'handoff_execution_decisions'",
+        ).get()).toEqual({ name: "handoff_execution_decisions" });
+        expect(upgraded.sqlite.prepare(
+          "SELECT current_version, current_revision_id, organization_id FROM designs WHERE id = ?",
+        ).get(historical.evidence.designId)).toEqual({
+          current_version: 2,
+          current_revision_id: historical.evidence.currentRevisionId,
+          organization_id: "organization_legacy",
+        });
+        for (const revision of historical.evidence.revisions) {
+          expect(upgraded.sqlite.prepare(
+            `SELECT document_json, operations_json, snapshot_hash, operation_hash,
+                    parent_revision_hash, revision_hash
+             FROM revisions WHERE id = ?`,
+          ).get(revision.id)).toEqual({
+            document_json: revision.documentJson,
+            operations_json: revision.operationsJson,
+            snapshot_hash: revision.snapshotHash,
+            operation_hash: revision.operationHash,
+            parent_revision_hash: revision.parentRevisionHash,
+            revision_hash: revision.revisionHash,
+          });
+          expect(upgraded.readSnapshot(revision.snapshotHash)).toBe(revision.documentJson);
+        }
+        const asset = upgraded.sqlite.prepare(
+          "SELECT sha256, data, organization_id FROM assets WHERE id = ?",
+        ).get(historical.evidence.asset.id) as {
+          sha256: string;
+          data: Buffer;
+          organization_id: string;
+        };
+        expect(asset).toMatchObject({
+          sha256: historical.evidence.asset.sha256,
+          organization_id: "organization_legacy",
+        });
+        expect(asset.data).toEqual(historical.evidence.asset.bytes);
+        expect(upgraded.sqlite.prepare("SELECT COUNT(*) AS count FROM handoff_execution_decisions").get())
+          .toEqual({ count: sourceVersion === 12 ? 1 : 0 });
+        if (sourceVersion >= 8) {
+          expect(upgraded.sqlite.prepare("SELECT id FROM handoffs WHERE id = ?")
+            .get(HISTORICAL_FIXTURE_IDS.handoffId)).toEqual({ id: HISTORICAL_FIXTURE_IDS.handoffId });
+        }
+        if (sourceVersion === 11) {
+          expect(schemaElevenPreservationFingerprint(upgraded.sqlite))
+            .toBe(historical.evidence.schemaElevenPreservationFingerprint);
+        }
+        if (sourceVersion === 12) {
+          expect(schemaTwelvePreservationFingerprint(upgraded.sqlite))
+            .toBe(historical.evidence.schemaTwelvePreservationFingerprint);
+          expect(upgraded.sqlite.prepare(
+            `SELECT source_json, source_hash FROM component_definitions
+             WHERE design_system_id = ? AND component_id = ? AND version = 1`,
+          ).get(
+            HISTORICAL_FIXTURE_IDS.designSystemId,
+            HISTORICAL_FIXTURE_IDS.componentDefinitionId,
+          )).toEqual({ source_json: null, source_hash: null });
+        }
       } finally {
         upgraded.close();
       }
     }
   });
 
-  it("rejects ledger-only migration-9 through migration-11 schema tampering", async () => {
+  it("rejects ledger-only migration-9 through migration-13 schema tampering", async () => {
     const root = await temporaryDirectory();
     const source = await createVerifiedBundle(root);
     const mutations: Array<{
       expectedReason: string;
       apply: (sqlite: Database.Database) => void;
     }> = [
+      {
+        expectedReason: "missing required trigger component_definitions_source_insert_integrity",
+        apply: (sqlite) => sqlite.exec("DROP TRIGGER component_definitions_source_insert_integrity"),
+      },
+      {
+        expectedReason: "missing required trigger design_system_upgrade_previews_exact_metadata_insert",
+        apply: (sqlite) => sqlite.exec("DROP TRIGGER design_system_upgrade_previews_exact_metadata_insert"),
+      },
+      {
+        expectedReason: "missing required table handoff_execution_decisions",
+        apply: (sqlite) => sqlite.exec("DROP TABLE handoff_execution_decisions"),
+      },
+      {
+        expectedReason: "missing required index handoff_execution_decisions_handoff_kind_sequence",
+        apply: (sqlite) => sqlite.exec("DROP INDEX handoff_execution_decisions_handoff_kind_sequence"),
+      },
+      {
+        expectedReason: "missing required trigger handoff_execution_decisions_insert_integrity",
+        apply: (sqlite) => sqlite.exec("DROP TRIGGER handoff_execution_decisions_insert_integrity"),
+      },
       {
         expectedReason: "missing required table render_jobs",
         apply: (sqlite) => sqlite.exec("DROP TABLE render_jobs"),
@@ -500,43 +876,14 @@ describe("verified FormaSpec backups", () => {
     }
   });
 
-  it("validates only supported structural invariants for a schema-1 legacy database", async () => {
+  it("validates the genuine deterministic baseline V1 fixture without assuming later schema columns", async () => {
     const root = await temporaryDirectory();
     const source = await createVerifiedBundle(root);
     const legacy = await mutateBundle(root, source, async (entries) => {
       const filename = path.join(root, "legacy-schema-1.sqlite");
-      const sqlite = new Database(filename);
-      const now = "2026-01-01T00:00:00.000Z";
-      const document = createDocument("document_legacybackup0001", "Legacy backup", now, "phone");
-      try {
-        sqlite.exec(`
-          CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
-          CREATE TABLE designs(
-            id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, name TEXT NOT NULL,
-            current_version INTEGER NOT NULL, current_revision_id TEXT NOT NULL,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-          );
-          CREATE TABLE revisions(
-            id TEXT PRIMARY KEY, design_id TEXT NOT NULL, version INTEGER NOT NULL,
-            parent_revision_id TEXT, actor_id TEXT NOT NULL, message TEXT,
-            document_json TEXT NOT NULL, operations_json TEXT NOT NULL, created_at TEXT NOT NULL,
-            UNIQUE(design_id, version)
-          );
-          CREATE TABLE assets(
-            id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, design_id TEXT, filename TEXT NOT NULL,
-            mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, width INTEGER NOT NULL,
-            height INTEGER NOT NULL, sha256 TEXT NOT NULL, data BLOB NOT NULL, created_at TEXT NOT NULL
-          );
-          INSERT INTO schema_migrations VALUES (1, 'baseline_v1', '${now}');
-        `);
-        sqlite.prepare("INSERT INTO designs VALUES (?, 'local', ?, 1, 'revision_legacybackup0001', ?, ?)")
-          .run(document.id, document.name, now, now);
-        sqlite.prepare(
-          "INSERT INTO revisions VALUES ('revision_legacybackup0001', ?, 1, NULL, 'local', 'Legacy', ?, '[]', ?)",
-        ).run(document.id, JSON.stringify(document), now);
-      } finally {
-        sqlite.close();
-      }
+      const fixture = createHistoricalDatabaseFixture(filename, 1);
+      expect(fixture.evidence.schemaFingerprint).toBe(HISTORICAL_FIXTURE_DIGESTS.schema[1]);
+      fixture.sqlite.close();
       const data = await fs.promises.readFile(filename);
       entries.set("database.sqlite", data);
       const manifest = parsedManifest(entries);
@@ -908,9 +1255,9 @@ describe("verified FormaSpec backups", () => {
           DROP TRIGGER schema_migrations_immutable_update;
           DROP TRIGGER schema_migrations_immutable_delete;
           INSERT INTO schema_migrations(version, name, applied_at)
-          VALUES (12, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
+          VALUES (14, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
         `);
-        manifest.databaseSchemaVersion = 12;
+        manifest.databaseSchemaVersion = 14;
       },
     ];
     for (const mutation of mutations) {
@@ -925,7 +1272,7 @@ describe("verified FormaSpec backups", () => {
       manifest.databaseSchemaVersion = 7;
       rewriteManifest(entries, manifest);
     });
-    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 11/);
+    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 13/);
   });
 
   it("rejects snapshot, revision-chain, and project-head integrity tampering", async () => {

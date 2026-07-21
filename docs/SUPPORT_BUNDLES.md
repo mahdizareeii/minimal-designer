@@ -1,6 +1,6 @@
 # FormaSpec support bundles
 
-FormaSpec support bundles are deliberately small, source-local diagnostic
+FormaSpec support bundles are deliberately small, local diagnostic
 archives. They are not backups and cannot restore an installation. The
 collector has no network or subprocess access and does not inspect Docker
 volumes or an operating-system credential store.
@@ -27,9 +27,10 @@ entry inventory, entry hashes, archive byte count, and archive SHA-256. Review
 the sidecar and sanitized log entries locally before sharing the TAR. Existing
 archive or sidecar files are never overwritten.
 
-Without an output argument, the archive is written beneath
-`.designer/support-bundles/`. The `--yes` flag is mandatory; an interactive
-terminal prompt is intentionally not accepted as a substitute.
+Without an output argument, source mode writes beneath
+`.designer/support-bundles/`; native wrappers write beneath the absolute
+`FORMASPEC_SUPPORT_DIR` user-state location. The `--yes` flag is mandatory; an
+interactive terminal prompt is intentionally not accepted as a substitute.
 
 ## Included inventory
 
@@ -37,7 +38,7 @@ Only the following fixed inventory is eligible:
 
 - FormaSpec CLI, supported database, Node runtime, and operating-system
   version metadata. Hostname and environment variables are omitted.
-- Source-local migration status from `data/designer.sqlite`, when the migration
+- Read-only migration status from the configured local data directory, when the migration
   ledger can be opened read-only. Only version/count/state metadata is copied;
   no database path, row, schema, snapshot, or design content is copied.
 - Sanitized launcher state: recognized mode, recorded-port validity,
@@ -46,11 +47,11 @@ Only the following fixed inventory is eligible:
 - Sanitized local-bridge state: schema version, process-alive state, URL
   classification, and whether an instance ID was recorded. The instance ID and
   URL are omitted.
-- Key names from only `.designer/env/docker.env` and
-  `.designer/env/server.env`. Every value is represented as `<redacted>`;
+- Key names from only `docker.env` and `server.env` in the configured runtime
+  environment directory. Every value is represented as `<redacted>`;
   comments, malformed lines, and file contents are omitted.
-- Bounded tails from only `.designer/logs/local.log` and
-  `.designer/logs/formaspec-bridge.log`. Symlinks and non-regular files are
+- Bounded tails from only `local.log` and `formaspec-bridge.log` in the
+  configured log directory. Symlinks and non-regular files are
   skipped. ANSI/control sequences, private paths, URLs, authorization/cookie
   headers, labeled secrets, common provider tokens, JWTs, and private-key
   blocks are removed or redacted.

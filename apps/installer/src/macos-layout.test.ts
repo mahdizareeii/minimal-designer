@@ -34,7 +34,15 @@ describe("unsigned macOS installer layout", () => {
     const rendererPlist = launchAgentPlist(MACOS_RENDERER_LABEL, `${MACOS_INSTALL_ROOT}/bin/formaspec-renderer`);
     expect(apiPlist).toContain("<key>RunAtLoad</key><true/>");
     expect(rendererPlist).toContain("<key>KeepAlive</key><true/>");
-    expect(formaspecctlWrapper()).toContain("FORMASPEC_RUNTIME_DIR");
+    const cli = formaspecctlWrapper();
+    for (const variable of [
+      "FORMASPEC_RUNTIME_DIR",
+      "FORMASPEC_DATA_DIR",
+      "FORMASPEC_BACKUP_DIR",
+      "FORMASPEC_LOG_DIR",
+      "FORMASPEC_SUPPORT_DIR",
+    ]) expect(cli).toContain(variable);
+    expect(cli).toContain("Library/Application Support/FormaSpec");
     const launcher = compatibilityLauncher("1.2.3");
     expect(launcher).toContain("/health/ready");
     expect(launcher).toContain("echo 'FormaSpec 1.2.3'");

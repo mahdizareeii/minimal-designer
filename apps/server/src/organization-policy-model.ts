@@ -27,7 +27,16 @@ export const ORGANIZATION_AGENT_SCOPES = [
   "design_system:read",
   "workspace:inventory:read",
   "workspace:inventory:write",
+  "implementation_mapping:read",
+  "implementation_mapping:write",
   "handoff:read",
+  "handoff:execution:plan",
+  "handoff:execution:isolation",
+  "handoff:execution:diff_review",
+  "handoff:execution:validation",
+  "handoff:execution:commit",
+  "handoff:execution:push",
+  "handoff:execution:pull_request",
   "redesign:read",
   "redesign:assessment",
   "redesign:review",
@@ -182,6 +191,18 @@ export const OrganizationPolicySchema = organizationPolicySchema.superRefine((va
       message: "Enabled agents must be allowed to read the organization policy.",
     });
   }
+  const mappedIdentities = new Set<string>();
+  value.identity.roleMappings.forEach((mapping, index) => {
+    if (mappedIdentities.has(mapping.value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["identity", "roleMappings", index, "value"],
+        message: "Trusted identity mapping values must be unique across all claim aliases.",
+      });
+      return;
+    }
+    mappedIdentities.add(mapping.value);
+  });
   const schedule = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(value.backups.scheduleUtc);
   const minute = Number(schedule?.[1]);
   const hour = Number(schedule?.[2]);

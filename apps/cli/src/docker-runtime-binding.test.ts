@@ -24,6 +24,7 @@ const rendererId = "b".repeat(64);
 const imageId = `sha256:${"c".repeat(64)}`;
 const designerConfigHash = "d".repeat(64);
 const rendererConfigHash = "e".repeat(64);
+const defaultComposeProject = "minimalappdesigner";
 const dataVolume = "minimalappdesigner_designer-data";
 const backupVolume = "minimalappdesigner_designer-backups";
 const socketVolume = "minimalappdesigner_renderer-socket";
@@ -103,6 +104,7 @@ interface RuntimeFixtureState {
   composeImageId: string;
   designerConfigHash: string;
   rendererConfigHash: string;
+  composeProject: string;
   dataVolume: string;
   backupVolume: string;
   socketVolume: string;
@@ -121,6 +123,7 @@ function defaultState(port = 4310): RuntimeFixtureState {
     composeImageId: imageId,
     designerConfigHash,
     rendererConfigHash,
+    composeProject: defaultComposeProject,
     dataVolume,
     backupVolume,
     socketVolume,
@@ -135,9 +138,10 @@ function composeLabels(
   configHash: string,
   projectRoot: string,
   currentImageId: string,
+  composeProject = defaultComposeProject,
 ): Record<string, string> {
   return {
-    "com.docker.compose.project": "minimalappdesigner",
+    "com.docker.compose.project": composeProject,
     "com.docker.compose.service": service,
     "com.docker.compose.oneoff": "False",
     "com.docker.compose.container-number": "1",
@@ -169,9 +173,10 @@ function inspectionOutput(service: "designer" | "renderer", state: RuntimeFixtur
       isDesigner ? state.designerConfigHash : state.rendererConfigHash,
       projectRoot,
       state.composeImageId,
+      state.composeProject,
     )),
     JSON.stringify(mounts),
-    JSON.stringify(isDesigner ? "minimalappdesigner_default" : state.rendererNetworkMode),
+    JSON.stringify(isDesigner ? `${state.composeProject}_default` : state.rendererNetworkMode),
     JSON.stringify(ports),
     "",
   ].join("\n");
@@ -209,6 +214,9 @@ function fixtureRunner(state: RuntimeFixtureState, calls: string[][], projectRoo
       return { exitCode: 0, stdout: `${JSON.stringify(state.daemonId)}\n`, stderr: "" };
     }
     if (args[2] === "ps") {
+      if (!args.includes(`label=com.docker.compose.project=${state.composeProject}`)) {
+        return { exitCode: 1, stdout: "", stderr: "wrong compose project" };
+      }
       const designer = args.includes("label=com.docker.compose.service=designer");
       const renderer = args.includes("label=com.docker.compose.service=renderer");
       if (designer === renderer) return { exitCode: 1, stdout: "", stderr: "invalid service filter" };
@@ -235,7 +243,12 @@ describe("Docker runtime binding", () => {
     const binding = await captureDockerRuntimeBinding(root, {
       commandRunner: fixtureRunner(state, calls, root),
       dockerExecutable: "/usr/bin/docker",
-      environment: { PATH: "/usr/bin", DOCKER_CONTEXT: context, DOCKER_HOST: "tcp://ignored.invalid:2375" },
+      environment: {
+        PATH: "/usr/bin",
+        DOCKER_CONTEXT: context,
+        DOCKER_HOST: "tcp://ignored.invalid:2375",
+        COMPOSE_PROJECT_NAME: "ambient_project_must_be_ignored",
+      },
       now: () => new Date("2026-07-20T01:02:03.000Z"),
     });
 
@@ -252,6 +265,10 @@ describe("Docker runtime binding", () => {
     });
     expect(calls.some((args) => args[0] === "context")).toBe(false);
     expect(calls.every((args) => args[0] === "--context" && args[1] === context)).toBe(true);
+    expect(calls.filter((args) => args[2] === "ps").every((args) => (
+      args.includes(`label=com.docker.compose.project=${defaultComposeProject}`)
+      && !args.some((argument) => argument.includes("ambient_project_must_be_ignored"))
+    ))).toBe(true);
 
     const filename = persistDockerRuntimeBinding(root, binding);
     expect(filename).toBe(dockerRuntimeBindingPath(root));
@@ -274,6 +291,108 @@ describe("Docker runtime binding", () => {
     expect(serializedPublic).not.toContain(daemonId);
     expect(serializedPublic).not.toContain(dataVolume);
     expect(dockerPublicPortBinding(binding)).toBe("127.0.0.1:4321:4310/tcp");
+  });
+
+  it("captures and verifies an explicitly selected candidate Compose project without ambient discovery", async () => {
+    const root = projectFixture(4391);
+    const composeProject = "formaspeccandidate_20260720";
+    const state: RuntimeFixtureState = {
+      ...defaultState(4391),
+      composeProject,
+      dataVolume: `${composeProject}_designer-data`,
+      backupVolume: `${composeProject}_designer-backups`,
+      socketVolume: `${composeProject}_renderer-socket`,
+    };
+    const captureCalls: string[][] = [];
+    const binding = await captureDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(state, captureCalls, root),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+      composeProject,
+      environment: {
+        PATH: "/usr/bin",
+        COMPOSE_PROJECT_NAME: "ambient_attacker_project",
+      },
+      now: () => new Date("2026-07-20T01:02:03.000Z"),
+    });
+
+    expect(binding.composeProject).toBe(composeProject);
+    expect(binding.labels.designer.project).toBe(composeProject);
+    expect(binding.labels.renderer.project).toBe(composeProject);
+    expect(captureCalls.filter((args) => args[2] === "ps")).toHaveLength(2);
+    expect(captureCalls.filter((args) => args[2] === "ps").every((args) => (
+      args.includes(`label=com.docker.compose.project=${composeProject}`)
+      && !args.some((argument) => argument.includes("ambient_attacker_project"))
+    ))).toBe(true);
+
+    persistDockerRuntimeBinding(root, binding);
+    expect(readDockerRuntimeBinding(root)).toEqual(binding);
+    const verificationCalls: string[][] = [];
+    await expect(verifyDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(state, verificationCalls, root),
+      dockerExecutable: "/usr/bin/docker",
+      environment: { PATH: "/usr/bin", COMPOSE_PROJECT_NAME: "different_ambient_project" },
+    })).resolves.toEqual(binding);
+    expect(verificationCalls.filter((args) => args[2] === "ps").every((args) => (
+      args.includes(`label=com.docker.compose.project=${composeProject}`)
+    ))).toBe(true);
+
+    await expect(verifyDockerRuntimeBinding(root, {
+      commandRunner: fixtureRunner(state, [], root),
+      dockerExecutable: "/usr/bin/docker",
+      composeProject: "another_candidate",
+    })).rejects.toThrow(/does not match the persisted runtime binding/);
+
+    const oneShot = buildHardenedDockerRunArguments(binding, {
+      containerName: "formaspec-candidate-restore-0001",
+      command: ["node", "apps/server/dist/restore-control.js", "status"],
+    });
+    expect(oneShot).toContain(`--label=com.formaspec.runtime.compose-project=${composeProject}`);
+    expect(oneShot).toContain("--label=com.formaspec.runtime.binding-version=2");
+  });
+
+  it("rejects invalid explicit Compose projects before Docker and cross-project container labels during capture", async () => {
+    for (const composeProject of [
+      "",
+      "MinimalAppDesigner",
+      "-leading-hyphen",
+      "_leading-underscore",
+      "contains.dot",
+      "contains/slash",
+      "a".repeat(64),
+    ]) {
+      const root = projectFixture();
+      const calls: string[][] = [];
+      await expect(captureDockerRuntimeBinding(root, {
+        commandRunner: fixtureRunner(defaultState(), calls, root),
+        dockerExecutable: "/usr/bin/docker",
+        context,
+        composeProject,
+      })).rejects.toThrow(/Compose project.*invalid/);
+      expect(calls).toHaveLength(0);
+    }
+
+    const root = projectFixture();
+    const composeProject = "formaspeccandidate_crossproject";
+    const state = { ...defaultState(), composeProject };
+    const baseRunner = fixtureRunner(state, [], root);
+    const crossProjectLabels: CommandRunner = async (executable, args, options) => {
+      const result = await baseRunner(executable, args, options);
+      if (args[2] === "inspect" && result.exitCode === 0) {
+        const lines = result.stdout.trim().split(/\r?\n/);
+        const labels = JSON.parse(lines[2]!) as Record<string, string>;
+        labels["com.docker.compose.project"] = defaultComposeProject;
+        lines[2] = JSON.stringify(labels);
+        return { ...result, stdout: `${lines.join("\n")}\n` };
+      }
+      return result;
+    };
+    await expect(captureDockerRuntimeBinding(root, {
+      commandRunner: crossProjectLabels,
+      dockerExecutable: "/usr/bin/docker",
+      context,
+      composeProject,
+    })).rejects.toThrow(/required Compose ownership labels/);
   });
 
   it("pins a trusted-proxy server runtime without persisting or forwarding its bearer token", async () => {
@@ -433,8 +552,25 @@ describe("Docker runtime binding", () => {
 
     expect(readDockerRuntimeBinding(root)).toMatchObject({
       version: 2,
+      composeProject: defaultComposeProject,
       runtime: { mode: "docker", serverAccess: "none", healthHostHeader: "127.0.0.1:4310" },
     });
+
+    const candidateRoot = projectFixture();
+    const candidateProject = "formaspeccandidate_legacy";
+    const candidateState = { ...defaultState(), composeProject: candidateProject };
+    const candidate = await captureDockerRuntimeBinding(candidateRoot, {
+      commandRunner: fixtureRunner(candidateState, [], candidateRoot),
+      dockerExecutable: "/usr/bin/docker",
+      context,
+      composeProject: candidateProject,
+    });
+    const candidateFilename = persistDockerRuntimeBinding(candidateRoot, candidate);
+    const unsupportedLegacy = JSON.parse(fs.readFileSync(candidateFilename, "utf8")) as Record<string, unknown>;
+    unsupportedLegacy.version = 1;
+    delete unsupportedLegacy.runtime;
+    fs.writeFileSync(candidateFilename, `${JSON.stringify(unsupportedLegacy)}\n`, { mode: 0o600 });
+    expect(() => readDockerRuntimeBinding(candidateRoot)).toThrow(/Legacy.*unsupported Compose project/);
   });
 
   it("pins the runtime image ID separately from Docker Compose's manifest-list image label", async () => {
@@ -652,5 +788,10 @@ describe("Docker runtime binding", () => {
     parsed.extra = "not allowed";
     fs.writeFileSync(filename, `${JSON.stringify(parsed)}\n`, { mode: 0o600 });
     expect(() => readDockerRuntimeBinding(root)).toThrow(/unexpected fields/);
+
+    delete parsed.extra;
+    parsed.composeProject = "other_candidate";
+    fs.writeFileSync(filename, `${JSON.stringify(parsed)}\n`, { mode: 0o600 });
+    expect(() => readDockerRuntimeBinding(root)).toThrow(/labels are invalid/);
   });
 });

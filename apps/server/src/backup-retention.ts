@@ -12,12 +12,69 @@ export const BACKUP_RETENTION_POLICY: Readonly<BackupRetentionPolicy> = Object.f
   monthly: 12,
 });
 
+export const BACKUP_SCHEDULE_GRACE_MS = 6 * 60 * 60 * 1_000;
+export const BACKUP_SCHEDULE_STALL_MS = 20 * 60 * 1_000;
+
 export type ManagedRetentionClass = keyof typeof BACKUP_RETENTION_POLICY;
 export type BackupRetentionClass = "manual" | ManagedRetentionClass;
 
 export interface BackupScheduleWindow {
   dueAt: string;
   nextDueAt: string;
+}
+
+export type BackupScheduleAttemptStatus = "running" | "created" | "already_completed" | "failed";
+
+export interface BackupScheduleAttempt {
+  runId: string;
+  status: BackupScheduleAttemptStatus;
+  dueAt: string;
+  nextDueAt: string;
+  startedAt: string;
+  completedAt: string | null;
+  errorCode: string | null;
+  retryable: boolean | null;
+}
+
+export interface BackupScheduleSupervisionAlert {
+  code:
+    | "BACKUP_WINDOW_DUE"
+    | "BACKUP_WINDOW_OVERDUE"
+    | "SCHEDULE_RUN_FAILED"
+    | "SCHEDULE_RUN_STALLED"
+    | "RETENTION_PRUNE_REQUIRED"
+    | "BACKUP_RECORDS_REQUIRE_REVIEW";
+  severity: "warning" | "critical";
+  message: string;
+}
+
+export interface BackupScheduleSupervision {
+  status: "disabled" | "healthy" | "warning" | "critical";
+  checkedAt: string;
+  dueAt: string | null;
+  nextDueAt: string | null;
+  graceEndsAt: string | null;
+  currentWindowCovered: boolean;
+  latestAttempt: BackupScheduleAttempt | null;
+  retention: {
+    candidateCount: number;
+    candidateBytes: number;
+    protectedCount: number;
+    planHash: string;
+  };
+  alerts: BackupScheduleSupervisionAlert[];
+}
+
+export interface BackupScheduleSupervisionInput {
+  enabled: boolean;
+  cronExpression: string;
+  at: Date;
+  currentWindowCovered: boolean;
+  latestAttempt: BackupScheduleAttempt | null;
+  retentionCandidateCount: number;
+  retentionCandidateBytes: number;
+  retentionProtectedCount: number;
+  retentionPlanHash: string;
 }
 
 export interface RetentionRecord {
@@ -71,6 +128,97 @@ export function backupScheduleWindow(expression: string, at: Date): BackupSchedu
   const next = new Date(due.getTime());
   next.setUTCDate(next.getUTCDate() + 1);
   return { dueAt: due.toISOString(), nextDueAt: next.toISOString() };
+}
+
+export function evaluateBackupScheduleSupervision(
+  input: Readonly<BackupScheduleSupervisionInput>,
+): BackupScheduleSupervision {
+  if (!Number.isFinite(input.at.getTime())) throw new Error("The schedule supervision time is invalid.");
+  if (!Number.isSafeInteger(input.retentionCandidateCount) || input.retentionCandidateCount < 0
+    || !Number.isSafeInteger(input.retentionCandidateBytes) || input.retentionCandidateBytes < 0
+    || !Number.isSafeInteger(input.retentionProtectedCount) || input.retentionProtectedCount < 0
+    || !/^[a-f0-9]{64}$/.test(input.retentionPlanHash)) {
+    throw new Error("The schedule supervision retention summary is invalid.");
+  }
+
+  const checkedAt = input.at.toISOString();
+  const window = input.enabled ? backupScheduleWindow(input.cronExpression, input.at) : null;
+  const graceEndsAt = window === null
+    ? null
+    : new Date(new Date(window.dueAt).getTime() + BACKUP_SCHEDULE_GRACE_MS).toISOString();
+  const alerts: BackupScheduleSupervisionAlert[] = [];
+  const currentAttempt = window !== null && input.latestAttempt?.dueAt === window.dueAt
+    ? input.latestAttempt
+    : null;
+
+  if (currentAttempt?.status === "failed") {
+    alerts.push({
+      code: "SCHEDULE_RUN_FAILED",
+      severity: "critical",
+      message: `The latest scheduled backup attempt failed with ${currentAttempt.errorCode ?? "INTERNAL_ERROR"}.`,
+    });
+  } else if (currentAttempt?.status === "running"
+    && input.at.getTime() - new Date(currentAttempt.startedAt).getTime() >= BACKUP_SCHEDULE_STALL_MS) {
+    alerts.push({
+      code: "SCHEDULE_RUN_STALLED",
+      severity: "critical",
+      message: "The scheduled backup attempt has no terminal result after the bounded execution window.",
+    });
+  }
+
+  if (window !== null && !input.currentWindowCovered) {
+    if (graceEndsAt !== null && checkedAt > graceEndsAt) {
+      alerts.push({
+        code: "BACKUP_WINDOW_OVERDUE",
+        severity: "critical",
+        message: "No verified managed backup covers the current schedule window after its grace period.",
+      });
+    } else {
+      alerts.push({
+        code: "BACKUP_WINDOW_DUE",
+        severity: "warning",
+        message: "The current scheduled backup window is due and does not yet have a verified backup.",
+      });
+    }
+  }
+  if (input.retentionCandidateCount > 0) {
+    alerts.push({
+      code: "RETENTION_PRUNE_REQUIRED",
+      severity: "warning",
+      message: `${input.retentionCandidateCount} verified scheduled backup(s) require a reviewed retention prune.`,
+    });
+  }
+  if (input.retentionProtectedCount > 0) {
+    alerts.push({
+      code: "BACKUP_RECORDS_REQUIRE_REVIEW",
+      severity: "warning",
+      message: `${input.retentionProtectedCount} incomplete or invalid backup record(s) require operator review.`,
+    });
+  }
+
+  const status = alerts.some((alert) => alert.severity === "critical")
+    ? "critical"
+    : alerts.length > 0
+      ? "warning"
+      : input.enabled
+        ? "healthy"
+        : "disabled";
+  return {
+    status,
+    checkedAt,
+    dueAt: window?.dueAt ?? null,
+    nextDueAt: window?.nextDueAt ?? null,
+    graceEndsAt,
+    currentWindowCovered: input.enabled && input.currentWindowCovered,
+    latestAttempt: input.latestAttempt,
+    retention: {
+      candidateCount: input.retentionCandidateCount,
+      candidateBytes: input.retentionCandidateBytes,
+      protectedCount: input.retentionProtectedCount,
+      planHash: input.retentionPlanHash,
+    },
+    alerts,
+  };
 }
 
 function isoWeekBounds(at: Date): { start: string; end: string } {

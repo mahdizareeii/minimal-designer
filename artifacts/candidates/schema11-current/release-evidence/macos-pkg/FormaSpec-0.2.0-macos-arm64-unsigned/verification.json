@@ -1,0 +1,324 @@
+{
+  "artifact": {
+    "architecture": "arm64",
+    "checksumSidecar": "FormaSpec-0.2.0-macos-arm64-unsigned.pkg.sha256",
+    "checksumSidecarStatus": "pass",
+    "filename": "FormaSpec-0.2.0-macos-arm64-unsigned.pkg",
+    "sha256": "3aad0cd887a7ce83e59cd85e0527500083e71eb31e9340d96dec2eca958017c2",
+    "signed": false,
+    "size": 184887987,
+    "version": "0.2.0"
+  },
+  "blockers": [
+    {
+      "code": "CHROMIUM_RUNTIME_CONTAINS_LGPL_NOTICES",
+      "component": "pkg:generic/chromium-headless-shell@playwright-1228?arch=arm64",
+      "detail": "not-allowlisted"
+    },
+    {
+      "code": "NOTARIZATION_EVIDENCE_MISSING",
+      "detail": "No Apple notarization ticket or stapling evidence is available."
+    },
+    {
+      "code": "PACKAGE_UNSIGNED",
+      "detail": "No Developer ID Installer signature is present."
+    },
+    {
+      "code": "REPRODUCIBILITY_EVIDENCE_MISSING",
+      "detail": "A second independent build has not reproduced the artifact bytes."
+    },
+    {
+      "code": "VULNERABILITY_SCAN_MISSING",
+      "detail": "No external dependency, binary, or OS vulnerability scan is attached."
+    }
+  ],
+  "checksPerformed": [
+    "artifact SHA-256 and canonical sidecar",
+    "pkgutil signature classification",
+    "full flat-PKG expansion in a private temporary directory",
+    "PackageInfo, install manifest, bundle identity, scripts, and required payload paths",
+    "BOM-to-extracted-tree exact path equality",
+    "mode/content/symlink-aware payload tree hash",
+    "packaged npm manifest inventory linked to the source CycloneDX SBOM",
+    "exact workspace dist and managed CLI asset path/content-hash equality",
+    "bundled Node and Playwright runtime inventory with local license evidence"
+  ],
+  "format": "formaspec-macos-pkg-verification",
+  "installerScripts": [
+    {
+      "mode": "0755",
+      "path": "preinstall",
+      "sha256": "f2fbbafb6f2fca42e08e98cb6f7f45e40057373adff58e91858a591a3ee06b91",
+      "size": 1207
+    },
+    {
+      "mode": "0755",
+      "path": "postinstall",
+      "sha256": "f29768d7e8658f7912299e0ae89be14f623c952641969c456ca1d90db7b9caa0",
+      "size": 1377
+    }
+  ],
+  "integrityStatus": "pass",
+  "keyFiles": [
+    {
+      "mode": "0644",
+      "path": "Applications/FormaSpec.app/Contents/Info.plist",
+      "sha256": "54bd5bd9b671a222ea89d05ae282419278e0b8835173ab89a7570186f3d80a07",
+      "size": 899
+    },
+    {
+      "mode": "0755",
+      "path": "Applications/FormaSpec.app/Contents/MacOS/FormaSpec",
+      "sha256": "513fbd284d05a35958683a7bc0e284c8f919e659381fb94ebfb679ff543d10a1",
+      "size": 309
+    },
+    {
+      "mode": "0644",
+      "path": "Library/LaunchAgents/com.formaspec.api.plist",
+      "sha256": "bf9aea282ac83f1188ae0d1ad4b237e161ac8083d0122b5f8b668fcdccfc69ad",
+      "size": 524
+    },
+    {
+      "mode": "0644",
+      "path": "Library/LaunchAgents/com.formaspec.renderer.plist",
+      "sha256": "ad21c732ce6190b0f7920c6636fb4701640e6e949b88e583b079444c5acd800c",
+      "size": 534
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/VERSION",
+      "sha256": "1f930dd1f133c1f97a94fe3acb8db34372cf4c01ffdb2b3ff4ca72f9494121e9",
+      "size": 6
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/install-manifest.json",
+      "sha256": "76c20bf426641e336c9c1755ec7395660be3ed7c0bdaba1a965a563612ce7f88",
+      "size": 185
+    },
+    {
+      "mode": "0755",
+      "path": "Library/Application Support/FormaSpec/bin/formaspec-api",
+      "sha256": "c7252cab076471dfe1a1487812f4b82509d42be3f1ec35623cf3cb7f95e2d50b",
+      "size": 1294
+    },
+    {
+      "mode": "0755",
+      "path": "Library/Application Support/FormaSpec/bin/formaspec-renderer",
+      "sha256": "df6214e187aab17707815bee27283d869d6d8b082dd7fa482d00ebb525c703fa",
+      "size": 1181
+    },
+    {
+      "mode": "0755",
+      "path": "Library/Application Support/FormaSpec/bin/formaspecctl",
+      "sha256": "1d8f1dd6e78b6ffaad1658070a9ff80f689c5de8604dd40a586bb2a605a7134f",
+      "size": 582
+    },
+    {
+      "mode": "0755",
+      "path": "Library/Application Support/FormaSpec/app/designer",
+      "sha256": "83dbd7d5bb073e120f1b0d56aa15f157fafd2626f4de5944831cd62c99f792ad",
+      "size": 2963
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/apps/server/dist/index.js",
+      "sha256": "f93d451a1d208b192574502316bacdace89f8fb365e465cdc126a321b691afd5",
+      "size": 472
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/apps/server/dist/renderer-worker.js",
+      "sha256": "0b13683f1b65da6693a94fc5a4776cb4e4cb90cc6034c88c5a8894055f06a91e",
+      "size": 7789
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/apps/web/dist/index.html",
+      "sha256": "02b98fbf261550e128f94858bc124e24c827291d3a7655f2f16f7db9a9a010f7",
+      "size": 687
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/apps/cli/dist/index.js",
+      "sha256": "c35d71484c27a24c207c53dcece7dce94e89ae637a806bbd113a97d32961158a",
+      "size": 148
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/apps/local-bridge/dist/index.js",
+      "sha256": "c31e2043b6b63a9f5aa976607289d0f2d108a24284bd7a6f308edb400c9a3f4e",
+      "size": 1484
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/apps/workspace-bridge/dist/cli.js",
+      "sha256": "525a996192243d155db8b229d6769a63da79901f47d8e69c4c073a41b66b7937",
+      "size": 8381
+    },
+    {
+      "mode": "0644",
+      "path": "Library/Application Support/FormaSpec/app/packages/core/dist/index.js",
+      "sha256": "4ef97ddef5fd947c25c57a9a5fc60225aa02626a1cf2411de81a1d629cc35c27",
+      "size": 596
+    },
+    {
+      "mode": "0755",
+      "path": "Library/Application Support/FormaSpec/runtime/node",
+      "sha256": "20a18709f0154d668f1bd6f6ea8c2a7ae001447b4b2c339732f22e57a8767a55",
+      "size": 119133456
+    },
+    {
+      "mode": "0755",
+      "path": "usr/local/bin/formaspecctl",
+      "sha256": "1d8f1dd6e78b6ffaad1658070a9ff80f689c5de8604dd40a586bb2a605a7134f",
+      "size": 582
+    }
+  ],
+  "limitations": [
+    "The artifact is unsigned and not notarized; checksums prove integrity, not publisher identity.",
+    "No external vulnerability database, binary scanner, Apple service, or signing credential is used.",
+    "Reproducibility requires an independent second build and is not proven by one artifact hash."
+  ],
+  "package": {
+    "auth": "root",
+    "componentFilename": "FormaSpec.clean.component.pkg",
+    "generatorVersion": "InstallCmds-864.12 (25F84)",
+    "identifier": "com.formaspec.pkg",
+    "installKBytes": 547473,
+    "installLocation": "/",
+    "version": "0.2.0"
+  },
+  "payload": {
+    "appleDoubleEntryCount": 0,
+    "bomPathCount": 20365,
+    "bomPathSetSha256": "4621b57072aeb92893f4958fe99c2eac23565ae930db7d326ca41624a32f7b8e",
+    "directoryCount": 2561,
+    "entryCount": 20365,
+    "extractedAppleDoubleEntryCount": 0,
+    "logicalBytes": 553846670,
+    "regularFileCount": 16917,
+    "symlinkCount": 887,
+    "treeSha256": "2276fc4bde74dcd229c5a5c6f979d5b1dafa2360b48cbb4c6f215dae97f3f9ce"
+  },
+  "releaseDecision": "no-go",
+  "runtimeDirectories": [
+    "chromium_headless_shell-1228"
+  ],
+  "schemaVersion": 2,
+  "signature": {
+    "exitCode": 1,
+    "status": "unsigned",
+    "tool": "pkgutil"
+  },
+  "sourceEvidence": {
+    "licensesSha256": "fdd0aa6913f1146389bf10a66c49e7c04285679759d1177f2edea612b94f622a",
+    "linkageStatus": "pass",
+    "sbomSha256": "a66210e97b89151229018c996e7b3424cd80bf5a99a77f8d76753cce206f1727",
+    "sourceLicensePolicyStatus": "pass",
+    "target": "darwin-arm64"
+  },
+  "workspaceTrees": {
+    "contentSha256": "1b4ecd5cbc8fdcfc1b41b17c71d22891bae25845a9326f0903b0e60d568f6591",
+    "directoryCount": 21,
+    "entryCount": 445,
+    "logicalBytes": 13438677,
+    "regularFileCount": 424,
+    "status": "pass",
+    "symlinkCount": 0,
+    "treeCount": 7,
+    "trees": [
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/apps/cli/assets",
+        "contentTreeSha256": "58b174e26f2536a040ed1ce359297daebde19a4bcf932e76c847a4fef64dc232",
+        "directoryCount": 13,
+        "entryCount": 19,
+        "id": "cli-assets",
+        "kind": "packaged-assets",
+        "logicalBytes": 5359,
+        "pathSetSha256": "eec40465a5bf6d4c77be2c97f17fa603c703cb520ebc90b4b9a3178510218988",
+        "regularFileCount": 6,
+        "symlinkCount": 0,
+        "workspacePath": "apps/cli/assets"
+      },
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/apps/cli/dist",
+        "contentTreeSha256": "98b60bc928e01d08399a4185739ef0991a22092b887812dbae24c29f792833d6",
+        "directoryCount": 1,
+        "entryCount": 89,
+        "id": "cli-dist",
+        "kind": "build-output",
+        "logicalBytes": 718453,
+        "pathSetSha256": "62df3ddd2209709b4400dbc6c5b262929a7e4c92dd7778c19c94177bb6479539",
+        "regularFileCount": 88,
+        "symlinkCount": 0,
+        "workspacePath": "apps/cli/dist"
+      },
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/packages/core/dist",
+        "contentTreeSha256": "f5a7de4711885991d3a861dfa43e52a49f96bda8750a3fd7adc1b6a1b9fbd1f3",
+        "directoryCount": 1,
+        "entryCount": 74,
+        "id": "core-dist",
+        "kind": "build-output",
+        "logicalBytes": 8305763,
+        "pathSetSha256": "65d4980b8b2401cdcba9a317529ee8d03efe4765df6092ae491f6c7c55925b70",
+        "regularFileCount": 73,
+        "symlinkCount": 0,
+        "workspacePath": "packages/core/dist"
+      },
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/apps/local-bridge/dist",
+        "contentTreeSha256": "c297061aa814a30300183cc6527001cdcd06fec1c218b309a30c85f91dbdbe5d",
+        "directoryCount": 1,
+        "entryCount": 25,
+        "id": "local-bridge-dist",
+        "kind": "build-output",
+        "logicalBytes": 118362,
+        "pathSetSha256": "a367af1d7e5fd9f7c5a6b0be5dee5d1fd55ecd77731820ed05ea35be04ee2507",
+        "regularFileCount": 24,
+        "symlinkCount": 0,
+        "workspacePath": "apps/local-bridge/dist"
+      },
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/apps/server/dist",
+        "contentTreeSha256": "c7dcfee15ccb289c9aab7c4511cfa255e3ce44b9e0ff9ec6fa55ee9360fcfe80",
+        "directoryCount": 2,
+        "entryCount": 183,
+        "id": "server-dist",
+        "kind": "build-output",
+        "logicalBytes": 2812306,
+        "pathSetSha256": "0fbf9bd20d88cb3da0b6f63c3533c4257bf0c16831795823de2e565dd6e773a0",
+        "regularFileCount": 181,
+        "symlinkCount": 0,
+        "workspacePath": "apps/server/dist"
+      },
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/apps/web/dist",
+        "contentTreeSha256": "1327dd00d437edc576b44008b3561783268ff6a925ecd65f82b1661c5b3789bd",
+        "directoryCount": 2,
+        "entryCount": 18,
+        "id": "web-dist",
+        "kind": "build-output",
+        "logicalBytes": 1221263,
+        "pathSetSha256": "0826104975826a06a0edfc048977c4595be7842007323402d577c18c792d028e",
+        "regularFileCount": 16,
+        "symlinkCount": 0,
+        "workspacePath": "apps/web/dist"
+      },
+      {
+        "artifactPath": "Library/Application Support/FormaSpec/app/apps/workspace-bridge/dist",
+        "contentTreeSha256": "2d13537578745fe68709463f17f7e346cb11e932c17074fb2841d9da2c374459",
+        "directoryCount": 1,
+        "entryCount": 37,
+        "id": "workspace-bridge-dist",
+        "kind": "build-output",
+        "logicalBytes": 257171,
+        "pathSetSha256": "91381d7da36c634174dadb2acc49aca212da9d41cd5d7b1383c0d55715cf7832",
+        "regularFileCount": 36,
+        "symlinkCount": 0,
+        "workspacePath": "apps/workspace-bridge/dist"
+      }
+    ]
+  }
+}

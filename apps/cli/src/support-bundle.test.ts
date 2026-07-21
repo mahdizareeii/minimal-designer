@@ -16,6 +16,7 @@ import {
   type SupportBundleManifest,
   type SupportBundleSidecar,
 } from "./support-bundle.js";
+import { CLI_SUPPORTED_DATABASE_VERSION } from "./migrations.js";
 
 const temporaryDirectories: string[] = [];
 const fixedNow = new Date("2026-07-19T12:34:56.000Z");
@@ -34,7 +35,7 @@ function sha256(data: Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-function writeMigrationDatabase(root: string, version = 11): void {
+function writeMigrationDatabase(root: string, version = CLI_SUPPORTED_DATABASE_VERSION): void {
   const filename = path.join(root, "data", "designer.sqlite");
   fs.mkdirSync(path.dirname(filename), { recursive: true });
   const sqlite = new Database(filename);
@@ -204,11 +205,11 @@ describe("FormaSpec support bundles", () => {
     ]);
     const migration = JSON.parse(extracted.files.get("diagnostics/migration-status.json")!.toString("utf8"));
     expect(migration).toEqual({
-      appliedMigrationCount: 11,
+      appliedMigrationCount: CLI_SUPPORTED_DATABASE_VERSION,
       available: true,
-      latestAppliedVersion: 11,
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
       state: "current",
-      supportedVersion: 11,
+      supportedVersion: CLI_SUPPORTED_DATABASE_VERSION,
     });
     const runtime = JSON.parse(extracted.files.get("diagnostics/runtime-state.json")!.toString("utf8"));
     expect(runtime).toMatchObject({
@@ -315,6 +316,54 @@ describe("FormaSpec support bundles", () => {
       "diagnostics/versions.json",
     ]);
     expect(preview.manifest.totalPayloadBytes).toBeLessThan(SUPPORT_BUNDLE_LIMITS.maxPayloadBytes);
+  });
+
+  it("reads native user state and writes the default bundle outside the packaged application tree", async () => {
+    const root = temporaryDirectory();
+    const packagedApplication = path.join(root, "packaged-app");
+    const state = path.join(root, "native-user-state");
+    const runtime = path.join(state, "runtime");
+    const logs = path.join(state, "logs");
+    const support = path.join(state, "support-bundles");
+    fs.mkdirSync(path.join(runtime, "run"), { recursive: true });
+    fs.mkdirSync(logs, { recursive: true });
+    fs.writeFileSync(path.join(runtime, "run", "mode"), "local\n");
+    fs.writeFileSync(path.join(runtime, "run", "api-port"), "4310\n");
+    fs.writeFileSync(path.join(logs, "local.log"), "native packaged runtime ready\n");
+    writeMigrationDatabase(state);
+    const environment = {
+      FORMASPEC_RUNTIME_DIR: runtime,
+      FORMASPEC_DATA_DIR: path.join(state, "data"),
+      FORMASPEC_BACKUP_DIR: path.join(state, "backups"),
+      FORMASPEC_LOG_DIR: logs,
+      FORMASPEC_SUPPORT_DIR: support,
+    };
+    const io = collectingIo();
+
+    expect(await runSupportBundleCli(["create", "--yes", "--json"], {
+      projectRoot: packagedApplication,
+      environment,
+      io,
+      now: () => fixedNow,
+      applicationVersion: "native-test",
+      pidIsAlive: () => false,
+    })).toBe(0);
+
+    const result = JSON.parse(io.output.at(-1)!) as { bundlePath: string; previewManifestPath: string };
+    expect(result.bundlePath).toBe(path.join(support, "formaspec-support-2026-07-19T12-34-56-000Z.tar"));
+    expect(result.previewManifestPath).toBe(`${result.bundlePath}.manifest.json`);
+    const extracted = await extractArchive(result.bundlePath);
+    expect(JSON.parse(extracted.files.get("diagnostics/migration-status.json")!.toString("utf8"))).toMatchObject({
+      available: true,
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      state: "current",
+    });
+    expect(JSON.parse(extracted.files.get("diagnostics/runtime-state.json")!.toString("utf8"))).toMatchObject({
+      launcher: { mode: "local", apiPort: 4310 },
+    });
+    expect(extracted.files.get("logs/local.log")!.toString("utf8")).toContain("native packaged runtime ready");
+    expect(fs.existsSync(path.join(packagedApplication, ".designer"))).toBe(false);
+    expect(fs.existsSync(path.join(packagedApplication, "data"))).toBe(false);
   });
 
   it("provides a read-only preview and requires --yes in the standalone CLI adapter", async () => {

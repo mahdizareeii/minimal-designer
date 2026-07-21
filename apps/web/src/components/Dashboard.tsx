@@ -5,6 +5,7 @@ import {
   Clock3,
   CloudOff,
   Code2,
+  Database,
   FolderOpen,
   LayoutDashboard,
   LoaderCircle,
@@ -12,6 +13,7 @@ import {
   Plus,
   Search,
   Settings,
+  ShieldCheck,
   Server,
   Smartphone,
   Sparkles,
@@ -22,8 +24,13 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { navigate } from "../App";
-import { DEVICE_PRESETS, type DevicePreset } from "../domain";
-import { createRedesignAssessment, renderUrl } from "../lib/api";
+import { DEVICE_PRESETS, type DesignProjectSummary, type DevicePreset } from "../domain";
+import {
+  createRedesignAssessment,
+  listRepositoryInventories,
+  renderUrl,
+  type RepositoryInventorySummary,
+} from "../lib/api";
 import { useDesignerStore } from "../store/designer-store";
 
 const presetIcons = {
@@ -43,6 +50,184 @@ function relativeTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(value));
 }
 
+const inventoryPlatformLabels: Record<string, string> = {
+  web: "Web",
+  android: "Android",
+  ios: "iOS",
+  flutter: "Flutter",
+  "react-native": "React Native",
+  "generic-git": "Generic Git",
+};
+
+export function eligibleRedesignInventories(
+  inventories: readonly RepositoryInventorySummary[],
+): RepositoryInventorySummary[] {
+  return inventories.filter((inventory) => inventory.status === "active" && inventory.platforms.length === 1);
+}
+
+export function redesignInventoryPresentation(inventory: RepositoryInventorySummary): {
+  title: string;
+  detail: string;
+  limitNotice: string | null;
+} {
+  const platform = inventoryPlatformLabels[inventory.platforms[0] ?? ""] ?? "Other platform";
+  return {
+    title: `${platform} inventory`,
+    detail: `${inventory.entityCount.toLocaleString()} bounded entities · ${inventory.scannedFileCount.toLocaleString()} files · scanned ${relativeTime(inventory.createdAt)}`,
+    limitNotice: inventory.truncated ? "Scan reached its configured limit" : null,
+  };
+}
+
+export function buildDashboardRedesignRequest(
+  project: DesignProjectSummary,
+  inventory: RepositoryInventorySummary,
+): Parameters<typeof createRedesignAssessment>[0] {
+  if (!eligibleRedesignInventories([inventory]).length) {
+    throw new Error("An active single-platform repository inventory is required.");
+  }
+  return {
+    designId: project.id,
+    inventoryId: inventory.id,
+    expectedDesignVersion: project.version,
+    brief: "Assess the selected FormaSpec project, document its current state against the selected bounded repository inventory, interview the product manager, and propose a reviewed future state before any implementation work.",
+  };
+}
+
+interface RedesignSetupDialogProps {
+  projects: readonly DesignProjectSummary[];
+  inventories: readonly RepositoryInventorySummary[];
+  inventoryLoading: boolean;
+  inventoryError: string | null;
+  ineligibleActiveInventoryCount: number;
+  selectedProjectId: string | null;
+  selectedInventoryId: string | null;
+  redesigning: boolean;
+  redesignError: string | null;
+  onClose: () => void;
+  onCreateProject: () => void;
+  onRetryInventories: () => void;
+  onSelectProject: (projectId: string) => void;
+  onSelectInventory: (inventoryId: string) => void;
+  onStart: () => void;
+}
+
+export function RedesignSetupDialog({
+  projects,
+  inventories,
+  inventoryLoading,
+  inventoryError,
+  ineligibleActiveInventoryCount,
+  selectedProjectId,
+  selectedInventoryId,
+  redesigning,
+  redesignError,
+  onClose,
+  onCreateProject,
+  onRetryInventories,
+  onSelectProject,
+  onSelectInventory,
+  onStart,
+}: RedesignSetupDialogProps) {
+  const ready = selectedProjectId !== null && selectedInventoryId !== null;
+  return (
+    <div className="create-modal redesign-setup-modal" role="dialog" aria-modal="true" aria-labelledby="redesign-title">
+      <div className="modal-heading">
+        <div><span className="modal-icon"><WandSparkles size={18} /></span><div><h2 id="redesign-title">Redesign an existing product</h2><p>Pin one FormaSpec project and one active Workspace Bridge inventory before assessment.</p></div></div>
+        <button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+      </div>
+
+      <section className="redesign-selection-section" aria-labelledby="redesign-project-heading">
+        <div className="redesign-selection-heading">
+          <span>1</span>
+          <div><strong id="redesign-project-heading">Select the current project</strong><small>The assessment is pinned to its exact current design version.</small></div>
+        </div>
+        {projects.length > 0 ? (
+          <div className="redesign-choice-list" role="radiogroup" aria-label="FormaSpec project">
+            {projects.map((project) => {
+              const selected = selectedProjectId === project.id;
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  className={selected ? "is-selected" : ""}
+                  key={project.id}
+                  disabled={redesigning}
+                  onClick={() => onSelectProject(project.id)}
+                >
+                  <span className="redesign-choice-icon"><LayoutDashboard size={15} /></span>
+                  <span><strong>{project.name}</strong><small>Version {project.version} · Updated {relativeTime(project.updatedAt)}</small></span>
+                  {selected ? <Check size={15} /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="redesign-guidance"><Sparkles size={16} /><div><strong>Create a current-state project first</strong><span>Redesign Studio requires an exact design version as review evidence.</span></div></div>
+        )}
+      </section>
+
+      <section className="redesign-selection-section" aria-labelledby="redesign-inventory-heading">
+        <div className="redesign-selection-heading">
+          <span>2</span>
+          <div><strong id="redesign-inventory-heading">Select a repository inventory</strong><small>Only active, bounded, single-platform Workspace Bridge inventories are eligible.</small></div>
+        </div>
+        {inventoryLoading ? (
+          <div className="redesign-guidance"><LoaderCircle size={16} className="spin" /><div><strong>Loading active inventories</strong><span>Checking the server for current path-free repository evidence.</span></div></div>
+        ) : inventories.length > 0 ? (
+          <div className="redesign-choice-list" role="radiogroup" aria-label="Active repository inventory">
+            {inventories.map((inventory) => {
+              const selected = selectedInventoryId === inventory.id;
+              const presentation = redesignInventoryPresentation(inventory);
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  className={selected ? "is-selected" : ""}
+                  key={inventory.id}
+                  disabled={redesigning}
+                  onClick={() => onSelectInventory(inventory.id)}
+                >
+                  <span className="redesign-choice-icon"><Database size={15} /></span>
+                  <span>
+                    <strong>{presentation.title}</strong>
+                    <small>{presentation.detail}{presentation.limitNotice ? ` · ${presentation.limitNotice}` : ""}</small>
+                  </span>
+                  {selected ? <Check size={15} /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="redesign-guidance is-workspace-bridge">
+            <Code2 size={16} />
+            <div>
+              <strong>{inventoryError ? "Workspace Bridge inventory unavailable" : "Connect the Workspace Bridge first"}</strong>
+              <span>
+                {inventoryError ?? (ineligibleActiveInventoryCount > 0
+                  ? "The active scans combine multiple platforms. Grant and scan each platform separately, then retry."
+                  : "Explicitly grant the repository on its workstation and upload one bounded inventory per platform. Repository paths and credentials stay local.")}
+              </span>
+            </div>
+            <button type="button" className="button button-secondary" onClick={onRetryInventories}>Retry</button>
+          </div>
+        )}
+      </section>
+
+      <div className="redesign-assessment-note"><ShieldCheck size={16} /><div><strong>Assessment and planning only</strong><span>This action cannot modify repository source. Implementation remains separately reviewed and explicitly approved.</span></div></div>
+      {redesignError && <div className="modal-note is-error"><CloudOff size={14} /> {redesignError}</div>}
+      <div className="modal-actions">
+        <button className="button button-secondary" onClick={onClose}>Cancel</button>
+        {projects.length === 0 ? <button className="button button-primary" onClick={onCreateProject}>Create project</button> : null}
+        <button className="button button-primary" disabled={!ready || redesigning || inventoryLoading} onClick={onStart}>
+          {redesigning ? <><LoaderCircle size={15} className="spin" /> Creating assessment…</> : <>Start assessment<ArrowRight size={16} /></>}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function Dashboard() {
   const projects = useDesignerStore((state) => state.projects);
   const loading = useDesignerStore((state) => state.dashboardLoading);
@@ -54,7 +239,13 @@ export function Dashboard() {
   const [query, setQuery] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [redesignOpen, setRedesignOpen] = useState(false);
-  const [redesigning, setRedesigning] = useState<string | null>(null);
+  const [redesignInventories, setRedesignInventories] = useState<RepositoryInventorySummary[]>([]);
+  const [ineligibleActiveInventoryCount, setIneligibleActiveInventoryCount] = useState(0);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
+  const [selectedRedesignProjectId, setSelectedRedesignProjectId] = useState<string | null>(null);
+  const [selectedRedesignInventoryId, setSelectedRedesignInventoryId] = useState<string | null>(null);
+  const [redesigning, setRedesigning] = useState(false);
   const [redesignError, setRedesignError] = useState<string | null>(null);
   const [name, setName] = useState("Untitled product flow");
   const [preset, setPreset] = useState<DevicePreset>("web");
@@ -64,6 +255,38 @@ export function Dashboard() {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
+
+  const loadRedesignInventories = async (isCurrent: () => boolean = () => true) => {
+    setInventoryLoading(true);
+    setInventoryError(null);
+    try {
+      const allInventories = await listRepositoryInventories();
+      if (!isCurrent()) return;
+      const eligible = eligibleRedesignInventories(allInventories);
+      setRedesignInventories(eligible);
+      setIneligibleActiveInventoryCount(allInventories.filter((inventory) => (
+        inventory.status === "active" && inventory.platforms.length !== 1
+      )).length);
+      setSelectedRedesignInventoryId((current) => (
+        eligible.some((inventory) => inventory.id === current) ? current : null
+      ));
+    } catch {
+      if (!isCurrent()) return;
+      setRedesignInventories([]);
+      setIneligibleActiveInventoryCount(0);
+      setSelectedRedesignInventoryId(null);
+      setInventoryError("Active inventories could not be loaded. Verify the Workspace Bridge connection and try again.");
+    } finally {
+      if (isCurrent()) setInventoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!redesignOpen) return undefined;
+    let current = true;
+    void loadRedesignInventories(() => current);
+    return () => { current = false; };
+  }, [redesignOpen]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -81,21 +304,33 @@ export function Dashboard() {
     }
   };
 
-  const startRedesign = async (project: (typeof projects)[number]) => {
-    setRedesigning(project.id);
+  const openRedesign = () => {
+    setSelectedRedesignProjectId(null);
+    setSelectedRedesignInventoryId(null);
+    setRedesignInventories([]);
+    setIneligibleActiveInventoryCount(0);
+    setInventoryError(null);
+    setRedesignError(null);
+    setRedesignOpen(true);
+  };
+
+  const startRedesign = async () => {
+    const project = projects.find((candidate) => candidate.id === selectedRedesignProjectId);
+    const inventory = redesignInventories.find((candidate) => candidate.id === selectedRedesignInventoryId);
+    if (!project || !inventory) {
+      setRedesignError("Explicitly select both a current project and an active single-platform inventory.");
+      return;
+    }
+    setRedesigning(true);
     setRedesignError(null);
     try {
-      const assessment = await createRedesignAssessment({
-        designId: project.id,
-        expectedDesignVersion: project.version,
-        brief: `Assess ${project.name}, document the current state, interview the product manager, and propose a reviewed future state before any implementation work.`,
-      });
+      const assessment = await createRedesignAssessment(buildDashboardRedesignRequest(project, inventory));
       setRedesignOpen(false);
       navigate(`/redesign/${encodeURIComponent(assessment.id)}`);
-    } catch (cause) {
-      setRedesignError(cause instanceof Error ? cause.message : "The redesign assessment could not be created.");
+    } catch {
+      setRedesignError("The assessment could not be created. Refresh the project and Workspace Bridge inventory, then try again.");
     } finally {
-      setRedesigning(null);
+      setRedesigning(false);
     }
   };
 
@@ -128,7 +363,7 @@ export function Dashboard() {
             <button className="primary-action-card is-primary" onClick={() => setModalOpen(true)}>
               <Plus size={20} /><span><strong>Design a new product</strong><small>Start from a structured web, phone, or tablet frame.</small></span><ArrowRight size={16} />
             </button>
-            <button className="primary-action-card" onClick={() => setRedesignOpen(true)}>
+            <button className="primary-action-card" onClick={openRedesign}>
               <WandSparkles size={20} /><span><strong>Redesign an existing product</strong><small>Assess first; source changes always require approval.</small></span><ArrowRight size={16} />
             </button>
             <button className="primary-action-card" onClick={() => {
@@ -256,28 +491,23 @@ export function Dashboard() {
 
       {redesignOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setRedesignOpen(false); }}>
-          <div className="create-modal" role="dialog" aria-modal="true" aria-labelledby="redesign-title">
-            <div className="modal-heading">
-              <div><span className="modal-icon"><WandSparkles size={18} /></span><div><h2 id="redesign-title">Redesign an existing product</h2><p>Select a project to begin assessment and planning. This does not modify source code.</p></div></div>
-              <button className="icon-button" onClick={() => setRedesignOpen(false)} aria-label="Close"><X size={18} /></button>
-            </div>
-            {projects.length > 0 ? (
-              <div className="redesign-project-list">
-                {projects.map((project) => (
-                  <button key={project.id} disabled={redesigning !== null} onClick={() => void startRedesign(project)}>
-                    {redesigning === project.id ? <LoaderCircle size={15} className="spin" /> : <WandSparkles size={15} />}<span><strong>{project.name}</strong><small>Version {project.version} · Updated {relativeTime(project.updatedAt)}</small></span><ArrowRight size={15} />
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="modal-note"><Sparkles size={14} /> Create the current-state project first, then start its redesign assessment.</div>
-            )}
-            {redesignError && <div className="modal-note" style={{ color: "#ef9aa6" }}><CloudOff size={14} /> {redesignError}</div>}
-            <div className="modal-actions">
-              <button className="button button-secondary" onClick={() => setRedesignOpen(false)}>Cancel</button>
-              {projects.length === 0 && <button className="button button-primary" onClick={() => { setRedesignOpen(false); setModalOpen(true); }}>Create project</button>}
-            </div>
-          </div>
+          <RedesignSetupDialog
+            projects={projects}
+            inventories={redesignInventories}
+            inventoryLoading={inventoryLoading}
+            inventoryError={inventoryError}
+            ineligibleActiveInventoryCount={ineligibleActiveInventoryCount}
+            selectedProjectId={selectedRedesignProjectId}
+            selectedInventoryId={selectedRedesignInventoryId}
+            redesigning={redesigning}
+            redesignError={redesignError}
+            onClose={() => setRedesignOpen(false)}
+            onCreateProject={() => { setRedesignOpen(false); setModalOpen(true); }}
+            onRetryInventories={() => void loadRedesignInventories()}
+            onSelectProject={(projectId) => { setSelectedRedesignProjectId(projectId); setRedesignError(null); }}
+            onSelectInventory={(inventoryId) => { setSelectedRedesignInventoryId(inventoryId); setRedesignError(null); }}
+            onStart={() => void startRedesign()}
+          />
         </div>
       )}
     </main>

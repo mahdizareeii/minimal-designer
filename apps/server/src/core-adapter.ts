@@ -14,6 +14,7 @@ import {
   type AnyDesignDocument,
   type DesignDocument,
   type DesignOperation,
+  type IdFactory,
   type IdKind,
 } from "@designer/core";
 
@@ -54,7 +55,10 @@ function isIdentifierField(key: string | undefined): boolean {
   return key === "id" || key === "children" || key === "root_ids" || key?.endsWith("_id") === true || key?.endsWith("_ids") === true;
 }
 
-export function normalizeTemporaryReferences(input: unknown): { operations: unknown; idMap: Record<string, string> } {
+export function normalizeTemporaryReferences(
+  input: unknown,
+  createTemporaryId: (temporaryId: string, kind: IdKind) => string = (_temporaryId, kind) => createCoreId(kind),
+): { operations: unknown; idMap: Record<string, string> } {
   const definitions = new Map<string, IdKind>();
   const collect = (value: unknown, parentKey?: string): void => {
     if (Array.isArray(value)) {
@@ -79,7 +83,7 @@ export function normalizeTemporaryReferences(input: unknown): { operations: unkn
   collect(input);
 
   const idMap: Record<string, string> = {};
-  for (const [temporaryId, kind] of definitions) idMap[temporaryId] = createCoreId(kind);
+  for (const [temporaryId, kind] of definitions) idMap[temporaryId] = createTemporaryId(temporaryId, kind);
 
   const rewrite = (value: unknown, parentKey?: string): unknown => {
     if (typeof value === "string" && temporaryIdPattern.test(value) && isIdentifierField(parentKey)) {
@@ -226,7 +230,7 @@ export function collectDiagnostics(document: AnyDesignDocument): Diagnostic[] {
 export function applyOperations(
   document: AnyDesignDocument,
   operationsValue: unknown,
-  options: { expectedRevision: number; now: string },
+  options: { expectedRevision: number; now: string; idFactory?: IdFactory },
 ): AppliedOperations {
   const operations = parseOperations(operationsValue);
   try {
@@ -234,10 +238,17 @@ export function applyOperations(
     const result = applyCoreOperations(compatible, operations, {
       expectedRevision: options.expectedRevision,
       now: options.now,
+      ...(options.idFactory === undefined ? {} : { idFactory: options.idFactory }),
     });
     const editedDocument = DesignDocumentSchema.parse(result.document);
+    const accessibilityLabelEdits = new Map<string, string | null>();
+    for (const operation of operations) {
+      if (operation.type === "update_node" && operation.patch.accessibility_label !== undefined) {
+        accessibilityLabelEdits.set(operation.node_id, operation.patch.accessibility_label);
+      }
+    }
     const nextDocument = document.schema_version === 2
-      ? mergeV1CompatibilityDocument(document, editedDocument)
+      ? mergeV1CompatibilityDocument(document, editedDocument, { accessibilityLabelEdits })
       : editedDocument;
     const diagnostics = [
       ...normalizeDiagnostics(result.diagnostics),

@@ -13,6 +13,7 @@ import { ContentAddressedRasterStore } from "./assets.js";
 import { BackupManager, inspectRestoreJournal } from "./backup.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { DesignerDatabase } from "./db/database.js";
+import { ComponentInsertionService } from "./component-insertion-service.js";
 import { DesignSystemService } from "./design-system-service.js";
 import { registerEnterpriseDomainHttpRoutes } from "./enterprise-domain-http-routes.js";
 import { asDomainError, DomainError } from "./errors.js";
@@ -30,6 +31,10 @@ import { registerOperationsHttpRoutes } from "./operations-http-routes.js";
 import { OperationsService } from "./operations-service.js";
 import { registerOrganizationPolicyHttpRoutes } from "./organization-policy-http-routes.js";
 import { OrganizationPolicyService } from "./organization-policy-service.js";
+import {
+  collectProtectedNonMcpRouteRegistration,
+  type ProtectedNonMcpRouteKey,
+} from "./public-route-contract.js";
 import { PngRenderer } from "./render.js";
 import { SqliteRenderJobStore } from "./render-job-store.js";
 import { RedesignStudioService } from "./redesign-studio-service.js";
@@ -58,6 +63,7 @@ export interface DesignerApplication {
   service: DesignerService;
   enterprise: EnterpriseService;
   designSystems: DesignSystemService;
+  componentInsertions: ComponentInsertionService;
   handoffs: WorkspaceHandoffService;
   redesign: RedesignStudioService;
   events: EventHub;
@@ -67,6 +73,7 @@ export interface DesignerApplication {
   operations: OperationsService;
   policies: OrganizationPolicyService;
   maintenance: MaintenanceStore;
+  registeredProtectedNonMcpRoutes: ReadonlySet<ProtectedNonMcpRouteKey>;
 }
 
 export async function buildApplication(config = loadConfig()): Promise<DesignerApplication> {
@@ -131,6 +138,14 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     bodyLimit: Math.max(config.maxAssetBytes + 1024 * 1024, 2 * 1024 * 1024),
     trustProxy: config.appMode === "server" ? config.trustedProxies : false,
   });
+  const registeredProtectedNonMcpRoutes = new Set<ProtectedNonMcpRouteKey>();
+  app.addHook("onRoute", (routeOptions) => {
+    collectProtectedNonMcpRouteRegistration(
+      registeredProtectedNonMcpRoutes,
+      routeOptions.method,
+      routeOptions.url,
+    );
+  });
   const assetStore = new ContentAddressedRasterStore(config.dataDir);
   const database = new DesignerDatabase(config.databasePath);
   const events = new EventHub();
@@ -154,7 +169,9 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   });
   const designSystems = new DesignSystemService(database, {
     upgradePreviewTtlSeconds: config.previewTtlSeconds,
+    designerService: service,
   });
+  const componentInsertions = new ComponentInsertionService(database, service);
   const handoffs = new WorkspaceHandoffService(database);
   const redesign = new RedesignStudioService(database);
   const backups = new BackupManager(database, config.dataDir, config.backupDir, {
@@ -281,9 +298,9 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
 
   registerAuthentication(app, config, database);
   registerMaintenanceStatusRoute(app, maintenance);
-  registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance });
+  registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance, operations });
   registerEnterpriseHttpRoutes(app, enterprise);
-  registerEnterpriseDomainHttpRoutes(app, { designSystems, handoffs, redesign });
+  registerEnterpriseDomainHttpRoutes(app, { designSystems, componentInsertions, handoffs, redesign });
   registerOperationsHttpRoutes(app, operations);
   registerOrganizationPolicyHttpRoutes(app, policies);
   registerMcpEndpoint(app, {
@@ -291,6 +308,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     service,
     enterprise,
     designSystems,
+    componentInsertions,
     handoffs,
     redesign,
     renderer,
@@ -341,6 +359,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     service,
     enterprise,
     designSystems,
+    componentInsertions,
     handoffs,
     redesign,
     events,
@@ -350,5 +369,6 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     operations,
     policies,
     maintenance,
+    registeredProtectedNonMcpRoutes,
   };
 }

@@ -10,3 +10,10 @@ data
 .designer
 playwright-report
 test-results
+.github
+.agents
+.codex
+artifacts
+docs
+scripts
+*.md

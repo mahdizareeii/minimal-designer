@@ -134,6 +134,31 @@ export interface CanvasClientRect {
   bottom: number;
 }
 
+export interface CanvasSelectionBounds extends CanvasClientRect {
+  width: number;
+  height: number;
+}
+
+/**
+ * Return the exact client-space union used by the multi-selection overlay.
+ * React Moveable rounds target offsets while calculating a group rectangle;
+ * retaining the browser's fractional client geometry here prevents that
+ * upstream rounding from growing beyond the CSS-pixel alignment budget when
+ * the canvas is zoomed.
+ */
+export function unionClientRects(
+  rects: readonly CanvasClientRect[],
+): CanvasSelectionBounds | null {
+  if (rects.length === 0) return null;
+  const values = rects.flatMap((rect) => [rect.left, rect.top, rect.right, rect.bottom]);
+  if (!values.every(Number.isFinite)) throw new Error("Selection bounds must be finite.");
+  const left = Math.min(...rects.map((rect) => rect.left));
+  const top = Math.min(...rects.map((rect) => rect.top));
+  const right = Math.max(...rects.map((rect) => rect.right));
+  const bottom = Math.max(...rects.map((rect) => rect.bottom));
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
 export interface AutoLayoutContainerDescriptor {
   nodeId: NodeId;
   mode: AutoLayoutMode;

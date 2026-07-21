@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { unzipSync, zipSync } from "fflate";
 import {
@@ -8,10 +11,22 @@ import {
   createStarterDocument,
   migrateDesignDocumentV1ToV2,
 } from "@designer/core";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { canonicalJson } from "./ids.js";
-import { createPortableProjectBundle, readPortableProjectBundle } from "./portable-export.js";
+import {
+  createPortableProjectBundle,
+  readPortableProjectBundle,
+  readPortableProjectBundleFile,
+} from "./portable-export.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function rewriteBundleJson(
   bundle: Buffer,
@@ -29,6 +44,54 @@ function rewriteBundleJson(
     `${createHash("sha256").update(entries[name]!).digest("hex")}  ${name}`
   )).join("\n")}\n`, "utf8");
   return Buffer.from(zipSync(entries, { level: 6, mtime: new Date("1980-01-01T00:00:00.000Z") }));
+}
+
+function semanticV1Document() {
+  const ids = createSequentialIdFactory("semanticv1");
+  const document = createStarterDocument({
+    name: "Semantic V1 portable project",
+    now: "2026-05-01T00:00:00.000Z",
+    idFactory: ids,
+  });
+  const tokenId = ids("token");
+  document.tokens[tokenId] = {
+    id: tokenId,
+    name: "Action",
+    path: "color.action",
+    kind: "color",
+    value: "#2457e6",
+    archived: false,
+    metadata: {},
+  };
+  return DesignDocumentSchema.parse(document);
+}
+
+function semanticV2Document() {
+  const document = migrateDesignDocumentV1ToV2(semanticV1Document(), {
+    migratedAt: "2026-05-02T00:00:00.000Z",
+  });
+  const frameId = document.pages[0]!.children[0]!;
+  document.product_specification.summary = "Canonical semantic sidecar fixture.";
+  document.implementation_mappings.target_portablesemantic_0001 = {
+    id: "target_portablesemantic_0001",
+    target_type: "screen",
+    source_id: frameId,
+    platform: "web",
+    symbol: "SemanticScreen",
+    connection_id: "connection_portablesemantic_0001",
+    mapping_version: 1,
+  };
+  return DesignDocumentV2Schema.parse(document);
+}
+
+async function readStreamedFixture(bundle: Buffer) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-portable-semantic-"));
+  temporaryDirectories.push(root);
+  const filename = path.join(root, "project.formaspec.zip");
+  const extractionDirectory = path.join(root, "entries");
+  fs.writeFileSync(filename, bundle);
+  fs.mkdirSync(extractionDirectory, { recursive: true });
+  return readPortableProjectBundleFile(filename, extractionDirectory);
 }
 
 function endOfCentralDirectoryOffset(bundle: Buffer): number {
@@ -168,6 +231,10 @@ describe("portable FormaSpec project bundles", () => {
     expect(imported.manifest.revisionHash).toBe("a".repeat(64));
     expect(imported.assets["assets/asset_portable_00000001.png"]?.equals(asset)).toBe(true);
     expect(imported.previews["previews/desktop.png"]?.toString()).toBe("png-preview");
+    expect(imported.productSpecification).toEqual({ natural_language_brief: "" });
+    expect(imported.prototype).toEqual(document.prototype_links);
+    expect(imported.designSystem).toEqual({ pin: null, components: {} });
+    expect(imported.implementationMap).toEqual({});
   });
 
   it("round-trips a canonical strict V2 document without projecting away V2-only fields", () => {
@@ -252,6 +319,275 @@ describe("portable FormaSpec project bundles", () => {
       verified_backup_id: "backup_portablev2_00000001",
     });
     expect(imported.productSpecification).toEqual(canonicalDocument.product_specification);
+    expect(imported.prototype).toEqual(canonicalDocument.prototype_links);
+    expect(imported.designSystem).toEqual({
+      pin: canonicalDocument.design_system,
+      components: canonicalDocument.component_definitions,
+    });
+    expect(imported.implementationMap).toEqual(canonicalDocument.implementation_mappings);
+    expect(imported.tokens).toMatchObject({
+      color: {
+        surface: {
+          $extensions: { "com.formaspec": { id: tokenId, layer: "primitive" } },
+        },
+      },
+    });
+  });
+
+  it("rejects checksum-valid V2 semantic sidecar conflicts in both in-memory and streaming readers", async () => {
+    const document = semanticV2Document();
+    const bundle = createPortableProjectBundle({
+      document,
+      revisionId: "revision_portablesemanticv2_0001",
+      revisionHash: "1".repeat(64),
+      designSystemVersion: document.design_system.release_version,
+      createdAt: "2026-05-03T00:00:00.000Z",
+    });
+    const sidecars = [
+      "product-spec.json",
+      "prototype.json",
+      "design-system.json",
+      "tokens.dtcg.json",
+      "implementation-map.json",
+    ] as const;
+    for (const entryName of sidecars) {
+      const conflicting = rewriteBundleJson(bundle, entryName, (value) => {
+        value.__checksum_valid_semantic_conflict__ = entryName;
+      });
+      expect(() => readPortableProjectBundle(conflicting)).toThrow(
+        new RegExp(`semantic sidecar conflicts with document\\.json: ${entryName.replaceAll(".", "\\.")}`),
+      );
+      await expect(readStreamedFixture(conflicting)).rejects.toThrow(
+        new RegExp(`semantic sidecar conflicts with document\\.json: ${entryName.replaceAll(".", "\\.")}`),
+      );
+    }
+    const conflictingManifest = rewriteBundleJson(bundle, "manifest.json", (value) => {
+      value.designSystemVersion = document.design_system.release_version + 1;
+    });
+    expect(() => readPortableProjectBundle(conflictingManifest)).toThrow(
+      /manifest design-system version conflicts with document\.json/,
+    );
+    await expect(readStreamedFixture(conflictingManifest)).rejects.toThrow(
+      /manifest design-system version conflicts with document\.json/,
+    );
+  });
+
+  it("supports an external V1 product specification but requires every other V1 sidecar projection to match", async () => {
+    const document = semanticV1Document();
+    const externalProductSpecification = migrateDesignDocumentV1ToV2(document, {
+      migratedAt: "2026-05-02T00:00:00.000Z",
+    }).product_specification;
+    externalProductSpecification.natural_language_brief = "Externally versioned product context for a V1 design.";
+    externalProductSpecification.summary = "Preserve semantic integrity.";
+    const bundle = createPortableProjectBundle({
+      document,
+      revisionId: "revision_portablesemanticv1_0001",
+      revisionHash: "2".repeat(64),
+      designSystemVersion: 1,
+      productSpecification: externalProductSpecification,
+      createdAt: "2026-05-03T00:00:00.000Z",
+    });
+    const imported = readPortableProjectBundle(bundle);
+    expect(imported.productSpecification).toEqual(externalProductSpecification);
+    expect(imported.prototype).toEqual(document.prototype_links);
+    expect(imported.designSystem).toEqual({ pin: null, components: {} });
+    expect(imported.implementationMap).toEqual({});
+    expect((await readStreamedFixture(bundle)).productSpecification).toEqual(externalProductSpecification);
+
+    const changedExternalProductSpecification = rewriteBundleJson(bundle, "product-spec.json", (value) => {
+      value.natural_language_brief = "A different but valid external V1 product specification.";
+    });
+    expect(readPortableProjectBundle(changedExternalProductSpecification).productSpecification).toMatchObject({
+      natural_language_brief: "A different but valid external V1 product specification.",
+    });
+    await expect(readStreamedFixture(changedExternalProductSpecification)).resolves.toMatchObject({
+      productSpecification: {
+        natural_language_brief: "A different but valid external V1 product specification.",
+      },
+    });
+
+    for (const entryName of [
+      "prototype.json",
+      "design-system.json",
+      "tokens.dtcg.json",
+      "implementation-map.json",
+    ] as const) {
+      const conflicting = rewriteBundleJson(bundle, entryName, (value) => {
+        value.__checksum_valid_semantic_conflict__ = entryName;
+      });
+      expect(() => readPortableProjectBundle(conflicting)).toThrow(
+        new RegExp(`semantic sidecar conflicts with document\\.json: ${entryName.replaceAll(".", "\\.")}`),
+      );
+      await expect(readStreamedFixture(conflicting)).rejects.toThrow(
+        new RegExp(`semantic sidecar conflicts with document\\.json: ${entryName.replaceAll(".", "\\.")}`),
+      );
+    }
+  });
+
+  it("keeps historical V1 documents exportable when legacy product_brief metadata is not a string", async () => {
+    const document = semanticV1Document();
+    document.metadata.product_brief = {
+      legacy: true,
+      note: "Valid V1 JSON metadata, but not a product-specification brief.",
+    };
+    const canonicalDocument = DesignDocumentSchema.parse(document);
+    const bundle = createPortableProjectBundle({
+      document: canonicalDocument,
+      revisionId: "revision_portablelegacybrief_0001",
+      revisionHash: "6".repeat(64),
+      designSystemVersion: 1,
+      createdAt: "2026-05-03T00:00:00.000Z",
+    });
+
+    expect(readPortableProjectBundle(bundle).productSpecification).toEqual({ natural_language_brief: "" });
+    expect((await readStreamedFixture(bundle)).productSpecification).toEqual({ natural_language_brief: "" });
+  });
+
+  it("preserves __proto__ token paths without mutating Object.prototype in V1 or V2 readers", async () => {
+    const pollutionKey = "formaspec_portable_polluted";
+    const prototype = Object.prototype as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(prototype, pollutionKey)).toBe(false);
+
+    const v1 = semanticV1Document();
+    v1.tokens.token_portableprototype_0001 = {
+      id: "token_portableprototype_0001",
+      name: "Prototype-safe token",
+      path: `__proto__.${pollutionKey}`,
+      kind: "color",
+      value: "#123456",
+      archived: false,
+      metadata: {},
+    };
+    const documents = [
+      DesignDocumentSchema.parse(v1),
+      DesignDocumentV2Schema.parse(migrateDesignDocumentV1ToV2(v1, {
+        migratedAt: "2026-05-02T00:00:00.000Z",
+      })),
+    ];
+
+    for (const document of documents) {
+      const bundle = createPortableProjectBundle({
+        document,
+        revisionId: `revision_portableprototype_${document.schema_version}`,
+        revisionHash: String(document.schema_version).repeat(64),
+        designSystemVersion: document.schema_version === 2 ? document.design_system.release_version : 1,
+        createdAt: "2026-05-03T00:00:00.000Z",
+      });
+      expect(Object.prototype.hasOwnProperty.call(prototype, pollutionKey)).toBe(false);
+
+      for (const imported of [
+        readPortableProjectBundle(bundle),
+        await readStreamedFixture(bundle),
+      ]) {
+        expect(Object.prototype.hasOwnProperty.call(prototype, pollutionKey)).toBe(false);
+        const tokens = imported.tokens as Record<string, unknown>;
+        expect(Object.prototype.hasOwnProperty.call(tokens, "__proto__")).toBe(true);
+        const prototypeGroup = tokens.__proto__ as Record<string, unknown>;
+        expect(Object.prototype.hasOwnProperty.call(prototypeGroup, pollutionKey)).toBe(true);
+      }
+    }
+  });
+
+  it("uses canonical token-ID order for colliding and prefix DTCG paths in both readers", async () => {
+    const v1 = semanticV1Document();
+    v1.tokens.token_zduplicate_0001 = {
+      id: "token_zduplicate_0001",
+      name: "Duplicate path Z",
+      path: "collision.same",
+      kind: "color",
+      value: "#222222",
+      archived: false,
+      metadata: {},
+    };
+    v1.tokens.token_aduplicate_0001 = {
+      id: "token_aduplicate_0001",
+      name: "Duplicate path A",
+      path: "collision.same",
+      kind: "color",
+      value: "#111111",
+      archived: false,
+      metadata: {},
+    };
+    v1.tokens.token_zprefixchild_0001 = {
+      id: "token_zprefixchild_0001",
+      name: "Prefix child",
+      path: "prefix.child",
+      kind: "color",
+      value: "#444444",
+      archived: false,
+      metadata: {},
+    };
+    v1.tokens.token_aprefixroot_0001 = {
+      id: "token_aprefixroot_0001",
+      name: "Prefix root",
+      path: "prefix",
+      kind: "color",
+      value: "#333333",
+      archived: false,
+      metadata: {},
+    };
+    const documents = [
+      DesignDocumentSchema.parse(v1),
+      DesignDocumentV2Schema.parse(migrateDesignDocumentV1ToV2(v1, {
+        migratedAt: "2026-05-02T00:00:00.000Z",
+      })),
+    ];
+
+    for (const document of documents) {
+      const bundle = createPortableProjectBundle({
+        document,
+        revisionId: `revision_portabletokencollision_${document.schema_version}`,
+        revisionHash: "7".repeat(64),
+        designSystemVersion: document.schema_version === 2 ? document.design_system.release_version : 1,
+        createdAt: "2026-05-03T00:00:00.000Z",
+      });
+      for (const imported of [
+        readPortableProjectBundle(bundle),
+        await readStreamedFixture(bundle),
+      ]) {
+        expect(imported.tokens).toMatchObject({
+          collision: { same: { $value: "#222222" } },
+          prefix: { child: { $value: "#444444" } },
+        });
+      }
+    }
+  });
+
+  it("does not create a self-conflicting portable export when explicit sidecars disagree with the document", () => {
+    const v2 = semanticV2Document();
+    expect(() => createPortableProjectBundle({
+      document: v2,
+      revisionId: "revision_portableexportconflict_0000",
+      revisionHash: "3".repeat(64),
+      designSystemVersion: v2.design_system.release_version + 1,
+    })).toThrow(/manifest design-system version conflicts with document\.json/);
+    expect(() => createPortableProjectBundle({
+      document: v2,
+      revisionId: "revision_portableexportconflict_0001",
+      revisionHash: "3".repeat(64),
+      designSystemVersion: v2.design_system.release_version,
+      productSpecification: { ...v2.product_specification, summary: "Conflicting export sidecar." },
+    })).toThrow(/semantic sidecar conflicts with document\.json: product-spec\.json/);
+
+    const v1 = semanticV1Document();
+    const externalProductSpecification = migrateDesignDocumentV1ToV2(v1, {
+      migratedAt: "2026-05-02T00:00:00.000Z",
+    }).product_specification;
+    externalProductSpecification.natural_language_brief = "Supported external V1 context.";
+    expect(() => createPortableProjectBundle({
+      document: v1,
+      revisionId: "revision_portableexportconflict_0002",
+      revisionHash: "4".repeat(64),
+      designSystemVersion: 1,
+      prototype: { injected: true },
+    })).toThrow(/semantic sidecar conflicts with document\.json: prototype\.json/);
+    expect(() => createPortableProjectBundle({
+      document: v1,
+      revisionId: "revision_portableexternalv1_0001",
+      revisionHash: "5".repeat(64),
+      designSystemVersion: 1,
+      productSpecification: externalProductSpecification,
+    })).not.toThrow();
   });
 
   it("round-trips quarantined V1 assets by metadata without treating unsafe bytes as render-ready", () => {

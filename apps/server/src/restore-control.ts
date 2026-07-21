@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { z } from "zod";
 
-import { finalizeTerminalRestoreJournal } from "./backup.js";
+import { finalizeTerminalRestoreJournal, verifyPinnedForensicRecoveryBundle } from "./backup.js";
 import {
   DATABASE_SCHEMA_VERSION,
   validateDatabaseMigrationLedger,
@@ -56,6 +56,7 @@ export interface RestoreControlStatus {
     smoke: RestoreOperationState["smoke"];
     result: RestoreOperationState["result"];
     errorCode: RestoreOperationState["errorCode"];
+    recovery: RestoreOperationState["recovery"] | null;
   };
   workerLock:
     | { active: false; lockValid: true }
@@ -106,6 +107,7 @@ function publicOperation(state: RestoreOperationState | null): RestoreControlSta
     smoke: state.smoke,
     result: state.result,
     errorCode: state.errorCode,
+    recovery: state.recovery ?? null,
   };
 }
 
@@ -152,7 +154,17 @@ async function verifyPreparedAbortDatabase(config: RestoreControlConfig): Promis
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new DomainError("VALIDATION_FAILED", "Live FormaSpec database is not a regular file.", 422);
   }
-  const sqlite = new Database(databasePath, { readonly: true, fileMustExist: true });
+  let sqlite: Database.Database;
+  try {
+    sqlite = new Database(databasePath, { readonly: true, fileMustExist: true });
+  } catch (error) {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "Live database is not a readable SQLite database before restore cancellation.",
+      422,
+      { cause: error, details: { reason: error instanceof Error ? error.message : String(error) } },
+    );
+  }
   try {
     sqlite.pragma("query_only = ON");
     if (sqlite.pragma("integrity_check", { simple: true }) !== "ok") {
@@ -186,6 +198,14 @@ async function verifyPreparedAbortDatabase(config: RestoreControlConfig): Promis
     if (schemaVersion !== DATABASE_SCHEMA_VERSION) {
       throw new DomainError("VALIDATION_FAILED", "Live database schema is not current before restore cancellation.", 422);
     }
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "Live database validation failed before restore cancellation.",
+      422,
+      { cause: error, details: { reason: error instanceof Error ? error.message : String(error) } },
+    );
   } finally {
     sqlite.close();
   }
@@ -207,7 +227,14 @@ async function readStatus(
       && maintenanceStatus.operationId !== expectedOperationId) {
       throw new DomainError("VERSION_CONFLICT", "Maintenance belongs to a different restore operation.", 409);
     }
-    if (operation !== null && operation.operationId !== expectedOperationId) {
+    const fencedForensicPredecessor = operation !== null
+      && operation.operationId !== expectedOperationId
+      && operation.phase === "rolled_back"
+      && operation.recovery?.mode === "offline"
+      && maintenanceStatus.active
+      && maintenanceStatus.markerValid
+      && maintenanceStatus.operationId === expectedOperationId;
+    if (operation !== null && operation.operationId !== expectedOperationId && !fencedForensicPredecessor) {
       throw new DomainError("VERSION_CONFLICT", "Persisted restore state belongs to a different operation.", 409);
     }
     if (lockStatus.active && lockStatus.lockValid && lockStatus.operationId !== expectedOperationId) {
@@ -274,19 +301,37 @@ export async function runRestoreControl(
           503,
         );
       }
-      if (maintenanceStatus.active && maintenanceStatus.operationId !== operationId) {
+      const forensicRecoveryHandoff = maintenanceStatus.active
+        && maintenanceStatus.operationId !== operationId
+        && operation !== null
+        && operation.operationId === maintenanceStatus.operationId
+        && operation.phase === "rolled_back"
+        && operation.recovery?.mode === "offline";
+      if (maintenanceStatus.active && maintenanceStatus.operationId !== operationId && !forensicRecoveryHandoff) {
         throw new DomainError("VERSION_CONFLICT", "Another restore operation already owns maintenance mode.", 409);
       }
       if (operation !== null && operation.operationId !== operationId
         && operation.phase !== "reconciled" && operation.phase !== "rolled_back") {
         throw new DomainError("VERSION_CONFLICT", "An unfinished restore operation already exists.", 409);
       }
-      // Archive an unrelated terminal operation before publishing the next
-      // maintenance owner. A crash between these actions leaves the live API
-      // unfenced and the old terminal state safely archived; no restore
-      // cutover has begun. Retrying the command is idempotent.
+      // Normal terminal replacement archives before publishing a new fence.
+      // A forensic rollback is different: its bytes are deliberately not
+      // trusted for serving, so hand off the maintenance owner first and only
+      // archive the old terminal record once the replacement preparation is
+      // durable. Keeping the predecessor here lets a failed preparation prove
+      // why the new maintenance owner must remain fenced.
       if (operation !== null && operation.operationId !== operationId) {
-        await operationStore.archiveTerminal(operation.operationId);
+        if (forensicRecoveryHandoff) {
+          await maintenance.write({
+            schemaVersion: 1,
+            active: true,
+            phase: "restore",
+            operationId,
+            startedAt: now().toISOString(),
+          });
+        } else {
+          await operationStore.archiveTerminal(operation.operationId);
+        }
       }
       if (!maintenanceStatus.active) {
         await maintenance.write({
@@ -322,6 +367,13 @@ export async function runRestoreControl(
         throw new DomainError(
           "VERSION_CONFLICT",
           "Restore maintenance cannot clear before durable completion or rollback.",
+          409,
+        );
+      }
+      if (operation.phase === "rolled_back" && operation.recovery?.mode === "offline") {
+        throw new DomainError(
+          "VERSION_CONFLICT",
+          "Forensic rollback bytes cannot be unfenced directly; hand maintenance to a new verified offline restore.",
           409,
         );
       }
@@ -369,7 +421,24 @@ export async function runRestoreControl(
         );
       }
       await requireNoRestoreJournal(config.dataDirectory);
-      if (operation?.phase === "prepared") {
+      if (operation === null) {
+        await verifyPreparedAbortDatabase(config);
+      } else if (operation.phase === "prepared") {
+        if (operation.recovery?.mode === "offline") {
+          const backupRoot = path.resolve(config.backupDirectory);
+          const safetyPath = path.resolve(backupRoot, operation.safety.filename);
+          if (path.dirname(safetyPath) !== backupRoot || path.basename(safetyPath) !== operation.safety.filename) {
+            throw new DomainError("VALIDATION_FAILED", "Forensic safety snapshot escaped the managed backup root.", 422);
+          }
+          await verifyPinnedForensicRecoveryBundle(safetyPath, {
+            expectedSource: {
+              sha256: operation.safety.bundleSha256,
+              sizeBytes: operation.safety.sizeBytes,
+            },
+            sourcePinDirectory: backupRoot,
+            expectedOperationId: operation.operationId,
+          });
+        }
         await verifyPreparedAbortDatabase(config);
         await operationStore.archivePreparedCancellation(operationId);
       }
