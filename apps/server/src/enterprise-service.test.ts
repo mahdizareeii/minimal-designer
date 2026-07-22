@@ -10,6 +10,7 @@ import { resolveAccess } from "./authorization.js";
 import { DesignerDatabase } from "./db/database.js";
 import { EnterpriseService } from "./enterprise-service.js";
 import { EventHub } from "./events.js";
+import { encodeRgbaPng } from "./render.js";
 import { DesignerService } from "./service.js";
 
 const temporaryDirectories: string[] = [];
@@ -24,7 +25,7 @@ function setup(filename = ":memory:") {
   const database = new DesignerDatabase(filename);
   const events = new EventHub();
   const designer = new DesignerService(database, events, 900);
-  const enterprise = new EnterpriseService(database, events);
+  const enterprise = new EnterpriseService(database, events, { designerService: designer });
   const created = designer.createDesign("local", {
     name: "Enterprise workflow",
     preset: "phone",
@@ -301,16 +302,33 @@ describe("immutable agent task workflow", () => {
         toStatus: "completed",
         data: { previewId: preview.id, unexpected: true },
       }))).toMatchObject({ code: "VALIDATION_FAILED" });
-      const completed = opened.enterprise.transitionAgentTask("usr_codex", task.id, {
+      const awaitingApproval = opened.enterprise.transitionAgentTask("usr_codex", task.id, {
         expectedStatus: "in_progress",
-        toStatus: "completed",
+        toStatus: "awaiting_approval",
         data: { previewId: preview.id },
       });
-      expect(completed.status).toBe("completed");
-      expect(completed.transitions.map((transition) => transition.toStatus)).toEqual([
+      expect(awaitingApproval.status).toBe("awaiting_approval");
+      const png = encodeRgbaPng(16, 16, Buffer.alloc(16 * 16 * 4, 255));
+      opened.designer.recordPreviewRenderMetadata("usr_codex", opened.created.document.id, preview.id, {
+        options: { nodeId: opened.frameId, maxSize: 256 },
+        png,
+        width: 16,
+        height: 16,
+        renderer: "software",
+        warnings: [],
+      });
+      const completed = opened.enterprise.approveAgentTaskDesignPreview("local", task.id, {
+        designId: opened.created.document.id,
+        previewId: preview.id,
+        expectedBaseVersion: 1,
+        idempotencyKey: "task-approval-0001",
+      });
+      expect(completed.task.status).toBe("completed");
+      expect(completed.task.transitions.map((transition) => transition.toStatus)).toEqual([
         "queued",
         "claimed",
         "in_progress",
+        "awaiting_approval",
         "completed",
       ]);
       expect(() => opened.database.sqlite.prepare(

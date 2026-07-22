@@ -33,6 +33,7 @@ async function application(label: string, mode: "local" | "server"): Promise<Des
     DATA_DIR: path.join(root, "data"),
     BACKUP_DIR: path.join(root, "backups"),
     DESIGNER_DATABASE_PATH: ":memory:",
+    FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     DESIGNER_LOG_LEVEL: "silent",
   } : {
     APP_MODE: "server",
@@ -47,6 +48,7 @@ async function application(label: string, mode: "local" | "server"): Promise<Des
     FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
     FORMASPEC_PROXY_SECRET: PROXY_SECRET,
     DESIGNER_CORS_ORIGINS: PUBLIC_ORIGIN,
+    FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     DESIGNER_LOG_LEVEL: "silent",
   }));
   applications.push(app);

@@ -66,7 +66,7 @@ function installAgent(application: DesignerApplication, designId: string) {
     now.toISOString(),
     expiresAt,
   );
-  return { actorId, token };
+  return { actorId, principalId, token };
 }
 
 function captureThrown(callback: () => unknown): unknown {
@@ -402,6 +402,48 @@ describe("task-scoped agent preview review", () => {
     }
   });
 
+  it("does not overblock an unrelated direct preview after a matching task expires without a transition", () => {
+    const created = application.service.createDesign("local", {
+      name: "Expired task direct preview",
+      preset: "phone",
+      idempotencyKey: "expired-task-direct-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId);
+    const taskId = "task_expired_without_transition_0001";
+    const local = resolveAccess(application.database.sqlite, "local");
+    const now = new Date().toISOString();
+    application.database.sqlite.prepare(
+      `INSERT INTO agent_tasks
+       (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
+        expected_output, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, '2000-01-01T00:00:00.000Z')`,
+    ).run(taskId, local.organizationId, designId, local.principalId, "Expired task without an expiry transition", JSON.stringify([frameId]), now);
+    const insertTransition = application.database.sqlite.prepare(
+      `INSERT INTO agent_task_transitions
+       (id, task_id, from_status, to_status, actor_id, message, data_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, '{}', ?)`,
+    );
+    insertTransition.run("transition_expired_queued_0001", taskId, null, "queued", local.principalId, "Task created", now);
+    insertTransition.run("transition_expired_claimed_0001", taskId, "queued", "claimed", agent.principalId, "Task claimed", now);
+    insertTransition.run("transition_expired_progress_0001", taskId, "claimed", "in_progress", agent.principalId, "Task started", now);
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Independent direct preview" } }],
+    });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+    const committed = application.service.commitPreview(agent.actorId, designId, {
+      previewId: preview.id,
+      expectedBaseVersion: 1,
+      idempotencyKey: "expired-task-direct-commit-0001",
+      message: "Commit unrelated direct preview",
+      requireRenderEvidence: true,
+    });
+    expect(committed.revision.version).toBe(2);
+  });
+
   it("atomically expires a discarded task preview so its creating agent cannot commit it later", () => {
     const created = application.service.createDesign("local", {
       name: "Discard agent review",
@@ -449,7 +491,7 @@ describe("task-scoped agent preview review", () => {
       previewId: preview.id,
       expectedBaseVersion: 1,
       idempotencyKey: "task-preview-discard-late-commit-0001",
-    }))).toMatchObject({ code: "PREVIEW_EXPIRED", statusCode: 410 });
+    }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
     expect(application.service.getDesign("local", designId).revision.version).toBe(1);
   });
 });

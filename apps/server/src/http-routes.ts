@@ -354,7 +354,12 @@ export function registerHttpRoutes(
         rawRequestField(request.params, "previewId"),
       );
     } else {
-      enterprise.authorizeAgentTaskPreviewApproval(request.actorId);
+      enterprise.authorizeAgentTaskPreviewApproval(
+        request.actorId,
+        rawTaskId,
+        rawRequestField(request.params, "id"),
+        rawRequestField(request.params, "previewId"),
+      );
     }
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const input = z.object({
@@ -416,7 +421,12 @@ export function registerHttpRoutes(
         rawRequestField(request.params, "previewId"),
       );
     } else {
-      enterprise.authorizeAgentTaskPreviewApproval(request.actorId);
+      enterprise.authorizeAgentTaskPreviewApproval(
+        request.actorId,
+        rawTaskId,
+        rawRequestField(request.params, "id"),
+        rawRequestField(request.params, "previewId"),
+      );
     }
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const input = z.object({

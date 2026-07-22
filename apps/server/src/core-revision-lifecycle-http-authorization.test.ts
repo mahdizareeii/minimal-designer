@@ -106,6 +106,7 @@ async function serverApplication(label: string): Promise<DesignerApplication> {
     FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
     FORMASPEC_PROXY_SECRET: PROXY_SECRET,
     DESIGNER_CORS_ORIGINS: PUBLIC_ORIGIN,
+    FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     DESIGNER_LOG_LEVEL: "silent",
   }));
   applications.push(application);

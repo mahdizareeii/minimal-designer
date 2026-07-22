@@ -223,6 +223,36 @@ describe("agent before/after review", () => {
     expect(markup).toContain("Copy Codex instruction");
   });
 
+  it("does not offer Codex launch or instruction copy for terminal tasks", () => {
+    for (const status of ["failed", "cancelled", "expired"] as const) {
+      const markup = renderToStaticMarkup(createElement(AgentTaskWorkflowCard, {
+        connectionState: "active",
+        connectionMessage: "Connected",
+        task: task({ status }),
+        preview: null,
+        busy: false,
+        actionError: null,
+        canCommit: false,
+        canDiscard: false,
+        previewRenderStatus: "loading",
+        previewRenderRetryKey: 0,
+        onCopyInstruction: () => undefined,
+        onOpenCodex: () => undefined,
+        onConnect: () => undefined,
+        onRetry: () => undefined,
+        onOpenReview: () => undefined,
+        onCommit: () => undefined,
+        onDiscard: () => undefined,
+        onPreviewRenderStatusChange: () => undefined,
+        onRetryPreviewRender: () => undefined,
+        onOpenPlanning: () => undefined,
+      }));
+      expect(markup).not.toContain("Open task in Codex");
+      expect(markup).not.toContain("Copy Codex instruction");
+      expect(markup).toContain("Refresh status");
+    }
+  });
+
   it("fails closed when the persisted preview PNG is unavailable while preserving safe discard", () => {
     const document = createStarterDocument({ preset: "phone", name: "Unavailable render" });
     const preview = {
@@ -471,6 +501,7 @@ describe("agent before/after review", () => {
         version: document.revision + 1,
         revisionId: "revision_committed",
         document: { ...document, revision: document.revision + 1 },
+        task: task({ status: "completed" }),
       }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -517,6 +548,7 @@ describe("agent before/after review", () => {
       kind: "ordinary",
     });
     expect(committed.version).toBe(document.revision + 1);
+    expect(committed.task?.status).toBe("completed");
     const commitInit = fetch.mock.calls[1]?.[1];
     expect(JSON.parse(String(commitInit?.body))).toMatchObject({
       expectedBaseVersion: document.revision,

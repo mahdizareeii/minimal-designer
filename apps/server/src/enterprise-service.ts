@@ -728,8 +728,24 @@ export class EnterpriseService {
     this.requireTaskCreateDesign(actorId, designId);
   }
 
-  authorizeAgentTaskPreviewApproval(actorId: string): void {
-    this.assertTaskApproval(resolveAccess(this.database.sqlite, actorId));
+  authorizeAgentTaskPreviewApproval(
+    actorId: string,
+    taskId?: string,
+    designId?: string,
+    previewId?: string,
+  ): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertTaskApproval(access);
+    if (taskId === undefined || designId === undefined || previewId === undefined) return;
+    const task = this.requireAgentTaskRow(access, taskId);
+    if (task.design_id !== designId || task.expected_output !== "design_preview") {
+      throw new DomainError("NOT_FOUND", "Agent task not found.", 404);
+    }
+    const current = this.currentTaskTransition(task.id);
+    const data = jsonObject(current.data_json, "task transition");
+    if ((current.to_status !== "awaiting_approval" && current.to_status !== "completed") || data.previewId !== previewId) {
+      throw new DomainError("NOT_FOUND", "Agent task not found.", 404);
+    }
   }
 
   createAgentTask(actorId: string, input: {
