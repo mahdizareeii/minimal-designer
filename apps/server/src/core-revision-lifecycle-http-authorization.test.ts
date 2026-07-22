@@ -9,6 +9,7 @@ import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
+import { encodeRgbaPng } from "./render.js";
 
 const PROXY_SECRET = "core-revision-lifecycle-proxy-secret-0123456789abcdef";
 const PUBLIC_ORIGIN = "https://design.example.test";
@@ -106,9 +107,16 @@ async function serverApplication(label: string): Promise<DesignerApplication> {
     FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
     FORMASPEC_PROXY_SECRET: PROXY_SECRET,
     DESIGNER_CORS_ORIGINS: PUBLIC_ORIGIN,
-    FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     DESIGNER_LOG_LEVEL: "silent",
   }));
+  const renderPng = encodeRgbaPng(24, 16, Buffer.alloc(24 * 16 * 4, 255));
+  vi.spyOn(application.renderer, "render").mockResolvedValue({
+    png: renderPng,
+    width: 24,
+    height: 16,
+    renderer: "software",
+    warnings: ["Deterministic revision lifecycle test renderer."],
+  });
   applications.push(application);
   await application.app.ready();
   return application;
@@ -518,7 +526,27 @@ describe("core revision lifecycle HTTP authorization", () => {
       },
     });
     expect(archivePreview.statusCode, archivePreview.body).toBe(201);
-    const archivePreviewId = archivePreview.json<{ previewId: string }>().previewId;
+    const archivePreviewBody = archivePreview.json<{
+      previewId: string;
+      renderMetadata: { sha256: string; width: number; height: number };
+    }>();
+    const archivePreviewId = archivePreviewBody.previewId;
+    expect(archivePreviewBody.renderMetadata).toMatchObject({
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      width: 24,
+      height: 16,
+    });
+    const exactArchiveRender = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${fixture.allowed.id}/previews/${archivePreviewId}/render.png`,
+      headers: serverHeaders(EDITOR_IDENTITY),
+    });
+    expect(exactArchiveRender.statusCode, exactArchiveRender.body).toBe(200);
+    expect(exactArchiveRender.headers["content-type"]).toContain("image/png");
+    expect(exactArchiveRender.headers["x-formaspec-preview-render-mode"]).toBe("exact");
+    expect(exactArchiveRender.headers["x-formaspec-preview-render-sha256"]).toBe(archivePreviewBody.renderMetadata.sha256);
+    expect(createHash("sha256").update(exactArchiveRender.rawPayload).digest("hex"))
+      .toBe(archivePreviewBody.renderMetadata.sha256);
     const archived = await application.app.inject({
       method: "POST",
       url: `/api/designs/${fixture.allowed.id}/archive-previews/${archivePreviewId}/commit`,

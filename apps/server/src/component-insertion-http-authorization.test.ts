@@ -48,9 +48,16 @@ async function application(label: string, mode: "local" | "server"): Promise<Des
     FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
     FORMASPEC_PROXY_SECRET: PROXY_SECRET,
     DESIGNER_CORS_ORIGINS: PUBLIC_ORIGIN,
-    FORMASPEC_ALLOW_SOFTWARE_RENDERER: "true",
     DESIGNER_LOG_LEVEL: "silent",
   }));
+  const renderPng = encodeRgbaPng(24, 16, Buffer.alloc(24 * 16 * 4, 255));
+  vi.spyOn(app.renderer, "render").mockResolvedValue({
+    png: renderPng,
+    width: 24,
+    height: 16,
+    renderer: "software",
+    warnings: ["Deterministic HTTP preview test renderer."],
+  });
   applications.push(app);
   await app.app.ready();
   return app;
@@ -180,11 +187,27 @@ describe("component insertion preview HTTP authorization", () => {
       resultSnapshotHash: string;
       canCommit: boolean;
       status: string;
+      renderMetadata: { sha256: string; width: number; height: number };
       component: { instanceId: string; sourceHash: string };
     }>();
     expect(body).toMatchObject({ rootBaseVersion: 2, canCommit: true, status: "ready" });
     expect(body.component.sourceHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(body.renderMetadata).toMatchObject({
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      width: 24,
+      height: 16,
+    });
     expect(fixture.service.history("local", source.designId)).toEqual(historyBefore);
+
+    const exactRender = await fixture.app.inject({
+      method: "GET",
+      url: `/api/designs/${source.designId}/previews/${body.previewId}/render.png`,
+    });
+    expect(exactRender.statusCode, exactRender.body).toBe(200);
+    expect(exactRender.headers["content-type"]).toContain("image/png");
+    expect(exactRender.headers["x-formaspec-preview-render-mode"]).toBe("exact");
+    expect(exactRender.headers["x-formaspec-preview-render-sha256"]).toBe(body.renderMetadata.sha256);
+    expect(createHash("sha256").update(exactRender.rawPayload).digest("hex")).toBe(body.renderMetadata.sha256);
 
     const commit = await fixture.app.inject({
       method: "POST",

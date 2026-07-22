@@ -11,6 +11,7 @@ import {
 import {
   commitComponentInsertionPreview,
   createComponentInsertionPreview,
+  exactPreviewRenderUrl,
   readComponentLibrary,
 } from "../lib/api";
 import { useDesignerStore } from "../store/designer-store";
@@ -136,6 +137,9 @@ describe("manual pinned component insertion", () => {
       component: { instanceId, componentDefinitionId: definition.id },
     });
     expect(committed).toMatchObject({ version: 3, revisionId: "revision_componentinsertcommit01" });
+    expect(exactPreviewRenderUrl(document.id, previewId)).toBe(
+      `/api/designs/${document.id}/previews/${previewId}/render.png`,
+    );
     expect(fetch.mock.calls[0]?.[0]).toBe(`/api/designs/${document.id}/component-library`);
     expect(fetch.mock.calls[1]?.[0]).toBe(`/api/designs/${document.id}/component-insertion-previews`);
     expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({
