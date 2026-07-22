@@ -383,8 +383,9 @@ test("pinned components preview exactly and commit through the ordinary revision
 test("website design commands capture the Codex launch URL and simulate the MCP preview workflow with approval actions", async ({ page, request }) => {
   const fixture = await createEditorFixture(request);
   // This browser suite captures the generated protocol URL and drives the
-  // authenticated MCP contract directly. OS protocol handling, managed plugin
-  // loading, and a real Codex client are covered by installer/client suites.
+  // authenticated MCP contract directly. Coverage of OS protocol handling,
+  // managed plugin loading, and a real Codex client is intentionally not
+  // provided by this suite.
   await page.addInitScript(() => {
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click() {

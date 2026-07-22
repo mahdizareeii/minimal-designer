@@ -215,12 +215,12 @@ describe("task-scoped agent preview review", () => {
     application.database.sqlite.prepare(
       "UPDATE memberships SET role = 'viewer' WHERE organization_id = ? AND principal_id = ?",
     ).run(viewer.organizationId, viewer.principalId);
-    expect(captureThrown(() => application.service.commitPreview("preview-viewer", designId, {
+    expect(captureThrown(() => application.enterprise.approveAgentTaskDesignPreview("preview-viewer", task.id, {
+      designId,
       previewId: preview.id,
       expectedBaseVersion: 1,
       idempotencyKey: "task-preview-viewer-commit-0001",
       message: "Viewer must not approve",
-      taskId: task.id,
     }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
 
     const editor = resolveAccess(application.database.sqlite, "preview-editor");
@@ -286,6 +286,120 @@ describe("task-scoped agent preview review", () => {
       status: "committed",
       committedRevisionId: expect.stringMatching(/^revision_/),
     });
+  });
+
+  it("rolls back atomic approval without persisting completion or idempotency when exact render evidence is missing", async () => {
+    const created = application.service.createDesign("local", {
+      name: "Atomic approval rollback",
+      preset: "phone",
+      idempotencyKey: "task-preview-rollback-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId);
+    const task = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Return an exact preview that needs approval",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "task-preview-rollback-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(agent.actorId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Needs render evidence" } }],
+    });
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.id },
+    });
+
+    const payload = {
+      expectedBaseVersion: 1,
+      idempotencyKey: "task-preview-rollback-approval-0001",
+      message: "Approve only with exact evidence",
+      taskId: task.id,
+    };
+    const rejected = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
+      payload,
+    });
+    expect(rejected.statusCode, rejected.body).toBe(409);
+    expect(rejected.json()).toMatchObject({ error: { code: "PREVIEW_ENGINE_MISMATCH" } });
+    expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+    expect(application.database.sqlite.prepare("SELECT status FROM previews WHERE id = ?").get(preview.id)).toEqual({ status: "ready" });
+    expect(application.enterprise.readAgentTask("local", task.id).status).toBe("awaiting_approval");
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM agent_task_transitions WHERE task_id = ? AND to_status = 'completed'",
+    ).get(task.id)).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM idempotency WHERE scope = ? AND key = ?",
+    ).get(`task:${task.id}:approve-design-preview`, payload.idempotencyKey)).toEqual({ count: 0 });
+
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+    const retried = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
+      payload,
+    });
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(retried.json()).toMatchObject({ version: 2, task: { id: task.id, status: "completed" } });
+  });
+
+  it("requires compatible persisted render evidence for ordinary and archive REST commits", async () => {
+    const cases = [
+      { kind: "ordinary" as const, incompatible: false },
+      { kind: "archive" as const, incompatible: false },
+      { kind: "ordinary" as const, incompatible: true },
+      { kind: "archive" as const, incompatible: true },
+    ];
+    for (const [index, testCase] of cases.entries()) {
+      const created = application.service.createDesign("local", {
+        name: `REST evidence ${index}`,
+        preset: "phone",
+        idempotencyKey: `rest-evidence-create-${index}-0001`,
+      });
+      const designId = created.document.id;
+      const pageId = created.document.pages[0]!.id;
+      const frameId = created.document.pages[0]!.children[0]!;
+      const operations = testCase.kind === "archive"
+        ? [{ type: "archive_nodes" as const, node_ids: [frameId] }]
+        : [{ type: "update_node" as const, node_id: frameId, patch: { name: `Evidence ${index}` } }];
+      const preview = application.service.createPreview("local", designId, {
+        baseVersion: 1,
+        operations,
+        kind: testCase.kind,
+      });
+      if (testCase.incompatible) {
+        persistExactRender(application, "local", designId, preview.id, pageId, frameId);
+        application.database.sqlite.prepare(
+          "UPDATE previews SET renderer_version = 'incompatible-test-renderer' WHERE id = ?",
+        ).run(preview.id);
+      }
+      const previewPath = testCase.kind === "archive" ? "archive-previews" : "previews";
+      const response = await application.app.inject({
+        method: "POST",
+        url: `/api/designs/${designId}/${previewPath}/${preview.id}/commit`,
+        payload: {
+          expectedBaseVersion: 1,
+          idempotencyKey: `rest-evidence-commit-${index}-0001`,
+          message: "Commit only exact evidence",
+        },
+      });
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: "PREVIEW_ENGINE_MISMATCH" } });
+      expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+      expect(application.database.sqlite.prepare("SELECT status FROM previews WHERE id = ?").get(preview.id)).toEqual({ status: "ready" });
+    }
   });
 
   it("atomically expires a discarded task preview so its creating agent cannot commit it later", () => {

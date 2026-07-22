@@ -24,7 +24,7 @@ import {
 import {
   commitComponentInsertionPreview,
   createComponentInsertionPreview,
-  previewRenderUrl,
+  exactPreviewRenderUrl,
   readComponentLibrary,
   renderUrl,
   type ComponentInsertionPreviewRecord,
@@ -244,7 +244,7 @@ export function ComponentLibraryPanel() {
       )}
 
       {preview && <div className={`component-insertion-preview is-${preview.status}`}>
-        <div className="component-insertion-preview-image"><img src={previewRenderUrl(designId, preview.previewId, 720)} alt={`Exact preview of ${component?.definition.name ?? "component"} insertion`} /></div>
+        <div className="component-insertion-preview-image"><img src={exactPreviewRenderUrl(designId, preview.previewId)} alt={`Exact preview of ${component?.definition.name ?? "component"} insertion`} /></div>
         <div className="component-insertion-preview-summary">
           <span><strong>{preview.canCommit ? "Ready to commit" : "Preview blocked"}</strong><small>v{preview.rootBaseVersion} → v{preview.proposedVersion} · {preview.changedNodeIds.length} changed</small></span>
           <code title={preview.resultSnapshotHash}>{preview.resultSnapshotHash.slice(0, 12)}…</code>

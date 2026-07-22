@@ -356,7 +356,14 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   registerMaintenanceStatusRoute(app, maintenance);
   registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance, operations });
   registerEnterpriseHttpRoutes(app, enterprise);
-  registerEnterpriseDomainHttpRoutes(app, { designSystems, componentInsertions, handoffs, redesign });
+  registerEnterpriseDomainHttpRoutes(app, {
+    designSystems,
+    componentInsertions,
+    designer: service,
+    renderer,
+    handoffs,
+    redesign,
+  });
   registerOperationsHttpRoutes(app, operations);
   registerOrganizationPolicyHttpRoutes(app, policies);
   registerMcpEndpoint(app, {

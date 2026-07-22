@@ -240,8 +240,9 @@ test("product manager to verified backup restore captures the Codex URL and simu
   };
 
   // This release scenario captures protocol links and simulates the agent via
-  // authenticated MCP calls. It does not claim OS protocol-handler execution,
-  // managed plugin loading, or execution inside a real Codex client.
+  // authenticated MCP calls. Coverage of OS protocol-handler execution,
+  // managed plugin loading, and execution inside a real Codex client is
+  // intentionally not provided by this suite.
   await page.addInitScript(() => {
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click() {

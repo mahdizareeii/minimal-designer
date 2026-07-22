@@ -32,7 +32,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 
 import { navigate } from "../App";
 import { DEVICE_PRESETS, type DevicePreset } from "../domain";
-import { exportUrl, portableExportUrl, previewRenderUrl, renderUrl, updateContext } from "../lib/api";
+import { exactPreviewRenderUrl, exportUrl, portableExportUrl, renderUrl, updateContext } from "../lib/api";
 import { createConflictPatchArtifact } from "../lib/conflict-recovery";
 import { CENTER_WORKSPACE_TABS, type CenterWorkspaceTab } from "../lib/editor-information-architecture";
 import { useDesignerStore } from "../store/designer-store";
@@ -541,7 +541,7 @@ export function Editor({ designId }: { designId: string }) {
               </figure>
               <figure>
                 <figcaption><strong>After</strong><span>Exact archive preview</span></figcaption>
-                <div><img src={previewRenderUrl(document.id, archiveReview.previewId, 1600)} alt="Design after archival" /></div>
+                <div><img src={exactPreviewRenderUrl(document.id, archiveReview.previewId)} alt="Design after archival" /></div>
               </figure>
             </div>
             <footer>

@@ -505,6 +505,13 @@ export function previewRenderUrl(
   return `${API_ROOT}/designs/${encodeURIComponent(id)}/previews/${encodeURIComponent(previewId)}/render.png?${params}`;
 }
 
+export function exactPreviewRenderUrl(id: string, previewId: string, retryKey?: number): string {
+  const params = new URLSearchParams();
+  if (retryKey !== undefined) params.set("_retry", String(Math.max(0, Math.trunc(retryKey))));
+  const query = params.toString();
+  return `${API_ROOT}/designs/${encodeURIComponent(id)}/previews/${encodeURIComponent(previewId)}/render.png${query ? `?${query}` : ""}`;
+}
+
 export function exportUrl(id: string, version?: number): string {
   const query = version === undefined ? "" : `?version=${encodeURIComponent(version)}`;
   return `${API_ROOT}/designs/${encodeURIComponent(id)}/export${query}`;

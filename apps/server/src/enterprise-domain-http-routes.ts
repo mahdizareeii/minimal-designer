@@ -4,6 +4,8 @@ import { z } from "zod";
 
 import type { DesignSystemService } from "./design-system-service.js";
 import type { ComponentInsertionService } from "./component-insertion-service.js";
+import type { PngRenderer, RenderOptions } from "./render.js";
+import type { DesignerService } from "./service.js";
 import {
   RedesignAssessmentCreateRequestSchema,
   RedesignStageRevisionRequestSchema,
@@ -71,6 +73,7 @@ function insertionPreviewResponse(result: ReturnType<ComponentInsertionService["
     kind: preview.kind,
     status: preview.status,
     committedRevisionId: preview.committedRevisionId,
+    renderMetadata: preview.renderMetadata,
     changedNodeIds: preview.changedNodeIds,
     versions: preview.versions,
     diagnostics: preview.diagnostics,
@@ -89,6 +92,8 @@ function rawParameter(params: unknown, key: string): unknown {
 export interface EnterpriseDomainHttpDependencies {
   designSystems: DesignSystemService;
   componentInsertions: ComponentInsertionService;
+  designer: DesignerService;
+  renderer: PngRenderer;
   handoffs: WorkspaceHandoffService;
   redesign: RedesignStudioService;
 }
@@ -97,7 +102,7 @@ export function registerEnterpriseDomainHttpRoutes(
   app: FastifyInstance,
   dependencies: EnterpriseDomainHttpDependencies,
 ): void {
-  const { designSystems, componentInsertions, handoffs, redesign } = dependencies;
+  const { designSystems, componentInsertions, designer, renderer, handoffs, redesign } = dependencies;
 
   app.get("/api/design-systems", async (request) => {
     designSystems.authorizeCatalogRead(request.actorId);
@@ -271,7 +276,28 @@ export function registerEnterpriseDomainHttpRoutes(
     componentInsertions.authorizePreview(request.actorId, String(rawParameter(request.params, "id") ?? ""));
     const { id } = designParams.parse(request.params);
     const body = componentInsertionPreviewBody.parse(request.body);
-    return reply.code(201).send(insertionPreviewResponse(componentInsertions.preview(request.actorId, id, body)));
+    const result = componentInsertions.preview(request.actorId, id, body);
+    const renderOptions: RenderOptions = { nodeId: result.component.instanceId, maxSize: 720 };
+    const rendered = await renderer.render(result.preview.canonicalDocument, renderOptions, (assetId) => {
+      try {
+        const asset = designer.getAsset(request.actorId, assetId);
+        return `data:${asset.mimeType};base64,${asset.data.toString("base64")}`;
+      } catch {
+        return null;
+      }
+    });
+    designer.recordPreviewRenderMetadata(request.actorId, id, result.preview.id, {
+      options: renderOptions,
+      png: rendered.png,
+      width: rendered.width,
+      height: rendered.height,
+      renderer: rendered.renderer,
+      warnings: rendered.warnings,
+    });
+    return reply.code(201).send(insertionPreviewResponse({
+      ...result,
+      preview: designer.getPreview(request.actorId, id, result.preview.id),
+    }));
   });
 
   app.get("/api/design-system-upgrade-previews/:previewId", async (request) => {
