@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { resolveAccess } from "./authorization.js";
 import { loadConfig } from "./config.js";
+import { encodeRgbaPng } from "./render.js";
 
 function testConfig() {
   return loadConfig({
@@ -77,6 +78,26 @@ function captureThrown(callback: () => unknown): unknown {
   throw new Error("Expected callback to throw.");
 }
 
+function persistExactRender(
+  application: DesignerApplication,
+  actorId: string,
+  designId: string,
+  previewId: string,
+  pageId: string,
+  nodeId: string,
+): void {
+  const width = 24;
+  const height = 16;
+  application.service.recordPreviewRenderMetadata(actorId, designId, previewId, {
+    options: { pageId, nodeId, maxSize: 512 },
+    png: encodeRgbaPng(width, height, Buffer.alloc(width * height * 4, 255)),
+    width,
+    height,
+    renderer: "software",
+    warnings: ["Deterministic task approval test render."],
+  });
+}
+
 describe("task-scoped agent preview review", () => {
   let application: DesignerApplication;
 
@@ -96,6 +117,7 @@ describe("task-scoped agent preview review", () => {
       idempotencyKey: "task-preview-create-0001",
     });
     const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
     const frameId = created.document.pages[0]!.children[0]!;
     const agent = installAgent(application, designId);
     const task = application.enterprise.createAgentTask("local", {
@@ -130,6 +152,15 @@ describe("task-scoped agent preview review", () => {
       message: "Ready for product-manager review",
       data: { previewId: preview.id },
     });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+
+    expect(captureThrown(() => application.service.commitPreview(agent.actorId, designId, {
+      previewId: preview.id,
+      expectedBaseVersion: 1,
+      idempotencyKey: "task-preview-agent-self-commit-0001",
+      message: "Agent must not approve its own task preview",
+      requireRenderEvidence: true,
+    }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
 
     const listed = await application.app.inject({
       method: "GET",
@@ -192,7 +223,26 @@ describe("task-scoped agent preview review", () => {
       taskId: task.id,
     }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
 
-    const committed = await application.app.inject({
+    const editor = resolveAccess(application.database.sqlite, "preview-editor");
+    application.database.sqlite.prepare(
+      "UPDATE memberships SET role = 'design_editor' WHERE organization_id = ? AND principal_id = ?",
+    ).run(editor.organizationId, editor.principalId);
+    expect(captureThrown(() => application.enterprise.approveAgentTaskDesignPreview("preview-editor", task.id, {
+      designId,
+      previewId: preview.id,
+      expectedBaseVersion: 1,
+      idempotencyKey: "task-preview-editor-approval-0001",
+      message: "Design editor must not approve",
+    }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+
+    expect(captureThrown(() => application.enterprise.transitionAgentTask("local", task.id, {
+      expectedStatus: "awaiting_approval",
+      toStatus: "completed",
+      message: "Generic completion must not bypass atomic approval",
+      data: { previewId: preview.id },
+    }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
+
+    const approvalRequest = {
       method: "POST",
       url: `/api/designs/${designId}/previews/${preview.id}/commit`,
       payload: {
@@ -201,20 +251,31 @@ describe("task-scoped agent preview review", () => {
         message: "Approve exact agent preview",
         taskId: task.id,
       },
-    });
+    } as const;
+    const committed = await application.app.inject(approvalRequest);
     expect(committed.statusCode).toBe(200);
-    expect(committed.json<{ version: number; document: { nodes: Record<string, { name: string }> } }>()).toMatchObject({
+    const committedBody = committed.json<{
+      version: number;
+      revisionId: string;
+      document: { nodes: Record<string, { name: string }> };
+      task: { id: string; status: string };
+    }>();
+    expect(committedBody).toMatchObject({
       version: 2,
       document: { nodes: { [frameId]: { name: "Agent-refined checkout" } } },
+      task: { id: task.id, status: "completed" },
     });
 
-    const completed = application.enterprise.transitionAgentTask("local", task.id, {
-      expectedStatus: "awaiting_approval",
-      toStatus: "completed",
-      message: "Approved",
-      data: { previewId: preview.id },
+    const replay = await application.app.inject(approvalRequest);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json()).toMatchObject({
+      version: 2,
+      revisionId: committedBody.revisionId,
+      task: { id: task.id, status: "completed" },
     });
-    expect(completed.status).toBe("completed");
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM revisions WHERE design_id = ? AND version = 2",
+    ).get(designId)).toEqual({ count: 1 });
 
     const committedPreview = await application.app.inject({
       method: "GET",

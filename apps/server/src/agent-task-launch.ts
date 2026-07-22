@@ -4,7 +4,7 @@ export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspe
 
 export function agentTaskInstruction(taskId: string): string {
   if (!AGENT_TASK_ID.test(taskId)) throw new Error("Agent task ID is not safe for a Codex launch link.");
-  return `${FORMASPEC_CODEX_MENTION}\n\nUse FormaSpec. Claim task ${taskId} with task_claim, call task_transition to move it to in_progress, read its project context and selection, create and inspect a rendered design preview, and run linting. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>"}. Do not commit it; the website must show the exact PNG and human Commit button.`;
+  return `${FORMASPEC_CODEX_MENTION}\n\nUse FormaSpec. Claim task ${taskId} with task_claim, call task_transition to move it to in_progress, and read its project context and selection. Call design_preview_changes, inspect its returned PNG in Codex, and call design_lint for that preview. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>"}. Do not commit it; the website must show the exact PNG and human Commit button.`;
 }
 
 export function agentTaskCodexLaunchUrl(taskId: string): string {

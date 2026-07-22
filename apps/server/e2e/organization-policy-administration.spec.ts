@@ -116,5 +116,5 @@ test("administration remains readable and uses one page scroll surface on a smal
   expect(tooSmall).toEqual([]);
 
   await shell.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await expect(page.getByRole("heading", { name: "Import & project recovery" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Import one editable project" })).toBeVisible();
 });

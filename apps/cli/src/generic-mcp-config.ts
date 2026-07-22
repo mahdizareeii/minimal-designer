@@ -99,7 +99,7 @@ url = ${JSON.stringify(url)}`;
       "Copy the appropriate snippet into the client's documented MCP settings manually. FormaSpec does not edit unsupported client files.",
       "If the client uses different field names, map only the server ID, Streamable HTTP transport, and URL; do not invent authentication fields.",
       `Run the client's MCP connection test and confirm server '${FORMASPEC_MCP_SERVER_ID}' is available as ${FORMASPEC_MCP_DISPLAY_NAME}.`,
-      "Confirm both natural-language identities are recognized: 'Use FormaSpec' and 'Use Minimal UI'.",
+      "Confirm the primary natural-language identity is recognized: 'Use FormaSpec'. The 'Use Minimal UI' alias is compatibility-only for existing prompts.",
       "List MCP resources and confirm formaspec://schema/v1 and formaspec://schema/v2 are readable.",
       "Keep write-tool approval enabled. Do not add a bearer token or Authorization header; the loopback bridge holds the scoped upstream grant.",
     ],
@@ -189,7 +189,8 @@ export function runGenericMcpConfigCli(
     io.stdout(`FormaSpec (${configuration.displayName}) generic MCP configuration`);
     io.stdout("This output is advisory and print-only; no client configuration file was read or changed.");
     io.stdout(`Server ID: ${configuration.serverId}`);
-    io.stdout(`Agent identities: ${[configuration.displayName, ...configuration.displayAliases].join(", ")}`);
+    io.stdout(`Primary agent identity: ${configuration.displayName}`);
+    io.stdout(`Compatibility aliases: ${configuration.displayAliases.join(", ")}`);
     io.stdout(`Transport: Streamable HTTP (${configuration.transport})`);
     io.stdout(`Endpoint: ${configuration.url}`);
     io.stdout("");

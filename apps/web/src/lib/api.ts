@@ -184,6 +184,7 @@ export interface CommitResult {
   version: number;
   revisionId?: string;
   document?: DesignDocument;
+  task?: AgentTaskRecord;
 }
 
 export async function commitRevision(
@@ -1459,6 +1460,7 @@ export async function commitDesignPreview(input: {
     version: Number(result.version ?? result.revision ?? input.expectedBaseVersion + 1),
     ...(result.revisionId || result.revision_id ? { revisionId: String(result.revisionId ?? result.revision_id) } : {}),
     ...(result.document ? { document: normalizeDocument(result.document) } : {}),
+    ...(result.task && typeof result.task === "object" ? { task: asAgentTaskRecord(result.task) } : {}),
   };
 }
 

@@ -382,13 +382,17 @@ to a client-provided value.
 ## MCP and agent deployment behavior
 
 The automatic Codex setup registers MCP server ID `formaspec` at the
-credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs the managed
-version-0.2.0 FormaSpec and Minimal UI skills/plugins, and provides:
+credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs the primary
+managed version-0.2.0 FormaSpec skills/plugins plus the Minimal UI legacy
+compatibility assets, and provides:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec)
-[@Minimal UI](plugin://minimal-ui@formaspec)
 ```
+
+> **Legacy prompt compatibility:** existing integrations may continue to use
+> `[@Minimal UI](plugin://minimal-ui@formaspec)`. New integrations should use
+> FormaSpec.
 
 The bridge creates a scoped, expiring upstream grant and stores it in macOS
 Keychain, Linux Secret Service, or a Windows current-user DPAPI ciphertext

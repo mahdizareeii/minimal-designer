@@ -334,8 +334,9 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         : `Unmanaged Minimal UI skill preserved at ${result.minimalUiSkillPath}; the managed plugin alias remains available.`);
       io.stdout(`Managed FormaSpec plugin installed at ${result.pluginPath}.`);
       io.stdout(`Managed Minimal UI plugin alias installed at ${result.minimalUiPluginPath}.`);
-      io.stdout(`Codex mentions: ${FORMASPEC_CODEX_MENTION} and ${MINIMAL_UI_CODEX_MENTION}`);
-      io.stdout("Use FormaSpec or Use Minimal UI in a new Codex task.");
+      io.stdout(`Primary Codex mention: ${FORMASPEC_CODEX_MENTION}`);
+      io.stdout(`Compatibility alias for existing prompts: ${MINIMAL_UI_CODEX_MENTION}`);
+      io.stdout("Use FormaSpec in a new Codex task.");
     };
     const offerCodexConnection = async (alreadyAuthorized = false): Promise<void> => {
       if (findExecutable("codex", environment) === null) {
@@ -343,7 +344,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         return;
       }
       const authorized = alreadyAuthorized || assumeYes || await confirm(
-        "Allow FormaSpec to configure Codex, install the managed FormaSpec and Minimal UI plugins, and verify the loopback MCP connection?",
+        "Allow FormaSpec to configure Codex, install the managed FormaSpec plugin plus the Minimal UI compatibility alias, and verify the loopback MCP connection?",
       );
       if (!authorized) {
         io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");

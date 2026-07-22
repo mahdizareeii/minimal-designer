@@ -8,10 +8,12 @@ that the subsystem has been implemented.
 
 ## Current system
 
-The product and primary agent-facing identity are **FormaSpec**. **Minimal UI**
-is the compatibility agent identity; both version-0.2.0 plugins share the
-token-free `formaspec` MCP server. `designer` remains only as a compatibility
-launcher for existing local state.
+The product and primary agent-facing identity are **FormaSpec**. `designer`
+remains only as a compatibility launcher for existing local state.
+
+> **Backward compatibility:** **Minimal UI** is a legacy agent alias for
+> existing prompts and integrations. It shares the token-free `formaspec` MCP
+> server with the primary version-0.2.0 FormaSpec plugin.
 The repository is an incremental pnpm TypeScript workspace:
 
 | Area | Current implementation |
@@ -21,7 +23,7 @@ The repository is an incremental pnpm TypeScript workspace:
 | HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, password-session and trusted-header browser authentication, organization/project authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, backups, and render orchestration. |
 | Persistence | Better SQLite3 with a numbered version-16 migration ledger, WAL, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, bounded write-once exact preview-render metadata, and a canonical consume-once bootstrap-credential trigger. |
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
-| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus the managed FormaSpec and Minimal UI plugins/skills. |
+| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus the primary managed FormaSpec plugins/skills and the Minimal UI legacy compatibility assets. |
 | Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
 | Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. Current local schema-16 image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1` passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery; its compatibility evidence paths remain under `artifacts/ci/docker-schema11/`. It is local uncommitted-source evidence, not hosted/signed/scanned release provenance. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; native macOS/Linux/Windows lifecycle proof is missing. |
 
@@ -78,11 +80,14 @@ matrices remain open.
    persisted ephemeral preview with engine versions, hashes, diagnostics,
    permanent-ID mapping, changed IDs, expiry, and status.
 4. The caller renders, inspects, and lints the exact preview before approval.
-5. Commit uses one `BEGIN IMMEDIATE` transaction to authorize, enforce scoped
+5. A website-created task transitions to `awaiting_approval` with the exact
+   preview ID and stops; a human commits or discards it in FormaSpec. A direct
+   non-task MCP client may commit only after its normal write approval.
+6. Commit uses one `BEGIN IMMEDIATE` transaction to authorize, enforce scoped
    idempotency, validate the preview, reference its exact snapshot, insert the
    immutable revision/hash chain, compare-and-swap the head, and write audit
    plus event-outbox records.
-6. Only committed outbox records are published to open editors. Reconnects use
+7. Only committed outbox records are published to open editors. Reconnects use
    persisted monotonic IDs and `Last-Event-ID`; gaps require an authoritative
    refetch and are never auto-merged.
 
@@ -92,9 +97,11 @@ stores its canonical JSON and SHA-256 with the component version. Insertion
 resolves only the project's exact pinned release, verifies source/release
 identity, hydrates transitive token aliases, materializes deterministic
 archived/locked masters, and produces an ordinary exact preview. The MCP tool
-renders that preview, but `design_commit_preview` remains the only commit path.
-Asset-bearing sources and non-empty property/slot overrides fail closed until
-hash-based asset copying and visual binding semantics exist.
+renders that preview. A direct non-task client may call
+`design_commit_preview` after write approval; a website task records the
+preview for human approval instead. Asset-bearing sources and non-empty
+property/slot overrides fail closed until hash-based asset copying and visual
+binding semantics exist.
 
 Portable import is a separate bounded workflow. `POST /api/imports/validate`
 parses and validates without creating project state. `POST /api/imports`

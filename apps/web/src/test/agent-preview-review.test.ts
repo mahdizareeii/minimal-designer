@@ -85,7 +85,7 @@ describe("agent before/after review", () => {
       adapter: "codex" as const,
       displayName: "Codex — FormaSpec",
       status: "active" as const,
-      scopes: ["task:claim"],
+      scopes: ["design:read", "design:preview", "task:read", "task:claim", "task:update"],
       projectIds: [],
       principalId: "principal_codex_0001",
       expiresAt: "2030-01-01T00:00:00.000Z",
@@ -93,15 +93,40 @@ describe("agent before/after review", () => {
       createdAt: "2026-07-20T09:00:00.000Z",
       updatedAt: "2026-07-20T09:00:00.000Z",
     };
-    expect(summarizeCodexConnection([activeConnection], null, false, Date.parse("2026-07-20T09:00:00.000Z"))).toEqual({
+    const now = Date.parse("2026-07-20T09:00:00.000Z");
+    expect(summarizeCodexConnection([activeConnection], null, false, "document_review_0001", now)).toEqual({
       state: "active",
       message: "Connected and ready to claim tasks.",
     });
-    expect(summarizeCodexConnection([], new ApiError("Forbidden", { status: 403, code: "FORBIDDEN" }), false).state).toBe("restricted");
+    expect(summarizeCodexConnection([{
+      ...activeConnection,
+      scopes: ["task:claim"],
+    }], null, false, "document_review_0001", now)).toMatchObject({
+      state: "restricted",
+      message: expect.stringContaining("missing required"),
+    });
+    expect(summarizeCodexConnection([{
+      ...activeConnection,
+      projectIds: ["document_other_project"],
+    }], null, false, "document_review_0001", now)).toMatchObject({
+      state: "restricted",
+      message: expect.stringContaining("cannot access this project"),
+    });
+    expect(summarizeCodexConnection([{
+      ...activeConnection,
+      principalId: null,
+    }], null, false, "document_review_0001", now)).toMatchObject({
+      state: "restricted",
+      message: expect.stringContaining("pairing is not complete"),
+    });
+    expect(summarizeCodexConnection([], new ApiError("Forbidden", { status: 403, code: "FORBIDDEN" }), false, "document_review_0001").state).toBe("restricted");
     expect(agentTaskStatusMessage(task({ status: "queued" }))).toContain("Click Open task in Codex");
     expect(agentTaskInstruction(task())).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(agentTaskInstruction(task())).toContain("Use FormaSpec.");
     expect(agentTaskInstruction(task())).toContain("Claim task task_review_0001 with task_claim");
+    expect(agentTaskInstruction(task())).toContain("design_preview_changes");
+    expect(agentTaskInstruction(task())).toContain("returned PNG in Codex");
+    expect(agentTaskInstruction(task())).toContain("design_lint");
     expect(agentTaskInstruction(task())).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
     expect(agentTaskInstruction(task())).toContain("Do not commit it");
     const launchUrl = new URL(codexTaskLaunchUrl(task()));

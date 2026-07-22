@@ -202,7 +202,7 @@ export function AgentPreviewPng({
 }
 
 export function agentTaskInstruction(task: AgentTaskRecord): string {
-  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim task ${task.id} with task_claim, call task_transition to move it to in_progress, read its project context and selection, create and inspect a rendered design preview, and run linting. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>"}. Do not commit it; the website must show the exact PNG and human Commit button.`;
+  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim task ${task.id} with task_claim, call task_transition to move it to in_progress, and read its project context and selection. Call design_preview_changes, inspect its returned PNG in Codex, and call design_lint for that preview. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>"}. Do not commit it; the website must show the exact PNG and human Commit button.`;
 }
 
 export function codexTaskLaunchUrl(task: AgentTaskRecord): string {
@@ -293,6 +293,7 @@ export function AgentTaskWorkflowCard({
 }) {
   const waiting = task && ["queued", "claimed", "in_progress"].includes(task.status);
   const terminalError = task && ["failed", "cancelled", "expired"].includes(task.status);
+  const canLaunchInCodex = task && ["queued", "claimed", "in_progress"].includes(task.status);
   const canCommitExactPreview = exactPreviewCommitAllowed(
     canCommit,
     previewRenderStatus,
@@ -370,9 +371,9 @@ export function AgentTaskWorkflowCard({
 
           {!preview && (
             <div className="agent-task-current-actions">
-              <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open task in Codex</button>
+              {canLaunchInCodex && <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open task in Codex</button>}
               {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect or repair @FormaSpec</button>}
-              <button className="button button-secondary" onClick={onCopyInstruction}><Copy size={12} /> Copy Codex instruction</button>
+              {canLaunchInCodex && <button className="button button-secondary" onClick={onCopyInstruction}><Copy size={12} /> Copy Codex instruction</button>}
               <button className="button button-secondary" onClick={onRetry}><RefreshCcw size={12} /> Refresh status</button>
             </div>
           )}

@@ -380,8 +380,11 @@ test("pinned components preview exactly and commit through the ordinary revision
   expect(Object.values(committed.document.nodes).some((node) => node.type === "instance" && !node.archived)).toBe(true);
 });
 
-test("website design commands expose connection and claim state, then show the exact agent preview with approval actions", async ({ page, request }) => {
+test("website design commands capture the Codex launch URL and simulate the MCP preview workflow with approval actions", async ({ page, request }) => {
   const fixture = await createEditorFixture(request);
+  // This browser suite captures the generated protocol URL and drives the
+  // authenticated MCP contract directly. OS protocol handling, managed plugin
+  // loading, and a real Codex client are covered by installer/client suites.
   await page.addInitScript(() => {
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click() {
@@ -440,14 +443,18 @@ test("website design commands expose connection and claim state, then show the e
   await productWorkspace.getByRole("textbox", { name: "Describe the product, business logic, and constraints" }).fill(
     "Design a professional dispatch overview with a clear urgent-order state, accessible actions, and RTL-safe content.",
   );
-  await productWorkspace.getByRole("button", { name: "Start with Codex" }).click();
-  await expect(workflow.getByText("Task created. Codex has not claimed it yet.", { exact: true })).toBeVisible();
+  await productWorkspace.getByRole("button", { name: "Submit to @FormaSpec" }).click();
+  await expect(workflow.getByText("Task created. Click Open task in Codex below so @FormaSpec can claim it.", { exact: true })).toBeVisible();
 
   const tasksResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`);
   expect(tasksResponse.ok(), await tasksResponse.text()).toBe(true);
   const tasks = await tasksResponse.json() as { tasks: Array<{ id: string; status: string }> };
   const task = tasks.tasks[0]!;
   expect(task.status).toBe("queued");
+  expect(await page.evaluate(() => (window as unknown as { __formaspecExternalLink?: string }).__formaspecExternalLink)).toBeUndefined();
+  const openTask = workflow.getByRole("button", { name: "Open task in Codex" });
+  await expect(openTask).toBeVisible();
+  await openTask.click();
   const codexLink = await page.evaluate(() => (window as unknown as { __formaspecExternalLink?: string }).__formaspecExternalLink);
   expect(codexLink).toBeTruthy();
   const parsedCodexLink = new URL(codexLink!);
@@ -455,7 +462,6 @@ test("website design commands expose connection and claim state, then show the e
   expect(parsedCodexLink.hostname).toBe("new");
   expect(parsedCodexLink.searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
   expect(parsedCodexLink.searchParams.get("prompt")).toContain(task.id);
-  await expect(workflow.getByRole("button", { name: "Open in Codex" })).toBeVisible();
   await expect(workflow.getByRole("button", { name: "Copy Codex instruction" })).toBeVisible();
 
   const claimed = await callTool<{ task: { status: string } }>("task_claim", { task_id: task.id });
@@ -576,4 +582,17 @@ test("editor chrome has a readable minimum size without changing canonical canva
     });
   });
   expect(tooSmall).toEqual([]);
+});
+
+test("dashboard readability floors preserve the semantic hero hierarchy", async ({ page }) => {
+  await page.goto("/");
+  const hero = page.locator(".hero-row h1");
+  const emphasized = hero.locator("span");
+  await expect(hero).toBeVisible();
+  const sizes = await hero.evaluate((heading) => ({
+    heading: Number.parseFloat(getComputedStyle(heading).fontSize),
+    emphasized: Number.parseFloat(getComputedStyle(heading.querySelector("span")!).fontSize),
+  }));
+  expect(sizes.heading).toBeGreaterThanOrEqual(36);
+  expect(sizes.emphasized).toBeCloseTo(sizes.heading, 3);
 });

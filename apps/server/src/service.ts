@@ -1026,6 +1026,14 @@ export class DesignerService {
     taskId?: string;
     requireRenderEvidence?: boolean;
   }): RevisionResult {
+    if (input.taskId !== undefined) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "Task-bound design previews must be approved through the atomic task approval workflow.",
+        422,
+        { details: { taskId: input.taskId, requiredAction: "approve_task_preview" } },
+      );
+    }
     this.authorizePreviewCommit(actorId, designId, input.previewId, input.taskId);
     const scope = `design:${designId}:commit-preview`;
     this.database.cleanupPreviews();
@@ -1055,6 +1063,27 @@ export class DesignerService {
         message: normalizedInput.message,
         ...(normalizedInput.taskId === null ? {} : { taskId: normalizedInput.taskId }),
       });
+    });
+  }
+
+  commitExactTaskPreviewInCurrentTransaction(actorId: string, designId: string, input: {
+    previewId: string;
+    expectedBaseVersion: number;
+    taskId: string;
+    kind?: PreviewKind;
+    message: string;
+  }): RevisionResult {
+    if (!this.database.sqlite.inTransaction) {
+      throw new DomainError("INTERNAL_ERROR", "Task preview approval requires an active immediate transaction.", 500);
+    }
+    this.authorizePreviewCommit(actorId, designId, input.previewId, input.taskId);
+    this.getExactPreviewForRender(actorId, designId, input.previewId, { taskId: input.taskId });
+    return this.commitPreviewInTransaction(actorId, designId, {
+      previewId: input.previewId,
+      expectedBaseVersion: input.expectedBaseVersion,
+      kind: input.kind ?? "ordinary",
+      message: input.message,
+      taskId: input.taskId,
     });
   }
 
@@ -2183,7 +2212,61 @@ export class DesignerService {
     if (preview.actor_id !== actorId) {
       this.assertAgentTaskPreviewAccess(actorId, designId, preview, taskId, accessMode);
     }
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (accessMode === "commit" && access.role === "agent") {
+      this.assertAgentPreviewIsNotTaskBound(access, preview);
+    }
     return preview;
+  }
+
+  private assertAgentPreviewIsNotTaskBound(
+    access: ReturnType<typeof resolveAccess>,
+    preview: PreviewRow,
+  ): void {
+    const task = this.database.sqlite.prepare(
+      `SELECT task.id
+       FROM agent_tasks task
+       JOIN agent_task_transitions claimed
+         ON claimed.rowid = (
+           SELECT first_claim.rowid FROM agent_task_transitions first_claim
+           WHERE first_claim.task_id = task.id AND first_claim.to_status = 'claimed'
+           ORDER BY first_claim.rowid LIMIT 1
+         )
+       JOIN agent_task_transitions current
+         ON current.rowid = (
+           SELECT latest.rowid FROM agent_task_transitions latest
+           WHERE latest.task_id = task.id ORDER BY latest.rowid DESC LIMIT 1
+         )
+       WHERE task.organization_id = ?
+         AND task.design_id = ?
+         AND task.base_version = ?
+         AND task.expected_output = 'design_preview'
+         AND claimed.actor_id = ?
+         AND (
+           (current.to_status IN ('claimed', 'in_progress', 'awaiting_approval') AND task.expires_at > ?)
+           OR EXISTS (
+             SELECT 1 FROM agent_task_transitions artifact
+             WHERE artifact.task_id = task.id
+               AND json_valid(artifact.data_json)
+               AND json_extract(artifact.data_json, '$.previewId') = ?
+           )
+         )
+       LIMIT 1`,
+    ).get(
+      access.organizationId,
+      preview.design_id,
+      preview.root_base_version,
+      access.principalId,
+      new Date().toISOString(),
+      preview.id,
+    ) as { id: string } | undefined;
+    if (!task) return;
+    throw new DomainError(
+      "FORBIDDEN",
+      "An agent cannot commit a preview created for a human-approved design task.",
+      403,
+      { details: { taskId: task.id, requiredAction: "human_approval" } },
+    );
   }
 
   private requirePreviewForRead(actorId: string, designId: string, previewId: string, taskId?: string): PreviewRow {

@@ -451,13 +451,12 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   }
   const minimalUiSkillManaged = isManagedInstallTarget(minimalUiSkillPath);
   if (!options.assumeYes && !await options.confirm(
-    `Allow FormaSpec to configure the 'formaspec' MCP server and install the managed FormaSpec and Minimal UI identities in ${codexHome}?`,
+    `Allow FormaSpec to configure the 'formaspec' MCP server and install the managed FormaSpec identity plus the Minimal UI compatibility alias in ${codexHome}?`,
   )) {
     throw new Error("Codex connection was cancelled; no Codex files were changed.");
   }
 
   const bridge = await options.bridge.ensureStarted();
-  await options.bridge.authorizeAgent(options.pairing);
   const mcpUrl = `${bridge.url}/mcp`;
   const existing = await options.commandRunner(codexPath, ["mcp", "get", "formaspec", "--json"], {
     env: options.environment,
@@ -541,8 +540,13 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   if (verifiedPlugins.exitCode !== 0
     || installedPluginVersion(verifiedPlugins.stdout, FORMASPEC_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION
     || installedPluginVersion(verifiedPlugins.stdout, MINIMAL_UI_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION) {
-    throw new Error("Codex could not verify both managed FormaSpec and Minimal UI plugin identities.");
+    throw new Error("Codex could not verify the primary FormaSpec plugin and its legacy Minimal UI compatibility alias.");
   }
+  // Consume the one-time ticket only after Codex configuration and both
+  // managed plugins are installed and verified. A local setup failure must
+  // leave the pending ticket retryable instead of making the server advertise
+  // an active connection that Codex cannot use.
+  await options.bridge.authorizeAgent(options.pairing);
   return {
     codexPath,
     mcpUrl,

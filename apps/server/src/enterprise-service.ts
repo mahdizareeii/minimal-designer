@@ -40,6 +40,7 @@ import {
   type OrganizationPolicy,
 } from "./organization-policy-model.js";
 import { canonicalProductSpecification } from "./product-spec-persistence.js";
+import type { DesignerService, PreviewKind, RevisionResult } from "./service.js";
 
 const MAX_TRANSITION_DATA_BYTES = 65_536;
 const IDEMPOTENCY_TTL_MS = 86_400_000;
@@ -52,6 +53,7 @@ export type PlanningStatus = "draft" | "in_progress" | "ready_for_review" | "com
 export type AgentConnectionStatus = "pending" | "active" | "expired" | "revoked" | "error";
 
 export const AGENT_CONNECTION_SCOPES = ORGANIZATION_AGENT_SCOPES;
+const MANAGED_CODEX_CONNECTION_NAMES = ["Codex — FormaSpec", "Codex — Minimal UI"] as const;
 
 const taskTransitionGraph: Record<AgentTaskStatus, readonly AgentTaskStatus[]> = {
   queued: ["claimed", "cancelled", "expired"],
@@ -255,6 +257,11 @@ export interface AgentTaskResult {
   transitions: AgentTaskTransition[];
 }
 
+export interface AgentTaskPreviewApprovalResult {
+  revision: RevisionResult;
+  task: AgentTaskResult;
+}
+
 export interface AgentConnectionResult {
   id: string;
   adapter: "codex" | "generic_mcp";
@@ -297,6 +304,7 @@ export interface EnterpriseServiceOptions {
   productSpecPreviewTtlSeconds?: number;
   pairingTtlSeconds?: number;
   now?: () => Date;
+  designerService?: DesignerService;
 }
 
 function workflowId(prefix: string): string {
@@ -365,6 +373,7 @@ export class EnterpriseService {
   readonly productSpecPreviewTtlSeconds: number;
   readonly pairingTtlSeconds: number;
   readonly #now: () => Date;
+  readonly #designerService: DesignerService | undefined;
 
   constructor(
     readonly database: DesignerDatabase,
@@ -376,6 +385,7 @@ export class EnterpriseService {
     assertSeconds(this.productSpecPreviewTtlSeconds, "Product specification preview TTL", 60, 3_600);
     assertSeconds(this.pairingTtlSeconds, "Pairing TTL", 60, 900);
     this.#now = options.now ?? (() => new Date());
+    this.#designerService = options.designerService;
     this.flushPendingEventsSafely();
   }
 
@@ -718,6 +728,10 @@ export class EnterpriseService {
     this.requireTaskCreateDesign(actorId, designId);
   }
 
+  authorizeAgentTaskPreviewApproval(actorId: string): void {
+    this.assertTaskApproval(resolveAccess(this.database.sqlite, actorId));
+  }
+
   createAgentTask(actorId: string, input: {
     designId: string;
     brief: string;
@@ -866,12 +880,20 @@ export class EnterpriseService {
       if (!taskTransitionGraph[current.to_status].includes(input.toStatus)) {
         throw new DomainError("VALIDATION_FAILED", `Cannot move an agent task from ${current.to_status} to ${input.toStatus}.`, 422);
       }
+      if (row.expected_output === "design_preview" && input.toStatus === "completed") {
+        throw new DomainError(
+          "VALIDATION_FAILED",
+          "Design-preview tasks must be completed by atomically approving their exact persisted preview.",
+          422,
+          { details: { requiredAction: "approve_task_preview" } },
+        );
+      }
       const claimedBy = this.claimedBy(row.id);
       if (access.role === "agent") {
         if (claimedBy !== access.principalId) throw new DomainError("FORBIDDEN", "Only the agent that claimed this task may update it.", 403);
       } else {
         const canCancel = ["organization_admin", "product_manager", "design_editor"].includes(access.role) && input.toStatus === "cancelled";
-        const canApprove = ["organization_admin", "product_manager"].includes(access.role)
+        const canApprove = this.canApproveAgentTask(access)
           && current.to_status === "awaiting_approval" && input.toStatus === "completed";
         if (!canCancel && !canApprove) throw new DomainError("FORBIDDEN", "The current role cannot make this task transition.", 403);
       }
@@ -898,6 +920,86 @@ export class EnterpriseService {
     this.flushPendingEventsSafely();
     if (expired) throw new DomainError("TASK_EXPIRED", "The agent task expired.", 410);
     return result;
+  }
+
+  approveAgentTaskDesignPreview(actorId: string, taskId: string, input: {
+    designId: string;
+    previewId: string;
+    expectedBaseVersion: number;
+    idempotencyKey: string;
+    message?: string;
+    kind?: PreviewKind;
+  }): AgentTaskPreviewApprovalResult {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertTaskApproval(access);
+    const task = this.requireAgentTaskRow(access, taskId);
+    const designer = this.#designerService;
+    if (!designer) {
+      throw new DomainError("INTERNAL_ERROR", "The atomic task preview approval service is unavailable.", 500);
+    }
+    const previewId = boundedText(input.previewId, "Preview ID", 240);
+    const key = boundedText(input.idempotencyKey, "Idempotency key", 240);
+    const message = input.message === undefined
+      ? `Approve FormaSpec proposal from task ${task.id}`
+      : boundedText(input.message, "Commit message", 500);
+    const kind = input.kind ?? "ordinary";
+    if (task.design_id !== input.designId || task.base_version !== input.expectedBaseVersion) {
+      throw new DomainError("VALIDATION_FAILED", "The task design or base version does not match the preview approval request.", 422);
+    }
+    if (task.expected_output !== "design_preview") {
+      throw new DomainError("VALIDATION_FAILED", "Only a design-preview task can use exact preview approval.", 422);
+    }
+
+    return this.withIdempotency(access, `task:${task.id}:approve-design-preview`, key, {
+      designId: input.designId,
+      previewId,
+      expectedBaseVersion: input.expectedBaseVersion,
+      message,
+      kind,
+    }, () => {
+      const currentTask = this.requireAgentTaskRow(access, task.id);
+      const current = this.currentTaskTransition(currentTask.id);
+      if (current.to_status !== "awaiting_approval") {
+        throw this.taskStateConflict("awaiting_approval", current.to_status);
+      }
+      const now = this.nowIso();
+      if (currentTask.expires_at <= now) {
+        throw new DomainError("TASK_EXPIRED", "The agent task expired before its preview could be approved.", 410, {
+          retryable: true,
+        });
+      }
+      const proposal = jsonObject(current.data_json, "task transition");
+      if (proposal.previewId !== previewId) {
+        throw new DomainError("VALIDATION_FAILED", "The preview does not match the task proposal awaiting approval.", 422);
+      }
+      this.validateTaskCompletion(currentTask, { previewId });
+      const revision = designer.commitExactTaskPreviewInCurrentTransaction(actorId, input.designId, {
+        previewId,
+        expectedBaseVersion: input.expectedBaseVersion,
+        taskId: currentTask.id,
+        kind,
+        message,
+      });
+      this.appendTaskTransition(
+        access,
+        currentTask.id,
+        "awaiting_approval",
+        "completed",
+        "The product manager approved and committed the exact design preview.",
+        { previewId },
+        now,
+      );
+      appendAuditEvent(this.database.sqlite, access, "agent_task.transition", "agent_task", currentTask.id, {
+        fromStatus: "awaiting_approval",
+        toStatus: "completed",
+        expectedOutput: currentTask.expected_output,
+        revisionId: revision.revision.id,
+      });
+      return {
+        revision,
+        task: this.agentTaskResult(currentTask),
+      };
+    });
   }
 
   readOwnAuthorizationContext(actorId: string): OwnAuthorizationContextResult {
@@ -951,12 +1053,17 @@ export class EnterpriseService {
       const connectionId = workflowId("connection");
       const replacedConnectionIds: string[] = [];
       if (input.replaceExisting === true) {
+        const replacementNames = input.adapter === "codex"
+          && MANAGED_CODEX_CONNECTION_NAMES.includes(displayName as (typeof MANAGED_CODEX_CONNECTION_NAMES)[number])
+          ? MANAGED_CODEX_CONNECTION_NAMES
+          : [displayName];
         const existingRows = this.database.sqlite.prepare(
           `SELECT * FROM agent_connections
-           WHERE organization_id = ? AND adapter = ? AND display_name = ?
+           WHERE organization_id = ? AND adapter = ?
+             AND display_name IN (${replacementNames.map(() => "?").join(", ")})
              AND status IN ('active', 'pending', 'revoked')
            ORDER BY created_at, id`,
-        ).all(access.organizationId, input.adapter, displayName) as AgentConnectionRow[];
+        ).all(access.organizationId, input.adapter, ...replacementNames) as AgentConnectionRow[];
         for (const existingRow of existingRows) {
           this.revokeAgentConnectionRow(access, existingRow, now, {
             reason: "replaced",
@@ -1758,6 +1865,16 @@ export class EnterpriseService {
 
   private assertOrganizationAdmin(access: AccessContext): void {
     this.assertRole(access, ["organization_admin"], "Organization Administrator permission is required.");
+  }
+
+  private canApproveAgentTask(access: AccessContext): boolean {
+    return access.role === "organization_admin" || access.role === "product_manager";
+  }
+
+  private assertTaskApproval(access: AccessContext): void {
+    if (!this.canApproveAgentTask(access)) {
+      throw new DomainError("FORBIDDEN", "Organization Administrator or Product Manager permission is required to approve an agent task.", 403);
+    }
   }
 
   private assertRole(access: AccessContext, roles: OrganizationRole[], message: string): void {

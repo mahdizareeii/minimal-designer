@@ -1,10 +1,13 @@
 # FormaSpec
 
-FormaSpec is a self-hosted, AI-first product and UI design workspace. Its
-primary agent-facing name is **FormaSpec**, with **Minimal UI** retained as a
-compatibility identity: a product manager can describe a web, phone, or tablet
-experience to Codex, review a rendered preview, and continue editing the same
-structured document in the browser.
+FormaSpec is a self-hosted, AI-first product and UI design workspace.
+**FormaSpec** is the product and primary agent-facing identity: a product
+manager can describe a web, phone, or tablet experience to Codex, review a
+rendered preview, and continue editing the same structured document in the
+browser.
+
+> **Backward compatibility:** **Minimal UI** remains available only as a legacy
+> alias for existing prompts and integrations. Use FormaSpec for all new work.
 
 The application does not embed the OpenAI API and does not require an OpenAI
 API key. Codex connects through the local FormaSpec MCP bridge. Your Codex
@@ -21,7 +24,8 @@ subscription or API usage remains separate.
 Run one installer command from the repository root. It checks the operating
 system and requirements, prepares the selected runtime, starts FormaSpec and
 the loopback bridge, and—when Codex is detected—configures the token-free
-`formaspec` MCP server plus both managed version-0.2.0 identities.
+`formaspec` MCP server, the primary managed FormaSpec identity, and the
+managed Minimal UI legacy alias.
 
 Docker is the easiest source installation:
 
@@ -85,13 +89,16 @@ Use FormaSpec to design this product flow.
 Design this with FormaSpec.
 Refine this selection with FormaSpec.
 [@FormaSpec](plugin://formaspec@formaspec) create a professional mobile onboarding flow.
-Use Minimal UI to design this product flow.
-[@Minimal UI](plugin://minimal-ui@formaspec) refine this selected screen.
 ```
 
-Both version-0.2.0 plugin identities share the same token-free `formaspec` MCP
-connection. Start a new Codex task after installation or refresh so Codex loads
-the managed assets.
+> **Legacy prompt compatibility:** existing automation may continue to use
+> `Use Minimal UI` or
+> `[@Minimal UI](plugin://minimal-ui@formaspec)`. Do not use that alias in new
+> examples or workflows.
+
+The primary version-0.2.0 FormaSpec plugin and the managed Minimal UI legacy
+alias share the same token-free `formaspec` MCP connection. Start a new Codex
+task after installation or refresh so Codex loads the managed assets.
 
 The connection is intentionally token-free in Codex configuration. Codex talks
 to the loopback bridge; the bridge holds the short-lived upstream scoped grant
@@ -99,12 +106,23 @@ in macOS Keychain, Linux Secret Service, or a Windows current-user DPAPI blob.
 Windows code-level DPAPI tests pass; a real packaged Windows lifecycle test is
 still required before release.
 
-FormaSpec’s MCP server is named `formaspec`. Its required workflow is:
+FormaSpec’s MCP server is named `formaspec`.
+
+For a website-created task opened with **Submit to @FormaSpec**, Codex must
+claim the task, read its project and selection context, create the exact
+preview, inspect its PNG, run linting, and transition the task to
+`awaiting_approval` with the `previewId`. The agent must not commit the
+preview or complete the task. A human reviews the exact preview in FormaSpec
+and chooses **Commit** or **Discard**.
+
+For a direct, non-task MCP request, an agent may use the ordinary write-approved
+workflow:
 
 1. Read project, product-specification, version, and editor-selection context.
 2. Create a bounded preview without changing history.
 3. Inspect the rendered PNG and lint diagnostics.
-4. Commit that exact preview with the expected base version.
+4. After write approval, commit that exact preview with the expected base
+   version.
 5. Return the secret-free project/revision deep link for human review.
 
 Archive operations use their own destructive preview and commit tools. A

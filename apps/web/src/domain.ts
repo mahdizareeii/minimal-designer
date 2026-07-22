@@ -124,6 +124,47 @@ export function parentLayoutMode(document: DesignDocument, nodeId: NodeId) {
   return parent && "node_id" in parent ? document.nodes[parent.node_id]?.layout.mode : undefined;
 }
 
+function splitCssFontFamilies(value: string): string[] {
+  const families: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (const character of value) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote) {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      current += character;
+      quote = quote === character ? null : quote ?? character;
+      continue;
+    }
+    if (character === "," && quote === null) {
+      if (current.trim()) families.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (current.trim()) families.push(current.trim());
+  return families;
+}
+
+export function browserFontFamilyStack(value: string): string {
+  return splitCssFontFamilies(value).flatMap((family) => {
+    const unquoted = family.replace(/^(?:"([^"]*)"|'([^']*)')$/, "$1$2").toLowerCase();
+    if (unquoted === "vazirmatn") return ['"Vazirmatn Variable"', "Vazirmatn"];
+    if (unquoted === "inter") return ['"Inter Variable"', "Inter"];
+    return [family];
+  }).join(", ");
+}
+
 export function styleForNode(
   document: DesignDocument,
   node: DesignNode,
@@ -141,9 +182,20 @@ export function styleForNode(
     includePosition: options.includePosition ?? true,
   }) as CSSProperties;
   if (node.type === "text" && typeof style.fontFamily === "string") {
-    style.fontFamily = style.fontFamily
-      .replaceAll("Vazirmatn", '"Vazirmatn Variable", Vazirmatn')
-      .replaceAll("Inter", '"Inter Variable", Inter');
+    const containsArabicScript = /[\u0600-\u06ff\u0750-\u077f\u0870-\u089f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/u.test(node.content);
+    const normalizedFamily = style.fontFamily.trim().toLowerCase();
+    const canonicalStack = style.fontFamily.includes(",")
+      ? style.fontFamily
+      : normalizedFamily === "vazirmatn" || normalizedFamily === "vazirmatn variable"
+        ? "Vazirmatn, Inter, system-ui, sans-serif"
+        : normalizedFamily === "inter" || normalizedFamily === "inter variable"
+          ? containsArabicScript
+            ? "Vazirmatn, Inter, system-ui, sans-serif"
+            : "Inter, Vazirmatn, system-ui, sans-serif"
+          : containsArabicScript
+            ? `${style.fontFamily}, Vazirmatn, Inter, system-ui, sans-serif`
+            : `${style.fontFamily}, Inter, Vazirmatn, system-ui, sans-serif`;
+    style.fontFamily = browserFontFamilyStack(canonicalStack);
   }
   return style;
 }

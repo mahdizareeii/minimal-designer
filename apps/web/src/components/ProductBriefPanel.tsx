@@ -57,6 +57,14 @@ export interface CodexConnectionSummary {
   message: string;
 }
 
+const CODEX_DESIGN_TASK_SCOPES = [
+  "design:read",
+  "design:preview",
+  "task:read",
+  "task:claim",
+  "task:update",
+] as const;
+
 export interface AgentPreviewReadFailureDisposition {
   clearReview: true;
   closeDialog: true;
@@ -97,6 +105,7 @@ export function summarizeCodexConnection(
   connections: readonly AgentConnectionRecord[],
   error: unknown,
   loading: boolean,
+  designId: string | null,
   now = Date.now(),
 ): CodexConnectionSummary {
   if (loading) return { state: "loading", message: "Checking the Codex connection…" };
@@ -105,12 +114,28 @@ export function summarizeCodexConnection(
   }
   if (error) return { state: "error", message: error instanceof Error ? error.message : "Codex connection status could not be read." };
   const codex = connections.filter((connection) => connection.adapter === "codex");
-  const usable = codex.find((connection) => connection.status === "active"
+  const active = codex.filter((connection) => connection.status === "active"
     && (connection.expiresAt === null || new Date(connection.expiresAt).getTime() > now));
+  const usable = active.find((connection) => connection.principalId !== null
+    && CODEX_DESIGN_TASK_SCOPES.every((scope) => connection.scopes.includes(scope))
+    && (designId === null || connection.projectIds.length === 0 || connection.projectIds.includes(designId)));
   if (usable) {
     return {
       state: "active",
       message: usable.lastUsedAt ? `Connected · last used ${new Date(usable.lastUsedAt).toLocaleString()}` : "Connected and ready to claim tasks.",
+    };
+  }
+  if (active.length > 0) {
+    const projectBlocked = designId !== null
+      && active.every((connection) => connection.projectIds.length > 0 && !connection.projectIds.includes(designId));
+    const incomplete = active.every((connection) => connection.principalId === null);
+    return {
+      state: "restricted",
+      message: incomplete
+        ? "Codex pairing is not complete. Finish or reconnect the managed FormaSpec connection."
+        : projectBlocked
+          ? "The active Codex connection cannot access this project. Reconnect FormaSpec to refresh its project grant."
+          : "The active Codex connection is missing required design-preview or task scopes. Reconnect it before submitting work.",
     };
   }
   if (codex.some((connection) => connection.status === "pending")) {
@@ -330,8 +355,8 @@ export function ProductBriefPanel() {
   const counts = useMemo(() => specificationCounts(specification?.specification ?? null), [specification]);
   const briefChanged = brief !== loadedBrief;
   const connectionSummary = useMemo(
-    () => summarizeCodexConnection(agentConnections, connectionError, connectionLoading),
-    [agentConnections, connectionError, connectionLoading],
+    () => summarizeCodexConnection(agentConnections, connectionError, connectionLoading, designId ?? null),
+    [agentConnections, connectionError, connectionLoading, designId],
   );
 
   const persistBrief = async (): Promise<ProductSpecificationRecord> => {
@@ -450,49 +475,23 @@ export function ProductBriefPanel() {
     const idempotencyKey = previewCommitKeys.current.get(reviewPreview.previewId)
       ?? createClientKey("agent_preview_commit");
     previewCommitKeys.current.set(reviewPreview.previewId, idempotencyKey);
-    let committed = false;
     try {
-      try {
-        await commitDesignPreview({
-          designId,
-          previewId: reviewPreview.previewId,
-          taskId: reviewTask.id,
-          expectedBaseVersion: reviewPreview.rootBaseVersion,
-          idempotencyKey,
-          message: `Approve FormaSpec proposal from task ${reviewTask.id}`,
-          kind: reviewPreview.kind,
-        });
-        committed = true;
-      } catch (cause) {
-        if (!(cause instanceof ApiError && cause.code === "PREVIEW_ALREADY_COMMITTED")) throw cause;
-        committed = true;
-      }
-
-      let transitionWarning: string | null = null;
-      if (reviewTask.status === "awaiting_approval") {
-        try {
-          const completed = await transitionAgentTask({
-            taskId: reviewTask.id,
-            expectedStatus: "awaiting_approval",
-            toStatus: "completed",
-            message: "The product manager approved and committed the exact design preview.",
-            data: { previewId: reviewPreview.previewId },
-          });
-          setLatestTask(completed);
-        } catch (cause) {
-          transitionWarning = cause instanceof Error ? cause.message : "The revision committed, but the task status could not be updated.";
-        }
-      }
+      const approved = await commitDesignPreview({
+        designId,
+        previewId: reviewPreview.previewId,
+        taskId: reviewTask.id,
+        expectedBaseVersion: reviewPreview.rootBaseVersion,
+        idempotencyKey,
+        message: `Approve FormaSpec proposal from task ${reviewTask.id}`,
+        kind: reviewPreview.kind,
+      });
+      if (approved.task) setLatestTask(approved.task);
       await openDesign(designId);
       await refreshAgentActivity();
       setReviewOpen(false);
-      setNotice(transitionWarning
-        ? `Committed version ${reviewPreview.proposedVersion}. Refresh the task status if needed.`
-        : `Committed FormaSpec preview as immutable version ${reviewPreview.proposedVersion}.`);
-      if (transitionWarning) setReviewError(transitionWarning);
+      setNotice(`Committed FormaSpec preview as immutable version ${approved.version}.`);
     } catch (cause) {
       setReviewError(cause instanceof Error ? cause.message : "The agent preview could not be committed.");
-      if (committed) await openDesign(designId);
     } finally {
       setReviewBusy(false);
     }

@@ -173,7 +173,7 @@ function designIdFromPage(page: Page): string {
   return decodeURIComponent(match[1]);
 }
 
-test("product manager to verified backup restore completes through browser, MCP, and immutable history", async ({ page }, testInfo) => {
+test("product manager to verified backup restore captures the Codex URL and simulates MCP through immutable history", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   const temporaryRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "formaspec-release-e2e-"));
   const dataDir = path.join(temporaryRoot, "data");
@@ -239,6 +239,9 @@ test("product manager to verified backup restore completes through browser, MCP,
     };
   };
 
+  // This release scenario captures protocol links and simulates the agent via
+  // authenticated MCP calls. It does not claim OS protocol-handler execution,
+  // managed plugin loading, or execution inside a real Codex client.
   await page.addInitScript(() => {
     const originalClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function click() {
@@ -325,12 +328,14 @@ test("product manager to verified backup restore completes through browser, MCP,
         "English and Persian RTL must be supported, touch targets must be accessible, and every commit must remain auditable.",
       ].join(" ");
       await page.getByLabel("Describe the product, business logic, and constraints").fill(brief);
-      await page.getByRole("button", { name: /Start with Codex/i }).click();
+      await page.getByRole("button", { name: "Submit to @FormaSpec" }).click();
       await expect(page.locator(".product-panel-success")).toContainText("queued");
 
       const tasks = await api<{ tasks: AgentTask[] }>(baseURL, `/api/designs/${encodeURIComponent(designId)}/agent-tasks`);
       task = tasks.tasks[0]!;
       expect(task).toMatchObject({ designId, baseVersion: 2, status: "queued", expectedOutput: "design_preview" });
+      expect(await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink)).toBeUndefined();
+      await page.getByRole("button", { name: "Open task in Codex" }).click();
       const taskLink = await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink);
       expect(taskLink).toBeTruthy();
       const parsedTaskLink = new URL(taskLink!);

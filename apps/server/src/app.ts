@@ -188,6 +188,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   const service = new DesignerService(database, events, config.previewTtlSeconds, {}, assetStore);
   const enterprise = new EnterpriseService(database, events, {
     productSpecPreviewTtlSeconds: config.previewTtlSeconds,
+    designerService: service,
   });
   const designSystems = new DesignSystemService(database, {
     upgradePreviewTtlSeconds: config.previewTtlSeconds,

@@ -45,17 +45,36 @@ ticket over its private control endpoint. The bridge posts only `{ "nonce":
 "…" }` to exact `POST /api/agent-connections/pair`, verifies the optional
 expected connection ID, verifies MCP and the returned authorization context,
 then stores the upstream scoped grant in the OS credential store. It writes a
-credential-free `formaspec` MCP entry, installs the managed version-0.2.0
-FormaSpec and Minimal UI skills/plugins, and verifies Codex configuration.
+credential-free `formaspec` MCP entry, installs the primary managed
+version-0.2.0 FormaSpec skills/plugins plus the Minimal UI legacy compatibility
+assets, and verifies Codex configuration.
 
 Canonical installation completes before managed compatibility assets are
 refreshed. Older `minimal-ui` content is replaced only when its own
 `.formaspec-managed.json` marker proves ownership by `formaspecctl`; unmanaged
 legacy content is left untouched. The connector never overwrites an unmanaged
-`formaspec` or `minimal-ui` skill/plugin/marketplace. Both current identities
-share the one token-free MCP entry and can be mentioned as
-`[@FormaSpec](plugin://formaspec@formaspec)` or
-`[@Minimal UI](plugin://minimal-ui@formaspec)` after starting a new Codex task.
+`formaspec` or `minimal-ui` skill/plugin/marketplace. Start a new Codex task
+and use the primary mention:
+
+```text
+[@FormaSpec](plugin://formaspec@formaspec)
+```
+
+> **Legacy prompt compatibility:** the managed
+> `[@Minimal UI](plugin://minimal-ui@formaspec)` alias remains available for
+> existing workflows and shares the same token-free MCP entry.
+
+## Website task approval boundary
+
+When **Submit to @FormaSpec** creates a website task, the connected agent claims
+the task, reads its authorized context, creates and inspects the exact rendered
+preview, runs linting, and transitions the task to `awaiting_approval` with the
+`previewId`. The agent must not commit the preview or complete the task. A
+human uses FormaSpec's before/after review to **Commit** or **Discard**.
+
+Direct non-task MCP requests remain separate: after normal write approval, an
+authorized agent may commit an exact inspected preview with
+`design_commit_preview`.
 
 Only `/api/agent-connections/pair` is available to the headless bridge without
 a browser session or trusted identity. Creating a connection, reconnecting it,

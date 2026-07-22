@@ -34,7 +34,7 @@ describe("FormaSpec browser usability", () => {
   it("builds a restore command only from a bounded opaque backup ID", () => {
     const backupId = `backup_${"a".repeat(40)}`;
     expect(managedBackupRestoreCommand(backupId)).toBe(
-      `pnpm formaspecctl backup restore --backup-id ${backupId} --yes`,
+      `formaspecctl backup restore --backup-id ${backupId} --yes`,
     );
     expect(() => managedBackupRestoreCommand("backup_short")).toThrow(/not safe/i);
     expect(() => managedBackupRestoreCommand("../backups/company.tar")).toThrow(/not safe/i);
@@ -50,7 +50,7 @@ describe("FormaSpec browser usability", () => {
       connection: { id: connectionId },
     } as Parameters<typeof codexPairingCommand>[0];
     expect(codexPairingCommand(challenge)).toBe(
-      `./designer --yes agent connect codex --pairing-nonce ${nonce} --connection-id ${connectionId}`,
+      `formaspecctl --yes agent connect codex --pairing-nonce ${nonce} --connection-id ${connectionId}`,
     );
     const pairingLink = new URL(codexPairingLink(challenge));
     expect(pairingLink.protocol).toBe("formaspec:");
@@ -112,6 +112,8 @@ describe("FormaSpec browser usability", () => {
   it("keeps scrolling and readability rules scoped to application chrome", () => {
     const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
     expect(styles).toMatch(/\.administration-shell\s*\{[^}]*height:\s*100%;[^}]*height:\s*100dvh;[^}]*overflow-y:\s*auto;/s);
+    expect(styles).toMatch(/\.session-auth-shell\s*\{[^}]*height:\s*100%;[^}]*height:\s*100dvh;[^}]*overflow:\s*auto;/s);
+    expect(styles).toMatch(/\.redesign-studio-shell\s*\{[^}]*height:\s*100%;[^}]*height:\s*100dvh;[^}]*overflow-y:\s*auto;/s);
     expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*?\.administration-list\s*\{[^}]*max-height:\s*none;[^}]*overflow:\s*visible;/);
     expect(styles).toContain("Readable application chrome");
     expect(styles).toContain("These selectors intentionally exclude canvas and prototype document rendering");
@@ -121,6 +123,12 @@ describe("FormaSpec browser usability", () => {
     expect(styles).toContain(".editor-shell :is(.editor-topbar, .left-sidebar, .right-sidebar, .editor-stage-tabs, .editor-statusbar)");
     expect(styles).toMatch(/\.editor-shell :is\(\.editor-topbar,[^{]+:is\(button, input, select, textarea\)[^{]*\{[^}]*font-size:\s*13px !important;/);
     expect(styles).toMatch(/\.editor-shell :is\(\.editor-topbar,[^{]+:is\(label, span, small, p, code\)[^{]*\{[^}]*font-size:\s*12px !important;/);
+    expect(styles).toMatch(/:is\(\.dashboard-shell, \.redesign-studio-shell\) :is\(button, input, select, textarea\)[^{]*\{[^}]*font-size:\s*13px !important;/);
+    expect(styles).toMatch(/:is\(\.dashboard-shell, \.redesign-studio-shell\) :is\(label, legend, span, small, p, code, li, summary\)[^{]*\{[^}]*font-size:\s*12px !important;/);
+    expect(styles).toMatch(/:is\(\.dashboard-shell, \.redesign-studio-shell\) :is\(div, section, article, header, footer, nav, form, fieldset\)[^{]*\{[^}]*font-size:\s*12px !important;/);
+    expect(styles).toMatch(/\.redesign-studio-shell :is\(h1, h2\)[^{]*\{[^}]*font-size:\s*16px !important;/);
+    expect(styles).toMatch(/\.dashboard-shell \.hero-row h1 span\s*\{[^}]*font-size:\s*inherit !important;[^}]*line-height:\s*inherit;/);
+    expect(styles).toMatch(/\.redesign-studio-shell \.redesign-stage-card > header > div > span\s*\{[^}]*font-size:\s*22px !important;[^}]*line-height:\s*1 !important;/);
     expect(styles).not.toContain(".canvas-viewport :is(button, input, select, textarea, label, span, small, p, code)");
     expect(styles).not.toContain(".designer-node :is(button, input, select, textarea, label, span, small, p, code)");
   });

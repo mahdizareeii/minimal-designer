@@ -320,7 +320,17 @@ export function registerHttpRoutes(
       ...(input.basePreviewId === undefined ? {} : { basePreviewId: input.basePreviewId }),
       operations: input.operations,
     });
-    return reply.code(201).send(previewResponse(preview));
+    const renderOptions: RenderOptions = { maxSize: 2048 };
+    const rendered = await renderCanonicalDocument(request.actorId, preview.canonicalDocument, renderOptions);
+    service.recordPreviewRenderMetadata(request.actorId, id, preview.id, {
+      options: renderOptions,
+      png: rendered.png,
+      width: rendered.width,
+      height: rendered.height,
+      renderer: rendered.renderer,
+      warnings: rendered.warnings,
+    });
+    return reply.code(201).send(previewResponse(service.getPreview(request.actorId, id, preview.id)));
   });
 
   app.get("/api/designs/:id/previews/:previewId", async (request) => {
@@ -336,12 +346,16 @@ export function registerHttpRoutes(
   });
 
   app.post("/api/designs/:id/previews/:previewId/commit", async (request) => {
-    service.authorizePreviewCommit(
-      request.actorId,
-      rawRequestField(request.params, "id"),
-      rawRequestField(request.params, "previewId"),
-      rawRequestField(request.body, "taskId") || undefined,
-    );
+    const rawTaskId = rawRequestField(request.body, "taskId") || undefined;
+    if (rawTaskId === undefined) {
+      service.authorizePreviewCommit(
+        request.actorId,
+        rawRequestField(request.params, "id"),
+        rawRequestField(request.params, "previewId"),
+      );
+    } else {
+      enterprise.authorizeAgentTaskPreviewApproval(request.actorId);
+    }
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const input = z.object({
       expectedBaseVersion: z.number().int().positive(),
@@ -349,13 +363,24 @@ export function registerHttpRoutes(
       message: z.string().trim().min(1).max(500).optional(),
       taskId: z.string().min(1).max(240).optional(),
     }).strict().parse(request.body);
+    if (input.taskId !== undefined) {
+      const approved = enterprise.approveAgentTaskDesignPreview(request.actorId, input.taskId, {
+        designId: params.id,
+        previewId: params.previewId,
+        expectedBaseVersion: input.expectedBaseVersion,
+        idempotencyKey: input.idempotencyKey,
+        kind: "ordinary",
+        ...(input.message === undefined ? {} : { message: input.message }),
+      });
+      return { ...revisionResponse(approved.revision), task: approved.task };
+    }
     return revisionResponse(service.commitPreview(request.actorId, params.id, {
       previewId: params.previewId,
       expectedBaseVersion: input.expectedBaseVersion,
       idempotencyKey: input.idempotencyKey,
       kind: "ordinary",
+      requireRenderEvidence: true,
       ...(input.message === undefined ? {} : { message: input.message }),
-      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     }));
   });
 
@@ -369,16 +394,30 @@ export function registerHttpRoutes(
       operations: input.operations,
       kind: "archive",
     });
-    return reply.code(201).send(previewResponse(preview));
+    const renderOptions: RenderOptions = { maxSize: 2048 };
+    const rendered = await renderCanonicalDocument(request.actorId, preview.canonicalDocument, renderOptions);
+    service.recordPreviewRenderMetadata(request.actorId, id, preview.id, {
+      options: renderOptions,
+      png: rendered.png,
+      width: rendered.width,
+      height: rendered.height,
+      renderer: rendered.renderer,
+      warnings: rendered.warnings,
+    });
+    return reply.code(201).send(previewResponse(service.getPreview(request.actorId, id, preview.id)));
   });
 
   app.post("/api/designs/:id/archive-previews/:previewId/commit", async (request) => {
-    service.authorizePreviewCommit(
-      request.actorId,
-      rawRequestField(request.params, "id"),
-      rawRequestField(request.params, "previewId"),
-      rawRequestField(request.body, "taskId") || undefined,
-    );
+    const rawTaskId = rawRequestField(request.body, "taskId") || undefined;
+    if (rawTaskId === undefined) {
+      service.authorizePreviewCommit(
+        request.actorId,
+        rawRequestField(request.params, "id"),
+        rawRequestField(request.params, "previewId"),
+      );
+    } else {
+      enterprise.authorizeAgentTaskPreviewApproval(request.actorId);
+    }
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const input = z.object({
       expectedBaseVersion: z.number().int().positive(),
@@ -386,13 +425,24 @@ export function registerHttpRoutes(
       message: z.string().trim().min(1).max(500).optional(),
       taskId: z.string().min(1).max(240).optional(),
     }).strict().parse(request.body);
+    if (input.taskId !== undefined) {
+      const approved = enterprise.approveAgentTaskDesignPreview(request.actorId, input.taskId, {
+        designId: params.id,
+        previewId: params.previewId,
+        expectedBaseVersion: input.expectedBaseVersion,
+        idempotencyKey: input.idempotencyKey,
+        kind: "archive",
+        ...(input.message === undefined ? {} : { message: input.message }),
+      });
+      return { ...revisionResponse(approved.revision), task: approved.task };
+    }
     return revisionResponse(service.commitPreview(request.actorId, params.id, {
       previewId: params.previewId,
       expectedBaseVersion: input.expectedBaseVersion,
       idempotencyKey: input.idempotencyKey,
       kind: "archive",
+      requireRenderEvidence: true,
       ...(input.message === undefined ? {} : { message: input.message }),
-      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     }));
   });
 

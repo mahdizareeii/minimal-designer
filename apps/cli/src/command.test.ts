@@ -134,6 +134,7 @@ if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "list" ]; then
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "add" ]; then exit 0; fi
 if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
+  if [ "$FAKE_CODEX_FAIL_PLUGIN_LIST" = "1" ]; then exit 8; fi
   if [ -f "$FAKE_CODEX_PLUGIN_STATE" ]; then cat "$FAKE_CODEX_PLUGIN_STATE"
   else printf '{"installed":[]}\n'; fi
   exit 0
@@ -169,11 +170,12 @@ describe("formaspecctl", () => {
     installFakeCodex(bin, log, state);
     const bridge = fakeBridge();
     const io = collectingIo();
+    let confirmation = "";
     const result = await runCli(["agent", "connect", "codex"], {
       projectRoot: root,
       bridge,
       io,
-      confirm: async () => false,
+      confirm: async (message) => { confirmation = message; return false; },
       environment: fakeEnvironment(root, bin, log, state),
     });
     expect(result).toBe(1);
@@ -181,6 +183,8 @@ describe("formaspecctl", () => {
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
     expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
     expect(fs.readFileSync(log, "utf8").trim()).toBe("--version");
+    expect(confirmation).toContain("managed FormaSpec identity plus the Minimal UI compatibility alias");
+    expect(confirmation).not.toContain("FormaSpec and Minimal UI identities");
   });
 
   it("configures token-free FormaSpec MCP and installs both managed agent identities", async () => {
@@ -255,6 +259,10 @@ describe("formaspecctl", () => {
     });
     expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(io.output.join("\n")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+    expect(io.output.join("\n")).toContain("Primary Codex mention: [@FormaSpec]");
+    expect(io.output.join("\n")).toContain("Compatibility alias for existing prompts: [@Minimal UI]");
+    expect(io.output.join("\n")).toContain("Use FormaSpec in a new Codex task.");
+    expect(io.output.join("\n")).not.toContain("Use FormaSpec or Use Minimal UI");
     const approvalConfig = [
       'basic_approval_example = """',
       "[mcp_servers.formaspec]",
@@ -310,6 +318,34 @@ describe("formaspecctl", () => {
 
     expect(result).toBe(0);
     expect(bridge.pairingTickets).toEqual([{ nonce, connectionId }]);
+    expect([...io.output, ...io.errors].join("\n")).not.toContain(nonce);
+  });
+
+  it("does not consume a pairing ticket until Codex configuration and plugins verify", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    const nonce = `fspair_${"n".repeat(43)}`;
+    const environment = {
+      ...fakeEnvironment(root, bin, log, state),
+      FAKE_CODEX_FAIL_PLUGIN_LIST: "1",
+    };
+
+    const result = await runCli([
+      "--yes", "agent", "connect", "codex",
+      "--pairing-nonce", nonce,
+      "--connection-id", `connection_${"a".repeat(32)}`,
+    ], { projectRoot: root, bridge, io, environment });
+
+    expect(result).toBe(1);
+    expect(bridge.starts).toBe(1);
+    expect(bridge.authorizations).toBe(0);
+    expect(bridge.pairingTickets).toEqual([]);
+    expect(io.errors.join("\n")).toContain("could not inspect installed plugins");
     expect([...io.output, ...io.errors].join("\n")).not.toContain(nonce);
   });
 

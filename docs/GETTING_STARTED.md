@@ -1,8 +1,10 @@
 # Getting started
 
-FormaSpec is the browser product and primary agent identity. **Minimal UI** is
-the supported compatibility identity; both use the same token-free `formaspec`
-MCP connection.
+FormaSpec is the browser product and primary agent identity.
+
+> **Backward compatibility:** **Minimal UI** remains a legacy alias for
+> existing prompts and integrations. Use FormaSpec for all new work. Both
+> identities use the same token-free `formaspec` MCP connection.
 
 ## Install and start
 
@@ -35,7 +37,7 @@ Open `http://127.0.0.1:4310` for the built application or
    and constraints**.
 4. Save the typed product-specification preview.
 5. Optionally complete the persistent 22-section planning interview.
-6. Select **Start with Codex**, or invoke the agent from Codex directly.
+6. Select **Submit to @FormaSpec**, or invoke FormaSpec from Codex directly.
 
 ## Use FormaSpec from Codex
 
@@ -49,13 +51,24 @@ Then use:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec) design a professional mobile flow.
-[@Minimal UI](plugin://minimal-ui@formaspec) design a professional mobile flow.
 ```
 
 Other supported triggers include `Use FormaSpec`, `Design this with FormaSpec`,
-and `Refine this selection with FormaSpec`, plus the corresponding `Use Minimal
-UI`, design, refine, improve-selection, and redesign variants. Both managed
-plugins are version 0.2.0; start a new Codex task after installation or refresh.
+and `Refine this selection with FormaSpec`.
+
+> **Legacy prompt compatibility:** existing workflows may still use
+> `Use Minimal UI` or
+> `[@Minimal UI](plugin://minimal-ui@formaspec)`, but new workflows should not.
+
+The primary FormaSpec plugin and its managed compatibility alias are version
+0.2.0; start a new Codex task after installation or refresh.
+
+When **Submit to @FormaSpec** creates a website task, Codex previews the design,
+inspects the PNG, runs linting, and returns the task in
+`awaiting_approval`. The product manager then commits or discards the exact
+preview in FormaSpec. Codex must not commit or complete a website-created task.
+A direct non-task Codex request may commit through MCP only after normal write
+approval.
 
 ## Export and administer
 

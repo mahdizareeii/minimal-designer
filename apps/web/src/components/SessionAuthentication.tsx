@@ -1,5 +1,5 @@
 import { KeyRound, LoaderCircle, LogIn, LogOut, ShieldCheck, UserRoundPlus } from "lucide-react";
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import {
   AUTHENTICATION_REQUIRED_EVENT,
@@ -36,11 +36,15 @@ export function AuthenticationForm({
   const [confirmPassword, setConfirmPassword] = useState("");
   const [bootstrapToken, setBootstrapToken] = useState(initialBootstrapToken);
   const [clientError, setClientError] = useState<string | null>(null);
+  const previousBootstrapRequired = useRef(bootstrapRequired);
 
   useEffect(() => {
-    setClientError(null);
-    setPassword("");
-    setConfirmPassword("");
+    if (previousBootstrapRequired.current !== bootstrapRequired) {
+      setClientError(null);
+      setPassword("");
+      setConfirmPassword("");
+    }
+    previousBootstrapRequired.current = bootstrapRequired;
   }, [bootstrapRequired]);
 
   const submit = (event: FormEvent<HTMLFormElement>) => {

@@ -3,8 +3,11 @@
 Last audited: 2026-07-22
 
 FormaSpec is the product name and primary agent-facing identity used by Codex
-and other MCP-capable clients. Minimal UI is the supported compatibility
-identity; both share the same token-free `formaspec` MCP server.
+and other MCP-capable clients.
+
+> **Backward compatibility:** Minimal UI remains a legacy alias for existing
+> prompts and integrations. Use FormaSpec for all new work. Both identities
+> share the same token-free `formaspec` MCP server.
 
 ## Operational status
 
@@ -60,9 +63,10 @@ Local source installer entry point:
 
 Both installers perform the available requirement checks, install the frozen
 workspace dependencies, build the CLI and local bridge, start FormaSpec, start
-the loopback bridge, detect Codex, and configure the managed version-0.2.0
-FormaSpec and Minimal UI integrations when Codex is available. `--yes` grants
-that explicit setup authorization without further prompts.
+the loopback bridge, detect Codex, and configure the primary managed
+version-0.2.0 FormaSpec integration plus the Minimal UI legacy compatibility
+assets when Codex is available. `--yes` grants that explicit setup
+authorization without further prompts.
 
 The source installer currently needs Node.js 24 or newer and pnpm 11.9 even
 when the selected application runtime is Docker, because `formaspecctl` and the
@@ -307,12 +311,20 @@ The resulting setup is:
 - MCP server ID: `formaspec`;
 - local bridge URL: `http://127.0.0.1:4312/mcp`;
 - upstream FormaSpec MCP URL: `http://127.0.0.1:4310/mcp` by default;
-- Codex mentions: `[@FormaSpec](plugin://formaspec@formaspec)` and
-  `[@Minimal UI](plugin://minimal-ui@formaspec)`;
-- installed managed identities: FormaSpec and Minimal UI, both version 0.2.0;
-- natural-language triggers prioritize “Use FormaSpec,” “Design this with
-  FormaSpec,” and “Refine this selection with FormaSpec,” plus the corresponding
-  Minimal UI selection and redesign variants.
+- primary Codex mention: `[@FormaSpec](plugin://formaspec@formaspec)`;
+- installed managed identity: FormaSpec version 0.2.0;
+- backward-compatibility asset: the managed Minimal UI version-0.2.0 alias,
+  including `[@Minimal UI](plugin://minimal-ui@formaspec)`, remains installed
+  for existing prompts;
+- recommended natural-language triggers: “Use FormaSpec,” “Design this with
+  FormaSpec,” and “Refine this selection with FormaSpec.”
+
+For a website-created task opened with **Submit to @FormaSpec**, Codex claims
+the task, previews the requested change, inspects the PNG, runs linting, and
+transitions to `awaiting_approval` with the exact `previewId`. It does not
+commit or complete the task. The human **Commit** or **Discard** action in
+FormaSpec is the approval boundary. Direct non-task MCP work may still call
+`design_commit_preview` after the client's normal write approval.
 
 The Codex MCP configuration contains no bearer token. Administration creates
 the scoped, expiring connection and one-time nonce. The loopback bridge submits

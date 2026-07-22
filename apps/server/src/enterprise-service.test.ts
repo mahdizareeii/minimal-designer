@@ -575,6 +575,43 @@ describe("agent pairing and revocation", () => {
     }
   });
 
+  it("replaces the legacy Minimal UI managed connection when FormaSpec is paired", () => {
+    const opened = setup();
+    try {
+      const legacyChallenge = opened.enterprise.createAgentConnection("local", {
+        adapter: "codex",
+        displayName: "Codex — Minimal UI",
+        scopes: ["design:read"],
+      });
+      const legacy = opened.enterprise.pairAgentConnection(legacyChallenge.nonce);
+      const unrelatedChallenge = opened.enterprise.createAgentConnection("local", {
+        adapter: "codex",
+        displayName: "Independent Codex bridge",
+        scopes: ["design:read"],
+      });
+      const replacement = opened.enterprise.createAgentConnection("local", {
+        adapter: "codex",
+        displayName: "Codex — FormaSpec",
+        scopes: ["design:read"],
+        replaceExisting: true,
+      });
+
+      const statuses = new Map(opened.enterprise.listAgentConnections("local").map((connection) => [
+        connection.id,
+        connection.status,
+      ]));
+      expect(statuses.get(legacy.connection.id)).toBe("revoked");
+      expect(statuses.get(unrelatedChallenge.connection.id)).toBe("pending");
+      expect(statuses.get(replacement.connection.id)).toBe("pending");
+      expect(captureThrown(() => opened.enterprise.resolveGrantActorId(legacy.grant.token))).toMatchObject({
+        code: "AUTH_REQUIRED",
+        statusCode: 401,
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
   it("keeps replaced grants invalid after reopening a file-backed database", () => {
     const filename = databasePath();
     const opened = setup(filename);

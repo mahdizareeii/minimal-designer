@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   applyOperations,
@@ -55,6 +55,40 @@ describe("style conversion", () => {
     expect(textFontFamilyStack("Inter", "Hello فارسی")).toBe("Vazirmatn, Inter, system-ui, sans-serif");
     expect(textFontFamilyStack("Vazirmatn", "فارسی")).toBe("Vazirmatn, Inter, system-ui, sans-serif");
     expect(textFontFamilyStack("Company Sans", "نسخه ۲")).toBe("Company Sans, Vazirmatn, Inter, system-ui, sans-serif");
+  });
+
+  it("matches bundled font identifiers independently of the host locale", () => {
+    const localeLowerCase = vi.spyOn(String.prototype, "toLocaleLowerCase").mockImplementation(function (this: string) {
+      return String(this).replaceAll("I", "ı").toLowerCase();
+    });
+    try {
+      expect(textFontFamilyStack("Inter", "Hello فارسی")).toBe("Vazirmatn, Inter, system-ui, sans-serif");
+      expect(textFontFamilyStack("Inter", "Hello world")).toBe("Inter, Vazirmatn, system-ui, sans-serif");
+    } finally {
+      localeLowerCase.mockRestore();
+    }
+  });
+
+  it("applies the Persian fallback after resolving a token-backed font family", () => {
+    const ids = createSequentialIdFactory("fonttoken");
+    const document = createStarterDocument({ idFactory: ids });
+    const fontTokenId = ids("token");
+    document.tokens[fontTokenId] = {
+      id: fontTokenId,
+      name: "Persian product font",
+      path: "font.family.persian",
+      kind: "font_family",
+      value: "Vazirmatn",
+      archived: false,
+      metadata: {},
+    };
+    const text = createTextNode({
+      content: "Android Courier — داشبورد فارسی",
+      direction: "rtl",
+      style: { typography: { font_family: { token_id: fontTokenId }, font_size: 18 } },
+    }, ids);
+
+    expect(nodeToCss(text, document).fontFamily).toBe("Vazirmatn, Inter, system-ui, sans-serif");
   });
 
   it("resolves tokens and converts layout/style into React-compatible CSS", () => {

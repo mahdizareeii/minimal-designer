@@ -73,7 +73,7 @@ export function managedBackupRestoreCommand(backupId: string): string {
   if (!/^backup_[a-f0-9]{40}$/.test(backupId)) {
     throw new Error("The managed backup ID is not safe to use in a restore command.");
   }
-  return `pnpm formaspecctl backup restore --backup-id ${backupId} --yes`;
+  return `formaspecctl backup restore --backup-id ${backupId} --yes`;
 }
 
 function assertSafePairingChallenge(challenge: AgentPairingChallenge): void {
@@ -85,7 +85,7 @@ function assertSafePairingChallenge(challenge: AgentPairingChallenge): void {
 
 export function codexPairingCommand(challenge: AgentPairingChallenge): string {
   assertSafePairingChallenge(challenge);
-  return `./designer --yes agent connect codex --pairing-nonce ${challenge.nonce} --connection-id ${challenge.connection.id}`;
+  return `formaspecctl --yes agent connect codex --pairing-nonce ${challenge.nonce} --connection-id ${challenge.connection.id}`;
 }
 
 export function codexPairingLink(challenge: AgentPairingChallenge): string {
@@ -337,7 +337,8 @@ export function Administration() {
               <code>{pairingCommand}</code>
               <button className="icon-button" title="Copy one-time pairing command" aria-label="Copy one-time Codex pairing command" onClick={() => void copyText(pairingCommand).then(() => setNotice("One-time Codex pairing command copied."))}><Copy size={14} /></button>
             </div> : <div className="pairing-link"><KeyRound size={13} /><span>Choose Connect Codex to FormaSpec to issue the short-lived pairing command required by authenticated FormaSpec.</span></div>}
-            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>Pairing is ready. Use this direct click so the browser can open the installed FormaSpec handler; the fallback command expires with it and contains no bearer grant.</span><a className="button button-primary" href={pairingLink}>Finish FormaSpec connection</a></div>}
+            {pairingCommand && <div className="pairing-link"><KeyRound size={13} /><span>Installed users run <code>formaspecctl</code> from PATH. A source checkout may use <code>./designer</code> only as the compatibility wrapper.</span></div>}
+            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>Pairing is ready. Use this direct click so the browser can open the installed FormaSpec handler; the fallback command expires with it and contains no bearer grant.</span><a className="button button-primary" href={pairingLink} rel="noopener noreferrer">Finish FormaSpec connection</a></div>}
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading agent connections…</div> : connections.length === 0 ? (
                 <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@FormaSpec](plugin://formaspec@formaspec).</span></div>
@@ -412,7 +413,7 @@ export function Administration() {
 
         {canAdministerOrganization !== false && <section className="administration-card import-validator-card" id="project-import" aria-labelledby="project-recovery-title">
           <div className="administration-card-heading">
-            <div><span><Upload size={18} /></span><div><h2 id="project-recovery-title">Import one editable project</h2><p>Non-destructive project import: choose a local .formaspec.zip bundle, validate it without mutation, then preserve IDs or create a deterministic clone.</p></div></div>
+            <div><span><Upload size={18} /></span><div><h2 id="project-recovery-title">Import one editable project</h2><p>Non-destructive V1 or V2 project import: choose a local .formaspec.zip bundle, validate it without mutation, then preserve IDs or create a deterministic clone.</p></div></div>
             <label className={`button button-secondary ${busy ? "is-disabled" : ""}`}><Upload size={14} /> Select .formaspec.zip<input type="file" accept=".zip,.formaspec.zip,application/zip" hidden disabled={busy !== null} onChange={(event) => {
               const file = event.target.files?.[0];
               event.currentTarget.value = "";

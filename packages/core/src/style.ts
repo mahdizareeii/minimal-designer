@@ -57,7 +57,7 @@ const ARABIC_SCRIPT = /[\u0600-\u06ff\u0750-\u077f\u0870-\u089f\u08a0-\u08ff\ufb
  */
 export function textFontFamilyStack(declaredFamily: string, content: string): string {
   const family = declaredFamily.trim();
-  const normalized = family.toLocaleLowerCase();
+  const normalized = family.toLowerCase();
   const containsArabicScript = ARABIC_SCRIPT.test(content);
   if (normalized === "vazirmatn" || normalized === "vazirmatn variable") {
     return "Vazirmatn, Inter, system-ui, sans-serif";

@@ -387,23 +387,25 @@ Do not start a production rollout or V2 head migration until every item passes:
   `error.details` is the only bounded generic JSON envelope. Dynamic
   handoff/redesign scopes have dedicated focused coverage.
   `design_system_component_insert_preview` resolves only the exact pinned
-  release, returns PNG plus source/release/instance metadata, and commits only
-  through `design_commit_preview`; generic operations reject the server-only
-  insertion record. The current 108-route application authorization run passes
-  with zero uncovered.
+  release and returns PNG plus source/release/instance metadata. Direct
+  non-task requests commit only through `design_commit_preview` after write
+  approval; website tasks stop at `awaiting_approval` for human commit or
+  discard. Generic operations reject the server-only insertion record. The
+  current 108-route application authorization run passes with zero uncovered.
 - [x] Agent task inputs are immutable and transitions are append-only.
 - [x] Claim/progress/complete/cancel/expiry/base-version/output validation pass
   in service and HTTP/MCP integration tests.
 - [x] Dashboard and editor prompt boxes create tasks and never call an embedded
   AI API.
 - [x] One explicit Codex authorization configures, verifies, and installs the
-  managed version-0.2.0 FormaSpec and Minimal UI integrations without a token
-  in generated TOML.
-- [x] Codex recognizes “Use FormaSpec” and “Use Minimal UI” through the managed
-  skills/plugins and the `[@FormaSpec](plugin://formaspec@formaspec)` and
-  `[@Minimal UI](plugin://minimal-ui@formaspec)` mentions. Managed content is
-  refreshed only after ownership markers verify; unmanaged content is
-  preserved. Both identities share the token-free `formaspec` MCP server.
+  primary managed version-0.2.0 FormaSpec integration plus the Minimal UI
+  legacy compatibility assets without a token in generated TOML.
+- [x] Codex recognizes the recommended “Use FormaSpec” trigger and
+  `[@FormaSpec](plugin://formaspec@formaspec)` mention. The managed
+  “Use Minimal UI” and `[@Minimal UI](plugin://minimal-ui@formaspec)` aliases
+  remain tested only for backward compatibility. Managed content is refreshed
+  only after ownership markers verify; unmanaged content is preserved. Both
+  identities share the token-free `formaspec` MCP server.
 - [x] Agent pairing nonce, scope, project restriction, expiry, reconnect, and
   immediate revocation tests pass.
 - [x] Unsupported MCP clients receive safe generic instructions; unknown
@@ -413,10 +415,11 @@ Do not start a production rollout or V2 head migration until every item passes:
   base/proposed versions and hashes, exact commit, and atomic discard/preview
   expiry. Expired/read-failed previews clear stale approval state, PNG failures
   expose Retry, and commit is disabled until the persisted PNG loads.
-- [x] Current release E2E passes 1/1 and live acceptance proves the product-
-  manager-to-Codex preview/render/commit/task-completion path with exact document
-  and hash equality. The complete schema-16 20-step scenario passes locally;
-  hosted supported-OS retention remains open.
+- [x] Current release E2E passes 1/1 and covers the product-manager-to-Codex
+  preview/render/website-approval/commit/task-completion path. Retained live
+  exact-preview acceptance separately proves exact document and hash equality.
+  The complete schema-16 20-step scenario passes locally; hosted supported-OS
+  retention remains open.
 
 ## Phase 4 and 5 gate
 
