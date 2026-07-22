@@ -39,6 +39,13 @@ pnpm release:evidence:macos:verify
 pnpm release:evidence:macos:gate
 ```
 
+The standalone packaged-runtime contract suite currently passes 11/11. For a
+fresh current-source payload it requires both managed version-0.2.0 identities
+(FormaSpec and Minimal UI), both standalone and plugin-contained skills, both
+plugin manifests, and one credential-free `formaspec` MCP entry targeting
+`http://127.0.0.1:4312/mcp`. This contract does not make the retained
+schema-12 PKG current or installed.
+
 `generate` always retains the evidence when the artifact is structurally valid.
 `verify` recalculates the package evidence and passes only when the checked
 files are current. `gate` additionally fails while any release blocker remains.
@@ -53,13 +60,16 @@ pnpm ci:macos-pkg-runtime-smoke --pkg <unsigned.pkg> --output <new-evidence-dire
 ```
 
 The smoke invokes only `pkgutil` inspection/private expansion and the extracted
-Node runtime. It starts the extracted API, renderer, and CLI against private
-runtime/data/backup/log/support directories; verifies schema 12, a real
-Playwright PNG, the exact 51-tool and 25-resource MCP inventories, migration,
-backup, and support-bundle path behavior; then terminates process groups and
-removes the private tree. It never invokes package installation, LaunchAgents,
-Keychain, Codex, protocol handlers, or a browser opener. This is stronger
-packaged-byte evidence, not privileged lifecycle or renderer-egress proof.
+Node runtime. For a fresh current-source package it starts the extracted API,
+renderer, and CLI against private runtime/data/backup/log/support directories;
+verifies schema 16, a real Playwright PNG, the current 52-tool/25-resource MCP
+inventory, both version-0.2.0 plugin identities and their token-free loopback
+MCP configuration, migration, backup, and support-bundle path behavior; then
+terminates process groups and removes the private tree. It never invokes
+package installation, LaunchAgents, Keychain, Codex, protocol handlers, or a
+browser opener. This is stronger packaged-byte evidence, not privileged
+lifecycle or renderer-egress proof. The retained schema-12 checkpoint remains
+verified against its own historical 51-tool/25-resource payload below.
 
 The main/manual-only `.github/workflows/macos-native-packaging.yml` performs the
 build, source evidence, package evidence, exact expected blocker check, and

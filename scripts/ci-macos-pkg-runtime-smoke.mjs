@@ -17,7 +17,7 @@ import {
 export const MACOS_RUNTIME_SMOKE_CONTRACT = Object.freeze({
   nodeVersion: "v24.14.0",
   playwrightRevision: "1228",
-  schemaVersion: 13,
+  schemaVersion: 16,
   mcpProtocolVersion: "2025-06-18",
   mcpToolCount: 52,
   mcpResourceCount: 25,
@@ -432,72 +432,103 @@ export function inspectBrowserPayload(browserRoot, expectedRevision, architectur
 
 export function inspectManagedCodexAssets(assetsRoot) {
   const root = requireContainedDirectory(assetsRoot, assetsRoot, "Packaged FormaSpec Codex asset root");
-  for (const relativePath of [
-    "skills/minimal-ui",
-    "codex-marketplace/plugins/minimal-ui",
-  ]) {
-    if (fs.existsSync(path.join(root, ...relativePath.split("/")))) {
-      throw new Error(`The package still contains the legacy managed Codex path ${relativePath}.`);
-    }
-  }
+  const pluginVersion = "0.2.0";
+  const identities = [
+    {
+      skillName: "formaspec",
+      pluginName: "formaspec",
+      pluginId: "formaspec@formaspec",
+      displayName: "FormaSpec",
+      mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+    },
+    {
+      skillName: "minimal-ui",
+      pluginName: "minimal-ui",
+      pluginId: "minimal-ui@formaspec",
+      displayName: "Minimal UI",
+      mention: "[@Minimal UI](plugin://minimal-ui@formaspec)",
+    },
+  ];
   const requiredFiles = [
-    "skills/formaspec/SKILL.md",
-    "skills/formaspec/agents/openai.yaml",
     "codex-marketplace/.agents/plugins/marketplace.json",
-    "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json",
-    "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
-    "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml",
+    ...identities.flatMap((identity) => [
+      `skills/${identity.skillName}/SKILL.md`,
+      `skills/${identity.skillName}/agents/openai.yaml`,
+      `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`,
+      `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`,
+      `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
+    ]),
   ];
   for (const relativePath of requiredFiles) {
     requireContainedRegular(root, path.join(root, ...relativePath.split("/")), `Packaged Codex asset ${relativePath}`);
-  }
-  const plugin = readBoundedJson(
-    path.join(root, "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json"),
-    256 * 1024,
-    "Packaged FormaSpec Codex plugin manifest",
-  );
-  if (plugin?.name !== "formaspec" || plugin?.interface?.displayName !== "FormaSpec") {
-    throw new Error("Packaged Codex plugin identity is not FormaSpec.");
   }
   const marketplace = readBoundedJson(
     path.join(root, "codex-marketplace/.agents/plugins/marketplace.json"),
     256 * 1024,
     "Packaged FormaSpec Codex marketplace manifest",
   );
-  const managedEntries = Array.isArray(marketplace?.plugins)
-    ? marketplace.plugins.filter((entry) => entry?.name === "formaspec")
-    : [];
   if (
     marketplace?.name !== "formaspec"
     || marketplace?.interface?.displayName !== "FormaSpec"
-    || managedEntries.length !== 1
-    || managedEntries[0]?.source?.source !== "local"
-    || managedEntries[0]?.source?.path !== "./plugins/formaspec"
-  ) throw new Error("Packaged Codex marketplace identity is not formaspec@formaspec.");
-  for (const relativePath of [
-    "skills/formaspec/SKILL.md",
-    "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
-  ]) {
-    const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
-    if (!/^name:\s*formaspec\s*$/mu.test(contents)) {
-      throw new Error(`Packaged Codex skill identity is stale: ${relativePath}`);
+    || !Array.isArray(marketplace?.plugins)
+    || marketplace.plugins.length !== identities.length
+  ) throw new Error("Packaged Codex marketplace must expose exactly the FormaSpec and Minimal UI identities.");
+
+  for (const identity of identities) {
+    const pluginPath = `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`;
+    const plugin = readBoundedJson(
+      path.join(root, ...pluginPath.split("/")),
+      256 * 1024,
+      `Packaged ${identity.displayName} Codex plugin manifest`,
+    );
+    if (
+      plugin?.name !== identity.pluginName
+      || plugin?.version !== pluginVersion
+      || plugin?.interface?.displayName !== identity.displayName
+    ) {
+      throw new Error(`Packaged Codex plugin identity is not ${identity.pluginId} at ${pluginVersion}.`);
+    }
+
+    const managedEntries = marketplace.plugins.filter((entry) => entry?.name === identity.pluginName);
+    if (
+      managedEntries.length !== 1
+      || managedEntries[0]?.source?.source !== "local"
+      || managedEntries[0]?.source?.path !== `./plugins/${identity.pluginName}`
+      || managedEntries[0]?.policy?.installation !== "AVAILABLE"
+      || managedEntries[0]?.policy?.authentication !== "ON_INSTALL"
+      || managedEntries[0]?.category !== "Productivity"
+    ) throw new Error(`Packaged Codex marketplace identity is not ${identity.pluginId}.`);
+
+    for (const relativePath of [
+      `skills/${identity.skillName}/SKILL.md`,
+      `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`,
+    ]) {
+      const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
+      const escapedSkillName = identity.skillName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      if (!new RegExp(`^name:\\s*${escapedSkillName}\\s*$`, "mu").test(contents)) {
+        throw new Error(`Packaged Codex skill identity is stale: ${relativePath}`);
+      }
+    }
+
+    for (const relativePath of [
+      `skills/${identity.skillName}/agents/openai.yaml`,
+      `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
+    ]) {
+      const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
+      const escapedDisplayName = identity.displayName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const escapedSkillName = identity.skillName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      if (!new RegExp(`^\\s*display_name:\\s*["']${escapedDisplayName}["']\\s*$`, "mu").test(contents)
+        || !new RegExp(`^\\s*default_prompt:\\s*["'][^"']*\\$${escapedSkillName}\\b[^"']*["']\\s*$`, "mu").test(contents)) {
+        throw new Error(`Packaged Codex skill metadata is stale: ${relativePath}`);
+      }
     }
   }
-  for (const relativePath of [
-    "skills/formaspec/agents/openai.yaml",
-    "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml",
-  ]) {
-    const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
-    if (!/^\s*display_name:\s*["']FormaSpec["']\s*$/mu.test(contents)
-      || !/^\s*default_prompt:\s*["'][^"']*\$formaspec\b[^"']*["']\s*$/mu.test(contents)) {
-      throw new Error(`Packaged Codex skill metadata is stale: ${relativePath}`);
-    }
-  }
+
   return {
-    skillName: "formaspec",
-    pluginId: "formaspec@formaspec",
-    displayName: "FormaSpec",
-    mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+    marketplaceName: "formaspec",
+    marketplaceDisplayName: "FormaSpec",
+    pluginVersion,
+    identities,
   };
 }
 

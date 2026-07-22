@@ -45,14 +45,17 @@ ticket over its private control endpoint. The bridge posts only `{ "nonce":
 "…" }` to exact `POST /api/agent-connections/pair`, verifies the optional
 expected connection ID, verifies MCP and the returned authorization context,
 then stores the upstream scoped grant in the OS credential store. It writes a
-credential-free `formaspec` MCP entry, installs the managed FormaSpec
-skill/plugin, and verifies Codex configuration.
+credential-free `formaspec` MCP entry, installs the managed version-0.2.0
+FormaSpec and Minimal UI skills/plugins, and verifies Codex configuration.
 
-Canonical installation completes before compatibility cleanup. A legacy
-`minimal-ui` skill or plugin is removed only when its own
-`.formaspec-managed.json` marker proves ownership by `formaspecctl` schema 1;
-unmanaged legacy content is left untouched. The connector never overwrites an
-unmanaged canonical `formaspec` skill or marketplace.
+Canonical installation completes before managed compatibility assets are
+refreshed. Older `minimal-ui` content is replaced only when its own
+`.formaspec-managed.json` marker proves ownership by `formaspecctl`; unmanaged
+legacy content is left untouched. The connector never overwrites an unmanaged
+`formaspec` or `minimal-ui` skill/plugin/marketplace. Both current identities
+share the one token-free MCP entry and can be mentioned as
+`[@FormaSpec](plugin://formaspec@formaspec)` or
+`[@Minimal UI](plugin://minimal-ui@formaspec)` after starting a new Codex task.
 
 Only `/api/agent-connections/pair` is available to the headless bridge without
 a browser session or trusted identity. Creating a connection, reconnecting it,

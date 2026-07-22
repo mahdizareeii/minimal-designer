@@ -75,8 +75,10 @@ function createProject(application: DesignerApplication, key: string, name = "Co
 }
 
 function firstEditableNode(document: ReturnType<DesignerApplication["service"]["getDesign"]>["document"]) {
-  const node = Object.values(document.nodes).find((candidate) => candidate.type === "text")
-    ?? Object.values(document.nodes)[0];
+  const editable = Object.values(document.nodes).filter((candidate) => (
+    candidate.type !== "component" && !candidate.archived && !candidate.locked
+  ));
+  const node = editable.find((candidate) => candidate.type === "text") ?? editable[0];
   if (!node) throw new Error("Starter document did not contain a node.");
   return node;
 }

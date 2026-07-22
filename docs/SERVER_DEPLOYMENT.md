@@ -137,11 +137,16 @@ schema-12 image, built from source identity
 `local-uncommitted-final437-eventauth-sqlbounded-cli`, is
 `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f` and
 also passed a same-machine copied-bundle restore into an independently
-  mounted clean target with exact state/render equality. Current schema-15 source
-  passes the seven-package suite 840/840, launcher 225/225, all workspace
-  typechecks/builds, installer 71/71 plus typecheck/build, Compose configuration,
-  targeted session/browser/preview integration, and macOS runtime-smoke contracts
-  11/11. No real schema-15 server-mode
+mounted clean target with exact state/render equality. Current schema-16 source
+passes the seven-package suite 842/842 (core 59, server 467, web 91, CLI 96,
+local bridge 20, Workspace Bridge 37, and installer 72), launcher 225/225, all
+workspace typechecks/builds, Compose configuration, targeted session/browser/
+preview integration, Chromium and Firefox/WebKit alignment 12/12 each, visual
+regression 7/7, the 1,000-node budgets, and macOS runtime-smoke contracts
+11/11. Current local image
+`sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`
+also passes deterministic restart rendering, renderer egress denial, and a
+same-host independent-clean-project copied-bundle restore. No real schema-16 server-mode
 proxy, remote-host/network/TLS/off-site restore, or privileged packaged
 lifecycle has run, so this remains an implemented foundation rather than a
 release-qualified service.

@@ -48,6 +48,35 @@ function assign(style: CssStyle, property: string, value: string | number | unde
   if (value !== undefined) style[property] = value;
 }
 
+const ARABIC_SCRIPT = /[\u0600-\u06ff\u0750-\u077f\u0870-\u089f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/u;
+
+/**
+ * Keep the canonical font value editable while making the two bundled
+ * families a deterministic fallback stack. Persian/Arabic text prefers
+ * Vazirmatn even when a legacy node still declares Inter.
+ */
+export function textFontFamilyStack(declaredFamily: string, content: string): string {
+  const family = declaredFamily.trim();
+  const normalized = family.toLocaleLowerCase();
+  const containsArabicScript = ARABIC_SCRIPT.test(content);
+  if (normalized === "vazirmatn" || normalized === "vazirmatn variable") {
+    return "Vazirmatn, Inter, system-ui, sans-serif";
+  }
+  if (normalized === "inter" || normalized === "inter variable") {
+    return containsArabicScript
+      ? "Vazirmatn, Inter, system-ui, sans-serif"
+      : "Inter, Vazirmatn, system-ui, sans-serif";
+  }
+  if (!family) {
+    return containsArabicScript
+      ? "Vazirmatn, Inter, system-ui, sans-serif"
+      : "Inter, Vazirmatn, system-ui, sans-serif";
+  }
+  return containsArabicScript
+    ? `${family}, Vazirmatn, Inter, system-ui, sans-serif`
+    : `${family}, Inter, Vazirmatn, system-ui, sans-serif`;
+}
+
 export function layoutToCss(
   layout: NodeLayout,
   source: TokenSource,
@@ -181,6 +210,9 @@ export function nodeToCss(
   options: { parentLayoutMode?: LayoutMode; includePosition?: boolean } = {},
 ): CssStyle {
   const css = { ...layoutToCss(node.layout, document, options), ...styleToCss(node.style, document) };
+  if (node.type === "text" && typeof css.fontFamily === "string") {
+    css.fontFamily = textFontFamilyStack(css.fontFamily, node.content);
+  }
   if (node.type === "frame" && node.clip_content && node.style.overflow === undefined) {
     css.overflow = "hidden";
   }

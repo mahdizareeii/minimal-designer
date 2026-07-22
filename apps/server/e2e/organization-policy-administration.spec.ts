@@ -72,3 +72,49 @@ test("organization policy is editable through the guided administration form", a
     /"minimumTouchTargetPx": 48/,
   );
 });
+
+test("administration remains readable and uses one page scroll surface on a small viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 640 });
+  await page.goto("/administration");
+  await expect(page.getByText("FormaSpec Administration", { exact: true })).toBeVisible();
+
+  const shell = page.locator(".administration-shell");
+  const scrollMetrics = await shell.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: style.overflowY,
+    };
+  });
+  expect(scrollMetrics.overflowY).toBe("auto");
+  expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+
+  const nestedLists = await page.locator(".administration-list").evaluateAll((elements) => elements.map((element) => {
+    const style = getComputedStyle(element);
+    return { maxHeight: style.maxHeight, overflowY: style.overflowY };
+  }));
+  expect(nestedLists.length).toBeGreaterThan(0);
+  expect(nestedLists.every((style) => style.maxHeight === "none" && style.overflowY === "visible")).toBe(true);
+
+  const tooSmall = await shell.evaluate((element) => {
+    const candidates = element.querySelectorAll<HTMLElement>(
+      "button, input, select, textarea, p, small, label, code, span, strong, h2, h3",
+    );
+    return [...candidates].flatMap((candidate) => {
+      const bounds = candidate.getBoundingClientRect();
+      if (bounds.width === 0 || bounds.height === 0) return [];
+      const size = Number.parseFloat(getComputedStyle(candidate).fontSize);
+      const control = ["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(candidate.tagName);
+      const emphasized = ["STRONG", "H2", "H3"].includes(candidate.tagName);
+      const minimum = control || emphasized ? 13 : 12;
+      return size + 0.01 < minimum
+        ? [{ tag: candidate.tagName, text: candidate.textContent?.trim().slice(0, 80) ?? "", size, minimum }]
+        : [];
+    });
+  });
+  expect(tooSmall).toEqual([]);
+
+  await shell.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.getByRole("heading", { name: "Import & project recovery" })).toBeVisible();
+});

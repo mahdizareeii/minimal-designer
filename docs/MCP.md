@@ -1,7 +1,8 @@
 # MCP
 
-FormaSpec exposes Streamable HTTP at `/mcp`. The server ID and display name are
-`formaspec` and **FormaSpec**, and resources use `formaspec://`.
+FormaSpec exposes Streamable HTTP at `/mcp`. The server ID is `formaspec`, its
+primary display identity is **FormaSpec**, the supported compatibility identity
+is **Minimal UI**, and resources use `formaspec://`.
 
 For local Codex, connect through the token-free loopback bridge:
 
@@ -33,10 +34,11 @@ managed scope and project sets exactly match current policy; missing, extra,
 stale, malformed, or unavailable context triggers one-time re-pairing. The
 credential still never enters Codex configuration.
 
-The managed mention is:
+The two managed version-0.2.0 mentions share this one token-free MCP server:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec)
+[@Minimal UI](plugin://minimal-ui@formaspec)
 ```
 
 ## Required workflow
@@ -120,7 +122,9 @@ annotations contradict that inventory.
 
 The corresponding protected non-MCP source manifest contains 108 routes: 54
 project-scoped, 48 organization-scoped, and six explicit exceptions. The
-current 678-test application run covers exact MCP/resource inventory, route
+current schema-16 seven-package run passes 842/842 (core 59, server 467, web
+91, CLI 96, local bridge 20, Workspace Bridge 37, and installer 72) and covers
+exact MCP/resource inventory, route
 closure, generated authentication rejection, and direct behavioral
 authorization across all 108 routes with zero uncovered, including the
 component library/insertion interfaces.
@@ -155,6 +159,6 @@ represented as opaque object/array fields beneath the strict per-tool envelope;
 promoting those domain payloads to shared schemas remains incremental hardening.
 These residuals and the broader public-interface matrix keep the release gate
 at **NO-GO**. Installed/link verification now confirms `drizzle-orm` 0.45.2;
-the 678-test MCP/application run and 52-tool/25-resource/108-route contracts
-pass against it. Remaining advisories and hosted/native release evidence remain
+the schema-16 842-test run and 52-tool/25-resource/108-route contracts pass
+against it. Remaining advisories and hosted/native release evidence remain
 open.

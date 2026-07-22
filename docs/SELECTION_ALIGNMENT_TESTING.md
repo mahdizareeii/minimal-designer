@@ -54,17 +54,16 @@ pnpm test:e2e:alignment:cross-browser
 The browser workflow installs the pinned runtimes and retains traces/screenshots
 under a `NO-GO-*` artifact. The Docker workflow additionally runs the suite
 against the exact image it just built and retains
-`NO-GO-cross-browser-docker-*`. The final reviewed local image
-`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`
-passed Firefox/WebKit 12/12 once in a network-disabled, read-only, non-root
-Linux run; its summary is
-`/private/tmp/formaspec-cross-browser-docker-20260721-final437-eventauth-sqlbounded-cli/summary.json`
-with SHA-256
-`2b723c3ddac0404bea7a1124559945ec78f69a6a6ced48923f9d170456c71b9b`.
+`NO-GO-cross-browser-docker-*`. The current schema-16 local image
+`sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`
+passes Firefox/WebKit 12/12 in a network-disabled, read-only, non-root Linux
+run. Its retained summary is
+`artifacts/ci/cross-browser-docker/summary.json` with SHA-256
+`f3bf8212ae79f1058ee3caf7c746c7bc0676c6d9d951bf3b50d1449ec68a1adf`.
 A delayed `requestAnimationFrame` initial fit could
 previously overwrite immediate user or test pan in WebKit; initial fitting now
 runs synchronously in `useLayoutEffect` once the editor root, document, and page
-exist. The immediately prior fit-sync image
+exist. A historical earlier fit-sync image
 `sha256:544a1c72cecaaf335a750a0fd4775f03a11f185e90ad441b1503dfdfa1b8ddeb`
 passed three consecutive 12/12 runs; its main summary is
 `/private/tmp/formaspec-cross-browser-docker-20260721-final430-auth106-supervision-egress-fit-sync-runtime/summary.json`,

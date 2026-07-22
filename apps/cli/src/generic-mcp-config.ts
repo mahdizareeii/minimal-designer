@@ -1,5 +1,6 @@
 export const FORMASPEC_MCP_SERVER_ID = "formaspec";
 export const FORMASPEC_MCP_DISPLAY_NAME = "FormaSpec";
+export const FORMASPEC_MCP_DISPLAY_ALIASES = ["Minimal UI"] as const;
 export const DEFAULT_FORMASPEC_BRIDGE_MCP_URL = "http://127.0.0.1:4312/mcp";
 
 export type GenericMcpConfigurationFormat = "all" | "json" | "toml";
@@ -7,6 +8,7 @@ export type GenericMcpConfigurationFormat = "all" | "json" | "toml";
 export interface GenericMcpConfiguration {
   serverId: typeof FORMASPEC_MCP_SERVER_ID;
   displayName: typeof FORMASPEC_MCP_DISPLAY_NAME;
+  displayAliases: typeof FORMASPEC_MCP_DISPLAY_ALIASES;
   transport: "streamable_http";
   url: string;
   healthUrl: string;
@@ -86,6 +88,7 @@ url = ${JSON.stringify(url)}`;
   return {
     serverId: FORMASPEC_MCP_SERVER_ID,
     displayName: FORMASPEC_MCP_DISPLAY_NAME,
+    displayAliases: FORMASPEC_MCP_DISPLAY_ALIASES,
     transport: "streamable_http",
     url,
     healthUrl: `${origin}/health`,
@@ -96,6 +99,7 @@ url = ${JSON.stringify(url)}`;
       "Copy the appropriate snippet into the client's documented MCP settings manually. FormaSpec does not edit unsupported client files.",
       "If the client uses different field names, map only the server ID, Streamable HTTP transport, and URL; do not invent authentication fields.",
       `Run the client's MCP connection test and confirm server '${FORMASPEC_MCP_SERVER_ID}' is available as ${FORMASPEC_MCP_DISPLAY_NAME}.`,
+      "Confirm both natural-language identities are recognized: 'Use FormaSpec' and 'Use Minimal UI'.",
       "List MCP resources and confirm formaspec://schema/v1 and formaspec://schema/v2 are readable.",
       "Keep write-tool approval enabled. Do not add a bearer token or Authorization header; the loopback bridge holds the scoped upstream grant.",
     ],
@@ -185,6 +189,7 @@ export function runGenericMcpConfigCli(
     io.stdout(`FormaSpec (${configuration.displayName}) generic MCP configuration`);
     io.stdout("This output is advisory and print-only; no client configuration file was read or changed.");
     io.stdout(`Server ID: ${configuration.serverId}`);
+    io.stdout(`Agent identities: ${[configuration.displayName, ...configuration.displayAliases].join(", ")}`);
     io.stdout(`Transport: Streamable HTTP (${configuration.transport})`);
     io.stdout(`Endpoint: ${configuration.url}`);
     io.stdout("");

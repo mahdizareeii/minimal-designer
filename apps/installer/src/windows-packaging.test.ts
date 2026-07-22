@@ -113,14 +113,40 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
     "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
     "",
   ].join("\n"));
+  writeFixture(payload, "app/apps/cli/assets/skills/minimal-ui/SKILL.md", [
+    "---",
+    "name: minimal-ui",
+    "description: Fixture managed Minimal UI alias skill.",
+    "---",
+    "",
+  ].join("\n"));
+  writeFixture(payload, "app/apps/cli/assets/skills/minimal-ui/agents/openai.yaml", [
+    "interface:",
+    "  display_name: \"Minimal UI\"",
+    "  default_prompt: \"Use $minimal-ui to design this interface with Minimal UI.\"",
+    "",
+  ].join("\n"));
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/.agents/plugins/marketplace.json", `${JSON.stringify({
     name: "formaspec",
     interface: { displayName: "FormaSpec" },
-    plugins: [{ name: "formaspec", source: { source: "local", path: "./plugins/formaspec" } }],
+    plugins: [
+      {
+        name: "formaspec",
+        source: { source: "local", path: "./plugins/formaspec" },
+        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+        category: "Productivity",
+      },
+      {
+        name: "minimal-ui",
+        source: { source: "local", path: "./plugins/minimal-ui" },
+        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+        category: "Productivity",
+      },
+    ],
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
     name: "formaspec",
-    version: "1.2.3",
+    version: "0.2.0",
     interface: { displayName: "FormaSpec" },
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", [
@@ -137,6 +163,28 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
       "interface:",
       "  display_name: \"FormaSpec\"",
       "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
+      "",
+    ].join("\n"),
+  );
+  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/.codex-plugin/plugin.json", `${JSON.stringify({
+    name: "minimal-ui",
+    version: "0.2.0",
+    interface: { displayName: "Minimal UI" },
+  }, null, 2)}\n`);
+  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/skills/minimal-ui/SKILL.md", [
+    "---",
+    "name: minimal-ui",
+    "description: Fixture managed Minimal UI plugin alias skill.",
+    "---",
+    "",
+  ].join("\n"));
+  writeFixture(
+    payload,
+    "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/skills/minimal-ui/agents/openai.yaml",
+    [
+      "interface:",
+      "  display_name: \"Minimal UI\"",
+      "  default_prompt: \"Use $minimal-ui to design this interface with Minimal UI.\"",
       "",
     ].join("\n"),
   );

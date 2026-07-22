@@ -678,7 +678,13 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       baseVersion: fixture.allowed.version,
       expectedOutput: "design_preview",
     });
-    expect(createdTask.launchUrl).toBe(`formaspec://connect-agent?task=${createdTask.task.id}`);
+    const taskLaunch = new URL(createdTask.launchUrl);
+    expect(taskLaunch.protocol).toBe("codex:");
+    expect(taskLaunch.hostname).toBe("new");
+    expect([...taskLaunch.searchParams.keys()]).toEqual(["prompt"]);
+    expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${createdTask.task.id} with task_claim`);
+    expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
+    expect(taskLaunch.searchParams.get("prompt")).toContain("Do not commit it");
     for (const marker of fixture.hidden) expect(createdTaskResponse.body).not.toContain(marker);
     const taskRetry = await application.app.inject({
       method: "POST",

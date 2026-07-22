@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentPreviewPng,
   AgentTaskWorkflowCard,
+  agentTaskBriefSummary,
   agentTaskInstruction,
   agentTaskStatusMessage,
   changedNodeSummaries,
@@ -57,7 +58,7 @@ function task(overrides: Partial<AgentTaskRecord> = {}): AgentTaskRecord {
         createdAt: "2026-07-20T09:05:00.000Z",
       },
     ],
-    launchUrl: "formaspec://connect-agent?task=task_review_0001",
+    launchUrl: "codex://new?prompt=Use%20FormaSpec.%20Claim%20FormaSpec%20task%20task_review_0001.",
     ...overrides,
   };
 }
@@ -97,10 +98,12 @@ describe("agent before/after review", () => {
       message: "Connected and ready to claim tasks.",
     });
     expect(summarizeCodexConnection([], new ApiError("Forbidden", { status: 403, code: "FORBIDDEN" }), false).state).toBe("restricted");
-    expect(agentTaskStatusMessage(task({ status: "queued" }))).toContain("not claimed");
+    expect(agentTaskStatusMessage(task({ status: "queued" }))).toContain("Click Open task in Codex");
     expect(agentTaskInstruction(task())).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(agentTaskInstruction(task())).toContain("Use FormaSpec.");
-    expect(agentTaskInstruction(task())).toContain("Claim FormaSpec task task_review_0001");
+    expect(agentTaskInstruction(task())).toContain("Claim task task_review_0001 with task_claim");
+    expect(agentTaskInstruction(task())).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
+    expect(agentTaskInstruction(task())).toContain("Do not commit it");
     const launchUrl = new URL(codexTaskLaunchUrl(task()));
     expect(launchUrl.protocol).toBe("codex:");
     expect(launchUrl.hostname).toBe("new");
@@ -108,6 +111,8 @@ describe("agent before/after review", () => {
     expect(launchUrl.searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(launchUrl.searchParams.get("prompt")).toContain("task_review_0001");
     expect(codexTaskLaunchUrl(task())).toContain("%40FormaSpec");
+    expect(agentTaskBriefSummary("  Build   a checkout\nflow  ")).toBe("Build a checkout flow");
+    expect(agentTaskBriefSummary("x".repeat(400))).toHaveLength(320);
   });
 
   it("renders the returned PNG with Commit and Discard directly beneath it", () => {
@@ -156,6 +161,8 @@ describe("agent before/after review", () => {
       onOpenPlanning: () => undefined,
     }));
     expect(markup).toContain("FormaSpec rendered preview");
+    expect(markup).toContain("Submitted to @FormaSpec");
+    expect(markup).toContain("Refine checkout");
     expect(markup).toContain("Agent preview approval actions");
     expect(markup).toContain("Commit exact preview");
     expect(markup).toContain("Discard");
@@ -185,7 +192,8 @@ describe("agent before/after review", () => {
       onRetryPreviewRender: () => undefined,
       onOpenPlanning: () => undefined,
     }));
-    expect(markup).toContain("Open in Codex");
+    expect(markup).toContain("Open task in Codex");
+    expect(markup).toContain("Click Open task in Codex below");
     expect(markup).toContain("Connect or repair Codex");
     expect(markup).toContain("Copy Codex instruction");
   });

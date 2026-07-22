@@ -277,6 +277,8 @@ export const PROTECTED_NON_MCP_ROUTE_CONTRACTS = defineProtectedNonMcpRouteContr
   organization("portable_and_backup", "POST", "/api/imports"),
   organization("portable_and_backup", "GET", "/api/backups"),
   organization("portable_and_backup", "POST", "/api/backups"),
+  organization("portable_and_backup", "POST", "/api/backups/imports/validate"),
+  organization("portable_and_backup", "POST", "/api/backups/imports"),
   organization("portable_and_backup", "GET", "/api/backups/schedule"),
   organization("portable_and_backup", "PUT", "/api/backups/schedule"),
   organization("portable_and_backup", "POST", "/api/backups/schedule/run"),

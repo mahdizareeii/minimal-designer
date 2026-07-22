@@ -1024,10 +1024,13 @@ export class DesignerService {
     message?: string;
     kind?: PreviewKind;
     taskId?: string;
+    requireRenderEvidence?: boolean;
   }): RevisionResult {
     this.authorizePreviewCommit(actorId, designId, input.previewId, input.taskId);
     const scope = `design:${designId}:commit-preview`;
     this.database.cleanupPreviews();
+    // Keep enforcement policy out of the request hash so a successful commit
+    // recorded by an older server remains retryable through the MCP path.
     const normalizedInput = {
       previewId: input.previewId,
       expectedBaseVersion: input.expectedBaseVersion,
@@ -1037,6 +1040,14 @@ export class DesignerService {
       taskId: input.taskId ?? null,
     };
     return this.withIdempotency(actorId, scope, input.idempotencyKey, normalizedInput, () => {
+      if (input.requireRenderEvidence === true) {
+        this.getExactPreviewForRender(
+          actorId,
+          designId,
+          normalizedInput.previewId,
+          normalizedInput.taskId === null ? {} : { taskId: normalizedInput.taskId },
+        );
+      }
       return this.commitPreviewInTransaction(actorId, designId, {
         previewId: normalizedInput.previewId,
         expectedBaseVersion: normalizedInput.expectedBaseVersion,

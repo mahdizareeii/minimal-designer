@@ -374,6 +374,7 @@ export function ProductBriefPanel() {
     if (!designId) return;
     setStartingAgent(true);
     setError(null);
+    setReviewError(null);
     try {
       if (pendingCount > 0 || savingDesign) await saveDesign();
       const current = useDesignerStore.getState();
@@ -389,9 +390,9 @@ export function ProductBriefPanel() {
       });
       setLatestTask(task);
       clearAgentReview();
+      setCollapsed(false);
       setPanelTab("activity");
-      setNotice(`Agent task ${task.id} queued. Codex opened with the FormaSpec instruction prefilled; review it and press Send.${connectionSummary.state === "active" ? "" : " Codex may ask you to finish the connection first."}`);
-      openExternalAppLink(codexTaskLaunchUrl(task), "codex:", "new");
+      setNotice(`Task ${task.id} was submitted to @FormaSpec and is visibly queued below. Click Open task in Codex to launch it with a fresh browser gesture and the exact instruction prefilled.${connectionSummary.state === "active" ? "" : " Codex may ask you to finish the connection first."}`);
       await refreshAgentActivity();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not create the Codex task.");
@@ -423,7 +424,7 @@ export function ProductBriefPanel() {
     if (!latestTask) return;
     try {
       openExternalAppLink(codexTaskLaunchUrl(latestTask), "codex:", "new");
-      setNotice(`Opened Codex with task ${latestTask.id} prefilled. Review the instruction, then press Send.`);
+      setNotice(`Requested Codex to open task ${latestTask.id} with @FormaSpec prefilled. Review the instruction, then press Send.`);
     } catch (cause) {
       setReviewError(cause instanceof Error ? cause.message : "Codex could not be opened for this task.");
     }
@@ -567,7 +568,7 @@ export function ProductBriefPanel() {
                 {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Task {latestTask.id} · {latestTask.status}</span> : <span>Agent mention: <code>{FORMASPEC_AGENT_MENTION}</code></span>}
               </div>
               <button className="button button-secondary" disabled={!briefChanged || savingSpec || startingAgent || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
-              <button className="button button-primary" disabled={!brief.trim() || savingSpec || startingAgent || loading || Boolean(archiveReview)} onClick={() => void startWithCodex()}>{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} Start with Codex</button>
+              <button className="button button-primary" disabled={!brief.trim() || savingSpec || startingAgent || loading || Boolean(archiveReview)} onClick={() => void startWithCodex()}>{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} Submit to @FormaSpec</button>
             </div>
           </div>
 

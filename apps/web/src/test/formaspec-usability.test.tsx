@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { Administration, codexPairingCommand, managedBackupRestoreCommand } from "../components/Administration";
+import {
+  Administration,
+  agentConnectionDisplayName,
+  codexPairingCommand,
+  groupAgentConnections,
+  managedBackupRestoreCommand,
+} from "../components/Administration";
 import { TextTypographyEditor } from "../components/InspectorPanel";
 
 afterEach(() => {
@@ -16,8 +22,9 @@ describe("FormaSpec browser usability", () => {
 
     expect(markup).toContain("FormaSpec Administration");
     expect(markup).toContain("Managed backups &amp; recovery");
-    expect(markup).toContain("Import &amp; project recovery");
-    expect(markup).toContain("File-picker only");
+    expect(markup).toContain("Load a full server backup");
+    expect(markup).toContain("Import one editable project");
+    expect(markup).toContain("Project import is different from full restore");
     expect(markup).toContain("never accepts or sends an arbitrary server filesystem path");
     expect(markup).toContain('type="file"');
     expect(markup).toContain(".formaspec.zip");
@@ -51,6 +58,31 @@ describe("FormaSpec browser usability", () => {
     })).toThrow(/not safe/i);
   });
 
+  it("presents current FormaSpec connections before collapsed immutable history", () => {
+    const connection = (id: string, status: "active" | "pending" | "expired" | "revoked", displayName: string) => ({
+      id,
+      adapter: "codex" as const,
+      displayName,
+      status,
+      scopes: ["task:claim"],
+      projectIds: [],
+      principalId: status === "active" ? "principal_codex" : null,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      lastUsedAt: null,
+      createdAt: "2026-07-20T00:00:00.000Z",
+      updatedAt: `2026-07-2${id.length}T00:00:00.000Z`,
+    });
+    const active = connection("connection_active", "active", "Codex — Minimal UI");
+    const pending = connection("connection_pending", "pending", "Old Codex label");
+    const revoked = connection("connection_revoked", "revoked", "Codex — Minimal UI");
+    const expired = connection("connection_expired", "expired", "Codex — Minimal UI");
+    const grouped = groupAgentConnections([revoked, pending, expired, active]);
+
+    expect(grouped.current.map((item) => item.status)).toEqual(["active", "pending"]);
+    expect(grouped.history.map((item) => item.status)).toEqual(["expired", "revoked"]);
+    expect(agentConnectionDisplayName(active)).toBe("Codex — FormaSpec");
+  });
+
   it("renders explicit Vazirmatn, Persian, and mixed-direction typography controls", () => {
     const text = createTextNode({
       name: "Persian title",
@@ -73,10 +105,17 @@ describe("FormaSpec browser usability", () => {
 
   it("keeps scrolling and readability rules scoped to application chrome", () => {
     const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-    expect(styles).toMatch(/\.administration-shell\s*\{[^}]*height:\s*100%;[^}]*overflow-y:\s*auto;/s);
+    expect(styles).toMatch(/\.administration-shell\s*\{[^}]*height:\s*100%;[^}]*height:\s*100dvh;[^}]*overflow-y:\s*auto;/s);
+    expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*?\.administration-list\s*\{[^}]*max-height:\s*none;[^}]*overflow:\s*visible;/);
     expect(styles).toContain("Readable application chrome");
     expect(styles).toContain("These selectors intentionally exclude canvas and prototype document rendering");
+    expect(styles).toMatch(/\.administration-shell :is\(p, small, label, code, span\)[^{]*\{[^}]*font-size:\s*12px !important;/);
+    expect(styles).toMatch(/\.administration-shell :is\(button, input, select, textarea\)[^{]*\{[^}]*font-size:\s*13px !important;/);
     expect(styles).toContain(".typography-font-presets");
     expect(styles).toContain(".editor-shell :is(.editor-topbar, .left-sidebar, .right-sidebar, .editor-stage-tabs, .editor-statusbar)");
+    expect(styles).toMatch(/\.editor-shell :is\(\.editor-topbar,[^{]+:is\(button, input, select, textarea\)[^{]*\{[^}]*font-size:\s*13px !important;/);
+    expect(styles).toMatch(/\.editor-shell :is\(\.editor-topbar,[^{]+:is\(label, span, small, p, code\)[^{]*\{[^}]*font-size:\s*12px !important;/);
+    expect(styles).not.toContain(".canvas-viewport :is(button, input, select, textarea, label, span, small, p, code)");
+    expect(styles).not.toContain(".designer-node :is(button, input, select, textarea, label, span, small, p, code)");
   });
 });

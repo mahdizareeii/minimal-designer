@@ -3,6 +3,7 @@ import { PLANNING_SECTIONS } from "@designer/core";
 import { z } from "zod";
 
 import { AgentTaskTransitionRequestSchema } from "./agent-task-schema.js";
+import { agentTaskCodexLaunchUrl } from "./agent-task-launch.js";
 import {
   AGENT_CONNECTION_SCOPES,
   AGENT_TASK_EXPECTED_OUTPUTS,
@@ -34,12 +35,6 @@ function specificationPreviewResponse(result: ProductSpecificationPreviewResult)
     version: result.resultVersion,
     naturalLanguageBrief: result.specification.natural_language_brief,
   };
-}
-
-function taskLaunchUrl(taskId: string): string {
-  const url = new URL("formaspec://connect-agent");
-  url.searchParams.set("task", taskId);
-  return url.toString();
 }
 
 export function registerEnterpriseHttpRoutes(
@@ -167,13 +162,13 @@ export function registerEnterpriseHttpRoutes(
       designId: id,
       ...input,
     });
-    return reply.code(201).send({ task, launchUrl: taskLaunchUrl(task.id) });
+    return reply.code(201).send({ task, launchUrl: agentTaskCodexLaunchUrl(task.id) });
   });
 
   app.get("/api/agent-tasks/:taskId", async (request) => {
     const { taskId } = taskParams.parse(request.params);
     const task = enterprise.readAgentTask(request.actorId, taskId);
-    return { task, launchUrl: taskLaunchUrl(task.id) };
+    return { task, launchUrl: agentTaskCodexLaunchUrl(task.id) };
   });
 
   app.post("/api/agent-tasks/:taskId/claim", async (request) => {

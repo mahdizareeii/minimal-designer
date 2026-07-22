@@ -18,6 +18,7 @@ import {
   nodeToCss,
   resolveTokenValue,
   searchNodes,
+  textFontFamilyStack,
   tokensToCssVariables,
   validateDesignDocument,
 } from "./index.js";
@@ -49,6 +50,13 @@ describe("tree and search helpers", () => {
 });
 
 describe("style conversion", () => {
+  it("uses bundled deterministic fallbacks for Persian and mixed-direction text", () => {
+    expect(textFontFamilyStack("Inter", "Hello world")).toBe("Inter, Vazirmatn, system-ui, sans-serif");
+    expect(textFontFamilyStack("Inter", "Hello فارسی")).toBe("Vazirmatn, Inter, system-ui, sans-serif");
+    expect(textFontFamilyStack("Vazirmatn", "فارسی")).toBe("Vazirmatn, Inter, system-ui, sans-serif");
+    expect(textFontFamilyStack("Company Sans", "نسخه ۲")).toBe("Company Sans, Vazirmatn, Inter, system-ui, sans-serif");
+  });
+
   it("resolves tokens and converts layout/style into React-compatible CSS", () => {
     const document = createSampleDocument({ idFactory: createSequentialIdFactory("csshelp") });
     const button = Object.values(document.nodes).find((node) => node.type === "frame" && node.role === "button")!;

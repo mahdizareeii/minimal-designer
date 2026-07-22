@@ -136,10 +136,16 @@ export function styleForNode(
   const parentMode = Object.prototype.hasOwnProperty.call(options, "parentLayoutMode")
     ? options.parentLayoutMode ?? undefined
     : parentLayoutMode(document, node.id);
-  return nodeToCss(node, document, {
+  const style = nodeToCss(node, document, {
     parentLayoutMode: parentMode,
     includePosition: options.includePosition ?? true,
   }) as CSSProperties;
+  if (node.type === "text" && typeof style.fontFamily === "string") {
+    style.fontFamily = style.fontFamily
+      .replaceAll("Vazirmatn", '"Vazirmatn Variable", Vazirmatn')
+      .replaceAll("Inter", '"Inter Variable", Inter');
+  }
+  return style;
 }
 
 export function resolvedString(

@@ -1691,6 +1691,87 @@ describe("operational backup and portable bundle HTTP routes", () => {
     )).rejects.toMatchObject({ code: "PREVIEW_EXPIRED" });
   });
 
+  it("validates and registers an uploaded full backup without replacing live data", async () => {
+    const source = await localApplication();
+    const sourceBackup = await source.operations.createBackup("local");
+    const sourceBytes = await fs.promises.readFile(path.join(source.config.backupDir, sourceBackup.filename));
+    const target = await localApplication();
+    const beforeSchema = target.database.schemaVersion();
+    const beforeOrganization = target.database.sqlite.prepare(
+      "SELECT id, name FROM organizations ORDER BY id",
+    ).all();
+
+    const validationUpload = multipart(sourceBackup.filename, "application/x-tar", sourceBytes);
+    const validationResponse = await target.app.inject({
+      method: "POST",
+      url: "/api/backups/imports/validate",
+      headers: { "content-type": `multipart/form-data; boundary=${validationUpload.boundary}` },
+      payload: chunkedBody(validationUpload.body),
+    });
+    expect(validationResponse.statusCode, validationResponse.body).toBe(200);
+    const validation = validationResponse.json<{
+      valid: true;
+      validationOnly: true;
+      mutationsApplied: false;
+      bundleSha256: string;
+      sizeBytes: number;
+      destructiveRestoreRequired: true;
+      manifest: { databaseSchemaVersion: number };
+      verification: { sqliteIntegrity: "ok"; foreignKeyViolations: number };
+    }>();
+    expect(validation).toMatchObject({
+      valid: true,
+      validationOnly: true,
+      mutationsApplied: false,
+      bundleSha256: sourceBackup.bundleSha256,
+      sizeBytes: sourceBytes.length,
+      destructiveRestoreRequired: true,
+      manifest: { databaseSchemaVersion: beforeSchema },
+      verification: { sqliteIntegrity: "ok", foreignKeyViolations: 0 },
+    });
+    expect(target.database.sqlite.prepare("SELECT COUNT(*) AS count FROM backup_records").get()).toEqual({ count: 0 });
+    expect(target.database.schemaVersion()).toBe(beforeSchema);
+    expect(target.database.sqlite.prepare("SELECT id, name FROM organizations ORDER BY id").all()).toEqual(beforeOrganization);
+
+    const registerUpload = multipart(sourceBackup.filename, "application/x-tar", sourceBytes);
+    const registerResponse = await target.app.inject({
+      method: "POST",
+      url: `/api/backups/imports?expectedSha256=${validation.bundleSha256}`,
+      headers: { "content-type": `multipart/form-data; boundary=${registerUpload.boundary}` },
+      payload: chunkedBody(registerUpload.body),
+    });
+    expect(registerResponse.statusCode, registerResponse.body).toBe(201);
+    const registered = registerResponse.json<{
+      registered: true;
+      alreadyRegistered: boolean;
+      destructiveRestoreRequired: true;
+      backup: { id: string; status: string; bundleSha256: string; filename: string };
+    }>();
+    expect(registered).toMatchObject({
+      registered: true,
+      alreadyRegistered: false,
+      destructiveRestoreRequired: true,
+      backup: { status: "valid", bundleSha256: validation.bundleSha256 },
+    });
+    expect(registered.backup.filename).toMatch(/^formaspec-backup-[0-9TZ-]+\.tar$/);
+    expect(target.database.schemaVersion()).toBe(beforeSchema);
+    expect(target.database.sqlite.prepare("SELECT id, name FROM organizations ORDER BY id").all()).toEqual(beforeOrganization);
+
+    const retryUpload = multipart(sourceBackup.filename, "application/x-tar", sourceBytes);
+    const retryResponse = await target.app.inject({
+      method: "POST",
+      url: `/api/backups/imports?expectedSha256=${validation.bundleSha256}`,
+      headers: { "content-type": `multipart/form-data; boundary=${retryUpload.boundary}` },
+      payload: retryUpload.body,
+    });
+    expect(retryResponse.statusCode, retryResponse.body).toBe(200);
+    expect(retryResponse.json<{ alreadyRegistered: boolean; backup: { id: string } }>()).toMatchObject({
+      alreadyRegistered: true,
+      backup: { id: registered.backup.id },
+    });
+    expect(target.database.sqlite.prepare("SELECT COUNT(*) AS count FROM backup_records").get()).toEqual({ count: 1 });
+  });
+
   it("requires Organization Administrator permission", async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "formaspec-operations-auth-"));
     temporaryDirectories.push(root);

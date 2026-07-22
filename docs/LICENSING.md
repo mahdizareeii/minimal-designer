@@ -67,7 +67,7 @@ the retained license-evidence SHA-256 is
 `6ecc9a43fdd37beae32e9c6995503a71a175e40dffbf93672083eaf6de9c80bb`.
 `apps/server/package.json`, `pnpm-lock.yaml`, and the retained
 `formaspec/server:local` image manifest contain no Sharp or libvips package.
-Current schema-15 source and target-artifact evidence must be regenerated before
+Current schema-16 source and target-artifact evidence must be regenerated before
 release qualification.
 
 Linux and Windows release targets must still generate and retain their own

@@ -6,7 +6,11 @@ import { pathToFileURL } from "node:url";
 
 import { verifyBackup, type BackupVerification } from "./backup.js";
 import { createBridgeController, type BridgeController } from "./bridge-lifecycle.js";
-import { connectCodex, FORMASPEC_CODEX_MENTION } from "./codex.js";
+import {
+  connectCodex,
+  FORMASPEC_CODEX_MENTION,
+  MINIMAL_UI_CODEX_MENTION,
+} from "./codex.js";
 import { captureDockerRuntimeBinding, persistDockerRuntimeBinding } from "./docker-runtime-binding.js";
 import {
   abortDockerRestore,
@@ -325,9 +329,13 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
     const reportCodexConnection = (result: Awaited<ReturnType<typeof connectCodex>>): void => {
       io.stdout(`Codex MCP 'formaspec' verified at ${result.mcpUrl}.`);
       io.stdout(`Managed FormaSpec skill installed at ${result.skillPath}.`);
+      io.stdout(result.minimalUiSkillManaged
+        ? `Managed Minimal UI alias skill installed at ${result.minimalUiSkillPath}.`
+        : `Unmanaged Minimal UI skill preserved at ${result.minimalUiSkillPath}; the managed plugin alias remains available.`);
       io.stdout(`Managed FormaSpec plugin installed at ${result.pluginPath}.`);
-      io.stdout(`Codex mention: ${FORMASPEC_CODEX_MENTION}`);
-      io.stdout("Use FormaSpec or Design this with FormaSpec in a new Codex task.");
+      io.stdout(`Managed Minimal UI plugin alias installed at ${result.minimalUiPluginPath}.`);
+      io.stdout(`Codex mentions: ${FORMASPEC_CODEX_MENTION} and ${MINIMAL_UI_CODEX_MENTION}`);
+      io.stdout("Use FormaSpec or Use Minimal UI in a new Codex task.");
     };
     const offerCodexConnection = async (alreadyAuthorized = false): Promise<void> => {
       if (findExecutable("codex", environment) === null) {
@@ -335,7 +343,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         return;
       }
       const authorized = alreadyAuthorized || assumeYes || await confirm(
-        "Allow FormaSpec to configure Codex, install the managed FormaSpec plugin, and verify the loopback MCP connection?",
+        "Allow FormaSpec to configure Codex, install the managed FormaSpec and Minimal UI plugins, and verify the loopback MCP connection?",
       );
       if (!authorized) {
         io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");

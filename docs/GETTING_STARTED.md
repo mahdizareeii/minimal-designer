@@ -1,7 +1,8 @@
 # Getting started
 
-FormaSpec is both the browser product and the identity used when an agent
-invokes it through MCP.
+FormaSpec is the browser product and primary agent identity. **Minimal UI** is
+the supported compatibility identity; both use the same token-free `formaspec`
+MCP connection.
 
 ## Install and start
 
@@ -48,10 +49,13 @@ Then use:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec) design a professional mobile flow.
+[@Minimal UI](plugin://minimal-ui@formaspec) design a professional mobile flow.
 ```
 
 Other supported triggers include `Use FormaSpec`, `Design this with FormaSpec`,
-and `Refine this selection with FormaSpec`.
+and `Refine this selection with FormaSpec`, plus the corresponding `Use Minimal
+UI`, design, refine, improve-selection, and redesign variants. Both managed
+plugins are version 0.2.0; start a new Codex task after installation or refresh.
 
 ## Export and administer
 

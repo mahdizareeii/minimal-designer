@@ -475,7 +475,13 @@ describe("designer server", () => {
     expect(taskResponse.statusCode).toBe(201);
     const task = taskResponse.json<{ task: { id: string; status: string }; launchUrl: string }>();
     expect(task.task.status).toBe("queued");
-    expect(task.launchUrl).toBe(`formaspec://connect-agent?task=${encodeURIComponent(task.task.id)}`);
+    const taskLaunch = new URL(task.launchUrl);
+    expect(taskLaunch.protocol).toBe("codex:");
+    expect(taskLaunch.hostname).toBe("new");
+    expect([...taskLaunch.searchParams.keys()]).toEqual(["prompt"]);
+    expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${task.task.id} with task_claim`);
+    expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
+    expect(taskLaunch.searchParams.get("prompt")).toContain("Do not commit it");
     expect(task.launchUrl).not.toMatch(/token|bearer|nonce/i);
 
     const inspectResponse = await application.app.inject({
@@ -780,11 +786,9 @@ describe("designer server", () => {
     expect(body.result.serverInfo.name).toBe("formaspec");
     expect(body.result.instructions).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(body.result.instructions).toContain("Use FormaSpec");
-    expect(body.result.instructions).toContain("Minimal UI");
-    expect(body.result.instructions).toContain("Use Minimal UI");
+    expect(body.result.instructions).not.toContain("Use Minimal UI");
     expect(body.result.instructions).not.toContain("plugin://minimal-ui");
-    expect(body.result.instructions).not.toContain("plugin://minimal-ui@formaspec");
-    expect(body.result.instructions).toContain("Preview, inspect, and lint");
+    expect(body.result.instructions).toContain("return the exact preview for human approval; do not commit it");
     expect(body.result.instructions).toContain("tmp:<label>");
     expect(body.result.instructions.length).toBeLessThanOrEqual(512);
 

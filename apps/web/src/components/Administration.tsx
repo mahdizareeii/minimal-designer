@@ -18,7 +18,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { navigate } from "../App";
 import { DesignSystemComponentAuthoring } from "./DesignSystemComponentAuthoring";
@@ -34,15 +34,18 @@ import {
   listBackups,
   listDesignSystems,
   readOrganizationPolicy,
+  registerBackupImport,
   reconnectAgentConnection,
   revokeAgentConnection,
   validatePortableImport,
+  validateBackupImport,
   verifyBackup,
   updateOrganizationPolicy,
   ApiError,
   type AgentConnectionRecord,
   type AgentPairingChallenge,
   type BackupRecord,
+  type BackupImportValidation,
   type DesignSystemRecord,
   type OrganizationPolicyRecord,
   type PortableImportMode,
@@ -81,6 +84,33 @@ export function codexPairingCommand(challenge: AgentPairingChallenge): string {
   return `./designer --yes agent connect codex --pairing-nonce ${challenge.nonce} --connection-id ${challenge.connection.id}`;
 }
 
+export function agentConnectionDisplayName(connection: Pick<AgentConnectionRecord, "adapter" | "displayName">): string {
+  return connection.adapter === "codex" ? "Codex — FormaSpec" : connection.displayName;
+}
+
+export function groupAgentConnections(connections: readonly AgentConnectionRecord[]): {
+  current: AgentConnectionRecord[];
+  history: AgentConnectionRecord[];
+} {
+  const statusRank: Record<AgentConnectionRecord["status"], number> = {
+    active: 0,
+    pending: 1,
+    error: 2,
+    expired: 3,
+    revoked: 4,
+  };
+  const ordered = [...connections].sort((left, right) => {
+    const statusDifference = statusRank[left.status] - statusRank[right.status];
+    if (statusDifference !== 0) return statusDifference;
+    const timeDifference = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+    return Number.isFinite(timeDifference) && timeDifference !== 0 ? timeDifference : left.id.localeCompare(right.id);
+  });
+  return {
+    current: ordered.filter((connection) => connection.status !== "expired" && connection.status !== "revoked"),
+    history: ordered.filter((connection) => connection.status === "expired" || connection.status === "revoked"),
+  };
+}
+
 function openPairingChallenge(challenge: AgentPairingChallenge): string {
   const url = new URL("formaspec://connect-agent");
   url.searchParams.set("connection", challenge.connection.id);
@@ -101,10 +131,13 @@ export function Administration() {
   const [validation, setValidation] = useState<PortableImportValidation | null>(null);
   const [portableFile, setPortableFile] = useState<File | null>(null);
   const [portableImportMode, setPortableImportMode] = useState<PortableImportMode>("conflict_fail");
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [backupImportValidation, setBackupImportValidation] = useState<BackupImportValidation | null>(null);
   const [pairingLink, setPairingLink] = useState<string | null>(null);
   const [pairingCommand, setPairingCommand] = useState<string | null>(null);
   const [organizationPolicy, setOrganizationPolicy] = useState<OrganizationPolicyRecord | null>(null);
   const [canAdministerOrganization, setCanAdministerOrganization] = useState<boolean | null>(null);
+  const connectionGroups = useMemo(() => groupAgentConnections(connections), [connections]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -173,6 +206,38 @@ export function Administration() {
     });
   };
 
+  const renderAgentConnection = (connection: AgentConnectionRecord) => {
+    const displayName = agentConnectionDisplayName(connection);
+    return (
+      <article className="administration-row" key={connection.id}>
+        <div className={`status-icon is-${connection.status}`}>{connection.status === "active" ? <CheckCircle2 size={16} /> : <Bot size={16} />}</div>
+        <div className="administration-row-main">
+          <strong>{displayName}</strong>
+          <span>{connection.status} · Expires {dateTime(connection.expiresAt)} · Last used {dateTime(connection.lastUsedAt)}</span>
+          <small>{connection.scopes.join(" · ")}</small>
+          <small>{connection.projectIds.length > 0 ? `${connection.projectIds.length} restricted projects` : "All projects in this organization"}</small>
+        </div>
+        <div className="administration-row-actions">
+          {connection.status !== "revoked" && <button className="icon-button" title="Reconnect" disabled={busy !== null} onClick={() => void run(`reconnect-${connection.id}`, async () => {
+            const challenge = await reconnectAgentConnection(connection.id);
+            setPairingCommand(codexPairingCommand(challenge));
+            setPairingLink(openPairingChallenge(challenge));
+            setNotice("A new one-time FormaSpec pairing request was opened.");
+            await refresh();
+          })}><RefreshCcw size={14} /></button>}
+          {connection.status !== "revoked" && <button className="icon-button is-danger" title="Revoke immediately" disabled={busy !== null} onClick={() => {
+            if (!window.confirm(`Revoke ${displayName} and all of its active grants immediately?`)) return;
+            void run(`revoke-${connection.id}`, async () => {
+              const revoked = await revokeAgentConnection(connection.id);
+              setConnections((current) => current.map((item) => item.id === revoked.id ? revoked : item));
+              setNotice(`${displayName} was revoked.`);
+            });
+          }}><Trash2 size={14} /></button>}
+        </div>
+      </article>
+    );
+  };
+
   return (
     <main className="administration-shell">
       <header className="administration-header">
@@ -199,6 +264,37 @@ export function Administration() {
             <div className="backup-recovery-note">
               <ShieldCheck size={16} />
               <div><strong>Safe restore workflow</strong><span>Verify the managed record, download an off-host copy if needed, then copy the restore command. FormaSpec performs maintenance mode, pre-restore backup, integrity checks, and rollback through <code>formaspecctl</code>.</span></div>
+            </div>
+            <div className="backup-import-panel" id="full-backup-import">
+              <div className="backup-import-heading">
+                <div><FileArchive size={16} /><span><strong>Load a full server backup</strong><small>Use a verified FormaSpec <code>.tar</code> backup from another installation.</small></span></div>
+                <label className={`button button-secondary ${busy ? "is-disabled" : ""}`}><Upload size={14} /> Select backup<input type="file" accept=".tar,application/x-tar,application/octet-stream" hidden disabled={busy !== null} onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.currentTarget.value = "";
+                  if (!file) return;
+                  setBackupFile(file);
+                  setBackupImportValidation(null);
+                  void run("validate-backup-import", async () => {
+                    const result = await validateBackupImport(file);
+                    setBackupImportValidation(result);
+                    setNotice(`${file.name} passed checksum, SQLite, foreign-key, asset, and render verification. Current data has not changed.`);
+                  });
+                }} /></label>
+              </div>
+              <div className="full-restore-warning"><ShieldCheck size={16} /><div><strong>Registration is safe; full restore is destructive</strong><span>This upload only adds a verified, content-addressed managed backup. It does not replace the running workspace. Restoring it later requires downtime, a pre-restore safety backup, integrity checks, rollback support, and the copied <code>formaspecctl</code> command.</span></div></div>
+              {busy === "validate-backup-import" && <div className="administration-empty"><LoaderCircle size={20} className="spin" /> Verifying the selected full backup…</div>}
+              {backupImportValidation && backupFile && <div className="backup-import-result">
+                <div><ShieldCheck size={20} /><span><strong>{backupFile.name}</strong><small>Database schema {backupImportValidation.manifest.databaseSchemaVersion} · {backupImportValidation.manifest.fileCount} files · {fileSize(backupImportValidation.sizeBytes)}</small><code>SHA-256 {backupImportValidation.bundleSha256}</code></span></div>
+                <button className="button button-primary" disabled={busy !== null} onClick={() => void run("register-backup-import", async () => {
+                  const imported = await registerBackupImport(backupFile, backupImportValidation.bundleSha256);
+                  setBackups((current) => [imported.backup, ...current.filter((item) => item.id !== imported.backup.id)]);
+                  setNotice(imported.alreadyRegistered
+                    ? `${imported.backup.filename} was already registered and remains ready for supervised restore.`
+                    : `${imported.backup.filename} was verified and added to managed backups. No live data was replaced.`);
+                  setBackupFile(null);
+                  setBackupImportValidation(null);
+                })}>{busy === "register-backup-import" ? <LoaderCircle size={14} className="spin" /> : <Upload size={14} />} Add to managed backups</button>
+              </div>}
             </div>
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading backup records…</div> : backups.length === 0 ? (
@@ -241,34 +337,14 @@ export function Administration() {
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading agent connections…</div> : connections.length === 0 ? (
                 <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@FormaSpec](plugin://formaspec@formaspec).</span></div>
-              ) : connections.map((connection) => (
-                <article className="administration-row" key={connection.id}>
-                  <div className={`status-icon is-${connection.status}`}>{connection.status === "active" ? <CheckCircle2 size={16} /> : <Bot size={16} />}</div>
-                  <div className="administration-row-main">
-                    <strong>{connection.displayName}</strong>
-                    <span>{connection.status} · Expires {dateTime(connection.expiresAt)} · Last used {dateTime(connection.lastUsedAt)}</span>
-                    <small>{connection.scopes.join(" · ")}</small>
-                    <small>{connection.projectIds.length > 0 ? `${connection.projectIds.length} restricted projects` : "All projects in this organization"}</small>
-                  </div>
-                  <div className="administration-row-actions">
-                    {connection.status !== "revoked" && <button className="icon-button" title="Reconnect" disabled={busy !== null} onClick={() => void run(`reconnect-${connection.id}`, async () => {
-                      const challenge = await reconnectAgentConnection(connection.id);
-                      setPairingCommand(codexPairingCommand(challenge));
-                      setPairingLink(openPairingChallenge(challenge));
-                      setNotice("A new one-time pairing request was opened.");
-                      await refresh();
-                    })}><RefreshCcw size={14} /></button>}
-                    {connection.status !== "revoked" && <button className="icon-button is-danger" title="Revoke immediately" disabled={busy !== null} onClick={() => {
-                      if (!window.confirm(`Revoke ${connection.displayName} and all of its active grants immediately?`)) return;
-                      void run(`revoke-${connection.id}`, async () => {
-                        const revoked = await revokeAgentConnection(connection.id);
-                        setConnections((current) => current.map((item) => item.id === revoked.id ? revoked : item));
-                        setNotice(`${revoked.displayName} was revoked.`);
-                      });
-                    }}><Trash2 size={14} /></button>}
-                  </div>
-                </article>
-              ))}
+              ) : <>
+                {connectionGroups.current.length === 0 && <div className="administration-empty is-compact"><Bot size={20} /><strong>No current FormaSpec connection</strong><span>Reconnect Codex to activate a scoped agent grant.</span></div>}
+                {connectionGroups.current.map(renderAgentConnection)}
+                {connectionGroups.history.length > 0 && <details className="agent-connection-history">
+                  <summary>Connection history <span>{connectionGroups.history.length} revoked or expired</span></summary>
+                  <div>{connectionGroups.history.map(renderAgentConnection)}</div>
+                </details>}
+              </>}
             </div>
           </section>}
 
@@ -330,9 +406,9 @@ export function Administration() {
 
         <DesignSystemComponentAuthoring designSystems={designSystems.filter((system) => system.status === "active")} />
 
-        {canAdministerOrganization !== false && <section className="administration-card import-validator-card" aria-labelledby="project-recovery-title">
+        {canAdministerOrganization !== false && <section className="administration-card import-validator-card" id="project-import" aria-labelledby="project-recovery-title">
           <div className="administration-card-heading">
-            <div><span><Upload size={18} /></span><div><h2 id="project-recovery-title">Import &amp; project recovery</h2><p>Choose a local .formaspec.zip bundle, validate it without mutation, then preserve IDs or create a deterministic clone.</p></div></div>
+            <div><span><Upload size={18} /></span><div><h2 id="project-recovery-title">Import one editable project</h2><p>Non-destructive project import: choose a local .formaspec.zip bundle, validate it without mutation, then preserve IDs or create a deterministic clone.</p></div></div>
             <label className={`button button-secondary ${busy ? "is-disabled" : ""}`}><Upload size={14} /> Select .formaspec.zip<input type="file" accept=".zip,.formaspec.zip,application/zip" hidden disabled={busy !== null} onChange={(event) => {
               const file = event.target.files?.[0];
               event.currentTarget.value = "";
@@ -346,7 +422,7 @@ export function Administration() {
               });
             }} /></label>
           </div>
-          <div className="safe-import-boundary"><ShieldCheck size={16} /><div><strong>File-picker only</strong><span>FormaSpec reads only the archive you select and applies bounded archive validation. This screen never accepts or sends an arbitrary server filesystem path.</span></div></div>
+          <div className="safe-import-boundary"><ShieldCheck size={16} /><div><strong>Project import is different from full restore</strong><span>This creates one editable project and never replaces the workspace database. FormaSpec reads only the archive selected with this file picker, applies bounded archive validation, and never accepts or sends an arbitrary server filesystem path.</span></div></div>
           {busy === "validate-import" && <div className="administration-empty"><LoaderCircle size={20} className="spin" /> Validating the bounded archive…</div>}
           {validation && <div className="validation-summary">
             <ShieldCheck size={22} />

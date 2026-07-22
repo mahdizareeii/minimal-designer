@@ -246,6 +246,12 @@ describe("backup artifact HTTP authorization", () => {
     const hidden = [...foreign.markers, fixture.projectScopedGrantToken];
     const before = backupState(application);
     const requests = [
+      { method: "POST", url: "/api/backups/imports/validate", payload: { secret: PRIVATE_TOKEN } },
+      {
+        method: "POST",
+        url: `/api/backups/imports?expectedSha256=${PRIVATE_TOKEN}`,
+        payload: { secret: PRIVATE_TOKEN },
+      },
       { method: "POST", url: "/api/backups/prune/previews", payload: { secret: PRIVATE_TOKEN } },
       {
         method: "POST",

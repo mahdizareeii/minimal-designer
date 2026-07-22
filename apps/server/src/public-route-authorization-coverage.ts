@@ -84,6 +84,8 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["POST", "/api/repository-inventories/:inventoryId/revoke"],
   ]),
   ...evidence("apps/server/src/backup-artifact-http-authorization.test.ts", [
+    ["POST", "/api/backups/imports/validate"],
+    ["POST", "/api/backups/imports"],
     ["POST", "/api/backups/prune/previews"],
     ["POST", "/api/backups/prune/previews/:previewId/commit"],
     ["POST", "/api/backups/:backupId/verify"],

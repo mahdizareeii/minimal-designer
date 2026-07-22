@@ -2,29 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_MANAGED_ASSET_BYTES = 256 * 1024;
-
-export const FORMASPEC_CODEX_IDENTITY = Object.freeze({
-  skillName: "formaspec",
-  pluginName: "formaspec",
-  marketplaceName: "formaspec",
-  pluginId: "formaspec@formaspec",
-  displayName: "FormaSpec",
-  mention: "[@FormaSpec](plugin://formaspec@formaspec)",
-});
-
-const REQUIRED_MANAGED_FILES = Object.freeze([
-  "skills/formaspec/SKILL.md",
-  "skills/formaspec/agents/openai.yaml",
-  "codex-marketplace/.agents/plugins/marketplace.json",
-  "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json",
-  "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
-  "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml",
-]);
-
-const LEGACY_MANAGED_PATHS = Object.freeze([
-  "skills/minimal-ui",
-  "codex-marketplace/plugins/minimal-ui",
-]);
+const MANAGED_PLUGIN_VERSION = "0.2.0";
 
 export interface ManagedCodexAssetIdentity {
   skillName: string;
@@ -35,18 +13,51 @@ export interface ManagedCodexAssetIdentity {
   mention: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+export interface ManagedCodexAssetInventory {
+  marketplaceName: string;
+  marketplaceDisplayName: string;
+  pluginVersion: string;
+  identities: readonly ManagedCodexAssetIdentity[];
 }
 
-function entryExists(filename: string): boolean {
-  try {
-    fs.lstatSync(filename);
-    return true;
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
-    throw error;
-  }
+export const FORMASPEC_CODEX_IDENTITY: ManagedCodexAssetIdentity = Object.freeze({
+  skillName: "formaspec",
+  pluginName: "formaspec",
+  marketplaceName: "formaspec",
+  pluginId: "formaspec@formaspec",
+  displayName: "FormaSpec",
+  mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+});
+
+export const MINIMAL_UI_CODEX_IDENTITY: ManagedCodexAssetIdentity = Object.freeze({
+  skillName: "minimal-ui",
+  pluginName: "minimal-ui",
+  marketplaceName: "formaspec",
+  pluginId: "minimal-ui@formaspec",
+  displayName: "Minimal UI",
+  mention: "[@Minimal UI](plugin://minimal-ui@formaspec)",
+});
+
+export const FORMASPEC_CODEX_ASSET_INVENTORY: ManagedCodexAssetInventory = Object.freeze({
+  marketplaceName: "formaspec",
+  marketplaceDisplayName: "FormaSpec",
+  pluginVersion: MANAGED_PLUGIN_VERSION,
+  identities: Object.freeze([FORMASPEC_CODEX_IDENTITY, MINIMAL_UI_CODEX_IDENTITY]),
+});
+
+const REQUIRED_MANAGED_FILES = Object.freeze([
+  "codex-marketplace/.agents/plugins/marketplace.json",
+  ...FORMASPEC_CODEX_ASSET_INVENTORY.identities.flatMap((identity) => [
+    `skills/${identity.skillName}/SKILL.md`,
+    `skills/${identity.skillName}/agents/openai.yaml`,
+    `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`,
+    `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`,
+    `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
+  ]),
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function requireRegularFile(root: string, relativePath: string): string {
@@ -78,26 +89,32 @@ function readJson(root: string, relativePath: string): Record<string, unknown> {
   return parsed;
 }
 
-function requireInterfaceDisplayName(value: Record<string, unknown>, description: string): void {
-  if (!isRecord(value.interface) || value.interface.displayName !== FORMASPEC_CODEX_IDENTITY.displayName) {
-    throw new Error(`${description} must display the managed agent as FormaSpec.`);
+function requireInterfaceDisplayName(
+  value: Record<string, unknown>,
+  displayName: string,
+  description: string,
+): void {
+  if (!isRecord(value.interface) || value.interface.displayName !== displayName) {
+    throw new Error(`${description} must display the managed agent as ${displayName}.`);
   }
 }
 
-function requireSkillIdentity(contents: string, description: string): void {
-  if (!/^name:\s*formaspec\s*$/mu.test(contents)) {
-    throw new Error(`${description} must use the managed FormaSpec skill name.`);
+function requireSkillIdentity(contents: string, identity: ManagedCodexAssetIdentity, description: string): void {
+  if (!new RegExp(`^name:\\s*${identity.skillName}\\s*$`, "mu").test(contents)) {
+    throw new Error(`${description} must use the managed ${identity.skillName} skill name.`);
   }
 }
 
-function requireOpenAiIdentity(contents: string, description: string): void {
-  if (!/^\s*display_name:\s*["']FormaSpec["']\s*$/mu.test(contents)
-    || !/^\s*default_prompt:\s*["'][^"']*\$formaspec\b[^"']*["']\s*$/mu.test(contents)) {
-    throw new Error(`${description} must expose the managed $formaspec agent identity.`);
+function requireOpenAiIdentity(contents: string, identity: ManagedCodexAssetIdentity, description: string): void {
+  const displayName = identity.displayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const skillName = identity.skillName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`^\\s*display_name:\\s*["']${displayName}["']\\s*$`, "mu").test(contents)
+    || !new RegExp(`^\\s*default_prompt:\\s*["'][^"']*\\$${skillName}\\b[^"']*["']\\s*$`, "mu").test(contents)) {
+    throw new Error(`${description} must expose the managed $${identity.skillName} agent identity.`);
   }
 }
 
-export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAssetIdentity {
+export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAssetInventory {
   const root = path.resolve(assetsRoot);
   let rootStat: fs.Stats;
   try {
@@ -108,51 +125,74 @@ export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAsset
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     throw new Error(`Managed FormaSpec Codex asset root must be a regular directory: ${root}`);
   }
-  for (const relativePath of LEGACY_MANAGED_PATHS) {
-    if (entryExists(path.join(root, ...relativePath.split("/")))) {
-      throw new Error(`Packaged Codex assets still contain the legacy managed path: ${relativePath}`);
-    }
-  }
   for (const relativePath of REQUIRED_MANAGED_FILES) requireRegularFile(root, relativePath);
 
-  const plugin = readJson(root, "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json");
-  if (plugin.name !== FORMASPEC_CODEX_IDENTITY.pluginName) {
-    throw new Error("Managed FormaSpec Codex plugin manifest must use the formaspec plugin name.");
-  }
-  requireInterfaceDisplayName(plugin, "Managed FormaSpec Codex plugin manifest");
-
   const marketplace = readJson(root, "codex-marketplace/.agents/plugins/marketplace.json");
-  if (marketplace.name !== FORMASPEC_CODEX_IDENTITY.marketplaceName) {
+  if (marketplace.name !== FORMASPEC_CODEX_ASSET_INVENTORY.marketplaceName) {
     throw new Error("Managed FormaSpec Codex marketplace must use the formaspec marketplace name.");
   }
-  requireInterfaceDisplayName(marketplace, "Managed FormaSpec Codex marketplace");
+  requireInterfaceDisplayName(
+    marketplace,
+    FORMASPEC_CODEX_ASSET_INVENTORY.marketplaceDisplayName,
+    "Managed FormaSpec Codex marketplace",
+  );
   if (!Array.isArray(marketplace.plugins)) {
     throw new Error("Managed FormaSpec Codex marketplace plugin inventory is malformed.");
   }
-  const managedEntries = marketplace.plugins.filter((entry): entry is Record<string, unknown> => (
-    isRecord(entry) && entry.name === FORMASPEC_CODEX_IDENTITY.pluginName
-  ));
-  if (managedEntries.length !== 1) {
-    throw new Error("Managed FormaSpec Codex marketplace must contain exactly one formaspec plugin entry.");
-  }
-  const source = managedEntries[0]?.source;
-  if (!isRecord(source) || source.source !== "local" || source.path !== "./plugins/formaspec") {
-    throw new Error("Managed FormaSpec Codex marketplace must resolve the plugin from ./plugins/formaspec.");
+  if (marketplace.plugins.length !== FORMASPEC_CODEX_ASSET_INVENTORY.identities.length) {
+    throw new Error("Managed FormaSpec Codex marketplace must contain exactly the two managed agent identities.");
   }
 
-  requireSkillIdentity(readText(root, "skills/formaspec/SKILL.md"), "Managed FormaSpec Codex skill");
-  requireOpenAiIdentity(
-    readText(root, "skills/formaspec/agents/openai.yaml"),
-    "Managed FormaSpec Codex skill metadata",
-  );
-  requireSkillIdentity(
-    readText(root, "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md"),
-    "Managed FormaSpec Codex plugin skill",
-  );
-  requireOpenAiIdentity(
-    readText(root, "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml"),
-    "Managed FormaSpec Codex plugin skill metadata",
-  );
+  for (const identity of FORMASPEC_CODEX_ASSET_INVENTORY.identities) {
+    const pluginPath = `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`;
+    const plugin = readJson(root, pluginPath);
+    if (plugin.name !== identity.pluginName || plugin.version !== MANAGED_PLUGIN_VERSION) {
+      throw new Error(`Managed ${identity.displayName} Codex plugin manifest must use ${identity.pluginName} at ${MANAGED_PLUGIN_VERSION}.`);
+    }
+    requireInterfaceDisplayName(plugin, identity.displayName, `Managed ${identity.displayName} Codex plugin manifest`);
 
-  return { ...FORMASPEC_CODEX_IDENTITY };
+    const managedEntries = marketplace.plugins.filter((entry): entry is Record<string, unknown> => (
+      isRecord(entry) && entry.name === identity.pluginName
+    ));
+    if (managedEntries.length !== 1) {
+      throw new Error(`Managed FormaSpec Codex marketplace must contain exactly one ${identity.pluginName} plugin entry.`);
+    }
+    const source = managedEntries[0]?.source;
+    const policy = managedEntries[0]?.policy;
+    if (!isRecord(source) || source.source !== "local" || source.path !== `./plugins/${identity.pluginName}`) {
+      throw new Error(`Managed FormaSpec Codex marketplace must resolve the plugin from ./plugins/${identity.pluginName}.`);
+    }
+    if (!isRecord(policy)
+      || policy.installation !== "AVAILABLE"
+      || policy.authentication !== "ON_INSTALL"
+      || managedEntries[0]?.category !== "Productivity") {
+      throw new Error(`Managed ${identity.displayName} Codex marketplace policy is invalid.`);
+    }
+
+    requireSkillIdentity(
+      readText(root, `skills/${identity.skillName}/SKILL.md`),
+      identity,
+      `Managed ${identity.displayName} Codex skill`,
+    );
+    requireOpenAiIdentity(
+      readText(root, `skills/${identity.skillName}/agents/openai.yaml`),
+      identity,
+      `Managed ${identity.displayName} Codex skill metadata`,
+    );
+    requireSkillIdentity(
+      readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`),
+      identity,
+      `Managed ${identity.displayName} Codex plugin skill`,
+    );
+    requireOpenAiIdentity(
+      readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`),
+      identity,
+      `Managed ${identity.displayName} Codex plugin skill metadata`,
+    );
+  }
+
+  return {
+    ...FORMASPEC_CODEX_ASSET_INVENTORY,
+    identities: FORMASPEC_CODEX_ASSET_INVENTORY.identities.map((identity) => ({ ...identity })),
+  };
 }

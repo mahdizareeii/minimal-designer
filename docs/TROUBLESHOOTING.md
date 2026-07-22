@@ -25,9 +25,10 @@ to `127.0.0.1` in local mode.
 ```
 
 Then verify `codex mcp get formaspec` and start a new Codex task. Codex should
-contain no bearer token for this MCP entry. The managed integration is
-`formaspec@formaspec`, invoked as
-`[@FormaSpec](plugin://formaspec@formaspec)`.
+contain no bearer token for this MCP entry. The two enabled version-0.2.0
+managed integrations share it and are invoked as
+`[@FormaSpec](plugin://formaspec@formaspec)` or
+`[@Minimal UI](plugin://minimal-ui@formaspec)`.
 
 ## A write reports VERSION_CONFLICT
 

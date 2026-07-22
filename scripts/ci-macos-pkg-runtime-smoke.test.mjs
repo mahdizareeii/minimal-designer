@@ -40,7 +40,7 @@ test("pins the current extracted native runtime contract", () => {
   assert.deepEqual(MACOS_RUNTIME_SMOKE_CONTRACT, {
     nodeVersion: "v24.14.0",
     playwrightRevision: "1228",
-    schemaVersion: 13,
+    schemaVersion: 16,
     mcpProtocolVersion: "2025-06-18",
     mcpToolCount: 52,
     mcpResourceCount: 25,
@@ -125,40 +125,67 @@ function writeManagedCodexAsset(root, relativePath, contents) {
 
 function managedCodexAssetsFixture() {
   const root = temporaryRoot("formaspec-macos-codex-assets-");
-  const skill = "---\nname: formaspec\ndescription: Fixture.\n---\n";
-  const metadata = [
-    "interface:",
-    "  display_name: \"FormaSpec\"",
-    "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
-    "",
-  ].join("\n");
-  writeManagedCodexAsset(root, "skills/formaspec/SKILL.md", skill);
-  writeManagedCodexAsset(root, "skills/formaspec/agents/openai.yaml", metadata);
+  const identities = [
+    { skillName: "formaspec", pluginName: "formaspec", displayName: "FormaSpec" },
+    { skillName: "minimal-ui", pluginName: "minimal-ui", displayName: "Minimal UI" },
+  ];
   writeManagedCodexAsset(root, "codex-marketplace/.agents/plugins/marketplace.json", `${JSON.stringify({
     name: "formaspec",
     interface: { displayName: "FormaSpec" },
-    plugins: [{ name: "formaspec", source: { source: "local", path: "./plugins/formaspec" } }],
+    plugins: identities.map((identity) => ({
+      name: identity.pluginName,
+      source: { source: "local", path: `./plugins/${identity.pluginName}` },
+      policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+      category: "Productivity",
+    })),
   })}\n`);
-  writeManagedCodexAsset(root, "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
-    name: "formaspec",
-    interface: { displayName: "FormaSpec" },
-  })}\n`);
-  writeManagedCodexAsset(root, "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", skill);
-  writeManagedCodexAsset(root, "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml", metadata);
+  for (const identity of identities) {
+    const skill = `---\nname: ${identity.skillName}\ndescription: Fixture.\n---\n`;
+    const metadata = [
+      "interface:",
+      `  display_name: \"${identity.displayName}\"`,
+      `  default_prompt: \"Use $${identity.skillName} to design this interface with ${identity.displayName}.\"`,
+      "",
+    ].join("\n");
+    writeManagedCodexAsset(root, `skills/${identity.skillName}/SKILL.md`, skill);
+    writeManagedCodexAsset(root, `skills/${identity.skillName}/agents/openai.yaml`, metadata);
+    writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`, `${JSON.stringify({
+      name: identity.pluginName,
+      version: "0.2.0",
+      interface: { displayName: identity.displayName },
+    })}\n`);
+    writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`, skill);
+    writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`, metadata);
+  }
   return root;
 }
 
-test("packaged Codex assets expose only the canonical FormaSpec agent identity", () => {
+test("packaged Codex assets expose the FormaSpec and Minimal UI agent identities", () => {
   const root = managedCodexAssetsFixture();
   assert.deepEqual(inspectManagedCodexAssets(root), {
-    skillName: "formaspec",
-    pluginId: "formaspec@formaspec",
-    displayName: "FormaSpec",
-    mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+    marketplaceName: "formaspec",
+    marketplaceDisplayName: "FormaSpec",
+    pluginVersion: "0.2.0",
+    identities: [
+      {
+        skillName: "formaspec",
+        pluginName: "formaspec",
+        pluginId: "formaspec@formaspec",
+        displayName: "FormaSpec",
+        mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+      },
+      {
+        skillName: "minimal-ui",
+        pluginName: "minimal-ui",
+        pluginId: "minimal-ui@formaspec",
+        displayName: "Minimal UI",
+        mention: "[@Minimal UI](plugin://minimal-ui@formaspec)",
+      },
+    ],
   });
 
-  fs.mkdirSync(path.join(root, "skills/minimal-ui"), { recursive: true });
-  assert.throws(() => inspectManagedCodexAssets(root), /legacy managed Codex path/u);
+  fs.rmSync(path.join(root, "codex-marketplace/plugins/minimal-ui"), { recursive: true, force: true });
+  assert.throws(() => inspectManagedCodexAssets(root), /minimal-ui/u);
 });
 
 test("nested containment accepts a canonicalized temporary root without allowing escapes", () => {

@@ -32,6 +32,7 @@ import {
   type BackupManifest,
   type BackupVerificationResult,
 } from "./backup.js";
+import type { BackupUploadFile } from "./backup-upload.js";
 import { normalizeImageAsset, safeFilename, type RasterMimeType } from "./assets.js";
 import {
   backupScheduleWindow,
@@ -127,6 +128,29 @@ export interface PublicBackupRecord {
     documentSchemaVersion: number;
     fileCount: number;
   };
+}
+
+export interface BackupImportValidationResult {
+  valid: true;
+  validationOnly: true;
+  mutationsApplied: false;
+  bundleSha256: string;
+  sizeBytes: number;
+  destructiveRestoreRequired: true;
+  manifest: NonNullable<PublicBackupRecord["manifest"]>;
+  verification: {
+    sqliteIntegrity: "ok";
+    foreignKeyViolations: number;
+    extractedBytes: number;
+    entryCount: number;
+  };
+}
+
+export interface BackupImportResult {
+  registered: true;
+  alreadyRegistered: boolean;
+  destructiveRestoreRequired: true;
+  backup: PublicBackupRecord;
 }
 
 export interface PortableExportResult {
@@ -2196,8 +2220,151 @@ export class OperationsService {
     return rows.map((row) => this.publicBackupRecord(row));
   }
 
+  async validateBackupImportFile(actorId: string, upload: BackupUploadFile): Promise<BackupImportValidationResult> {
+    const access = this.requireOrganizationAdmin(actorId);
+    this.requireBackupsEnabled(access);
+    const pinned = await verifyPinnedBackupBundle(upload.filename, {
+      expectedSource: { sha256: upload.sha256, sizeBytes: upload.sizeBytes },
+      sourcePinDirectory: upload.directory,
+      ...(this.backups.rasterVerifier
+        ? { rasterVerifier: this.backups.rasterVerifier, requireRasterVerifier: true }
+        : {}),
+    });
+    const result = this.backupImportValidationResult(pinned.verification, pinned.bundleSha256, pinned.sizeBytes);
+    appendAuditEvent(this.service.database.sqlite, access, "backup.import_validate", "backup_bundle", null, {
+      bundleSha256: pinned.bundleSha256,
+      sizeBytes: pinned.sizeBytes,
+      databaseSchemaVersion: pinned.verification.manifest.databaseSchemaVersion,
+      entryCount: pinned.verification.entryCount,
+      mutationsApplied: false,
+    });
+    return result;
+  }
+
+  async registerBackupImportFile(
+    actorId: string,
+    upload: BackupUploadFile,
+    expectedSha256: string,
+  ): Promise<BackupImportResult> {
+    const access = this.requireOrganizationAdmin(actorId);
+    this.requireBackupsEnabled(access);
+    if (upload.sha256 !== expectedSha256) {
+      throw new DomainError("VERSION_CONFLICT", "The selected backup does not match the validated SHA-256.", 409, {
+        details: { expectedSha256, actualSha256: upload.sha256 },
+      });
+    }
+    const lockHolder = this.acquireOperationalLock(access, "backup", "Register one verified uploaded backup", 15 * 60);
+    try {
+      const pinned = await verifyPinnedBackupBundle(upload.filename, {
+        expectedSource: { sha256: expectedSha256, sizeBytes: upload.sizeBytes },
+        sourcePinDirectory: upload.directory,
+        ...(this.backups.rasterVerifier
+          ? { rasterVerifier: this.backups.rasterVerifier, requireRasterVerifier: true }
+          : {}),
+      });
+      const existing = this.service.database.sqlite.prepare(
+        "SELECT * FROM backup_records WHERE organization_id = ? AND bundle_sha256 = ? ORDER BY created_at DESC LIMIT 1",
+      ).get(access.organizationId, pinned.bundleSha256) as BackupRecordRow | undefined;
+      if (existing) {
+        appendAuditEvent(this.service.database.sqlite, access, "backup.import_reuse", "backup", existing.id, {
+          bundleSha256: pinned.bundleSha256,
+          sizeBytes: pinned.sizeBytes,
+        });
+        return {
+          registered: true,
+          alreadyRegistered: true,
+          destructiveRestoreRequired: true,
+          backup: this.publicBackupRecord(existing),
+        };
+      }
+
+      await fs.promises.mkdir(this.backupDirectory, { recursive: true, mode: 0o700 });
+      const root = path.resolve(this.backupDirectory);
+      const rootStat = await fs.promises.lstat(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+        throw new DomainError("TEMPORARILY_UNAVAILABLE", "The managed backup directory is unsafe.", 503);
+      }
+      const decimalDigest = BigInt(`0x${pinned.bundleSha256.slice(0, 24)}`).toString(10).padStart(29, "0");
+      const filename = `formaspec-backup-1970-01-01T00-00-00-000Z-${decimalDigest}.tar`;
+      const destination = path.join(root, filename);
+      let createdFile = false;
+      try {
+        try {
+          await fs.promises.copyFile(upload.filename, destination, fs.constants.COPYFILE_EXCL);
+          createdFile = true;
+          await fs.promises.chmod(destination, 0o400);
+          const handle = await fs.promises.open(destination, "r");
+          try { await handle.sync(); } finally { await handle.close(); }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const stat = await fs.promises.lstat(destination);
+          if (!stat.isFile() || stat.isSymbolicLink()
+            || stat.size !== pinned.sizeBytes
+            || await sha256File(destination) !== pinned.bundleSha256) {
+            throw new DomainError("IDEMPOTENCY_CONFLICT", "A different file already occupies the managed backup destination.", 409);
+          }
+        }
+        await this.assertManagedBundle(destination, filename);
+        const id = `backup_${createHash("sha256")
+          .update(`import\0${access.organizationId}\0${pinned.bundleSha256}`)
+          .digest("hex").slice(0, 40)}`;
+        const now = new Date().toISOString();
+        const transaction = this.service.database.sqlite.transaction(() => {
+          this.service.database.sqlite.prepare(
+            `INSERT INTO backup_records
+             (id, organization_id, filename, bundle_sha256, status, manifest_json, created_by, created_at, verified_at,
+              size_bytes, verification_json, retention_class, completed_at)
+             VALUES (?, ?, ?, ?, 'valid', ?, ?, ?, ?, ?, ?, 'manual', ?)`,
+          ).run(
+            id,
+            access.organizationId,
+            filename,
+            pinned.bundleSha256,
+            JSON.stringify(pinned.verification.manifest),
+            access.principalId,
+            pinned.verification.manifest.createdAt,
+            now,
+            pinned.sizeBytes,
+            JSON.stringify(pinned.verification),
+            now,
+          );
+          appendAuditEvent(this.service.database.sqlite, access, "backup.import", "backup", id, {
+            filename,
+            bundleSha256: pinned.bundleSha256,
+            sizeBytes: pinned.sizeBytes,
+            databaseSchemaVersion: pinned.verification.manifest.databaseSchemaVersion,
+            entryCount: pinned.verification.entryCount,
+            restoreRequiresDowntime: true,
+          });
+          return this.requireBackupRow(access, id);
+        });
+        return {
+          registered: true,
+          alreadyRegistered: false,
+          destructiveRestoreRequired: true,
+          backup: this.publicBackupRecord(transaction.immediate()),
+        };
+      } catch (error) {
+        if (createdFile) {
+          const references = this.service.database.sqlite.prepare(
+            "SELECT COUNT(*) AS count FROM backup_records WHERE filename = ?",
+          ).get(filename) as { count: number };
+          if (references.count === 0) await fs.promises.rm(destination, { force: true }).catch(() => undefined);
+        }
+        throw error;
+      }
+    } finally {
+      this.releaseOperationalLock(access, "backup", lockHolder);
+    }
+  }
+
   assertBackupAdministrationAllowed(actorId: string): void {
     this.requireOrganizationAdmin(actorId);
+  }
+
+  assertBackupImportAllowed(actorId: string): void {
+    const access = this.requireOrganizationAdmin(actorId);
+    this.requireBackupsEnabled(access);
   }
 
   async createBackup(actorId: string): Promise<PublicBackupRecord> {
@@ -3201,6 +3368,35 @@ export class OperationsService {
         documentSchemaVersion: manifest.documentSchemaVersion,
         fileCount: manifest.files.length,
       } : null,
+    };
+  }
+
+  private backupImportValidationResult(
+    verification: BackupVerificationResult,
+    bundleSha256: string,
+    sizeBytes: number,
+  ): BackupImportValidationResult {
+    return {
+      valid: true,
+      validationOnly: true,
+      mutationsApplied: false,
+      bundleSha256,
+      sizeBytes,
+      destructiveRestoreRequired: true,
+      manifest: {
+        format: verification.manifest.format,
+        formatVersion: verification.manifest.formatVersion,
+        createdAt: verification.manifest.createdAt,
+        databaseSchemaVersion: verification.manifest.databaseSchemaVersion,
+        documentSchemaVersion: verification.manifest.documentSchemaVersion,
+        fileCount: verification.manifest.files.length,
+      },
+      verification: {
+        sqliteIntegrity: verification.sqliteIntegrity,
+        foreignKeyViolations: verification.foreignKeyViolations,
+        extractedBytes: verification.extractedBytes,
+        entryCount: verification.entryCount,
+      },
     };
   }
 

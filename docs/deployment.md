@@ -15,13 +15,16 @@ provenance, and complete release evidence do not exist yet. One historical
 isolated local-Docker A/B restore and safety-restore exercise passed; it does not qualify the server deployment
 path.
 
-Current schema-15 source passes the seven-package suite 840/840, launcher
-225/225, all workspace typechecks/builds, installer 71/71 plus typecheck/build,
-Compose configuration, editor/Administration 5/5, release E2E 1/1, preview
-integration 2/2, and macOS runtime-smoke contracts 11/11. The broad browser,
-visual, performance, Docker/egress, Firefox/WebKit, copied-bundle recovery, and
-SBOM/license results remain historical schema-13 evidence and require a
-schema-15 release-candidate rerun before deployment qualification.
+Current schema-16 source passes the seven-package suite 842/842 (core 59,
+server 467, web 91, CLI 96, local bridge 20, Workspace Bridge 37, and installer
+72), launcher 225/225, all workspace typechecks/builds, Compose configuration,
+editor/Administration 5/5, release E2E 1/1, preview integration 2/2, Chromium
+and Firefox/WebKit alignment 12/12 each, visual regression 7/7, the 1,000-node
+browser budgets, and macOS runtime-smoke contracts 11/11. Current local Docker
+restart/egress and copied-bundle recovery checkpoints also pass. Hosted
+supported-OS retention, current security/SBOM/image/OS scans, signed native
+lifecycle evidence, and real remote-host/TLS recovery remain required before
+deployment qualification.
 
 Do not expose the current Compose port to a LAN or the internet. Do not declare
 an enterprise rollout complete from a successful source or Compose startup.
@@ -95,6 +98,8 @@ Database schema 13 adds canonical component source JSON/SHA-256 persistence and
 exact design-system upgrade base/result snapshot references. Schema 14 adds
 browser-session authentication, and schema 15 adds bounded write-once exact
 preview-render options, dimensions, renderer backend, warnings, and PNG SHA-256.
+Schema 16 canonicalizes the legacy bootstrap-credential consume-once trigger
+while preserving credential rows.
 The current command engine is 2, renderer 3, renderer IPC protocol 2, and font
 bundle 1.
 
@@ -125,7 +130,8 @@ snapshot/revision/asset/render/SQLite/FK comparisons and cleanup passed; the
 `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
 
 These historical local results used linked `drizzle-orm` 0.44.7 and are not
-schema-15, real remote-host/TLS/off-site, or hosted release evidence. Later
+the current schema-16 checkpoint, real remote-host/TLS/off-site, or hosted
+release evidence. Later
 schema-13 linked-0.45.2 evidence is also historical. Prior `final437` schema-12 summaries
 remain historical regression evidence only. The retained unsigned macOS checkpoint
 under `artifacts/candidates/schema12-current/` retains passing frozen package-
@@ -135,7 +141,20 @@ PKG bytes are nondeterministic and release remains `NO-GO`. The preserved
 `schema11-current` checkpoint is historical only. The installed default volume
 previously migrated from
 schema 7 to schema 8 while preserving its project, 31 revisions, representative
-asset, and worker render. Current gaps include:
+asset, and worker render.
+
+Current schema-16 local runtime evidence uses image
+`sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`.
+The retained summaries are `artifacts/ci/docker-schema11/summary.json`,
+`artifacts/ci/cross-browser-docker/summary.json`, and
+`artifacts/ci/offhost-restore-simulation/NO-GO-SUMMARY.json`; the first path is
+a compatibility name. Deterministic restart rendering, renderer DNS/TCP/
+interface egress denial, Firefox/WebKit 12/12, clean-target database/asset/hash/
+render equality, and cleanup pass. Their source identity is local uncommitted
+source, and the recovery is a same-host disposable-isolation simulation, so
+release remains `NO-GO`.
+
+Current gaps include:
 
 - no release-qualified Windows named-pipe/native worker/service-host packaging;
 - the historical local schema-13 Docker smoke passes DNS/direct-TCP/non-loopback
@@ -364,10 +383,11 @@ to a client-provided value.
 
 The automatic Codex setup registers MCP server ID `formaspec` at the
 credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs the managed
-FormaSpec skill/plugin, and provides:
+version-0.2.0 FormaSpec and Minimal UI skills/plugins, and provides:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec)
+[@Minimal UI](plugin://minimal-ui@formaspec)
 ```
 
 The bridge creates a scoped, expiring upstream grant and stores it in macOS
@@ -586,10 +606,10 @@ migration fixtures, operator-approved cleanup, and rollback evidence exist.
 
 Production deployment remains **NO-GO** until evidence exists for all of these:
 
-- retain the current schema-15 package suite 840/840, launcher 225/225,
-  typecheck/build, installer, Compose, targeted browser/preview, and runtime-
-  smoke gates in hosted CI, then rerun the complete browser/Docker/recovery/
-  SBOM verification set at schema 15;
+- retain the current schema-16 package suite 842/842, launcher 225/225,
+  typecheck/build, Compose, browser/preview/alignment/visual/performance,
+  runtime-smoke, Docker/egress, and copied-bundle recovery gates in hosted
+  supported-OS CI, then generate current SBOM/security/image/OS evidence;
 - Windows native service-host/named-pipe renderer IPC, ACL/process-tree
   packaging plus retained hosted/native egress, crash, saturation, and load
   evidence beyond the historical local schema-13 Docker worker;
@@ -626,5 +646,5 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
   reproducibility, unsigned/signed artifact instructions, and zero unresolved
   critical/high security findings. Historical linked-0.45.2 schema-13 source
   evidence reported 342 components and zero license violations. Current
-  schema-15 artifact-specific SBOM/image/OS evidence remains mandatory and never
+  schema-16 artifact-specific SBOM/image/OS evidence remains mandatory and never
   replaces target-artifact evidence.

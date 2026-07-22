@@ -70,7 +70,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       body = undefined;
     }
     const domain = body as { error?: { code?: string; message?: string; retryable?: boolean; details?: unknown } } | undefined;
-    if (response.status === 401 && typeof window !== "undefined") {
+    const isCredentialAttempt = path === "/auth/bootstrap" || path === "/auth/login";
+    if (response.status === 401 && !isCredentialAttempt && typeof window !== "undefined") {
       window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT));
     }
     throw new ApiError(domain?.error?.message ?? `Request failed with status ${response.status}.`, {
@@ -534,6 +535,29 @@ export interface BackupRecord {
   };
 }
 
+export interface BackupImportValidation {
+  valid: true;
+  validationOnly: true;
+  mutationsApplied: false;
+  bundleSha256: string;
+  sizeBytes: number;
+  destructiveRestoreRequired: true;
+  manifest: NonNullable<BackupRecord["manifest"]>;
+  verification: {
+    sqliteIntegrity: "ok";
+    foreignKeyViolations: number;
+    extractedBytes: number;
+    entryCount: number;
+  };
+}
+
+export interface BackupImportResult {
+  registered: true;
+  alreadyRegistered: boolean;
+  destructiveRestoreRequired: true;
+  backup: BackupRecord;
+}
+
 export async function listBackups(): Promise<BackupRecord[]> {
   const result = await request<{ backups?: BackupRecord[] }>("/backups");
   return result.backups ?? [];
@@ -545,6 +569,24 @@ export async function createBackup(): Promise<BackupRecord> {
     body: JSON.stringify({}),
   });
   return result.backup;
+}
+
+export async function validateBackupImport(file: File): Promise<BackupImportValidation> {
+  const body = new FormData();
+  body.append("file", file);
+  return request<BackupImportValidation>("/backups/imports/validate", { method: "POST", body });
+}
+
+export async function registerBackupImport(
+  file: File,
+  expectedSha256: string,
+): Promise<BackupImportResult> {
+  const body = new FormData();
+  body.append("file", file);
+  return request<BackupImportResult>(
+    `/backups/imports?expectedSha256=${encodeURIComponent(expectedSha256)}`,
+    { method: "POST", body },
+  );
 }
 
 export async function verifyBackup(backupId: string): Promise<BackupRecord> {
@@ -947,7 +989,8 @@ function asAgentTaskRecord(input: unknown, launchUrl?: string): AgentTaskRecord 
     createdAt: String(task.createdAt ?? task.created_at ?? new Date().toISOString()),
     expiresAt: String(task.expiresAt ?? task.expires_at ?? ""),
     transitions,
-    launchUrl: launchUrl ?? String(task.launchUrl ?? task.launch_url ?? `formaspec://connect-agent?task=${encodeURIComponent(id)}`),
+    launchUrl: launchUrl ?? String(task.launchUrl ?? task.launch_url
+      ?? `codex://new?prompt=${encodeURIComponent(`[@FormaSpec](plugin://formaspec@formaspec)\n\nUse FormaSpec. Claim task ${id} with task_claim and return an exact persisted preview for website approval. Do not commit it.`)}`),
   };
 }
 

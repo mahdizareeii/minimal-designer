@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
+import { encodeRgbaPng } from "./render.js";
 import { createComponentSourceRevisionFixture } from "../test-fixtures/component-source.js";
 
 const applications: DesignerApplication[] = [];
@@ -94,6 +96,31 @@ function mcpTool(
       id: 1,
       method: "tools/call",
       params: { name, arguments: args },
+    },
+  });
+}
+
+function mcpResource(
+  fixture: DesignerApplication,
+  token: string,
+  uri: string,
+) {
+  return fixture.app.inject({
+    method: "POST",
+    url: "/mcp",
+    remoteAddress: "127.0.0.1",
+    headers: {
+      host: "design.example.test",
+      authorization: `Bearer ${token}`,
+      "x-formaspec-proxy-secret": PROXY_SECRET,
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "resources/read",
+      params: { uri },
     },
   });
 }
@@ -303,7 +330,7 @@ describe("component insertion preview HTTP authorization", () => {
     const allowedChallenge = fixture.enterprise.createAgentConnection(ADMIN_ACTOR, {
       adapter: "codex",
       displayName: "Component insertion MCP allowed",
-      scopes: ["design:preview", "design:read", "design_system:read"],
+      scopes: ["design:preview", "design:read", "design:write", "design_system:read"],
       projectIds: [allowed.designId],
       expiresInSeconds: 3_600,
     });
@@ -316,8 +343,9 @@ describe("component insertion preview HTTP authorization", () => {
     });
     const allowedGrant = fixture.enterprise.pairAgentConnection(allowedChallenge.nonce).grant;
     const missingScopeGrant = fixture.enterprise.pairAgentConnection(missingScopeChallenge.nonce).grant;
+    const renderedPng = encodeRgbaPng(160, 44, Buffer.alloc(160 * 44 * 4, 255));
     vi.spyOn(fixture.renderer, "render").mockResolvedValue({
-      png: Buffer.from("89504e470d0a1a0a", "hex"),
+      png: renderedPng,
       width: 160,
       height: 44,
       renderer: "playwright",
@@ -329,6 +357,7 @@ describe("component insertion preview HTTP authorization", () => {
       component_definition_id: FORMASPEC_FOUNDATION_SYSTEM.release.component_versions[0]!.component_definition_id,
       parent: { node_id: allowedParentId },
       position: { x: 20, y: 30 },
+      max_size: 512,
     };
     const allowedResponse = await mcpTool(
       fixture,
@@ -338,7 +367,22 @@ describe("component insertion preview HTTP authorization", () => {
     );
     expect(allowedResponse.statusCode, allowedResponse.body).toBe(200);
     const allowedBody = allowedResponse.json<{
-      result: { structuredContent: { ok: boolean; preview: { canCommit: boolean }; component: { instanceId: string } } };
+      result: {
+        structuredContent: {
+          ok: boolean;
+          preview: { id: string; canCommit: boolean };
+          component: { instanceId: string };
+          render: {
+            options: { nodeId: string; maxSize: number };
+            width: number;
+            height: number;
+            renderer: "playwright" | "software";
+            warnings: string[];
+            sha256: string;
+            resourceUri: string;
+          };
+        };
+      };
     }>();
     expect(allowedBody.result, allowedResponse.body).toBeDefined();
     expect(allowedBody.result.structuredContent, allowedResponse.body).toBeDefined();
@@ -347,6 +391,71 @@ describe("component insertion preview HTTP authorization", () => {
       preview: { canCommit: true },
       component: { instanceId: expect.stringMatching(/^node_/) },
     });
+    const allowedContent = allowedBody.result.structuredContent;
+    const renderedSha256 = createHash("sha256").update(renderedPng).digest("hex");
+    expect(allowedContent.render).toEqual({
+      options: { nodeId: allowedContent.component.instanceId, maxSize: 512 },
+      width: 160,
+      height: 44,
+      renderer: "playwright",
+      warnings: [],
+      sha256: renderedSha256,
+      resourceUri: `formaspec://designs/${allowed.designId}/previews/${allowedContent.preview.id}/render.png`,
+    });
+    const persistedRender = fixture.database.sqlite.prepare(
+      "SELECT render_metadata_json FROM previews WHERE id = ?",
+    ).get(allowedContent.preview.id) as { render_metadata_json: string | null };
+    expect(persistedRender.render_metadata_json).not.toBeNull();
+    expect(JSON.parse(persistedRender.render_metadata_json!)).toEqual({
+      options: allowedContent.render.options,
+      width: allowedContent.render.width,
+      height: allowedContent.render.height,
+      renderer: allowedContent.render.renderer,
+      warnings: allowedContent.render.warnings,
+      sha256: allowedContent.render.sha256,
+    });
+
+    const resourceResponse = await mcpResource(fixture, allowedGrant.token, allowedContent.render.resourceUri);
+    expect(resourceResponse.statusCode, resourceResponse.body).toBe(200);
+    const resourceBody = resourceResponse.json<{
+      result: { contents: Array<{ mimeType?: string; blob?: string }> };
+    }>();
+    const resourceImage = resourceBody.result.contents[0];
+    expect(resourceImage?.mimeType).toBe("image/png");
+    expect(createHash("sha256").update(Buffer.from(resourceImage!.blob!, "base64")).digest("hex"))
+      .toBe(allowedContent.render.sha256);
+
+    const historyBeforeMissingEvidenceCommit = fixture.service.history(ADMIN_ACTOR, allowed.designId);
+    const versionBeforeMissingEvidenceCommit = fixture.service.getDesign(ADMIN_ACTOR, allowed.designId).revision.version;
+    const missingEvidencePreview = fixture.componentInsertions.preview(allowedGrant.actorId, allowed.designId, {
+      baseVersion: 2,
+      componentDefinitionId: args.component_definition_id,
+      parent: { node_id: allowedParentId },
+      position: { x: 40, y: 50 },
+    }).preview;
+    expect(missingEvidencePreview.renderMetadata).toBeNull();
+    const missingEvidenceCommit = await mcpTool(
+      fixture,
+      allowedGrant.token,
+      "design_commit_preview",
+      {
+        design_id: allowed.designId,
+        preview_id: missingEvidencePreview.id,
+        expected_base_version: 2,
+        idempotency_key: "component-insertion-missing-render-commit-0001",
+        message: "Reject preview without exact render evidence",
+      },
+    );
+    expect(missingEvidenceCommit.statusCode, missingEvidenceCommit.body).toBe(200);
+    expect(missingEvidenceCommit.json<{
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: "PREVIEW_ENGINE_MISMATCH" },
+    });
+    expect(fixture.service.getDesign(ADMIN_ACTOR, allowed.designId).revision.version)
+      .toBe(versionBeforeMissingEvidenceCommit);
+    expect(fixture.service.history(ADMIN_ACTOR, allowed.designId)).toEqual(historyBeforeMissingEvidenceCommit);
 
     const deniedResponse = await mcpTool(
       fixture,
@@ -369,6 +478,37 @@ describe("component insertion preview HTTP authorization", () => {
     expect(missingScopeResponse.json<{
       result: { structuredContent: { ok: boolean; error: { code: string } } };
     }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+
+    const commitArguments = {
+      design_id: allowed.designId,
+      preview_id: allowedContent.preview.id,
+      expected_base_version: 2,
+      idempotency_key: "component-insertion-exact-render-commit-0001",
+      message: "Commit exact component insertion preview",
+    };
+    const committedResponse = await mcpTool(
+      fixture,
+      allowedGrant.token,
+      "design_commit_preview",
+      commitArguments,
+    );
+    expect(committedResponse.statusCode, committedResponse.body).toBe(200);
+    const committedContent = committedResponse.json<{
+      result: { structuredContent: { ok: boolean; design: { version: number }; revision: { id: string } } };
+    }>().result.structuredContent;
+    expect(committedContent).toMatchObject({ ok: true, design: { version: 3 } });
+
+    fixture.service.versions.renderer = `${fixture.service.versions.renderer}-upgraded`;
+    const retriedCommitResponse = await mcpTool(
+      fixture,
+      allowedGrant.token,
+      "design_commit_preview",
+      commitArguments,
+    );
+    expect(retriedCommitResponse.statusCode, retriedCommitResponse.body).toBe(200);
+    expect(retriedCommitResponse.json<{
+      result: { structuredContent: typeof committedContent };
+    }>().result.structuredContent).toEqual(committedContent);
 
     fixture.enterprise.revokeAgentConnection(ADMIN_ACTOR, allowedChallenge.connection.id);
     const revokedResponse = await mcpTool(

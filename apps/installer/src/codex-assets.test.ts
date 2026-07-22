@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  FORMASPEC_CODEX_ASSET_INVENTORY,
   FORMASPEC_CODEX_IDENTITY,
+  MINIMAL_UI_CODEX_IDENTITY,
   inspectManagedCodexAssets,
 } from "./codex-assets.js";
 
@@ -28,22 +30,28 @@ afterEach(() => {
 });
 
 describe("packaged FormaSpec Codex identity", () => {
-  it("pins the managed skill, plugin, marketplace, display name, and mention", () => {
-    expect(inspectManagedCodexAssets(sourceAssets)).toEqual(FORMASPEC_CODEX_IDENTITY);
+  it("pins both managed skills, plugins, display names, versions, and mentions", () => {
+    expect(inspectManagedCodexAssets(sourceAssets)).toEqual(FORMASPEC_CODEX_ASSET_INVENTORY);
+    expect(FORMASPEC_CODEX_ASSET_INVENTORY.identities).toEqual([
+      FORMASPEC_CODEX_IDENTITY,
+      MINIMAL_UI_CODEX_IDENTITY,
+    ]);
     expect(FORMASPEC_CODEX_IDENTITY.mention).toBe("[@FormaSpec](plugin://formaspec@formaspec)");
+    expect(MINIMAL_UI_CODEX_IDENTITY.mention).toBe("[@Minimal UI](plugin://minimal-ui@formaspec)");
+    expect(FORMASPEC_CODEX_ASSET_INVENTORY.pluginVersion).toBe("0.2.0");
   });
 
-  it("rejects missing canonical assets and legacy managed directories", () => {
+  it("rejects missing primary or alias assets", () => {
     const missing = copiedAssets();
     fs.rmSync(path.join(missing, "skills/formaspec"), { recursive: true, force: true });
     expect(() => inspectManagedCodexAssets(missing)).toThrow(/Required managed FormaSpec Codex asset/u);
 
-    const legacy = copiedAssets();
-    fs.mkdirSync(path.join(legacy, "codex-marketplace/plugins/minimal-ui"), { recursive: true });
-    expect(() => inspectManagedCodexAssets(legacy)).toThrow(/legacy managed path/u);
+    const missingAlias = copiedAssets();
+    fs.rmSync(path.join(missingAlias, "codex-marketplace/plugins/minimal-ui"), { recursive: true, force: true });
+    expect(() => inspectManagedCodexAssets(missingAlias)).toThrow(/Required managed FormaSpec Codex asset/u);
   });
 
-  it("rejects stale generated display names and marketplace plugin sources", () => {
+  it("rejects stale display names, versions, and marketplace plugin sources", () => {
     const staleDisplayName = copiedAssets();
     const pluginManifest = path.join(
       staleDisplayName,
@@ -56,13 +64,36 @@ describe("packaged FormaSpec Codex identity", () => {
     fs.writeFileSync(pluginManifest, `${JSON.stringify(plugin, null, 2)}\n`);
     expect(() => inspectManagedCodexAssets(staleDisplayName)).toThrow(/display the managed agent as FormaSpec/u);
 
+    const staleAliasDisplayName = copiedAssets();
+    const aliasManifest = path.join(
+      staleAliasDisplayName,
+      "codex-marketplace/plugins/minimal-ui/.codex-plugin/plugin.json",
+    );
+    const aliasPlugin = JSON.parse(fs.readFileSync(aliasManifest, "utf8")) as {
+      version: string;
+      interface: { displayName: string };
+    };
+    aliasPlugin.interface.displayName = "FormaSpec";
+    fs.writeFileSync(aliasManifest, `${JSON.stringify(aliasPlugin, null, 2)}\n`);
+    expect(() => inspectManagedCodexAssets(staleAliasDisplayName)).toThrow(/display the managed agent as Minimal UI/u);
+
+    const staleAliasVersion = copiedAssets();
+    const staleAliasVersionManifest = path.join(
+      staleAliasVersion,
+      "codex-marketplace/plugins/minimal-ui/.codex-plugin/plugin.json",
+    );
+    const versionedAlias = JSON.parse(fs.readFileSync(staleAliasVersionManifest, "utf8")) as { version: string };
+    versionedAlias.version = "0.1.0";
+    fs.writeFileSync(staleAliasVersionManifest, `${JSON.stringify(versionedAlias, null, 2)}\n`);
+    expect(() => inspectManagedCodexAssets(staleAliasVersion)).toThrow(/minimal-ui at 0\.2\.0/u);
+
     const staleSource = copiedAssets();
     const marketplaceManifest = path.join(staleSource, "codex-marketplace/.agents/plugins/marketplace.json");
     const marketplace = JSON.parse(fs.readFileSync(marketplaceManifest, "utf8")) as {
-      plugins: Array<{ source: { path: string } }>;
+      plugins: Array<{ name: string; source: { path: string } }>;
     };
-    marketplace.plugins[0]!.source.path = "./plugins/minimal-ui";
+    marketplace.plugins.find((entry) => entry.name === "minimal-ui")!.source.path = "./plugins/formaspec";
     fs.writeFileSync(marketplaceManifest, `${JSON.stringify(marketplace, null, 2)}\n`);
-    expect(() => inspectManagedCodexAssets(staleSource)).toThrow(/resolve the plugin from \.\/plugins\/formaspec/u);
+    expect(() => inspectManagedCodexAssets(staleSource)).toThrow(/resolve the plugin from \.\/plugins\/minimal-ui/u);
   });
 });

@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AuthenticationForm, parseBootstrapTokenFragment } from "../components/SessionAuthentication";
 import {
+  AUTHENTICATION_REQUIRED_EVENT,
   bootstrapBrowserAdministrator,
+  listDesigns,
   loginBrowserAdministrator,
   logoutBrowserAdministrator,
   readBrowserAuthentication,
@@ -28,6 +30,7 @@ describe("FormaSpec browser administrator authentication", () => {
     );
     expect(bootstrap).toContain("Create the first administrator");
     expect(bootstrap).toContain("Display name");
+    expect(bootstrap).toContain("Confirm password");
     expect(bootstrap).toContain("Create administrator");
     expect(bootstrap).toContain('minLength="12"');
 
@@ -36,6 +39,7 @@ describe("FormaSpec browser administrator authentication", () => {
     );
     expect(protectedBootstrap).toContain("One-time setup code");
     expect(protectedBootstrap).toContain("./designer server init");
+    expect(protectedBootstrap).toContain("removes it from the address bar");
 
     const login = renderToStaticMarkup(
       <AuthenticationForm bootstrapRequired={false} busy={false} error="Invalid login credentials." onSubmit={() => {}} onRetry={() => {}} />,
@@ -104,5 +108,30 @@ describe("FormaSpec browser administrator authentication", () => {
     expect(new Headers(calls[1]!.init.headers).get("x-formaspec-csrf")).toBe("1");
     expect(new Headers(calls[2]!.init.headers).get("x-formaspec-csrf")).toBe(csrfToken);
     expect(new Headers(calls[3]!.init.headers).get("x-formaspec-csrf")).toBe("1");
+  });
+
+  it("keeps expected credential failures on the form while protected-route failures request a session refresh", async () => {
+    const browserWindow = new EventTarget();
+    let authenticationRequiredEvents = 0;
+    browserWindow.addEventListener(AUTHENTICATION_REQUIRED_EVENT, () => { authenticationRequiredEvents += 1; });
+    vi.stubGlobal("window", browserWindow);
+    const responses = [
+      jsonResponse({ error: { code: "AUTH_REQUIRED", message: "Invalid login credentials." } }, 401),
+      jsonResponse({ error: { code: "AUTH_REQUIRED", message: "A valid browser session is required." } }, 401),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected request");
+      return response;
+    }));
+
+    await expect(loginBrowserAdministrator({
+      loginName: "admin@example.test",
+      password: "incorrect password 2026",
+    })).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: "Invalid login credentials." });
+    expect(authenticationRequiredEvents).toBe(0);
+
+    await expect(listDesigns()).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(authenticationRequiredEvents).toBe(1);
   });
 });

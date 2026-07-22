@@ -3,6 +3,7 @@ import { TOKEN_EXPORT_TARGETS } from "@designer/core";
 import { z } from "zod";
 
 import type { OperationsService } from "./operations-service.js";
+import { MAX_BACKUP_UPLOAD_BYTES, streamBackupUpload } from "./backup-upload.js";
 import { MAX_PORTABLE_ARCHIVE_BYTES, streamPortableUpload } from "./portable-upload.js";
 
 const designParams = z.object({ id: z.string().trim().min(1).max(240) }).strict();
@@ -12,6 +13,9 @@ const backupPruneParams = z.object({
 }).strict();
 const portableImportQuery = z.object({
   mode: z.enum(["conflict_fail", "clone"]).default("conflict_fail"),
+}).strict();
+const backupImportQuery = z.object({
+  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
 function portableImportIdempotencyKey(headers: FastifyRequest["headers"]): string {
@@ -111,6 +115,28 @@ export function registerOperationsHttpRoutes(app: FastifyInstance, operations: O
     z.object({}).strict().parse(request.body ?? {});
     const backup = await operations.createBackup(request.actorId);
     return reply.code(201).send({ backup });
+  });
+
+  app.post("/api/backups/imports/validate", { bodyLimit: MAX_BACKUP_UPLOAD_BYTES + 1024 * 1024 }, async (request) => {
+    operations.assertBackupImportAllowed(request.actorId);
+    const upload = await streamBackupUpload(request);
+    try {
+      return await operations.validateBackupImportFile(request.actorId, upload);
+    } finally {
+      await upload.cleanup();
+    }
+  });
+
+  app.post("/api/backups/imports", { bodyLimit: MAX_BACKUP_UPLOAD_BYTES + 1024 * 1024 }, async (request, reply) => {
+    operations.assertBackupImportAllowed(request.actorId);
+    const { expectedSha256 } = backupImportQuery.parse(request.query);
+    const upload = await streamBackupUpload(request);
+    try {
+      const imported = await operations.registerBackupImportFile(request.actorId, upload, expectedSha256);
+      return reply.code(imported.alreadyRegistered ? 200 : 201).send(imported);
+    } finally {
+      await upload.cleanup();
+    }
   });
 
   app.get("/api/backups/schedule", async (request) => {

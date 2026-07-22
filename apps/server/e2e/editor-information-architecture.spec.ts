@@ -1,4 +1,4 @@
-import { createId } from "@designer/core";
+import { createId, createTextNode } from "@designer/core";
 import { expect, test, type APIRequestContext, type Locator } from "playwright/test";
 
 interface CreatedDesign {
@@ -505,4 +505,75 @@ test("website design commands expose connection and claim state, then show the e
     version: 2,
     document: { nodes: { [fixture.frameId]: { name: "Agent-designed dispatch overview" } } },
   });
+});
+
+test("editor chrome has a readable minimum size without changing canonical canvas typography", async ({ page, request }) => {
+  const fixture = await createEditorFixture(request);
+  const tinyText = createTextNode({
+    name: "Canonical tiny canvas text",
+    content: "Canonical 8px canvas text",
+    direction: "ltr",
+    layout: { x: 40, y: 40, width: 220, height: 24 },
+    style: {
+      fill: "#ffffff",
+      typography: {
+        font_family: "Inter",
+        font_size: 8,
+        font_weight: 400,
+        line_height: 1.2,
+      },
+    },
+  });
+  const revision = await request.post(`/api/designs/${encodeURIComponent(fixture.designId)}/revisions`, {
+    data: {
+      baseVersion: 1,
+      operations: [{
+        type: "create_tree",
+        parent: { node_id: fixture.frameId },
+        root_ids: [tinyText.id],
+        nodes: [tinyText],
+      }],
+      idempotencyKey: `readable-editor-${crypto.randomUUID()}`,
+      message: "Add canonical tiny text for chrome-isolation verification",
+    },
+  });
+  expect(revision.ok(), await revision.text()).toBe(true);
+
+  await page.goto(
+    `/design/${encodeURIComponent(fixture.designId)}?page=${encodeURIComponent(fixture.pageId)}&node=${encodeURIComponent(fixture.frameId)}`,
+  );
+  await expect(page.locator(".canvas-editor-root")).toBeVisible();
+
+  const tinyCanvasText = page.locator(`[data-node-id="${tinyText.id}"]`);
+  await expect(tinyCanvasText).toBeVisible();
+  expect(await tinyCanvasText.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBe(8);
+
+  const tooSmall = await page.locator(".editor-shell").evaluate((editor) => {
+    const roots = editor.querySelectorAll<HTMLElement>([
+      ".editor-topbar",
+      ".left-sidebar",
+      ".right-sidebar",
+      ".editor-stage-tabs",
+      ".editor-statusbar",
+      ".product-workspace-panel",
+    ].join(","));
+    const candidates = new Set<HTMLElement>();
+    for (const root of roots) {
+      for (const candidate of root.querySelectorAll<HTMLElement>(
+        "button, input, select, textarea, label, span, small, p, code, strong, h2, h3",
+      )) candidates.add(candidate);
+    }
+    return [...candidates].flatMap((candidate) => {
+      const bounds = candidate.getBoundingClientRect();
+      if (bounds.width === 0 || bounds.height === 0) return [];
+      const size = Number.parseFloat(getComputedStyle(candidate).fontSize);
+      const control = ["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(candidate.tagName);
+      const emphasized = ["STRONG", "H2", "H3"].includes(candidate.tagName);
+      const minimum = control || emphasized ? 13 : 12;
+      return size + 0.01 < minimum
+        ? [{ tag: candidate.tagName, text: candidate.textContent?.trim().slice(0, 80) ?? "", size, minimum }]
+        : [];
+    });
+  });
+  expect(tooSmall).toEqual([]);
 });

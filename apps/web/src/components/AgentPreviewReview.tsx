@@ -202,7 +202,7 @@ export function AgentPreviewPng({
 }
 
 export function agentTaskInstruction(task: AgentTaskRecord): string {
-  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim FormaSpec task ${task.id}, read its project context and selection, preview the requested design, inspect the rendered result, run linting, and return the exact persisted preview for website approval.`;
+  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim task ${task.id} with task_claim, call task_transition to move it to in_progress, read its project context and selection, create and inspect a rendered design preview, and run linting. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>"}. Do not commit it; the website must show the exact PNG and human Commit button.`;
 }
 
 export function codexTaskLaunchUrl(task: AgentTaskRecord): string {
@@ -219,7 +219,7 @@ export function agentTaskStatusMessage(task: AgentTaskRecord | null): string {
   if (!task) return "Submit a design command to create an immutable agent task.";
   const latestMessage = task.transitions.at(-1)?.message?.trim();
   switch (task.status) {
-    case "queued": return "Task created. Codex has not claimed it yet.";
+    case "queued": return "Task created. Click Open task in Codex below so @FormaSpec can claim it.";
     case "claimed": return `Claimed${task.claimedBy ? ` by ${task.claimedBy}` : " by Codex"}; waiting for design work to start.`;
     case "in_progress": return latestMessage || "Codex is reading the brief and preparing an exact design preview.";
     case "awaiting_approval": return "Codex returned a persisted preview. Review it below, then commit or discard it.";
@@ -228,6 +228,12 @@ export function agentTaskStatusMessage(task: AgentTaskRecord | null): string {
     case "cancelled": return latestMessage || "This task was cancelled without changing design history.";
     case "expired": return latestMessage || "This task expired before it was completed.";
   }
+}
+
+export function agentTaskBriefSummary(brief: string, maxLength = 320): string {
+  const normalized = brief.trim().replace(/\s+/g, " ");
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }
 
 function taskStageState(task: AgentTaskRecord | null, stage: "queued" | "claimed" | "preview"): "idle" | "current" | "complete" | "error" {
@@ -323,6 +329,10 @@ export function AgentTaskWorkflowCard({
             <code>{task.id}</code>
           </div>
           <p className={terminalError ? "is-error" : ""}>{agentTaskStatusMessage(task)}</p>
+          <div className="agent-task-submitted-command" data-testid="agent-submitted-command">
+            <strong>Submitted to @FormaSpec</strong>
+            <span>{agentTaskBriefSummary(task.brief)}</span>
+          </div>
 
           {preview ? (
             <div className="agent-task-inline-preview">
@@ -360,7 +370,7 @@ export function AgentTaskWorkflowCard({
 
           {!preview && (
             <div className="agent-task-current-actions">
-              <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open in Codex</button>
+              <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open task in Codex</button>
               {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect or repair Codex</button>}
               <button className="button button-secondary" onClick={onCopyInstruction}><Copy size={12} /> Copy Codex instruction</button>
               <button className="button button-secondary" onClick={onRetry}><RefreshCcw size={12} /> Refresh status</button>

@@ -2,8 +2,9 @@
 
 Last audited: 2026-07-22
 
-FormaSpec is both the product name and the agent-facing identity used by Codex
-and other MCP-capable clients.
+FormaSpec is the product name and primary agent-facing identity used by Codex
+and other MCP-capable clients. Minimal UI is the supported compatibility
+identity; both share the same token-free `formaspec` MCP server.
 
 ## Operational status
 
@@ -29,18 +30,17 @@ socket proxy lifecycle passed 1/1 for overwrite/strip, direct-peer denial, appen
 and restart-bound secret rotation; it is not real Nginx/TLS/public-port proof. See
 [Release blockers](#release-blockers).
 
-The last broad cross-browser, visual, performance, Docker-runtime/egress,
-copied-bundle recovery, and SBOM/license checkpoint was schema 13 and is
-retained as historical evidence only. Current schema-15 package tests pass
-840/840 across core 59, server 466, web 91, CLI 96, local bridge 20, Workspace
-Bridge 37, and installer 71. All seven workspace typechecks/builds, installer
-typecheck/build, launcher 225/225, and `docker compose config --quiet` pass.
-Targeted editor/Administration E2E passes 5/5, current-schema release E2E 1/1,
-server preview integration 2/2, and macOS runtime-smoke contracts 11/11. These
-gates cover the session/pairing and prompt/task/preview/Commit-Discard slice;
-the full cross-browser, visual,
-performance, Docker runtime/recovery, SBOM/image scan, and installed native-
-lifecycle matrices have not been rerun at schema 15.
+Current schema-16 package tests pass 842/842 across core 59, server 467, web 91,
+CLI 96, local bridge 20, Workspace Bridge 37, and installer 72. All seven
+workspace typechecks/builds, launcher 225/225, and `docker compose config
+--quiet` pass. Editor/Administration E2E passes 5/5, current-schema release E2E
+1/1, server preview integration 2/2, Chromium and Firefox/WebKit alignment
+12/12 each, visual regression 7/7, the 1,000-node browser budgets, and macOS
+runtime-smoke contracts 11/11. Current local Docker restart/egress and copied-
+bundle recovery checkpoints also pass. The exact schema-13 SBOM/license result
+remains historical; hosted supported-OS runs, current security/SBOM/image/OS
+scans, signed native lifecycle evidence, and real remote-host/TLS recovery are
+still open.
 
 ## Fastest installation
 
@@ -60,9 +60,9 @@ Local source installer entry point:
 
 Both installers perform the available requirement checks, install the frozen
 workspace dependencies, build the CLI and local bridge, start FormaSpec, start
-the loopback bridge, detect Codex, and configure the managed FormaSpec
-integration when Codex is available. `--yes` grants that explicit setup
-authorization without further prompts.
+the loopback bridge, detect Codex, and configure the managed version-0.2.0
+FormaSpec and Minimal UI integrations when Codex is available. `--yes` grants
+that explicit setup authorization without further prompts.
 
 The source installer currently needs Node.js 24 or newer and pnpm 11.9 even
 when the selected application runtime is Docker, because `formaspecctl` and the
@@ -127,12 +127,19 @@ foreign-key equality and complete cleanup. Bundle SHA-256 was
 the `NO-GO` summary SHA-256 was
 `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
 
-These local runs predate the `drizzle-orm` 0.45.2 lock update and must be
-repeated after a fresh frozen install. Historical schema-12 summaries remain
-under the earlier `final437` temporary directories and are not current-source
-evidence. Server-mode proxy/restore, real remote-host/TLS/off-site recovery,
-broader fixtures, upgrade, saturation, and long-running security evidence
-remain incomplete. Do not weaken the host binding or publish the port.
+Those schema-13 runs remain historical. Current schema-16 local evidence uses
+image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`.
+Its Docker, cross-browser, and copied-bundle summaries are retained at
+`artifacts/ci/docker-schema11/summary.json`,
+`artifacts/ci/cross-browser-docker/summary.json`, and
+`artifacts/ci/offhost-restore-simulation/NO-GO-SUMMARY.json`; the legacy
+`docker-schema11` path is intentional. Deterministic restart rendering,
+DNS/TCP/interface egress denial, Firefox/WebKit 12/12, SQLite integrity/foreign
+keys, asset/snapshot/revision hashes, render equality, and cleanup pass. These
+remain local uncommitted-source `NO-GO` checkpoints. Server-mode proxy/restore,
+real remote-host/TLS/off-site recovery, broader fixtures, upgrade, saturation,
+and long-running security evidence remain incomplete. Do not weaken the host
+binding or publish the port.
 
 ## Source development
 
@@ -204,7 +211,7 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl audit retention preview [--json]` | Produces a 15-minute, organization-scoped, bounded dry-run using the current audit-retention policy, exact candidate counts/ranges, canonical-byte hashes, and a plan hash. |
 | `pnpm formaspecctl audit retention list [--json]` | Lists immutable retention-run evidence and SHA-256 chain hashes without exposing deleted audit contents. |
 | `pnpm formaspecctl audit retention execute --preview-id <id> --plan-hash <sha256> --yes [--idempotency-key <key>] [--json]` | Revalidates and atomically commits only the reviewed old audit/published-outbox batch, then records immutable hash-chained evidence. |
-| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts/authorizes the bridge, consumes an Administration-issued ticket in authenticated mode, installs the managed FormaSpec skill/plugin, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. `--connection-id` is optional but valid only with a nonce. |
+| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts/authorizes the bridge, consumes an Administration-issued ticket in authenticated mode, installs both managed version-0.2.0 identities, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. `--connection-id` is optional but valid only with a nonce. |
 | `pnpm formaspecctl agent config generic [--format all\|json\|toml]` | Prints validated client-neutral loopback Streamable HTTP configuration and verification guidance; it never reads or modifies an unknown client file. |
 | `pnpm formaspecctl support-bundle preview [--json]` | Produces a read-only exact inventory of bounded sanitized diagnostic entries. |
 | `pnpm formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]` | Creates the reviewed deterministic archive plus an adjacent local manifest; excludes databases, assets, backups, environment values, source, and credentials. |
@@ -223,7 +230,7 @@ custom volumes, and orchestrators still require deployment-specific procedures. 
 supervisor installation/alerting, application autostart, native package
 install/upgrade/uninstall, approved backup signing/provenance, and a migration
 execution/rollback command are not implemented. The migration-status
-reader is synchronized at version 15. Migration 9 adds the preview/run ledger
+reader is synchronized at version 16. Migration 9 adds the preview/run ledger
 and guarded exact-delete contract; migration 10 adds immutable portable-import
 provenance; migration 11 adds persistent bounded render-job lifecycle records;
 migration 12 adds append-only handoff execution decisions with immutable CAS
@@ -235,6 +242,9 @@ attempt buckets, and one-time public-server bootstrap credential without
 fabricating an administrator or active session. Migration 15 adds bounded,
 write-once exact preview-render options, dimensions, renderer backend, warnings,
 and PNG SHA-256 without fabricating evidence for historical previews.
+Migration 16 safely replaces the legacy schema-14/15 bootstrap-credential
+trigger with its canonical consume-once definition while preserving credential
+rows and failing closed on schema-shape drift.
 None changes stored V1 revisions. The
 copied version-7-to-8 migration
 fixture preserves V1 revision bytes and hashes. A historical disposable local-
@@ -297,9 +307,12 @@ The resulting setup is:
 - MCP server ID: `formaspec`;
 - local bridge URL: `http://127.0.0.1:4312/mcp`;
 - upstream FormaSpec MCP URL: `http://127.0.0.1:4310/mcp` by default;
-- Codex mention: `[@FormaSpec](plugin://formaspec@formaspec)`;
+- Codex mentions: `[@FormaSpec](plugin://formaspec@formaspec)` and
+  `[@Minimal UI](plugin://minimal-ui@formaspec)`;
+- installed managed identities: FormaSpec and Minimal UI, both version 0.2.0;
 - natural-language triggers prioritize “Use FormaSpec,” “Design this with
-  FormaSpec,” and “Refine this selection with FormaSpec.”
+  FormaSpec,” and “Refine this selection with FormaSpec,” plus the corresponding
+  Minimal UI selection and redesign variants.
 
 The Codex MCP configuration contains no bearer token. Administration creates
 the scoped, expiring connection and one-time nonce. The loopback bridge submits
@@ -1027,10 +1040,10 @@ from later event IDs.
 Production readiness remains **NO-GO** until all of the following are resolved
 and evidenced:
 
-- retain the current schema-15 package suite 840/840, launcher 225/225,
-  typecheck/build, installer, Compose configuration, and targeted browser/
-  preview gates in hosted CI, then rerun the full cross-browser, visual,
-  performance, Docker runtime/egress, recovery, and SBOM/license matrices;
+- retain the current schema-16 package suite 842/842, launcher 225/225,
+  typecheck/build, Compose configuration, browser/preview/alignment/visual/
+  performance gates, Docker runtime/egress, and copied-bundle recovery in
+  hosted supported-OS CI, then generate current SBOM/security/image/OS evidence;
 - add real Windows named-pipe/native renderer/service-host/ACL/process-tree
   packaging and retained hosted egress/crash/saturation/load evidence beyond
   the historical local schema-13 DNS/TCP/interface canary;
@@ -1039,11 +1052,10 @@ and evidenced:
   upgrade, alerting, and long-running Compose evidence; controlled actual-
   socket proxy behavior and both restore command paths exist but have not
   passed those deployment release matrices;
-- retain the current schema-15 editor/Administration 5/5, release E2E 1/1,
-  preview integration 2/2, and local session smoke, then rerun and retain the
-  historical schema-13 selection 12/12, handoff, visual 7/7, inspect,
-  20-step, cross-browser, and 1,000-node budget matrices on pinned hosted/
-  supported-OS release runners;
+- retain the current schema-16 editor/Administration 5/5, release E2E 1/1,
+  preview integration 2/2, Chromium and Firefox/WebKit alignment 12/12 each,
+  visual 7/7, 20-step release scenario, and 1,000-node budget matrices on
+  pinned hosted/supported-OS release runners;
 - extend the recorded disposable local-Docker A/B restore exercise beyond the
   passing source-local 20-step V1/V2/product/task/hash/render scenario and
   deterministic schema 1/schema 7–12 fixtures to the full asset/design-system/
@@ -1088,5 +1100,5 @@ and evidenced:
   but no GitHub-hosted run or real Ubuntu package artifact has been retained.
   The historical schema-13 source evidence reported 342 components and zero
   license violations. Audit reports zero high/critical findings for the 0.45.2
-  lock, but current schema-15 artifact-specific SBOM/image/OS and installed
+  lock, but current schema-16 artifact-specific SBOM/image/OS and installed
   lifecycle verification are still required.

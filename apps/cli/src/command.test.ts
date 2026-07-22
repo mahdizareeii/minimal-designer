@@ -134,24 +134,15 @@ if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "list" ]; then
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "add" ]; then exit 0; fi
 if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  if [ "$FAKE_CODEX_HIDE_LEGACY_AFTER_REFRESH" = "1" ] && [ ! -d "$FAKE_CODEX_MARKETPLACE/plugins/minimal-ui" ] && [ -f "$FAKE_CODEX_PLUGIN_STATE" ] && grep -q 'minimal-ui@formaspec' "$FAKE_CODEX_PLUGIN_STATE" && ! grep -q 'formaspec@formaspec' "$FAKE_CODEX_PLUGIN_STATE"; then
-    printf '{"installed":[]}\n'
-  elif [ -f "$FAKE_CODEX_PLUGIN_STATE" ]; then cat "$FAKE_CODEX_PLUGIN_STATE"
+  if [ -f "$FAKE_CODEX_PLUGIN_STATE" ]; then cat "$FAKE_CODEX_PLUGIN_STATE"
   else printf '{"installed":[]}\n'; fi
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "add" ]; then
-  if [ -f "$FAKE_CODEX_PLUGIN_STATE" ] && grep -q 'minimal-ui@formaspec' "$FAKE_CODEX_PLUGIN_STATE"; then
-    printf '{"installed":[{"pluginId":"minimal-ui@formaspec","version":"0.2.0","installed":true,"enabled":true},{"pluginId":"formaspec@formaspec","version":"0.2.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
-  else
-    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
-  fi
+  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.0","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
   exit 0
 fi
-if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then
-  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
-  exit 0
-fi
+if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then exit 9; fi
 exit 2
 `, { mode: 0o755 });
   fs.writeFileSync(log, "");
@@ -188,10 +179,11 @@ describe("formaspecctl", () => {
     expect(result).toBe(1);
     expect(bridge.starts).toBe(0);
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
+    expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
     expect(fs.readFileSync(log, "utf8").trim()).toBe("--version");
   });
 
-  it("configures token-free FormaSpec MCP and installs the managed FormaSpec skill and plugin", async () => {
+  it("configures token-free FormaSpec MCP and installs both managed agent identities", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -215,6 +207,7 @@ describe("formaspecctl", () => {
     expect(calls).toContain("mcp get formaspec\n");
     expect(calls).toContain("plugin marketplace add");
     expect(calls).toContain("plugin add formaspec@formaspec --json");
+    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
     expect(calls.toLowerCase()).not.toContain("bearer");
     expect(calls.toLowerCase()).not.toContain("token");
     const codexConfig = fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8");
@@ -224,20 +217,44 @@ describe("formaspecctl", () => {
     expect(codexConfig.toLowerCase()).not.toContain("bearer");
     const skill = fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"), "utf8");
     expect(skill).toContain("Use FormaSpec");
-    expect(skill).toContain("Use Minimal UI");
     expect(skill).toContain("Design this with FormaSpec");
     expect(skill).toContain("Refine this selection with FormaSpec");
     expect(skill).toContain("Redesign this with FormaSpec");
+    const minimalUiSkill = fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", "SKILL.md"), "utf8");
+    expect(minimalUiSkill).toContain("Use Minimal UI");
+    expect(minimalUiSkill).toContain("Design this with Minimal UI");
+    expect(minimalUiSkill).toContain("Refine this selection with Minimal UI");
+    expect(minimalUiSkill).toContain("Redesign this with Minimal UI");
     const marker = JSON.parse(fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", ".formaspec-managed.json"), "utf8"));
     expect(marker).toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
+    const minimalUiMarker = JSON.parse(fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", ".formaspec-managed.json"), "utf8"));
+    expect(minimalUiMarker).toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
     const marketplace = path.join(root, ".codex", "formaspec-marketplace");
-    expect(JSON.parse(fs.readFileSync(path.join(marketplace, ".agents", "plugins", "marketplace.json"), "utf8"))).toMatchObject({ name: "formaspec" });
+    expect(JSON.parse(fs.readFileSync(path.join(marketplace, ".agents", "plugins", "marketplace.json"), "utf8"))).toMatchObject({
+      name: "formaspec",
+      plugins: [
+        { name: "formaspec", source: { path: "./plugins/formaspec" } },
+        { name: "minimal-ui", source: { path: "./plugins/minimal-ui" } },
+      ],
+    });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "formaspec",
+      version: "0.2.0",
       interface: { displayName: "FormaSpec" },
     });
-    expect(io.output).toContain("Codex mention: [@FormaSpec](plugin://formaspec@formaspec)");
-    expect(io.output.join("\n")).not.toContain("plugin://minimal-ui@formaspec");
+    expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
+      name: "minimal-ui",
+      version: "0.2.0",
+      interface: { displayName: "Minimal UI" },
+    });
+    expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
+    });
+    expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
+    expect(io.output.join("\n")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
     const approvalConfig = [
       'basic_approval_example = """',
       "[mcp_servers.formaspec]",
@@ -342,7 +359,7 @@ describe("formaspecctl", () => {
     expect(fs.readFileSync(path.join(skill, "SKILL.md"), "utf8")).toBe("user-owned\n");
   });
 
-  it("repairs a disabled canonical FormaSpec plugin and verifies it is enabled", async () => {
+  it("repairs disabled or missing managed plugins and verifies both identities", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -360,13 +377,18 @@ describe("formaspecctl", () => {
     });
 
     expect(result).toBe(0);
-    expect(fs.readFileSync(log, "utf8")).toContain("plugin add formaspec@formaspec --json");
+    const calls = fs.readFileSync(log, "utf8");
+    expect(calls).toContain("plugin add formaspec@formaspec --json");
+    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
-      installed: [{ pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true }],
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
     });
   });
 
-  it("cleans an interrupted managed migration whose legacy plugin survives only in Codex config", async () => {
+  it("retains exact Minimal UI alias configuration while preserving similarly prefixed and unrelated TOML", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -393,13 +415,13 @@ describe("formaspecctl", () => {
       'prefix_array = "preserve"',
       "",
       '[plugins."minimal-ui@formaspec"] # managed legacy parent',
-      'legacy_parent = "remove"',
+      'alias_parent = "preserve"',
       "",
       '[[plugins."minimal-ui@formaspec".connections]] # managed legacy descendant array',
-      'legacy_array = "remove"',
+      'alias_array = "preserve"',
       "",
       '[plugins."minimal-ui@formaspec".mcp_servers.formaspec] # managed legacy descendant',
-      'legacy_descendant = "remove"',
+      'alias_descendant = "preserve"',
       "",
       '[plugins."unrelated@company"] # unrelated table',
       'unrelated = "preserve"',
@@ -424,16 +446,24 @@ describe("formaspecctl", () => {
     expect(updatedConfig).toContain('[[plugins."minimal-ui@formaspec-extra".connections]] # similarly prefixed array table');
     expect(updatedConfig).toContain('prefix_parent = "preserve"');
     expect(updatedConfig).toContain('prefix_array = "preserve"');
-    expect(updatedConfig).not.toContain('legacy_parent = "remove"');
-    expect(updatedConfig).not.toContain('legacy_array = "remove"');
-    expect(updatedConfig).not.toContain('legacy_descendant = "remove"');
+    expect(updatedConfig).toContain('alias_parent = "preserve"');
+    expect(updatedConfig).toContain('alias_array = "preserve"');
+    expect(updatedConfig).toContain('alias_descendant = "preserve"');
     expect(updatedConfig).toContain('[plugins."unrelated@company"] # unrelated table');
     expect(updatedConfig).toContain('unrelated = "preserve"');
     expect(updatedConfig).toContain("[mcp_servers.formaspec]");
-    expect(fs.readFileSync(log, "utf8")).not.toContain("plugin remove minimal-ui@formaspec");
+    const calls = fs.readFileSync(log, "utf8");
+    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
+    expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
+    expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
+    });
   });
 
-  it("migrates only FormaSpec-managed legacy Minimal UI skill and plugin installations", async () => {
+  it("upgrades managed legacy Minimal UI assets in place without removing the alias", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -455,26 +485,30 @@ describe("formaspecctl", () => {
       projectRoot: root,
       bridge: fakeBridge(),
       io: collectingIo(),
-      environment: {
-        ...fakeEnvironment(root, bin, log, state),
-        FAKE_CODEX_HIDE_LEGACY_AFTER_REFRESH: "1",
-        FAKE_CODEX_MARKETPLACE: marketplace,
-      },
+      environment: fakeEnvironment(root, bin, log, state),
     });
 
     expect(result).toBe(0);
-    expect(fs.existsSync(legacySkill)).toBe(false);
-    expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui"))).toBe(false);
+    expect(fs.readFileSync(path.join(legacySkill, "SKILL.md"), "utf8")).toContain("Use Minimal UI");
+    expect(JSON.parse(fs.readFileSync(path.join(legacySkill, ".formaspec-managed.json"), "utf8")))
+      .toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
+    expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui", "legacy.txt"))).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8")))
+      .toMatchObject({ name: "minimal-ui", version: "0.2.0", interface: { displayName: "Minimal UI" } });
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"))).toBe(true);
     const calls = fs.readFileSync(log, "utf8");
     expect(calls).toContain("plugin add formaspec@formaspec --json");
-    expect(calls).toContain("plugin remove minimal-ui@formaspec --json");
-    expect(calls.indexOf("plugin add formaspec@formaspec --json"))
-      .toBeLessThan(calls.indexOf("plugin remove minimal-ui@formaspec --json"));
+    expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
+    expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
+    });
   });
 
-  it("preserves unmanaged legacy Minimal UI content and does not uninstall its plugin", async () => {
+  it("preserves an unmanaged Minimal UI skill while repairing the managed plugin alias", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -497,7 +531,16 @@ describe("formaspecctl", () => {
     expect(result).toBe(0);
     expect(fs.readFileSync(path.join(legacySkill, "SKILL.md"), "utf8")).toBe("user-owned legacy skill\n");
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"))).toBe(true);
-    expect(fs.readFileSync(log, "utf8")).not.toContain("plugin remove minimal-ui@formaspec");
+    expect(fs.existsSync(path.join(root, ".codex", "formaspec-marketplace", "plugins", "minimal-ui", ".codex-plugin", "plugin.json"))).toBe(true);
+    const calls = fs.readFileSync(log, "utf8");
+    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
+    expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
+    expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
+    });
   });
 
   it("prints generic MCP configuration without starting, authorizing, or modifying an unknown client", async () => {

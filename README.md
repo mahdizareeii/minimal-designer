@@ -1,9 +1,10 @@
 # FormaSpec
 
 FormaSpec is a self-hosted, AI-first product and UI design workspace. Its
-agent-facing name is **FormaSpec**: a product manager can describe a web,
-phone, or tablet experience to Codex, review a rendered preview, and continue
-editing the same structured document in the browser.
+primary agent-facing name is **FormaSpec**, with **Minimal UI** retained as a
+compatibility identity: a product manager can describe a web, phone, or tablet
+experience to Codex, review a rendered preview, and continue editing the same
+structured document in the browser.
 
 The application does not embed the OpenAI API and does not require an OpenAI
 API key. Codex connects through the local FormaSpec MCP bridge. Your Codex
@@ -19,8 +20,8 @@ subscription or API usage remains separate.
 
 Run one installer command from the repository root. It checks the operating
 system and requirements, prepares the selected runtime, starts FormaSpec and
-the loopback bridge, and—when Codex is detected—configures the `formaspec` MCP
-server plus the managed FormaSpec skill/plugin.
+the loopback bridge, and—when Codex is detected—configures the token-free
+`formaspec` MCP server plus both managed version-0.2.0 identities.
 
 Docker is the easiest source installation:
 
@@ -34,21 +35,20 @@ For a local Node.js installation:
 ./designer --yes install local
 ```
 
-The Docker installer and container-local security mode are implemented.
-Historical schema-12 Compose project `formaspeccischema118e2818fed6`
-reached Playwright-worker readiness without fallback, rendered a real PNG, and
-preserved the same design and version across an API-only restart. Both services
-used image
-`sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`,
-ran non-root with the documented filesystem/capability/resource limits, and
-kept renderer networking disabled; DNS/TCP/interface egress checks failed
-closed. Its temporary local `NO-GO` summary is
-`/private/tmp/formaspec-docker-schema12-smoke-20260721-final437-eventauth-sqlbounded-cli/summary.json`
-(SHA-256 `efc87b99e30320b8af75c479eee709addbc0fd5f6afd33e82751b89acecfe24a`).
-Exact-image Firefox/WebKit 12/12 and same-machine copied-bundle recovery also
-passed. Keep source evaluation bound to the default host loopback address; this
-is not complete server-production, hosted-CI, remote/off-site, or retained
-provenance evidence.
+The Docker installer and container-local security mode are implemented. The
+current schema-16 local checkpoint uses image
+`sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`.
+It reaches renderer readiness without fallback, renders the same real PNG
+before and after an API restart, and denies renderer DNS, direct-TCP, and
+external-interface egress. The same image passes Firefox/WebKit alignment
+12/12 and same-machine copied-bundle recovery into an independent clean
+Compose project. Evidence is retained at
+`artifacts/ci/docker-schema11/summary.json`,
+`artifacts/ci/cross-browser-docker/summary.json`, and
+`artifacts/ci/offhost-restore-simulation/NO-GO-SUMMARY.json`; the compatibility
+directory name `docker-schema11` is intentionally unchanged. These are local
+uncommitted-source `NO-GO` checkpoints, not hosted provenance, a real remote-
+host/TLS recovery exercise, or production qualification.
 
 The compatibility `designer` launcher preserves existing `.designer` state and
 delegates supported commands to `formaspecctl`. Remove `--yes` if you want an
@@ -85,7 +85,13 @@ Use FormaSpec to design this product flow.
 Design this with FormaSpec.
 Refine this selection with FormaSpec.
 [@FormaSpec](plugin://formaspec@formaspec) create a professional mobile onboarding flow.
+Use Minimal UI to design this product flow.
+[@Minimal UI](plugin://minimal-ui@formaspec) refine this selected screen.
 ```
+
+Both version-0.2.0 plugin identities share the same token-free `formaspec` MCP
+connection. Start a new Codex task after installation or refresh so Codex loads
+the managed assets.
 
 The connection is intentionally token-free in Codex configuration. Codex talks
 to the loopback bridge; the bridge holds the short-lived upstream scoped grant
@@ -155,7 +161,7 @@ Currently implemented `formaspecctl` workflows are:
 | `backup restore --backup-id <id>` | Externally supervises a `HEALTHY_PLANNED_RESTORE_ONLY` operation for the launcher-recorded local Docker/server runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. This planned path still requires the current API/database for backup-ID resolution and preflight. |
 | `backup restore offline <bundle>` | With explicit `--yes`, verifies the operator-selected bundle before mutation, pins the same regular file by identity/hash/size, capacity-gates stdin and the whole workflow, streams only stdin into the network-disabled restore worker, applies forensic pre-copy capacity checks, creates and verifies an exact snapshot of the existing `/data` bytes even when SQLite is corrupt, then uses the standard verified cutover, schema/render checks, audit/outbox reconciliation, credential revocation, and readiness-gated restart. Child stdout/stderr shares one combined 4 MiB budget by default, with a 5-second SIGKILL fallback when SIGTERM is ignored. Any failure after fencing remains in maintenance for explicit resume; it never auto-aborts or restarts the API. |
 | `backup restore status\|resume\|rollback\|abort\|clear-stale-lock` | Inspects or safely recovers the exact durable Docker restore operation. Offline interruption before preparation resumes with `--offline-bundle <same-bundle>` under the current maintenance owner; `offlinePrepare` and the replacement worker never reuse a retained forensic predecessor's ID. Forensic rollback restores exact pre-state bytes, keeps maintenance active and the API stopped, and reports `maintenanceCleared: false`/`serviceReady: false`; direct clear is rejected and only a newly verified offline restore may atomically take over that fence. Abort accepts only pristine/prepared pre-cutover state with no journal/worker lock and a reverified healthy live database, so corrupt state remains fenced; stale-lock clearing requires proof that the pinned worker container is absent. |
-| `agent connect codex` | Starts/authorizes the bridge, configures MCP, installs the managed skill/plugin, and verifies the connection. |
+| `agent connect codex` | Starts/authorizes the bridge, configures MCP, installs both managed version-0.2.0 identities, and verifies the connection. |
 | `agent config generic` | Prints validated token-free loopback JSON/TOML and verification guidance without reading or modifying an unknown client. |
 | `support-bundle preview\|create` | Previews or explicitly creates a deterministic bounded diagnostic archive with aggressive redaction and no database, assets, backups, environment values, source, or credentials. |
 
@@ -259,12 +265,13 @@ These foundations do not close the release gates listed below.
   hash-only, owner-leased lifecycle with exact 30-day retention, but
   organization-configurable retention dashboards and packaged load evidence
   remain open.
-- The historical schema-13 20-step browser E2E, seven visual baselines,
-  selection alignment, and 1,000-node interaction budgets passed. Current
-  schema-15 targeted editor/Administration 5/5, release E2E 1/1, and preview
-  integration 2/2 pass; the complete cross-platform browser/visual,
-  performance, security, and server-deployment matrices require schema-15
-  release-candidate reruns.
+- Current schema-16 local evidence passes editor/Administration 5/5, release
+  E2E 1/1, preview integration 2/2, Chromium alignment 12/12,
+  Firefox/WebKit alignment 12/12, visual regression 7/7, and all 1,000-node
+  browser budgets. The Docker restart/egress and copied-bundle recovery gates
+  also pass locally. Hosted supported-OS repetition, the current security/
+  SBOM/image scans, signed native lifecycle evidence, and real remote-host/TLS
+  recovery remain open.
 - Five repository-native least-privilege workflows now cover frozen source
   gates, browser alignment/visual/performance/release suites, historical Docker
   smoke, deterministic SBOM/license evidence, unsigned Linux packages, and the
@@ -331,12 +338,16 @@ These foundations do not close the release gates listed below.
   [macOS PKG evidence](docs/MACOS_PKG_EVIDENCE.md).
 - New server initializer output includes the strict server-mode, proxy,
   allowlist, CORS, and container-boundary contract, and the CLI/server migration
-  readers both recognize version 12. Migration 9 adds bounded, preview-first
+  readers both recognize version 16. Migration 9 adds bounded, preview-first
   audit/published-outbox retention with immutable hash-chained execution
   evidence; migration 10 adds immutable portable-import provenance; migration
   11 adds persistent bounded render-job lifecycle records; migration 12 adds
-  append-only, independently authorized handoff execution decisions. Genuine
-  schema 1 and schema 7–11 fixtures are verified to upgrade without changing
+  append-only, independently authorized handoff execution decisions; migration
+  13 persists canonical component sources and exact upgrade snapshots;
+  migration 14 adds browser-session authentication; migration 15 adds bounded
+  write-once exact preview-render evidence; and migration 16 canonicalizes the
+  legacy bootstrap-credential trigger without rewriting credential rows.
+  Genuine schema 1 and schema 7–12 fixtures are verified to upgrade without changing
   V1 revision bytes, hashes, IDs, or assets; clean reverse-proxy
   deployment and real customer planned/offline backup-restore fixtures remain
   unproven. Server mode now also requires a separate internal
@@ -385,11 +396,15 @@ Before an upgrade or restore, follow
 
 ## Development verification
 
-Current schema-15 source verification passes the seven-package suite 840/840
-(core 59, server 466, web 91, CLI 96, local bridge 20, Workspace Bridge 37,
-installer 71), launcher 225/225, and all workspace typechecks/builds. Broad
-schema-13 Docker, cross-browser, visual, performance, recovery, and SBOM results
-remain historical release evidence.
+Current schema-16 source verification passes the seven-package suite 842/842
+(core 59, server 467, web 91, CLI 96, local bridge 20, Workspace Bridge 37,
+installer 72), launcher 225/225, and all workspace typechecks/builds. Current
+local evidence also passes editor/Administration 5/5, release E2E 1/1,
+preview integration 2/2, Chromium and Firefox/WebKit alignment 12/12 each,
+visual regression 7/7, macOS runtime contracts 11/11, and the 1,000-node
+browser budgets. Schema-16 Docker restart/egress, exact-image cross-browser,
+and clean-project copied-bundle recovery checkpoints are retained under
+`artifacts/ci/`; the exact schema-13 SBOM/license result remains historical.
 
 ```bash
 pnpm test:run
@@ -415,7 +430,8 @@ docker compose config --quiet
 `pnpm ci:release-evidence` is the strict source-workspace production dependency
 gate. Historical linked-0.45.2 schema-13 source evidence passed with 342 third-
 party components and zero policy violations after Sharp/libvips was removed;
-current schema-15 evidence must be regenerated. The retained `schema12-current`
+current schema-16 source-workspace and target-artifact evidence must be
+regenerated. The retained `schema12-current`
 unsigned PKG passed its frozen package/workspace integrity check and the
 non-installing extracted-runtime smoke, but the current verifier now records
 expected source drift and it remains an engineering checkpoint: the outer PKG was not
