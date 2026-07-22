@@ -82,4 +82,38 @@ describe("component instance HTML rendering", () => {
     expect(rendered.html).toContain("Component cycle");
     expect(rendered.html.match(/Component cycle/g)).toHaveLength(1);
   });
+
+  it("renders archived pages as tombstones without exposing their retained descendants", () => {
+    const ids = createSequentialIdFactory("serverarchivedpage");
+    const document = createStarterDocument({ preset: "phone", idFactory: ids });
+    const archivedPage = document.pages[0]!;
+    const retainedRootId = archivedPage.children[0]!;
+    archivedPage.archived = true;
+    document.pages.push({
+      id: ids("page"),
+      name: "Active comparison page",
+      children: [],
+      background: "#ffffff",
+      viewport: { width: 390, height: 844 },
+      archived: false,
+      metadata: {},
+    });
+
+    const single = renderHtmlDocument(
+      DesignDocumentSchema.parse(document),
+      { pageId: archivedPage.id, maxSize: 512 },
+      () => null,
+    );
+    expect(single.html).toContain('data-archived-page="true"');
+    expect(single.html).toContain(`Archived page: ${archivedPage.name}`);
+    expect(single.html).not.toContain(`data-node-id="${retainedRootId}"`);
+
+    const contactSheet = renderHtmlDocument(
+      DesignDocumentSchema.parse(document),
+      { pageIds: [archivedPage.id, document.pages[1]!.id], maxSize: 512 },
+      () => null,
+    );
+    expect(contactSheet.html).toContain('data-preview-page-archived="true"');
+    expect(contactSheet.html).not.toContain(`data-node-id="${retainedRootId}"`);
+  });
 });

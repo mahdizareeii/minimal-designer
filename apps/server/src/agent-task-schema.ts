@@ -48,12 +48,14 @@ export const AgentTaskTransitionDataSchema = BoundedJsonObjectSchema;
 function taskTransitionVariant<Status extends Exclude<AgentTaskStatus, "queued" | "claimed">>(
   status: Status,
   data: z.ZodTypeAny,
+  extraShape: z.ZodRawShape = {},
 ) {
   return z.object({
     expectedStatus: AgentTaskStatusSchema,
     toStatus: z.literal(status),
     message: transitionMessage,
     data,
+    ...extraShape,
   }).strict();
 }
 
@@ -62,7 +64,9 @@ export const AgentTaskTransitionRequestSchema = z.discriminatedUnion("toStatus",
   taskTransitionVariant("awaiting_approval", AgentTaskCompletionDataSchema),
   taskTransitionVariant("completed", AgentTaskCompletionDataSchema),
   taskTransitionVariant("failed", AgentTaskTransitionDataSchema.optional()),
-  taskTransitionVariant("cancelled", AgentTaskTransitionDataSchema.optional()),
+  taskTransitionVariant("cancelled", AgentTaskTransitionDataSchema.optional(), {
+    idempotencyKey: z.string().trim().min(8).max(240).optional(),
+  }),
   taskTransitionVariant("expired", AgentTaskTransitionDataSchema.optional()),
 ]);
 

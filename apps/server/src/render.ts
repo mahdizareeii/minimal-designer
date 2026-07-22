@@ -29,6 +29,7 @@ import type { RenderJobFailureRecord, RenderJobRecorder } from "./render-job-sto
 
 export interface RenderOptions {
   pageId?: string;
+  pageIds?: string[];
   nodeId?: string;
   maxSize?: number;
 }
@@ -293,6 +294,36 @@ export function renderHtmlDocument(
   options: RenderOptions,
   assetDataUrl: (id: string) => string | null,
 ): { html: string; width: number; height: number } {
+  if (options.pageIds !== undefined) {
+    const pages = contactSheetPages(document, options);
+    const gap = 32;
+    const dimensions = pages.map((page) => ({
+      page,
+      width: page.viewport?.width ?? 1440,
+      height: page.viewport?.height ?? 900,
+    }));
+    const naturalWidth = Math.max(...dimensions.map((entry) => entry.width));
+    const naturalHeight = dimensions.reduce((total, entry) => total + entry.height, 0) + gap * (dimensions.length - 1);
+    const maxSize = Math.max(64, Math.min(options.maxSize ?? 2048, 4096));
+    const scale = Math.min(1, maxSize / Math.max(naturalWidth, naturalHeight));
+    const width = Math.max(1, Math.round(naturalWidth * scale));
+    const height = Math.max(1, Math.round(naturalHeight * scale));
+    const body = dimensions.map(({ page, width: pageWidth, height: pageHeight }) => {
+      const direction = page.metadata.text_direction === "ltr" || page.metadata.text_direction === "rtl"
+        ? `direction:${page.metadata.text_direction};`
+        : "";
+      const content = page.archived
+        ? `<div data-archived-page="true" style="position:absolute;inset:0;display:grid;place-items:center;background:#eef1f5;color:#667085;font:600 24px Inter,Vazirmatn,system-ui,sans-serif">Archived page: ${escapeHtml(page.name)}</div>`
+        : page.children.map((nodeId) => renderNode(nodeId, document, assetDataUrl, "absolute")).join("");
+      const background = page.archived ? "#eef1f5" : colorValue(page.background, document, "#ffffff");
+      return `<section data-preview-page-id="${escapeHtml(page.id)}"${page.archived ? ' data-preview-page-archived="true"' : ""} style="position:relative;flex:0 0 auto;overflow:hidden;width:${pageWidth}px;height:${pageHeight}px;background:${escapeHtml(background)};${direction}">${content}</section>`;
+    }).join("");
+    return {
+      width,
+      height,
+      html: `<!doctype html><html><head><meta charset="utf-8"><style>${fontFaces()}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;gap:${gap}px;background:#d9dee8;transform-origin:top left;transform:scale(${scale});width:${naturalWidth}px;height:${naturalHeight}px;font-family:Inter,Vazirmatn,system-ui,sans-serif}</style></head><body>${body}</body></html>`,
+    };
+  }
   const page = options.pageId ? document.pages.find((candidate) => candidate.id === options.pageId) : document.pages.find((candidate) => !candidate.archived);
   if (!page) throw new DomainError("RENDER_FAILED", "The design has no renderable page.", 422);
   const target = options.nodeId ? document.nodes[options.nodeId] : undefined;
@@ -305,12 +336,30 @@ export function renderHtmlDocument(
   const height = Math.max(1, Math.round(naturalHeight * scale));
   const body = target
     ? renderNode(target.id, document, assetDataUrl, "absolute", true)
-    : page.children.map((nodeId) => renderNode(nodeId, document, assetDataUrl, "absolute")).join("");
+    : page.archived
+      ? `<div data-archived-page="true" style="position:absolute;inset:0;display:grid;place-items:center;background:#eef1f5;color:#667085;font:600 24px Inter,Vazirmatn,system-ui,sans-serif">Archived page: ${escapeHtml(page.name)}</div>`
+      : page.children.map((nodeId) => renderNode(nodeId, document, assetDataUrl, "absolute")).join("");
+  const pageBackground = page.archived ? "#eef1f5" : colorValue(page.background, document, "#ffffff");
   return {
     width,
     height,
-    html: `<!doctype html><html${page.metadata.text_direction === "ltr" || page.metadata.text_direction === "rtl" ? ` dir="${page.metadata.text_direction}"` : ""}><head><meta charset="utf-8"><style>${fontFaces()}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}body{background:${colorValue(page.background, document, "#ffffff")};transform-origin:top left;transform:scale(${scale});width:${naturalWidth}px;height:${naturalHeight}px;font-family:Inter,Vazirmatn,system-ui,sans-serif}</style></head><body>${body}</body></html>`,
+    html: `<!doctype html><html${page.metadata.text_direction === "ltr" || page.metadata.text_direction === "rtl" ? ` dir="${page.metadata.text_direction}"` : ""}><head><meta charset="utf-8"><style>${fontFaces()}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}body{background:${pageBackground};transform-origin:top left;transform:scale(${scale});width:${naturalWidth}px;height:${naturalHeight}px;font-family:Inter,Vazirmatn,system-ui,sans-serif}</style></head><body>${body}</body></html>`,
   };
+}
+
+function contactSheetPages(document: DesignDocument, options: RenderOptions): DesignDocument["pages"] {
+  if (options.pageIds === undefined) return [];
+  if (options.pageId !== undefined || options.nodeId !== undefined) {
+    throw new DomainError("VALIDATION_FAILED", "A contact-sheet render cannot also target one page or node.", 422);
+  }
+  if (options.pageIds.length < 2 || options.pageIds.length > 20 || new Set(options.pageIds).size !== options.pageIds.length) {
+    throw new DomainError("VALIDATION_FAILED", "A contact-sheet render requires 2 to 20 unique page IDs.", 422);
+  }
+  return options.pageIds.map((pageId) => {
+    const page = document.pages.find((candidate) => candidate.id === pageId);
+    if (!page) throw new DomainError("NOT_FOUND", "Render target page not found.", 404);
+    return page;
+  });
 }
 
 function parseColor(value: unknown, document: DesignDocument, fallback: Color): Color {
@@ -380,17 +429,41 @@ export function encodeRgbaPng(width: number, height: number, rgba: Buffer): Buff
 }
 
 function softwareRender(document: DesignDocument, options: RenderOptions): RenderResult {
+  const contactPages = options.pageIds === undefined ? null : contactSheetPages(document, options);
   const page = options.pageId ? document.pages.find((candidate) => candidate.id === options.pageId) : document.pages.find((candidate) => !candidate.archived);
-  if (!page) throw new DomainError("RENDER_FAILED", "The design has no renderable page.", 422);
+  if (!page && contactPages === null) throw new DomainError("RENDER_FAILED", "The design has no renderable page.", 422);
   const target = options.nodeId ? document.nodes[options.nodeId] : undefined;
-  const naturalWidth = target?.layout.width ?? page.viewport?.width ?? 1440;
-  const naturalHeight = target?.layout.height ?? page.viewport?.height ?? 900;
+  const gap = 32;
+  const contactDimensions = contactPages?.map((candidate) => ({
+    page: candidate,
+    width: candidate.viewport?.width ?? 1440,
+    height: candidate.viewport?.height ?? 900,
+  })) ?? null;
+  const naturalWidth = contactDimensions
+    ? Math.max(...contactDimensions.map((entry) => entry.width))
+    : target?.layout.width ?? page!.viewport?.width ?? 1440;
+  const naturalHeight = contactDimensions
+    ? contactDimensions.reduce((total, entry) => total + entry.height, 0) + gap * (contactDimensions.length - 1)
+    : target?.layout.height ?? page!.viewport?.height ?? 900;
   const maxSize = Math.max(64, Math.min(options.maxSize ?? 2048, 4096));
   const scale = Math.min(1, maxSize / Math.max(naturalWidth, naturalHeight));
   const width = Math.max(1, Math.round(naturalWidth * scale));
   const height = Math.max(1, Math.round(naturalHeight * scale));
   const pixels = Buffer.alloc(width * height * 4);
-  drawRect(pixels, width, height, 0, 0, width, height, parseColor(page.background, document, [255, 255, 255, 255]));
+  drawRect(
+    pixels,
+    width,
+    height,
+    0,
+    0,
+    width,
+    height,
+    contactDimensions
+      ? [217, 222, 232, 255]
+      : page!.archived
+        ? [238, 241, 245, 255]
+        : parseColor(page!.background, document, [255, 255, 255, 255]),
+  );
 
   const visit = (
     nodeId: string,
@@ -418,14 +491,43 @@ function softwareRender(document: DesignDocument, options: RenderOptions): Rende
       }
     }
   };
-  if (target) visit(target.id, 0, 0, true);
-  else for (const rootId of page.children) visit(rootId, 0, 0);
+  if (target) {
+    visit(target.id, 0, 0, true);
+  } else if (contactDimensions) {
+    let pageY = 0;
+    for (const entry of contactDimensions) {
+      const pageX = (naturalWidth - entry.width) / 2;
+      drawRect(
+        pixels,
+        width,
+        height,
+        pageX * scale,
+        pageY * scale,
+        entry.width * scale,
+        entry.height * scale,
+        entry.page.archived
+          ? [238, 241, 245, 255]
+          : parseColor(entry.page.background, document, [255, 255, 255, 255]),
+      );
+      if (!entry.page.archived) {
+        for (const rootId of entry.page.children) visit(rootId, pageX, pageY);
+      }
+      pageY += entry.height + gap;
+    }
+  } else {
+    if (!page!.archived) {
+      for (const rootId of page!.children) visit(rootId, 0, 0);
+    }
+  }
   return {
     png: encodeRgbaPng(width, height, pixels),
     width,
     height,
     renderer: "software",
-    warnings: ["Chromium rendering was unavailable; a simplified software preview was returned. Run `pnpm exec playwright install chromium` or install Google Chrome for full-fidelity renders."],
+    warnings: [
+      ...(contactDimensions ? [`Rendered ${contactDimensions.length} changed pages as one exact contact sheet.`] : []),
+      "Chromium rendering was unavailable; a simplified software preview was returned. Run `pnpm exec playwright install chromium` or install Google Chrome for full-fidelity renders.",
+    ],
   };
 }
 
@@ -490,6 +592,7 @@ export class PngRenderer {
         schemaVersion: document.schema_version,
         options: {
           ...(options.pageId === undefined ? {} : { pageId: boundedJobText(options.pageId) }),
+          ...(options.pageIds === undefined ? {} : { pageIds: options.pageIds.map((pageId) => boundedJobText(pageId)) }),
           ...(options.nodeId === undefined ? {} : { nodeId: boundedJobText(options.nodeId) }),
           ...(options.maxSize === undefined ? {} : { maxSize: options.maxSize }),
         },
@@ -658,7 +761,10 @@ export class PngRenderer {
           width: rendered.width,
           height: rendered.height,
           renderer: "playwright",
-          warnings: this.#browserWarning ? [this.#browserWarning] : [],
+          warnings: [
+            ...(options.pageIds === undefined ? [] : [`Rendered ${options.pageIds.length} changed pages as one exact contact sheet.`]),
+            ...(this.#browserWarning ? [this.#browserWarning] : []),
+          ],
         };
       };
       return await Promise.race([

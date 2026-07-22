@@ -1134,6 +1134,7 @@ export async function transitionAgentTask(input: {
   toStatus: "in_progress" | "awaiting_approval" | "completed" | "failed" | "cancelled" | "expired";
   message?: string;
   data?: Record<string, unknown>;
+  idempotencyKey?: string;
 }): Promise<AgentTaskRecord> {
   const result = await request<Record<string, unknown>>(`/agent-tasks/${encodeURIComponent(input.taskId)}/transition`, {
     method: "POST",
@@ -1142,6 +1143,7 @@ export async function transitionAgentTask(input: {
       toStatus: input.toStatus,
       ...(input.message === undefined ? {} : { message: input.message }),
       ...(input.data === undefined ? {} : { data: input.data }),
+      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
     }),
   });
   return asAgentTaskRecord(
@@ -1169,6 +1171,7 @@ export interface DesignPreviewDiagnostic {
 
 export interface DesignPreviewRenderOptions {
   pageId?: string;
+  pageIds?: string[];
   nodeId?: string;
   maxSize: number;
 }
@@ -1222,6 +1225,7 @@ function asOptionalDesignPreviewRenderMetadata(input: unknown): DesignPreviewRen
   const width = value.width;
   const height = value.height;
   const pageId = optionsValue.pageId ?? optionsValue.page_id;
+  const pageIds = optionsValue.pageIds ?? optionsValue.page_ids;
   const nodeId = optionsValue.nodeId ?? optionsValue.node_id;
   const renderer = value.renderer;
   const warnings = value.warnings;
@@ -1231,7 +1235,13 @@ function asOptionalDesignPreviewRenderMetadata(input: unknown): DesignPreviewRen
     || !Number.isInteger(height) || Number(height) < 1 || Number(height) > 4_096
     || Number(width) > Number(maxSize) || Number(height) > Number(maxSize)
     || (pageId !== undefined && (typeof pageId !== "string" || !pageId))
+    || (pageIds !== undefined && (!Array.isArray(pageIds)
+      || pageIds.length < 2
+      || pageIds.length > 20
+      || !pageIds.every((candidate) => typeof candidate === "string" && candidate.length > 0)
+      || new Set(pageIds).size !== pageIds.length))
     || (nodeId !== undefined && (typeof nodeId !== "string" || !nodeId))
+    || (pageIds !== undefined && (pageId !== undefined || nodeId !== undefined))
     || (renderer !== "playwright" && renderer !== "software")
     || !Array.isArray(warnings) || warnings.length > 100 || !warnings.every((warning) => typeof warning === "string" && warning.length <= 4_000)
     || typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) {
@@ -1240,6 +1250,7 @@ function asOptionalDesignPreviewRenderMetadata(input: unknown): DesignPreviewRen
   return {
     options: {
       ...(pageId === undefined ? {} : { pageId }),
+      ...(pageIds === undefined ? {} : { pageIds: [...pageIds] as string[] }),
       ...(nodeId === undefined ? {} : { nodeId }),
       maxSize: Number(maxSize),
     },

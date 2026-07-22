@@ -82,7 +82,7 @@ async function callMcpTool<T>(
   token: string,
   name: string,
   args: Record<string, unknown>,
-): Promise<{ output: T; content: Array<{ type: string; text?: string; mimeType?: string }> }> {
+): Promise<{ output: T; content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> }> {
   const response = await application.app.inject({
     method: "POST",
     url: "/mcp",
@@ -102,7 +102,7 @@ async function callMcpTool<T>(
   expect(response.statusCode, response.body).toBe(200);
   const body = response.json<{
     result: {
-      content: Array<{ type: string; text?: string; mimeType?: string }>;
+      content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
       structuredContent: ({ ok: true } & T) | { ok: false; error: { code: string; message: string; details?: unknown } };
     };
   }>();
@@ -1043,7 +1043,7 @@ describe("task-scoped agent preview review", () => {
     expect(application.service.getDesign("local", designId).revision.version).toBe(1);
   });
 
-  it("rejects exact render evidence that omits, crosses, or names the wrong changed page", async () => {
+  it("renders a multi-page exact contact sheet and rejects crops that hide changed pages", async () => {
     const created = application.service.createDesign("local", {
       name: "Exact render page scope",
       preset: "phone",
@@ -1054,10 +1054,24 @@ describe("task-scoped agent preview review", () => {
     const firstFrameId = created.document.pages[0]!.children[0]!;
     const secondPageId = "page_exact_render_scope_second_0001";
     const secondRootId = "node_exact_render_scope_second_0001";
+    const sharedTokenId = "token_exact_render_scope_shared_0001";
     application.service.applyRevision("local", designId, {
       baseVersion: 1,
       idempotencyKey: "exact-render-page-scope-setup-0001",
       operations: [
+        {
+          type: "upsert_token",
+          token: {
+            id: sharedTokenId,
+            name: "Shared surface",
+            path: "color.shared_surface",
+            kind: "color",
+            value: "#ffffff",
+            archived: false,
+            metadata: {},
+          },
+        },
+        { type: "update_node", node_id: firstFrameId, patch: { style: { fill: { token_id: sharedTokenId } } } },
         { type: "create_page", page: { id: secondPageId, name: "Second render page" } },
         {
           type: "create_tree",
@@ -1076,7 +1090,7 @@ describe("task-scoped agent preview review", () => {
               width_sizing: "fixed",
               height_sizing: "fixed",
             },
-            style: { fill: "#ffffff" },
+            style: { fill: { token_id: sharedTokenId } },
             visible: true,
             locked: false,
             archived: false,
@@ -1101,7 +1115,10 @@ describe("task-scoped agent preview review", () => {
       toStatus: "in_progress",
     });
 
-    expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
+    const contactSheet = await callMcpTool<{
+      preview: { id: string };
+      render: { options: { pageIds: string[]; maxSize: number }; width: number; height: number; warnings: string[] };
+    }>(application, agent.token, "design_preview_changes", {
       design_id: designId,
       task_id: task.id,
       base_version: 2,
@@ -1110,7 +1127,68 @@ describe("task-scoped agent preview review", () => {
         { type: "update_node", node_id: secondRootId, patch: { name: "Changed second page" } },
       ],
       max_size: 512,
-    })).toMatchObject({ code: "AMBIGUOUS_CONTEXT" });
+    });
+    expect(contactSheet.output.render).toMatchObject({
+      options: { pageIds: [firstPageId, secondPageId], maxSize: 512 },
+      width: expect.any(Number),
+      height: expect.any(Number),
+    });
+    expect(contactSheet.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "image", mimeType: "image/png" }),
+    ]));
+    expect(contactSheet.output.render.warnings).toContain("Rendered 2 changed pages as one exact contact sheet.");
+
+    const exactRerender = await callMcpTool<{
+      render: { width: number; height: number; warnings: string[] };
+    }>(application, agent.token, "design_render", {
+      design_id: designId,
+      preview_id: contactSheet.output.preview.id,
+    });
+    expect(exactRerender.output.render).toMatchObject({
+      width: contactSheet.output.render.width,
+      height: contactSheet.output.render.height,
+      warnings: expect.arrayContaining(["Rendered 2 changed pages as one exact contact sheet."]),
+    });
+    const previewImage = contactSheet.content.find((item) => item.type === "image")?.data;
+    const rerenderedImage = exactRerender.content.find((item) => item.type === "image")?.data;
+    expect(rerenderedImage).toBe(previewImage);
+
+    const newPageId = "page_exact_render_scope_created_0001";
+    const pageOnly = await callMcpTool<{
+      render: { options: { pageId: string; maxSize: number } };
+    }>(application, agent.token, "design_preview_changes", {
+      design_id: designId,
+      task_id: task.id,
+      base_version: 2,
+      operations: [{ type: "create_page", page: { id: newPageId, name: "New blank proposal page" } }],
+      max_size: 512,
+    });
+    expect(pageOnly.output.render.options).toEqual({ pageId: newPageId, maxSize: 512 });
+
+    const tokenOnly = await callMcpTool<{
+      render: { options: { pageIds: string[]; maxSize: number } };
+    }>(application, agent.token, "design_preview_changes", {
+      design_id: designId,
+      task_id: task.id,
+      base_version: 2,
+      operations: [{
+        type: "upsert_token",
+        token: {
+          id: sharedTokenId,
+          name: "Shared surface",
+          path: "color.shared_surface",
+          kind: "color",
+          value: "#eef2ff",
+          archived: false,
+          metadata: {},
+        },
+      }],
+      max_size: 512,
+    });
+    expect(tokenOnly.output.render.options).toEqual({
+      pageIds: [firstPageId, secondPageId],
+      maxSize: 512,
+    });
 
     expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
       design_id: designId,
@@ -1122,8 +1200,9 @@ describe("task-scoped agent preview review", () => {
         parent: { node_id: firstFrameId },
         position: { x: 20, y: 24 },
       }],
+      page_id: firstPageId,
       max_size: 512,
-    })).toMatchObject({ code: "AMBIGUOUS_CONTEXT" });
+    })).toMatchObject({ code: "VALIDATION_FAILED", details: { requiredRender: "contact_sheet" } });
 
     expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
       design_id: designId,
@@ -1136,7 +1215,7 @@ describe("task-scoped agent preview review", () => {
     expect(application.service.getDesign("local", designId).revision.version).toBe(2);
     expect(application.database.sqlite.prepare(
       "SELECT COUNT(*) AS count FROM previews WHERE design_id = ? AND render_metadata_json IS NOT NULL",
-    ).get(designId)).toEqual({ count: 0 });
+    ).get(designId)).toEqual({ count: 3 });
     expect(firstPageId).not.toBe(secondPageId);
   });
 
@@ -1239,13 +1318,20 @@ describe("task-scoped agent preview review", () => {
       data: { previewId: preview.id },
     });
 
-    const cancelled = application.enterprise.transitionAgentTask("local", task.id, {
+    const discardInput = {
       expectedStatus: "awaiting_approval",
-      toStatus: "cancelled",
+      toStatus: "cancelled" as const,
       message: "Discard without changing history",
       data: { previewId: preview.id, discarded: true },
-    });
+      idempotencyKey: "task-preview-discard-retry-0001",
+    };
+    const cancelled = application.enterprise.transitionAgentTask("local", task.id, discardInput);
+    const replayed = application.enterprise.transitionAgentTask("local", task.id, discardInput);
     expect(cancelled.status).toBe("cancelled");
+    expect(replayed).toEqual(cancelled);
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM agent_task_transitions WHERE task_id = ? AND to_status = 'cancelled'",
+    ).get(task.id)).toEqual({ count: 1 });
     expect(application.database.sqlite.prepare(
       "SELECT status FROM previews WHERE id = ?",
     ).get(preview.id)).toEqual({ status: "expired" });

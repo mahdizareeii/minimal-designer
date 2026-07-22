@@ -119,4 +119,33 @@ describe("local bridge lifecycle", () => {
     expect(health.buildId).toMatch(/^[a-f0-9]{64}$/);
     expect(health.buildId).not.toBe("stale-build");
   }, 15_000);
+
+  it("restarts an owned bridge when the recorded upstream API port changes", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-bridge-upstream-"));
+    temporaryDirectories.push(root);
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    const apiPortFile = path.join(runDirectory, "api-port");
+    fs.writeFileSync(apiPortFile, "4310\n");
+    const port = await availablePort();
+    const controller = createBridgeController(root, { ...process.env, FORMASPEC_BRIDGE_PORT: String(port) });
+    controllers.push(controller);
+
+    await controller.ensureStarted();
+    const statePath = path.join(runDirectory, "formaspec-bridge.json");
+    const firstState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      instanceId: string;
+      upstreamMcpUrl: string;
+    };
+    expect(firstState.upstreamMcpUrl).toBe("http://127.0.0.1:4310/mcp");
+
+    fs.writeFileSync(apiPortFile, "4320\n");
+    await controller.ensureStarted();
+    const secondState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      instanceId: string;
+      upstreamMcpUrl: string;
+    };
+    expect(secondState.instanceId).not.toBe(firstState.instanceId);
+    expect(secondState.upstreamMcpUrl).toBe("http://127.0.0.1:4320/mcp");
+  }, 15_000);
 });

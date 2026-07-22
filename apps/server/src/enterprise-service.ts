@@ -1013,6 +1013,7 @@ export class EnterpriseService {
     toStatus: Exclude<AgentTaskStatus, "queued" | "claimed">;
     message?: string;
     data?: Record<string, unknown>;
+    idempotencyKey?: string;
   }): AgentTaskResult {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "task:update");
@@ -1021,10 +1022,38 @@ export class EnterpriseService {
     if (Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_TRANSITION_DATA_BYTES) {
       throw new DomainError("PAYLOAD_TOO_LARGE", "Task transition data may not exceed 64 KiB.", 413);
     }
+    const idempotencyKey = input.idempotencyKey === undefined
+      ? null
+      : boundedText(input.idempotencyKey, "Idempotency key", 240);
+    if (idempotencyKey !== null && input.toStatus !== "cancelled") {
+      throw new DomainError("VALIDATION_FAILED", "Task-transition idempotency is supported only for cancellation/discard.", 422);
+    }
+    const idempotencyScope = `agent_task:${taskId}:cancel`;
+    const idempotencyRequest = {
+      expectedStatus: input.expectedStatus,
+      toStatus: input.toStatus,
+      message,
+      data,
+    };
+    const idempotencyRequestHash = hashPayload(idempotencyRequest);
     let expired = false;
     let previewExpired = false;
     let staleCurrentVersion: number | null = null;
     const transaction = this.database.sqlite.transaction(() => {
+      if (idempotencyKey !== null) {
+        const now = this.nowIso();
+        this.database.sqlite.prepare("DELETE FROM idempotency WHERE expires_at <= ?").run(now);
+        const existing = this.database.sqlite.prepare(
+          `SELECT request_hash, response_json FROM idempotency
+           WHERE actor_id = ? AND scope = ? AND key = ? AND expires_at > ?`,
+        ).get(access.principalId, idempotencyScope, idempotencyKey, now) as IdempotencyRow | undefined;
+        if (existing) {
+          if (existing.request_hash !== idempotencyRequestHash) {
+            throw new DomainError("IDEMPOTENCY_CONFLICT", "The idempotency key was already used with different input.", 409);
+          }
+          return JSON.parse(existing.response_json) as AgentTaskResult;
+        }
+      }
       const row = this.requireAgentTaskRow(access, taskId);
       const current = this.currentTaskTransition(row.id);
       if (row.expected_output === "design_preview" && current.to_status === "awaiting_approval") {
@@ -1147,7 +1176,25 @@ export class EnterpriseService {
         expectedOutput: row.expected_output,
         discardedPreview: discardedPreviewId !== null,
       });
-      return this.agentTaskResult(row);
+      const result = this.agentTaskResult(row);
+      if (idempotencyKey !== null) {
+        const createdAt = this.nowIso();
+        const expiresAt = new Date(this.#now().getTime() + IDEMPOTENCY_TTL_MS).toISOString();
+        this.database.sqlite.prepare(
+          `INSERT INTO idempotency
+           (actor_id, scope, key, request_hash, response_json, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          access.principalId,
+          idempotencyScope,
+          idempotencyKey,
+          idempotencyRequestHash,
+          JSON.stringify(result),
+          createdAt,
+          expiresAt,
+        );
+      }
+      return result;
     });
     const result = transaction.immediate();
     this.flushPendingEventsSafely();

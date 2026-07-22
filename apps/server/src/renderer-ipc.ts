@@ -42,9 +42,25 @@ const contractEnvelopeSchema = {
 
 const renderOptionsSchema = z.object({
   pageId: z.string().min(1).max(240).optional(),
+  pageIds: z.array(z.string().min(1).max(240)).min(2).max(20).optional(),
   nodeId: z.string().min(1).max(240).optional(),
   maxSize: z.number().int().min(64).max(4_096).optional(),
-}).strict();
+}).strict().superRefine((options, context) => {
+  if (options.pageIds !== undefined && (options.pageId !== undefined || options.nodeId !== undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["pageIds"],
+      message: "A contact-sheet render cannot also target one page or node.",
+    });
+  }
+  if (options.pageIds !== undefined && new Set(options.pageIds).size !== options.pageIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["pageIds"],
+      message: "Contact-sheet page IDs must be unique.",
+    });
+  }
+});
 
 const safeImageDataUrlSchema = z.string().refine(
   (value) => /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]*={0,2}$/.test(value),

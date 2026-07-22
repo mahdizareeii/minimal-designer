@@ -981,6 +981,12 @@ export class DesignerService {
       && !canonicalDocument.pages.some((page) => page.id === renderMetadata.options.pageId)) {
       throw new DomainError("INTERNAL_ERROR", "Stored preview render metadata references a missing page.", 500);
     }
+    if (renderMetadata?.options.pageIds !== undefined
+      && renderMetadata.options.pageIds.some(
+        (pageId) => !canonicalDocument.pages.some((page) => page.id === pageId),
+      )) {
+      throw new DomainError("INTERNAL_ERROR", "Stored preview contact-sheet metadata references a missing page.", 500);
+    }
     if (renderMetadata?.options.nodeId !== undefined
       && canonicalDocument.nodes[renderMetadata.options.nodeId] === undefined) {
       throw new DomainError("INTERNAL_ERROR", "Stored preview render metadata references a missing node.", 500);

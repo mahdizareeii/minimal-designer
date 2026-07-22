@@ -6,6 +6,6 @@ dependencies:
   tools:
     - type: "mcp"
       value: "formaspec"
-      description: "Structured FormaSpec design, specification, preview, lint, task, and commit tools"
+      description: "Structured FormaSpec design, specification, preview, lint, task, and human-review tools"
       transport: "streamable_http"
       url: "http://127.0.0.1:4312/mcp"

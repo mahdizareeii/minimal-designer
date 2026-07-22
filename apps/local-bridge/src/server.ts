@@ -6,6 +6,7 @@ import { PairingNonceStore } from "./pairing.js";
 import { MemoryCredentialStore, type CredentialStore } from "./credentials.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_MCP_PROBE_RESPONSE_BYTES = 1024 * 1024;
 const CODEX_REQUESTED_EXPIRY_SECONDS = 2_592_000;
 const CODEX_REQUESTED_SCOPES = [
   "organization_policy:read",
@@ -76,6 +77,7 @@ export interface BridgeServerOptions {
   instanceId?: string;
   fetchImplementation?: typeof fetch;
   allowLegacySelfCreate?: boolean;
+  controlErrorReporter?: (error: unknown) => void;
 }
 
 export interface AgentPairingTicket {
@@ -272,12 +274,12 @@ async function probeMcpGrant(
         return null;
       }
       const declaredLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(declaredLength) && declaredLength > 65_536) {
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_MCP_PROBE_RESPONSE_BYTES) {
         await response.body?.cancel();
         return null;
       }
       const text = await response.text();
-      if (Buffer.byteLength(text, "utf8") > 65_536) return null;
+      if (Buffer.byteLength(text, "utf8") > MAX_MCP_PROBE_RESPONSE_BYTES) return null;
       const envelope = recordValue(JSON.parse(text));
       const result = recordValue(envelope?.result);
       return envelope?.jsonrpc === "2.0"
@@ -740,6 +742,7 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
       } else if (error instanceof BridgeControlError) {
         sendJson(response, error.statusCode, { error: error.code });
       } else {
+        options.controlErrorReporter?.(error);
         sendJson(response, 502, { error: "BRIDGE_REQUEST_FAILED" });
       }
     });

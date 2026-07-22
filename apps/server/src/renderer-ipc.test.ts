@@ -78,7 +78,10 @@ describe("renderer worker IPC", () => {
         assetDataUrl: (id: string) => string | null,
       ): Promise<RenderResult> {
         expect(receivedDocument.id).toBe(document.id);
-        expect(options).toEqual({ maxSize: 512 });
+        expect(options).toEqual({
+          pageIds: [document.pages[0]!.id, document.pages[1]!.id],
+          maxSize: 512,
+        });
         observedAsset = assetDataUrl(assetId);
         await new Promise((resolve) => setTimeout(resolve, 20));
         return { png: onePixelPng, width: 1, height: 1, renderer: "playwright", warnings: [] };
@@ -113,7 +116,19 @@ describe("renderer worker IPC", () => {
         maxPixels: normalizationLimits.maxPixels,
       },
     });
-    const result = await renderer.render(document, { maxSize: 512 }, (id) => id === assetId ? onePixelDataUrl : null);
+    document.pages.push({
+      id: "page_renderer_ipc_contact_sheet_0001",
+      name: "Second IPC page",
+      children: [],
+      background: "#ffffff",
+      viewport: { width: 390, height: 844 },
+      archived: false,
+      metadata: {},
+    });
+    const result = await renderer.render(document, {
+      pageIds: [document.pages[0]!.id, document.pages[1]!.id],
+      maxSize: 512,
+    }, (id) => id === assetId ? onePixelDataUrl : null);
 
     expect(observedAsset).toBe(onePixelDataUrl);
     expect(result.png).toEqual(onePixelPng);

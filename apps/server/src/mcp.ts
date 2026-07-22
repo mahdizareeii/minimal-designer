@@ -83,6 +83,7 @@ import {
   type WorkspaceHandoffService,
 } from "./workspace-handoff-service.js";
 import type { OrganizationPolicyService } from "./organization-policy-service.js";
+import { canonicalJson } from "./ids.js";
 import { MCP_TOOL_CONTRACTS, type McpToolEffect } from "./mcp-contract.js";
 import { McpDesignOperationListSchema } from "./mcp-operation-schema.js";
 import {
@@ -635,6 +636,36 @@ function nodePageId(document: DesignDocument, nodeId: string): string | null {
   throw new DomainError("VALIDATION_FAILED", "Preview node ancestry exceeds the supported depth.", 422);
 }
 
+function changedRecordIds(
+  base: Record<string, unknown>,
+  preview: Record<string, unknown>,
+): Set<string> {
+  return new Set([...Object.keys(base), ...Object.keys(preview)].filter(
+    (id) => canonicalJson(base[id] ?? null) !== canonicalJson(preview[id] ?? null),
+  ));
+}
+
+function referencesChangedToken(value: unknown, changedTokenIds: ReadonlySet<string>): boolean {
+  if (changedTokenIds.size === 0 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => referencesChangedToken(item, changedTokenIds));
+  const record = value as Record<string, unknown>;
+  if (typeof record.token_id === "string" && changedTokenIds.has(record.token_id)) return true;
+  return Object.values(record).some((item) => referencesChangedToken(item, changedTokenIds));
+}
+
+function detachedComponentDefinitionId(document: DesignDocument, nodeId: string): string | null {
+  let current = nodeId;
+  let definitionId: string | null = null;
+  for (let depth = 0; depth <= 100; depth += 1) {
+    if (document.nodes[current]?.type === "component") definitionId = current;
+    const parent = findNodeParent(document, current as NodeId)?.parent;
+    if (!parent) return definitionId;
+    if ("page_id" in parent) return null;
+    current = parent.node_id;
+  }
+  throw new DomainError("VALIDATION_FAILED", "Preview component ancestry exceeds the supported depth.", 422);
+}
+
 function exactPreviewRenderOptions(input: {
   baseDocument: DesignDocument;
   previewDocument: DesignDocument;
@@ -646,7 +677,40 @@ function exactPreviewRenderOptions(input: {
   const changedIds = input.changedNodeIds.filter((nodeId) => (
     input.previewDocument.nodes[nodeId] !== undefined || input.baseDocument.nodes[nodeId] !== undefined
   ));
-  const renderedChangedIds = changedIds.filter((nodeId) => (
+  const visuallyChangedIds = new Set(changedIds);
+  const changedTokenIds = changedRecordIds(input.baseDocument.tokens, input.previewDocument.tokens);
+  const changedAssetIds = changedRecordIds(input.baseDocument.assets, input.previewDocument.assets);
+  for (const document of [input.baseDocument, input.previewDocument]) {
+    for (const node of Object.values(document.nodes)) {
+      if (referencesChangedToken(node, changedTokenIds)
+        || (node.type === "image" && node.asset_id !== undefined && changedAssetIds.has(node.asset_id))) {
+        visuallyChangedIds.add(node.id);
+      }
+    }
+  }
+
+  const changedDefinitionIds = new Set<string>();
+  for (const nodeId of visuallyChangedIds) {
+    const previewDefinitionId = input.previewDocument.nodes[nodeId] === undefined
+      ? null
+      : detachedComponentDefinitionId(input.previewDocument, nodeId);
+    const baseDefinitionId = input.baseDocument.nodes[nodeId] === undefined
+      ? null
+      : detachedComponentDefinitionId(input.baseDocument, nodeId);
+    if (previewDefinitionId !== null) changedDefinitionIds.add(previewDefinitionId);
+    if (baseDefinitionId !== null) changedDefinitionIds.add(baseDefinitionId);
+  }
+  if (changedDefinitionIds.size > 0) {
+    for (const document of [input.baseDocument, input.previewDocument]) {
+      for (const node of Object.values(document.nodes)) {
+        if (node.type === "instance" && changedDefinitionIds.has(node.component_id)) {
+          visuallyChangedIds.add(node.id);
+        }
+      }
+    }
+  }
+
+  const renderedChangedIds = [...visuallyChangedIds].filter((nodeId) => (
     nodePageId(input.previewDocument, nodeId) !== null
     || nodePageId(input.baseDocument, nodeId) !== null
   ));
@@ -657,13 +721,81 @@ function exactPreviewRenderOptions(input: {
     if (previewPageId !== null) changedPages.add(previewPageId);
     if (basePageId !== null) changedPages.add(basePageId);
   }
+
+  const nonNodeChangedPages = new Set<string>();
+  const basePages = new Map(input.baseDocument.pages.map((page) => [page.id, page]));
+  const previewPages = new Map(input.previewDocument.pages.map((page) => [page.id, page]));
+  for (const pageId of new Set([...basePages.keys(), ...previewPages.keys()])) {
+    const basePage = basePages.get(pageId);
+    const previewPage = previewPages.get(pageId);
+    const basePageState = basePage === undefined ? null : {
+      id: basePage.id,
+      name: basePage.name,
+      background: basePage.background,
+      viewport: basePage.viewport,
+      archived: basePage.archived,
+      metadata: basePage.metadata,
+    };
+    const previewPageState = previewPage === undefined ? null : {
+      id: previewPage.id,
+      name: previewPage.name,
+      background: previewPage.background,
+      viewport: previewPage.viewport,
+      archived: previewPage.archived,
+      metadata: previewPage.metadata,
+    };
+    if (canonicalJson(basePageState) !== canonicalJson(previewPageState)) {
+      nonNodeChangedPages.add(pageId);
+      changedPages.add(pageId);
+    }
+  }
+
+  if (changedTokenIds.size > 0) {
+    for (const page of [...input.previewDocument.pages, ...input.baseDocument.pages]) {
+      if (referencesChangedToken(page, changedTokenIds)) {
+        nonNodeChangedPages.add(page.id);
+        changedPages.add(page.id);
+      }
+    }
+  }
+
+  const orderedPageIds: string[] = [];
+  const seenPageIds = new Set<string>();
+  for (const page of [...input.previewDocument.pages, ...input.baseDocument.pages]) {
+    if (changedPages.has(page.id) && !seenPageIds.has(page.id)) {
+      seenPageIds.add(page.id);
+      orderedPageIds.push(page.id);
+    }
+  }
+  if (orderedPageIds.length > 20) {
+    throw new DomainError(
+      "PAYLOAD_TOO_LARGE",
+      "An exact preview can render at most 20 affected pages; narrow the proposal into smaller task-backed previews.",
+      413,
+      { details: { changedPageCount: orderedPageIds.length, maxPages: 20 } },
+    );
+  }
   if (changedPages.size > 1) {
-    throw new DomainError("AMBIGUOUS_CONTEXT", "One exact preview PNG cannot cover changes on multiple pages; split the proposal by page.", 409, {
-      details: { changedPageIds: [...changedPages].slice(0, 20) },
-    });
+    if (input.pageId !== undefined || input.nodeId !== undefined) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "A single-page or node crop cannot prove a multi-page proposal; omit page_id and node_id to render the exact contact sheet.",
+        422,
+        { details: { changedPageIds: orderedPageIds.slice(0, 20), requiredRender: "contact_sheet" } },
+      );
+    }
+    return { pageIds: orderedPageIds, maxSize: input.maxSize };
   }
   if (input.nodeId !== undefined) {
     const nodeId = input.nodeId;
+    if (nonNodeChangedPages.size > 0) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "A node crop cannot prove page, token, or asset changes; render the affected page instead.",
+        422,
+        { details: { changedPageIds: orderedPageIds, requiredRender: "page" } },
+      );
+    }
     const containsEveryChange = renderedChangedIds.length === 0 || renderedChangedIds.every((changedId) => (
       changedId === nodeId
       || (input.previewDocument.nodes[nodeId] !== undefined
@@ -696,12 +828,12 @@ function exactPreviewRenderOptions(input: {
   if (input.pageId !== undefined) {
     if (changedPages.size > 0 && !changedPages.has(input.pageId)) {
       throw new DomainError("VALIDATION_FAILED", "page_id does not contain any changed preview node.", 422, {
-        details: { changedPageIds: [...changedPages].slice(0, 20) },
+        details: { changedPageIds: orderedPageIds.slice(0, 20) },
       });
     }
     return { pageId: input.pageId, maxSize: input.maxSize };
   }
-  const inferredPageId = [...changedPages][0];
+  const inferredPageId = orderedPageIds[0];
   return {
     ...(inferredPageId === undefined ? {} : { pageId: inferredPageId }),
     maxSize: input.maxSize,
@@ -1206,24 +1338,48 @@ function createDesignerMcpServer(
       preview_id: z.string().optional(),
       page_id: z.string().optional(),
       node_id: z.string().optional(),
-      max_size: z.number().int().min(64).max(4096).default(2048),
+      max_size: z.number().int().min(64).max(4096).optional(),
     },
     annotations: readAnnotations,
   }, async ({ design_id, version, preview_id, page_id, node_id, max_size }) => withDomainErrors(async () => {
     if (version !== undefined && preview_id !== undefined) {
       throw new DomainError("VALIDATION_FAILED", "Provide version or preview_id, not both.", 422);
     }
-    const document = preview_id
-      ? service.getPreview(actorId, design_id, preview_id).canonicalDocument
-      : service.getDesign(actorId, design_id, version).canonicalDocument;
-    const rendered = await renderForTool(design_id, document, {
-      ...(page_id === undefined ? {} : { pageId: page_id }),
-      ...(node_id === undefined ? {} : { nodeId: node_id }),
-      maxSize: max_size,
-    });
+    const useExactPreviewOptions = preview_id !== undefined
+      && page_id === undefined
+      && node_id === undefined
+      && max_size === undefined;
+    const exactPreview = useExactPreviewOptions && preview_id !== undefined
+      ? service.getExactPreviewForRender(actorId, design_id, preview_id)
+      : null;
+    const preview = preview_id !== undefined && exactPreview === null
+      ? service.getPreview(actorId, design_id, preview_id)
+      : exactPreview?.preview ?? null;
+    const document = preview?.canonicalDocument
+      ?? service.getDesign(actorId, design_id, version).canonicalDocument;
+    const rendered = await renderForTool(
+      design_id,
+      document,
+      useExactPreviewOptions
+        ? exactPreview!.renderMetadata.options
+        : {
+          ...(page_id === undefined ? {} : { pageId: page_id }),
+          ...(node_id === undefined ? {} : { nodeId: node_id }),
+          maxSize: max_size ?? 2048,
+      },
+    );
+    if (exactPreview !== null && preview_id !== undefined) {
+      service.verifyExactPreviewRender(actorId, design_id, preview_id, {
+        png: rendered.png,
+        width: rendered.width,
+        height: rendered.height,
+        renderer: rendered.renderer,
+        warnings: rendered.warnings,
+      });
+    }
     return {
       content: [
-        { type: "text" as const, text: `Rendered ${rendered.width}×${rendered.height} using ${rendered.renderer}.` },
+        { type: "text" as const, text: `${exactPreview === null ? "Rendered ad-hoc" : "Verified exact preview"} ${rendered.width}×${rendered.height} using ${rendered.renderer}.` },
         { type: "image" as const, data: rendered.png.toString("base64"), mimeType: "image/png" as const },
       ],
       structuredContent: {

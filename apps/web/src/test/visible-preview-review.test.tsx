@@ -4,10 +4,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { applicationRoute } from "../App";
-import { AgentPreviewReviewDialog } from "../components/AgentPreviewReview";
+import { AgentPreviewReviewDialog, reviewPage } from "../components/AgentPreviewReview";
 import { validatePreviewReviewTarget } from "../components/PreviewReviewPage";
+import type { PageId } from "../domain";
 import {
   designPreviewReviewPath,
+  readDesignPreview,
   readAgentTask,
   subscribeToEvents,
   type AgentTaskRecord,
@@ -129,6 +131,94 @@ describe("visible exact preview review", () => {
     expect(markup).toContain("Before");
     expect(markup).toContain("Proposed");
     expect(markup).not.toContain("Discard proposal");
+  });
+
+  it("keeps Before empty when the proposal creates a newly selected page", () => {
+    const base = createStarterDocument({ preset: "phone", name: "New page review" });
+    const proposed = structuredClone(base);
+    const newPageId = "page_new_preview_review_0001" as PageId;
+    proposed.pages.push({
+      id: newPageId,
+      name: "New proposal page",
+      children: [],
+      background: "#ffffff",
+      archived: false,
+      metadata: {},
+    });
+    expect(reviewPage(base, newPageId)).toBeNull();
+    expect(reviewPage(proposed, newPageId)).toMatchObject({ id: newPageId });
+  });
+
+  it("parses and displays every page from an exact contact-sheet review", async () => {
+    const base = createStarterDocument({ preset: "phone", name: "Contact sheet review" });
+    const secondPageId = "page_contact_sheet_review_0001" as PageId;
+    const proposed = structuredClone(base);
+    proposed.pages.push({
+      id: secondPageId,
+      name: "Second changed page",
+      children: [],
+      background: "#f8fafc",
+      archived: false,
+      metadata: {},
+    });
+    const firstPageId = proposed.pages[0]!.id;
+    const previewId = "preview_contact_sheet_review_0001";
+    const response = {
+      previewId,
+      designId: proposed.id,
+      rootBaseVersion: 1,
+      baseRevisionId: "revision_contact_sheet_base",
+      baseSnapshotHash: "a".repeat(64),
+      operationHash: "b".repeat(64),
+      resultSnapshotHash: "c".repeat(64),
+      expiresAt: "2030-07-22T09:00:00.000Z",
+      canCommit: true,
+      destructive: false,
+      kind: "ordinary",
+      status: "ready",
+      committedRevisionId: null,
+      changedNodeIds: [proposed.pages[0]!.children[0]!],
+      versions: { commandEngine: "3", renderer: "3", fontBundle: "1" },
+      renderMetadata: {
+        options: { pageIds: [firstPageId, secondPageId], maxSize: 512 },
+        width: 390,
+        height: 512,
+        renderer: "playwright",
+        warnings: ["Rendered 2 changed pages as one exact contact sheet."],
+        sha256: "d".repeat(64),
+      },
+      diagnostics: [],
+      document: proposed,
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const preview = await readDesignPreview(proposed.id, previewId, "task_contact_sheet_review_0001");
+    expect(preview.renderMetadata?.options.pageIds).toEqual([firstPageId, secondPageId]);
+
+    const markup = renderToStaticMarkup(
+      <AgentPreviewReviewDialog
+        open
+        presentation="inline"
+        showActions={false}
+        task={reviewTask(proposed.id, previewId)}
+        preview={preview}
+        baseDocument={base}
+        activePageId={firstPageId}
+        activePageIds={[firstPageId, secondPageId]}
+        busy={false}
+        actionError={null}
+        baseMatchesHead
+        previewRenderStatus="available"
+        onCommit={() => undefined}
+        onDiscard={() => undefined}
+        onRetryPreviewRender={() => undefined}
+      />,
+    );
+    expect(markup).toContain("Second changed page");
+    expect(markup).toContain("Page not present in base");
+    expect(markup.match(/agent-review-page-item/g)).toHaveLength(4);
   });
 
   it("reads task launch and website focus links without exposing a token", async () => {

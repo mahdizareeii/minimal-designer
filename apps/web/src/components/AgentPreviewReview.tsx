@@ -49,7 +49,7 @@ export function changedNodeSummaries(
   });
 }
 
-function reviewPage(document: DesignDocument, requestedPageId: PageId | null): DesignDocument["pages"][number] | null {
+export function reviewPage(document: DesignDocument, requestedPageId: PageId | null): DesignDocument["pages"][number] | null {
   if (requestedPageId !== null) {
     return document.pages.find((page) => page.id === requestedPageId && !page.archived) ?? null;
   }
@@ -390,6 +390,7 @@ export function AgentPreviewReviewDialog({
   preview,
   baseDocument,
   activePageId,
+  activePageIds,
   busy,
   actionError,
   baseMatchesHead,
@@ -406,6 +407,7 @@ export function AgentPreviewReviewDialog({
   preview: DesignPreviewRecord;
   baseDocument: DesignDocument;
   activePageId: PageId | null;
+  activePageIds?: readonly PageId[];
   busy: boolean;
   actionError: string | null;
   baseMatchesHead: boolean;
@@ -428,6 +430,10 @@ export function AgentPreviewReviewDialog({
     () => changedNodeSummaries(baseDocument, preview.document, preview.changedNodeIds),
     [baseDocument, preview.changedNodeIds, preview.document],
   );
+  const comparisonPageIds = useMemo<readonly (PageId | null)[]>(
+    () => activePageIds && activePageIds.length > 0 ? activePageIds : [activePageId],
+    [activePageId, activePageIds],
+  );
   if (!open) return null;
 
   const canCommit = exactPreviewCommitAllowed(preview.canCommit
@@ -442,12 +448,27 @@ export function AgentPreviewReviewDialog({
           <span><strong>{before ? "Before" : "Proposed"}</strong><small>{before ? `Immutable version ${preview.rootBaseVersion}` : `Preview version ${preview.proposedVersion}`}</small></span>
           <span className="agent-review-hash">{(before ? preview.baseSnapshotHash : preview.resultSnapshotHash).slice(0, 12)}</span>
         </figcaption>
-        <ReviewDocumentCanvas
-          document={before ? baseDocument : preview.document}
-          pageId={activePageId}
-          highlightedIds={highlightedIds}
-          tone={version}
-        />
+        <div className="agent-review-page-stack">
+          {comparisonPageIds.map((pageId, index) => {
+            const document = before ? baseDocument : preview.document;
+            const page = pageId === null ? reviewPage(document, null) : document.pages.find((candidate) => candidate.id === pageId);
+            return (
+              <section key={pageId ?? `default-${index}`} className="agent-review-page-item">
+                {comparisonPageIds.length > 1 && (
+                  <div className="agent-review-page-label" title={page?.name ?? String(pageId ?? "Page")} dir="auto">
+                    {page?.name ?? (before ? "Page not present in base" : "Page not present in proposal")}
+                  </div>
+                )}
+                <ReviewDocumentCanvas
+                  document={document}
+                  pageId={pageId}
+                  highlightedIds={highlightedIds}
+                  tone={version}
+                />
+              </section>
+            );
+          })}
+        </div>
       </figure>
     );
   };

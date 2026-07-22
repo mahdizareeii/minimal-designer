@@ -26,6 +26,12 @@ const bridge = await startBridgeServer({
   buildId,
   allowLegacySelfCreate: upstreamAuthMode === "none",
   credentialStore: createSystemCredentialStore(upstreamMcpUrl),
+  controlErrorReporter: (error) => {
+    const message = (error instanceof Error ? error.message : String(error))
+      .replace(/[\r\n\u0000-\u001f\u007f]+/g, " ")
+      .slice(0, 500);
+    process.stderr.write(`FormaSpec bridge control error: ${message}\n`);
+  },
   ...(process.env.FORMASPEC_BRIDGE_INSTANCE_ID === undefined
     ? {}
     : { instanceId: process.env.FORMASPEC_BRIDGE_INSTANCE_ID }),

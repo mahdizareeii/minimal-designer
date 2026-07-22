@@ -12,6 +12,7 @@ interface BridgeState {
   url: string;
   instanceId: string;
   buildId?: string;
+  upstreamMcpUrl?: string;
 }
 
 interface BridgeHealthProbe {
@@ -174,8 +175,10 @@ function readState(statePath: string): BridgeState | null {
   try {
     const value = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<BridgeState>;
     if (value.schemaVersion !== 1 || !Number.isSafeInteger(value.pid) || typeof value.url !== "string"
-      || typeof value.instanceId !== "string" || value.instanceId.length < 16) return null;
+      || typeof value.instanceId !== "string" || value.instanceId.length < 16
+      || (value.upstreamMcpUrl !== undefined && typeof value.upstreamMcpUrl !== "string")) return null;
     validateBridgeMcpUrl(`${value.url}/mcp`);
+    if (value.upstreamMcpUrl !== undefined) validateBridgeMcpUrl(value.upstreamMcpUrl);
     return value as BridgeState;
   } catch {
     return null;
@@ -228,8 +231,12 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
       const runtime = resolveRuntime();
       const state = readState(statePath);
       const probe = await bridgeHealth(bridgeUrl);
-      if (probe.running && probe.buildId === runtime.buildId) {
-        return { running: true, url: bridgeUrl, owned: state?.url === bridgeUrl };
+      const upstreamMcpUrl = `http://127.0.0.1:${readApiPort(runtimeDirectory)}/mcp`;
+      if (probe.running
+        && probe.buildId === runtime.buildId
+        && state?.url === bridgeUrl
+        && state.upstreamMcpUrl === upstreamMcpUrl) {
+        return { running: true, url: bridgeUrl, owned: true };
       }
       if (probe.running) {
         if (state?.url !== bridgeUrl) {
@@ -241,7 +248,6 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
       fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
       const log = fs.openSync(logPath, "a", 0o600);
       const instanceId = randomUUID();
-      const upstreamMcpUrl = `http://127.0.0.1:${readApiPort(runtimeDirectory)}/mcp`;
       const child = spawn(process.execPath, runtime.arguments, {
         shell: false,
         detached: true,
@@ -273,6 +279,7 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         url: bridgeUrl,
         instanceId,
         buildId: runtime.buildId,
+        upstreamMcpUrl,
       };
       writeState(statePath, nextState);
       for (let attempt = 0; attempt < 60; attempt += 1) {

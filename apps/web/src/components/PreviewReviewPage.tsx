@@ -71,6 +71,7 @@ export function PreviewReviewPage({
   const [renderRetryKey, setRenderRetryKey] = useState(0);
   const loadSequence = useRef(0);
   const commitKey = useRef<string | null>(null);
+  const discardKey = useRef<string | null>(null);
   const stateAvailable = useRef(false);
   const renderIdentity = useRef("");
 
@@ -138,14 +139,25 @@ export function PreviewReviewPage({
     };
   }, [designId, load]);
 
-  const activePageId = useMemo<PageId | null>(() => {
-    if (!state) return null;
+  const activePageIds = useMemo<PageId[]>(() => {
+    if (!state) return [];
+    const requestedPages = state.preview.renderMetadata?.options.pageIds ?? [];
+    const exactPages = requestedPages.filter((pageId) => (
+      state.preview.document.pages.some((page) => page.id === pageId)
+      || state.baseDocument.pages.some((page) => page.id === pageId)
+    )) as PageId[];
+    if (exactPages.length > 0) return exactPages;
     const requested = state.preview.renderMetadata?.options.pageId as PageId | undefined;
-    if (requested && state.preview.document.pages.some((page) => page.id === requested)) return requested;
-    return state.preview.document.pages.find((page) => !page.archived)?.id
+    if (requested && (
+      state.preview.document.pages.some((page) => page.id === requested)
+      || state.baseDocument.pages.some((page) => page.id === requested)
+    )) return [requested];
+    const fallback = state.preview.document.pages.find((page) => !page.archived)?.id
       ?? state.baseDocument.pages.find((page) => !page.archived)?.id
       ?? null;
+    return fallback === null ? [] : [fallback];
   }, [state]);
+  const activePageId = activePageIds[0] ?? null;
 
   const retryRender = () => {
     setRenderStatus("loading");
@@ -202,6 +214,7 @@ export function PreviewReviewPage({
     if (!state || !taskId || state.task.status !== "awaiting_approval" || busy) return;
     setBusy(true);
     setError(null);
+    discardKey.current ??= createClientKey("preview_review_discard");
     try {
       const task = await transitionAgentTask({
         taskId,
@@ -209,6 +222,7 @@ export function PreviewReviewPage({
         toStatus: "cancelled",
         message: "The product manager discarded the exact preview without changing project history.",
         data: { previewId, discarded: true },
+        idempotencyKey: discardKey.current,
       });
       setState((current) => current ? { ...current, task } : current);
       setNotice("Discarded the proposal. No design revision was created.");
@@ -301,6 +315,7 @@ export function PreviewReviewPage({
         preview={preview}
         baseDocument={baseDocument}
         activePageId={activePageId}
+        activePageIds={activePageIds}
         busy={busy}
         actionError={error}
         baseMatchesHead={headVersion === preview.rootBaseVersion}

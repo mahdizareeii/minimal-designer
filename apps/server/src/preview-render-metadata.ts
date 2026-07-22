@@ -15,9 +15,25 @@ export const PREVIEW_RENDER_MAX_SIZE = 4_096;
 
 export const PreviewRenderOptionsSchema = z.object({
   pageId: PageIdSchema.optional(),
+  pageIds: z.array(PageIdSchema).min(2).max(20).optional(),
   nodeId: NodeIdSchema.optional(),
   maxSize: z.number().int().min(64).max(PREVIEW_RENDER_MAX_SIZE),
-}).strict();
+}).strict().superRefine((options, context) => {
+  if (options.pageIds !== undefined && (options.pageId !== undefined || options.nodeId !== undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["pageIds"],
+      message: "A contact-sheet render cannot also target one page or node.",
+    });
+  }
+  if (options.pageIds !== undefined && new Set(options.pageIds).size !== options.pageIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["pageIds"],
+      message: "Contact-sheet page IDs must be unique.",
+    });
+  }
+});
 
 export const PreviewRenderMetadataSchema = z.object({
   options: PreviewRenderOptionsSchema,
@@ -73,6 +89,16 @@ export function buildPreviewRenderMetadata(
     throw invalidRenderMetadata("Preview render page does not exist in the exact preview document.", {
       pageId: options.data.pageId,
     });
+  }
+  if (options.data.pageIds !== undefined) {
+    const missingPageIds = options.data.pageIds.filter(
+      (pageId) => !document.pages.some((page) => page.id === pageId),
+    );
+    if (missingPageIds.length > 0) {
+      throw invalidRenderMetadata("Preview contact-sheet pages do not exist in the exact preview document.", {
+        missingPageIds,
+      });
+    }
   }
   if (options.data.nodeId !== undefined && document.nodes[options.data.nodeId] === undefined) {
     throw invalidRenderMetadata("Preview render node does not exist in the exact preview document.", {

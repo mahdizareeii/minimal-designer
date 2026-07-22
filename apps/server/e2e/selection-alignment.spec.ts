@@ -597,6 +597,13 @@ async function waitForGeometryFrame(page: Page): Promise<void> {
   }));
 }
 
+async function savePendingDesign(page: Page): Promise<void> {
+  const save = page.getByRole("button", { name: "Save / Commit" });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(page.locator(".save-status")).toContainText("Saved");
+}
+
 async function readViewportTransform(page: Page): Promise<{ zoom: number; pan: { x: number; y: number } }> {
   return page.locator(".canvas-layer").evaluate((layer) => {
     const matrix = new DOMMatrixReadOnly(getComputedStyle(layer).transform);
@@ -972,7 +979,7 @@ test("real delayed bundled-font completion refreshes stale selection geometry", 
   }
 });
 
-test("fractional multi-root drag commits one revision and preserves equal precise deltas", async ({ page, request }) => {
+test("fractional multi-root drag stages precise deltas and Save / Commit creates one revision", async ({ page, request }) => {
   const fixture = await createFixture(request);
   const before = await readDesign(request, fixture.designId);
   const [firstNode, secondNode] = fixture.multiNodes;
@@ -991,6 +998,8 @@ test("fractional multi-root drag commits one revision and preserves equal precis
     y: firstBox.y + firstBox.height / 2 - 28.625,
   });
 
+  expect((await readDesign(request, fixture.designId)).version).toBe(before.version);
+  await savePendingDesign(page);
   await expect.poll(async () => (await readDesign(request, fixture.designId)).version).toBe(before.version + 1);
   const after = await readDesign(request, fixture.designId);
   const firstAfter = after.document.nodes[firstNode.id]!.layout;
@@ -1018,6 +1027,7 @@ test("auto-layout gestures reorder, reparent, and resize constraints without wri
     x: tailBox.x + tailBox.width / 2,
     y: tailBox.y + tailBox.height - 2,
   });
+  await savePendingDesign(page);
   await expect.poll(async () => {
     const design = await readDesign(request, fixture.designId);
     const source = design.document.nodes[fixture.sourceId];
@@ -1031,6 +1041,7 @@ test("auto-layout gestures reorder, reparent, and resize constraints without wri
     x: destinationBox.x + destinationBox.width / 2,
     y: destinationBox.y + destinationBox.height - 24,
   });
+  await savePendingDesign(page);
   await expect.poll(async () => {
     const design = await readDesign(request, fixture.designId);
     const destination = design.document.nodes[fixture.destinationId];
@@ -1048,6 +1059,7 @@ test("auto-layout gestures reorder, reparent, and resize constraints without wri
   await page.mouse.move(handleBox.x + handleBox.width / 2 + 36.375, handleBox.y + handleBox.height / 2 + 18.625, { steps: 10 });
   await page.mouse.up();
 
+  await savePendingDesign(page);
   await expect.poll(async () => {
     const design = await readDesign(request, fixture.designId);
     return design.document.nodes[fixture.resizeNode.id]?.layout.width_sizing;
@@ -1081,6 +1093,7 @@ test("wrapped and grid auto-layout gestures use row-aware insertion without writ
     x: gridTarget.x + 2,
     y: gridTarget.y + gridTarget.height / 2,
   });
+  await savePendingDesign(page);
   await expect.poll(async () => {
     const design = await readDesign(request, fixture.designId);
     const grid = design.document.nodes[fixture.gridId];
@@ -1101,6 +1114,7 @@ test("wrapped and grid auto-layout gestures use row-aware insertion without writ
     x: wrapTarget.x + wrapTarget.width - 2,
     y: wrapTarget.y + wrapTarget.height / 2,
   });
+  await savePendingDesign(page);
   await expect.poll(async () => {
     const design = await readDesign(request, fixture.designId);
     const wrap = design.document.nodes[fixture.wrapId];

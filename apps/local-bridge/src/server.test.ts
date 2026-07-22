@@ -352,6 +352,53 @@ describe("FormaSpec local bridge", () => {
     expect((await verify()).status).toBe(502);
   });
 
+  it("accepts a bounded enterprise tools list above 64 KiB and rejects one above 1 MiB", async () => {
+    let oversized = false;
+    const upstream = await startUpstream((request, response) => {
+      if (request.url !== "/mcp" || request.method !== "POST") {
+        response.writeHead(404).end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const rpc = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string; method: string };
+        const result = rpc.method === "initialize"
+          ? {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            serverInfo: { name: "formaspec", version: "0.2.1" },
+          }
+          : {
+            tools: [
+              ...essentialTools,
+              { name: "enterprise_contract_padding", description: "x".repeat(oversized ? 1_100_000 : 70_000) },
+            ],
+          };
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
+      });
+    });
+    const credentialStore = new MemoryCredentialStore();
+    await credentialStore.write("fsg_large-tools-list-secret");
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "large-tools-list-bridge",
+      credentialStore,
+    });
+    bridges.push(bridge);
+    const verify = () => fetch(`${bridge.url}/_control/verify-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "large-tools-list-bridge" }),
+    });
+
+    expect((await verify()).status).toBe(200);
+    oversized = true;
+    expect((await verify()).status).toBe(502);
+  });
+
   it("rejects hostile Host, browser-origin, fetch-metadata, and no-cors content types before proxying", async () => {
     let upstreamRequests = 0;
     const upstream = await startUpstream((_request, response) => {
