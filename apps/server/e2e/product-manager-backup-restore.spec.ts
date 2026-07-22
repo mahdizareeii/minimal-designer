@@ -336,7 +336,7 @@ test("product manager to verified backup restore captures the Codex URL and simu
       task = tasks.tasks[0]!;
       expect(task).toMatchObject({ designId, baseVersion: 2, status: "queued", expectedOutput: "design_preview" });
       expect(await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink)).toBeUndefined();
-      await page.getByRole("button", { name: "Open task in Codex" }).click();
+      await page.getByTestId("formaspec-submit-status").getByRole("button", { name: "Open task in Codex" }).click();
       const taskLink = await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink);
       expect(taskLink).toBeTruthy();
       const parsedTaskLink = new URL(taskLink!);
@@ -422,7 +422,7 @@ test("product manager to verified backup restore captures the Codex URL and simu
       });
       expect(initialized.result?.instructions).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
       expect(initialized.result?.instructions).toContain("Use FormaSpec");
-      expect(initialized.result?.instructions).toContain("Preview, inspect, and lint");
+      expect(initialized.result?.instructions).toContain("inspect PNG, lint");
       expect(initialized.result?.instructions?.length).toBeLessThanOrEqual(512);
     });
 
@@ -459,11 +459,13 @@ test("product manager to verified backup restore captures the Codex URL and simu
           resultSnapshotHash: string;
           changedNodeIds: string[];
           createdIds: { temporary: Record<string, string> };
-          editorDeepLink: string;
+          projectDeepLink: string;
+          reviewDeepLink: string | null;
         };
         render: { width: number; height: number; renderer: string };
       }>("design_preview_changes", {
         design_id: designId,
+        task_id: task.id,
         base_version: 2,
         max_size: 768,
         operations: [
@@ -600,33 +602,27 @@ test("product manager to verified backup restore captures the Codex URL and simu
       expect(initialPreview.render.width).toBe(rendered.structured.render.width);
     });
 
-    const agentCommit = await step("Commit the exact preview atomically as the first agent revision", async () => {
-      const committed = await callTool<{
-        design: { version: number };
-        revision: { id: string; snapshotHash: string; revisionHash: string };
-        deepLink: string;
-      }>("design_commit_preview", {
-        design_id: designId,
-        preview_id: initialPreviewId,
-        expected_base_version: 2,
-        idempotency_key: "release-e2e-agent-commit-0001",
-        message: "Codex creates the bilingual dispatch flow",
-      });
-      expect(committed.structured.design.version).toBe(3);
-      expect(committed.structured.revision.snapshotHash).toBe(initialPreview.preview.resultSnapshotHash);
-      expect(committed.structured.deepLink).toBe(`${baseURL}/design/${designId}`);
-      return committed.structured;
-    });
-
-    await step("Complete the website task with its validated preview output", async () => {
-      const completed = await callTool<{ task: { status: string } }>("task_transition", {
+    const agentCommit = await step("Approve the exact preview in the website as the first agent revision", async () => {
+      const proposed = await callTool<{ task: { status: string }; reviewDeepLink: string }>("task_transition", {
         task_id: task.id,
         expected_status: "in_progress",
-        to_status: "completed",
-        message: "Preview inspected, linted, and committed with approval.",
+        to_status: "awaiting_approval",
+        message: "Preview inspected and linted; request exact human approval.",
         data: { previewId: initialPreviewId },
       });
-      expect(completed.structured.task.status).toBe("completed");
+      expect(proposed.structured.task.status).toBe("awaiting_approval");
+      await page.goto(proposed.structured.reviewDeepLink);
+      await expect(page.getByTestId("exact-preview-review-png")).toBeVisible();
+      const commitButton = page.getByRole("button", { name: "Commit preview", exact: true });
+      await expect(commitButton).toBeEnabled({ timeout: 15_000 });
+      await commitButton.click();
+      await expect(page.getByRole("status")).toContainText("Committed the exact preview as immutable version 3", { timeout: 15_000 });
+      const head = await api<RevisionEnvelope>(baseURL, `/api/designs/${encodeURIComponent(designId)}`);
+      expect(head.version).toBe(3);
+      expect(head.snapshotHash).toBe(initialPreview.preview.resultSnapshotHash);
+      const completed = await api<{ task: { status: string } }>(baseURL, `/api/agent-tasks/${encodeURIComponent(task.id)}`);
+      expect(completed.task.status).toBe("completed");
+      return { revision: { id: head.revisionId, snapshotHash: head.snapshotHash, revisionHash: head.revisionHash } };
     });
 
     await step("Let a human select and correct the same design in the browser editor", async () => {
@@ -648,6 +644,30 @@ test("product manager to verified backup restore captures the Codex URL and simu
       expect(manualRevision.document.nodes[titleNodeId]?.content).toContain("human verified");
     });
 
+    const refinementTask = await step("Create and claim a selection-scoped refinement task", async () => {
+      const createdTask = await api<{ task: { id: string; status: string } }>(
+        baseURL,
+        `/api/designs/${encodeURIComponent(designId)}/agent-tasks`,
+        {
+          method: "POST",
+          body: {
+            brief: "Refine the currently selected heading without changing its human-authored copy.",
+            selection: [titleNodeId],
+            baseVersion: 4,
+            expectedOutput: "design_preview",
+            idempotencyKey: "release-e2e-selection-task-0001",
+          },
+        },
+      );
+      await callTool("task_claim", { task_id: createdTask.task.id });
+      await callTool("task_transition", {
+        task_id: createdTask.task.id,
+        expected_status: "claimed",
+        to_status: "in_progress",
+      });
+      return createdTask.task;
+    });
+
     const refinementPreview = await step("Read the editor selection and preview a selection-scoped agent refinement", async () => {
       const context = await callTool<{ context: { designId: string; version: number; selection: string[] } }>("context_get", {});
       expect(context.structured.context).toMatchObject({ designId, version: 4, selection: [titleNodeId] });
@@ -659,6 +679,7 @@ test("product manager to verified backup restore captures the Codex URL and simu
         preview: { id: string; canCommit: boolean; resultSnapshotHash: string; changedNodeIds: string[] };
       }>("design_preview_changes", {
         design_id: designId,
+        task_id: refinementTask.id,
         base_version: 4,
         node_id: titleNodeId,
         max_size: 768,
@@ -685,17 +706,31 @@ test("product manager to verified backup restore captures the Codex URL and simu
       return preview.structured;
     });
 
-    await step("Commit the inspected refinement and preserve the human-authored copy", async () => {
-      const committed = await callTool<{ design: { version: number }; revision: { id: string; snapshotHash: string } }>("design_commit_preview", {
-        design_id: designId,
-        preview_id: refinementPreview.preview.id,
-        expected_base_version: 4,
-        idempotency_key: "release-e2e-selection-commit-0001",
-        message: "Codex refines the selected heading",
+    await step("Approve the inspected refinement and preserve the human-authored copy", async () => {
+      const proposed = await callTool<{ task: { status: string }; reviewDeepLink: string }>("task_transition", {
+        task_id: refinementTask.id,
+        expected_status: "in_progress",
+        to_status: "awaiting_approval",
+        data: { previewId: refinementPreview.preview.id },
       });
-      expect(committed.structured).toMatchObject({ design: { version: 5 } });
-      expect(committed.structured.revision.snapshotHash).toBe(refinementPreview.preview.resultSnapshotHash);
+      expect(proposed.structured.task.status).toBe("awaiting_approval");
+      expect(proposed.structured.reviewDeepLink).toContain(`/previews/${refinementPreview.preview.id}/review`);
+      await page.goto(proposed.structured.reviewDeepLink);
+      await expect(page).toHaveURL(new RegExp(`/design/${designId}/previews/${refinementPreview.preview.id}/review\\?task=${refinementTask.id}$`));
+      await expect(page.getByText("Exact human approval", { exact: true })).toBeVisible();
+      await expect(page.getByText(refinementTask.id, { exact: true }).first()).toBeVisible();
+      await expect(page.getByText(refinementPreview.preview.id, { exact: true }).first()).toBeVisible();
+      await expect(page.getByTestId("exact-preview-review-png")).toBeVisible();
+      await expect(page.locator(".agent-review-pane.is-before figcaption strong")).toHaveText("Before");
+      await expect(page.locator(".agent-review-pane.is-after figcaption strong")).toHaveText("Proposed");
+      const commitButton = page.getByRole("button", { name: "Commit preview", exact: true });
+      await expect(page.getByRole("button", { name: "Discard", exact: true })).toBeEnabled();
+      await expect(commitButton).toBeEnabled({ timeout: 15_000 });
+      await commitButton.click();
+      await expect(page.getByRole("status")).toContainText("Committed the exact preview as immutable version 5", { timeout: 15_000 });
       const head = await api<RevisionEnvelope>(baseURL, `/api/designs/${encodeURIComponent(designId)}`);
+      expect(head.version).toBe(5);
+      expect(head.snapshotHash).toBe(refinementPreview.preview.resultSnapshotHash);
       expect(head.document.nodes[titleNodeId]?.content).toContain("human verified");
       expect(head.document.nodes[titleNodeId]?.style).toMatchObject({ color: "#2f2a8f" });
     });

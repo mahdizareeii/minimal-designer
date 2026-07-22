@@ -9,12 +9,12 @@ import { z } from "zod";
 
 import {
   appendAuditEvent,
-  assertProjectAccess,
   assertScope,
   resolveAccess,
   type AccessContext,
   type OrganizationRole,
 } from "./authorization.js";
+import { activeDesignSqlPredicate, requireActiveDesign } from "./active-design.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
 import { canonicalJson, hashPayload } from "./ids.js";
@@ -1751,7 +1751,14 @@ export class WorkspaceHandoffService {
       : this.parseHandoffListCursor(request.cursor, request.designId, accessHash);
     if (cursor) this.assertHandoffListCursorAnchor(access, request.designId, cursor);
 
-    const conditions = ["h.organization_id = ?"];
+    const conditions = [
+      "h.organization_id = ?",
+      `EXISTS (
+        SELECT 1 FROM designs active_design
+        WHERE active_design.id = h.design_id
+          AND ${activeDesignSqlPredicate("active_design")}
+      )`,
+    ];
     const parameters: Array<string | number> = [access.organizationId];
     if (request.designId !== undefined) {
       conditions.push("h.design_id = ?");
@@ -1795,13 +1802,18 @@ export class WorkspaceHandoffService {
     const projectClause = access.projectIds.length > 0
       ? ` AND design_id IN (${access.projectIds.map(() => "?").join(", ")})`
       : "";
+    const activeDesignClause = ` AND EXISTS (
+      SELECT 1 FROM designs active_design
+      WHERE active_design.id = handoffs.design_id
+        AND ${activeDesignSqlPredicate("active_design")}
+    )`;
     const rows = input.designId === undefined
       ? this.database.sqlite.prepare(
-        `SELECT * FROM handoffs WHERE organization_id = ?${projectClause}
+        `SELECT * FROM handoffs WHERE organization_id = ?${projectClause}${activeDesignClause}
          ORDER BY updated_at DESC, id DESC LIMIT ?`,
       ).all(access.organizationId, ...access.projectIds, limit) as HandoffRow[]
       : this.database.sqlite.prepare(
-        `SELECT * FROM handoffs WHERE organization_id = ? AND design_id = ?
+        `SELECT * FROM handoffs WHERE organization_id = ? AND design_id = ?${activeDesignClause}
          ORDER BY updated_at DESC, id DESC LIMIT ?`,
       ).all(access.organizationId, input.designId, limit) as HandoffRow[];
     return rows
@@ -1894,7 +1906,15 @@ export class WorkspaceHandoffService {
     designId: string | undefined,
     cursor: z.infer<typeof handoffListCursorCoreSchema>,
   ): void {
-    const conditions = ["id = ?", "organization_id = ?"];
+    const conditions = [
+      "id = ?",
+      "organization_id = ?",
+      `EXISTS (
+        SELECT 1 FROM designs active_design
+        WHERE active_design.id = handoffs.design_id
+          AND ${activeDesignSqlPredicate("active_design")}
+      )`,
+    ];
     const parameters: string[] = [cursor.id, access.organizationId];
     if (designId !== undefined) {
       conditions.push("design_id = ?");
@@ -2074,12 +2094,7 @@ export class WorkspaceHandoffService {
   }
 
   private requireDesign(access: AccessContext, designId: string): DesignRow {
-    const row = this.database.sqlite.prepare(
-      `SELECT id, organization_id, current_version, current_revision_id FROM designs WHERE id = ?`,
-    ).get(designId) as DesignRow | undefined;
-    if (!row || !row.organization_id) throw new DomainError("NOT_FOUND", "Design not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.id);
-    return row;
+    return requireActiveDesign(this.database.sqlite, access, designId);
   }
 
   private requireRawDesign(access: AccessContext, designId: unknown): DesignRow {
@@ -2370,7 +2385,7 @@ export class WorkspaceHandoffService {
       "SELECT * FROM implementation_mappings WHERE id = ? AND organization_id = ?",
     ).get(mappingId, access.organizationId) as ImplementationMappingRow | undefined;
     if (!row) throw new DomainError("NOT_FOUND", "Implementation mapping not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.design_id);
+    requireActiveDesign(this.database.sqlite, access, row.design_id);
     return row;
   }
 
@@ -2379,7 +2394,7 @@ export class WorkspaceHandoffService {
     row: ImplementationMappingRow,
     cache: MappingReadCache,
   ): ImplementationMappingResult {
-    assertProjectAccess(access, row.organization_id, row.design_id);
+    requireActiveDesign(this.database.sqlite, access, row.design_id);
     if (row.inventory_id === null) {
       throw new DomainError("INTERNAL_ERROR", "Persisted implementation mapping is missing its repository inventory pin.", 500);
     }
@@ -2520,7 +2535,7 @@ export class WorkspaceHandoffService {
       `SELECT * FROM handoffs WHERE id = ? AND organization_id = ?`,
     ).get(handoffId, access.organizationId) as HandoffRow | undefined;
     if (!row) throw new DomainError("NOT_FOUND", "Handoff not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.design_id);
+    requireActiveDesign(this.database.sqlite, access, row.design_id);
     if (row.inventory_id === null) throw new DomainError("INTERNAL_ERROR", "Persisted engineering handoff is missing its repository inventory.", 500);
     return row;
   }

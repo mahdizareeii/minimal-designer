@@ -25,9 +25,32 @@ export interface BridgeStatus {
   owned: boolean;
 }
 
+export const FORMASPEC_ESSENTIAL_MCP_TOOLS = [
+  "organization_policy_read",
+  "context_get",
+  "design_list",
+  "design_read",
+  "node_search",
+  "design_preview_changes",
+  "design_render",
+  "design_lint",
+  "task_create",
+  "task_read",
+  "task_claim",
+  "task_transition",
+] as const;
+
+export interface AgentVerification {
+  verified: true;
+  checks: string[];
+  serverName: "formaspec";
+  essentialTools: string[];
+}
+
 export interface BridgeController {
   ensureStarted(): Promise<BridgeStatus>;
   authorizeAgent(pairing?: AgentPairingTicket): Promise<{ connectionId: string; status: string; expiresAt: string | null }>;
+  verifyAgent(): Promise<AgentVerification>;
   stop(): Promise<boolean>;
   status(): Promise<BridgeStatus>;
 }
@@ -289,6 +312,46 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         connectionId: body.connectionId,
         status: body.status,
         expiresAt: typeof body.expiresAt === "string" ? body.expiresAt : null,
+      };
+    },
+
+    async verifyAgent(): Promise<AgentVerification> {
+      const state = readState(statePath);
+      if (state === null || !(await bridgeHealth(state.url)).running) {
+        throw new Error("The local bridge is stopped; run './designer start local' before verifying the Codex MCP connection.");
+      }
+      const response = await fetch(`${state.url}/_control/verify-agent`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ instanceId: state.instanceId }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({})) as { error?: unknown };
+        throw new Error(`The Codex MCP authorization could not be verified${typeof detail.error === "string" ? `: ${detail.error}` : "."}`);
+      }
+      const body = await response.json() as {
+        verified?: unknown;
+        checks?: unknown;
+        serverName?: unknown;
+        essentialTools?: unknown;
+      };
+      const essentialTools = Array.isArray(body.essentialTools)
+        && body.essentialTools.every((tool) => typeof tool === "string")
+        ? body.essentialTools as string[]
+        : null;
+      if (body.verified !== true || !Array.isArray(body.checks)
+        || !body.checks.every((check) => typeof check === "string")
+        || body.serverName !== "formaspec"
+        || essentialTools === null
+        || !FORMASPEC_ESSENTIAL_MCP_TOOLS.every((tool) => essentialTools.includes(tool))) {
+        throw new Error("The local bridge returned invalid MCP verification metadata.");
+      }
+      return {
+        verified: true,
+        checks: body.checks,
+        serverName: "formaspec",
+        essentialTools,
       };
     },
 

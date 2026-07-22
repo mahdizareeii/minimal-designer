@@ -9,6 +9,7 @@ import {
 } from "@designer/core";
 
 import { prepareComponentInstanceInsertion } from "./component-insertion.js";
+import { requireActiveDesign } from "./active-design.js";
 import {
   listPinnedComponentRelease,
   resolvePinnedComponentRelease,
@@ -22,6 +23,7 @@ import type { DesignerService, PreviewResult } from "./service.js";
 
 export interface ComponentInsertionPreviewInput {
   baseVersion: number;
+  taskId?: string;
   componentDefinitionId: string;
   parent: ParentReference;
   activeState?: ComponentSourceStateKey;
@@ -62,16 +64,18 @@ export class ComponentInsertionService {
       assertScope(access, "design:read");
       assertScope(access, "design_system:read");
     }
+    requireActiveDesign(this.database.sqlite, access, designId);
     this.designer.authorizeDesignRead(actorId, designId);
   }
 
-  authorizePreview(actorId: string, designId: string): void {
+  authorizePreview(actorId: string, designId: string, taskId?: string): void {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") {
       assertScope(access, "design:read");
       assertScope(access, "design_system:read");
     }
-    this.designer.authorizePreviewCreation(actorId, designId);
+    requireActiveDesign(this.database.sqlite, access, designId);
+    this.designer.authorizePreviewCreation(actorId, designId, taskId);
   }
 
   library(actorId: string, designId: string): ComponentInsertionLibraryResult {
@@ -81,10 +85,11 @@ export class ComponentInsertionService {
       throw new DomainError("VALIDATION_FAILED", "Component insertion requires a strict V2 project revision.", 422);
     }
     const document = DesignDocumentV2Schema.parse(current.canonicalDocument);
-    const design = this.database.sqlite.prepare(
-      "SELECT organization_id FROM designs WHERE id = ?",
-    ).get(designId) as { organization_id: string } | undefined;
-    if (!design) throw new DomainError("NOT_FOUND", "Design not found.", 404);
+    const design = requireActiveDesign(
+      this.database.sqlite,
+      resolveAccess(this.database.sqlite, actorId),
+      designId,
+    );
     return {
       designId,
       baseVersion: current.revision.version,
@@ -97,7 +102,7 @@ export class ComponentInsertionService {
     designId: string,
     rawInput: ComponentInsertionPreviewInput,
   ): ComponentInsertionPreviewResult {
-    this.authorizePreview(actorId, designId);
+    this.authorizePreview(actorId, designId, rawInput.taskId);
     if (!Number.isInteger(rawInput.baseVersion) || rawInput.baseVersion < 1) {
       throw new DomainError("VALIDATION_FAILED", "Component insertion baseVersion must be a positive integer.", 422);
     }
@@ -122,10 +127,11 @@ export class ComponentInsertionService {
       throw new DomainError("VALIDATION_FAILED", "Component insertion requires a strict V2 project revision.", 422);
     }
     const document = DesignDocumentV2Schema.parse(current.canonicalDocument);
-    const design = this.database.sqlite.prepare(
-      "SELECT organization_id FROM designs WHERE id = ?",
-    ).get(designId) as { organization_id: string } | undefined;
-    if (!design) throw new DomainError("NOT_FOUND", "Design not found.", 404);
+    const design = requireActiveDesign(
+      this.database.sqlite,
+      resolveAccess(this.database.sqlite, actorId),
+      designId,
+    );
     const resolved = resolvePinnedComponentRelease(
       this.database,
       design.organization_id,
@@ -159,6 +165,7 @@ export class ComponentInsertionService {
         assets: [],
         prototype_links: [],
       },
+      ...(rawInput.taskId === undefined ? {} : { taskId: rawInput.taskId }),
     });
     return {
       preview,

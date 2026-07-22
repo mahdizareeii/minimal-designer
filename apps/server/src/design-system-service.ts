@@ -35,11 +35,11 @@ import { z } from "zod";
 
 import {
   appendAuditEvent,
-  assertProjectAccess,
   assertScope,
   resolveAccess,
   type AccessContext,
 } from "./authorization.js";
+import { requireActiveDesign } from "./active-design.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { collectDiagnostics } from "./core-adapter.js";
 import {
@@ -1962,12 +1962,7 @@ export class DesignSystemService {
   }
 
   private requireDesignRow(access: AccessContext, designId: string): DesignRow {
-    const row = this.database.sqlite.prepare(
-      "SELECT id, organization_id, current_version, current_revision_id FROM designs WHERE id = ?",
-    ).get(designId) as DesignRow | undefined;
-    if (!row) throw new DomainError("NOT_FOUND", "Design not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.id);
-    return row;
+    return requireActiveDesign(this.database.sqlite, access, designId);
   }
 
   private requireRawDesignRow(access: AccessContext, designId: unknown): DesignRow {
@@ -2650,8 +2645,7 @@ export class DesignSystemService {
        WHERE id = ? AND organization_id = ?${requireCreator ? " AND created_by = ?" : ""}`,
     ).get(previewId, access.organizationId, ...(requireCreator ? [access.principalId] : [])) as UpgradePreviewRow | undefined;
     if (!row) throw new DomainError("NOT_FOUND", "Design-system upgrade preview not found.", 404);
-    const design = this.requireDesignRow(access, row.design_id);
-    assertProjectAccess(access, row.organization_id, design.id);
+    this.requireDesignRow(access, row.design_id);
     return row;
   }
 

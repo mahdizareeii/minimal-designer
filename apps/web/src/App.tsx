@@ -4,27 +4,44 @@ import { Dashboard } from "./components/Dashboard";
 import { Administration } from "./components/Administration";
 import { Editor } from "./components/Editor";
 import { InspectView } from "./components/InspectView";
+import { PreviewReviewPage } from "./components/PreviewReviewPage";
 import { RedesignStudio } from "./components/RedesignStudio";
 import { SessionAuthentication } from "./components/SessionAuthentication";
-import { hasUnsavedDesignerChanges, useDesignerStore } from "./store/designer-store";
+import { hasUnsavedDesignerChanges, saveAllDesignerChanges, useDesignerStore } from "./store/designer-store";
 
-interface ApplicationRoute {
-  kind: "dashboard" | "design" | "inspect" | "administration" | "redesign";
+export interface ApplicationRoute {
+  kind: "dashboard" | "design" | "preview-review" | "inspect" | "administration" | "redesign";
   designId?: string;
+  previewId?: string;
+  taskId?: string;
   revisionId?: string;
   assessmentId?: string;
 }
 
-function routeFromLocation(): ApplicationRoute {
-  if (window.location.pathname === "/administration" || window.location.pathname === "/administration/backups" || window.location.pathname === "/administration/agents") {
+export function applicationRoute(pathname: string, search = ""): ApplicationRoute {
+  if (pathname === "/administration" || pathname === "/administration/backups" || pathname === "/administration/agents") {
     return { kind: "administration" };
   }
-  const inspect = window.location.pathname.match(/^\/projects\/([^/]+)\/revisions\/([^/]+)\/inspect$/);
+  const inspect = pathname.match(/^\/projects\/([^/]+)\/revisions\/([^/]+)\/inspect$/);
   if (inspect?.[1] && inspect[2]) return { kind: "inspect", designId: decodeURIComponent(inspect[1]), revisionId: decodeURIComponent(inspect[2]) };
-  const redesign = window.location.pathname.match(/^\/redesign\/([^/]+)$/);
+  const redesign = pathname.match(/^\/redesign\/([^/]+)$/);
   if (redesign?.[1]) return { kind: "redesign", assessmentId: decodeURIComponent(redesign[1]) };
-  const match = window.location.pathname.match(/^\/design\/([^/]+)$/);
+  const review = pathname.match(/^\/design\/([^/]+)\/previews\/([^/]+)\/review$/);
+  if (review?.[1] && review[2]) {
+    const taskId = new URLSearchParams(search).get("task")?.trim();
+    return {
+      kind: "preview-review",
+      designId: decodeURIComponent(review[1]),
+      previewId: decodeURIComponent(review[2]),
+      ...(taskId ? { taskId } : {}),
+    };
+  }
+  const match = pathname.match(/^\/design\/([^/]+)$/);
   return match?.[1] ? { kind: "design", designId: decodeURIComponent(match[1]) } : { kind: "dashboard" };
+}
+
+function routeFromLocation(): ApplicationRoute {
+  return applicationRoute(window.location.pathname, window.location.search);
 }
 
 export function navigate(path: string): void {
@@ -100,7 +117,7 @@ function AuthenticatedApplication() {
     setNavigationBusy(true);
     setNavigationError(null);
     try {
-      await useDesignerStore.getState().save();
+      await saveAllDesignerChanges();
       const latest = useDesignerStore.getState();
       if (!hasUnsavedDesignerChanges(latest)) {
         continueNavigation(pendingNavigation.destination);
@@ -118,6 +135,12 @@ function AuthenticatedApplication() {
     } finally {
       setNavigationBusy(false);
     }
+  };
+
+  const discardAndLeave = () => {
+    if (!pendingNavigation || navigationBusy) return;
+    useDesignerStore.getState().productBriefGuard?.discard();
+    continueNavigation(pendingNavigation.destination);
   };
 
   const handleNavigationDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -140,6 +163,8 @@ function AuthenticatedApplication() {
 
   const content = route.kind === "inspect" && route.designId && route.revisionId
     ? <InspectView projectId={route.designId} revisionId={route.revisionId} />
+    : route.kind === "preview-review" && route.designId && route.previewId
+      ? <PreviewReviewPage designId={route.designId} previewId={route.previewId} taskId={route.taskId ?? null} />
     : route.kind === "administration"
       ? <Administration />
       : route.kind === "redesign" && route.assessmentId
@@ -170,7 +195,7 @@ function AuthenticatedApplication() {
             {navigationError && <div className="navigation-warning-error" role="alert">{navigationError}</div>}
             <div className="navigation-warning-actions">
               <button className="button button-primary" disabled={navigationBusy} onClick={() => void saveAndLeave()}>{navigationBusy ? "Saving…" : "Save & leave"}</button>
-              <button className="button button-danger" disabled={navigationBusy} onClick={() => continueNavigation(pendingNavigation.destination)}>Discard</button>
+              <button className="button button-danger" disabled={navigationBusy} onClick={discardAndLeave}>Discard</button>
               <button className="button button-secondary" disabled={navigationBusy} onClick={() => { setPendingNavigation(null); setNavigationError(null); }}>Cancel</button>
             </div>
           </section>

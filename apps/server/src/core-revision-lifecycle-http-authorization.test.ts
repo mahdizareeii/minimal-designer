@@ -238,7 +238,15 @@ async function createFixture(label: string): Promise<Fixture> {
     id: `core_revision_foreign_${label}`,
     organizationId: `organization_core_revision_foreign_${label}`,
     projectIds: [],
-    scopes: ["design:read", "design:preview", "design:write"],
+    scopes: [
+      "design:read",
+      "design:preview",
+      "design:write",
+      "task:create",
+      "task:read",
+      "task:claim",
+      "task:update",
+    ],
   });
   const foreign = createDesign(
     application,
@@ -261,10 +269,25 @@ async function createFixture(label: string): Promise<Fixture> {
     operations: [{ type: "archive_nodes", node_ids: [denied.frameId] }],
     kind: "archive",
   });
+  const foreignTask = application.enterprise.createAgentTask(foreignGrant.actorId, {
+    designId: foreign.id,
+    brief: "Prepare a foreign archive proposal",
+    selection: [foreign.frameId],
+    baseVersion: 1,
+    expectedOutput: "design_preview",
+    idempotencyKey: `core-revision-foreign-task-${label}-0001`,
+    expiresInSeconds: 3_600,
+  });
+  application.enterprise.claimAgentTask(foreignGrant.actorId, foreignTask.id);
+  application.enterprise.transitionAgentTask(foreignGrant.actorId, foreignTask.id, {
+    expectedStatus: "claimed",
+    toStatus: "in_progress",
+  });
   const foreignArchivePreview = application.service.createPreview(foreignGrant.actorId, foreign.id, {
     baseVersion: 1,
     operations: [{ type: "archive_nodes", node_ids: [foreign.frameId] }],
     kind: "archive",
+    taskId: foreignTask.id,
   });
   return {
     application,
@@ -451,13 +474,18 @@ describe("core revision lifecycle HTTP authorization", () => {
         fixture.deniedArchivePreviewId,
       ),
       () => application.service.authorizeDesignRevision(fixture.restrictedGrant.actorId, fixture.denied.id),
-      () => application.service.authorizeDesignRead(fixture.restrictedGrant.actorId, fixture.denied.id),
     ]) {
       const error = captureDomainError(callback);
-      expect(error).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+      expect(error).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
       expect(JSON.stringify(error.toJSON())).not.toContain(fixture.denied.id);
       expect(JSON.stringify(error.toJSON())).not.toContain(fixture.denied.name);
     }
+    const deniedRead = captureDomainError(
+      () => application.service.authorizeDesignRead(fixture.restrictedGrant.actorId, fixture.denied.id),
+    );
+    expect(deniedRead).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+    expect(JSON.stringify(deniedRead.toJSON())).not.toContain(fixture.denied.id);
+    expect(JSON.stringify(deniedRead.toJSON())).not.toContain(fixture.denied.name);
     expect(captureDomainError(
       () => application.service.authorizeDesignMigration(fixture.restrictedGrant.actorId, fixture.denied.id),
     )).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
@@ -494,7 +522,7 @@ describe("core revision lifecycle HTTP authorization", () => {
     expect(lifecycleState(application)).toEqual(before);
   });
 
-  it("preserves valid trusted-header UI and scoped-agent revision lifecycle behavior", async () => {
+  it("preserves valid trusted-header UI lifecycle behavior and denies scoped-agent direct writes", async () => {
     const fixture = await createFixture("allowed");
     const { application } = fixture;
 
@@ -590,7 +618,7 @@ describe("core revision lifecycle HTTP authorization", () => {
       schemaVersion: 2,
     });
 
-    const agentRevision = application.service.applyRevision(
+    expect(captureDomainError(() => application.service.applyRevision(
       fixture.restrictedGrant.actorId,
       fixture.agentProject.id,
       {
@@ -602,30 +630,18 @@ describe("core revision lifecycle HTTP authorization", () => {
         }],
         idempotencyKey: "core-revision-lifecycle-agent-revision-0001",
       },
-    );
-    expect(agentRevision.revision.version).toBe(2);
-    const agentArchivePreview = application.service.createPreview(
+    ))).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+    expect(captureDomainError(() => application.service.restoreRevision(
       fixture.restrictedGrant.actorId,
       fixture.agentProject.id,
       {
-        baseVersion: 2,
-        operations: [{ type: "archive_nodes", node_ids: [fixture.agentProject.frameId] }],
-        kind: "archive",
+        targetVersion: 1,
+        expectedBaseVersion: 1,
+        idempotencyKey: "core-revision-lifecycle-agent-restore-0001",
       },
-    );
-    const agentArchived = application.service.commitPreview(
-      fixture.restrictedGrant.actorId,
-      fixture.agentProject.id,
-      {
-        previewId: agentArchivePreview.id,
-        expectedBaseVersion: 2,
-        idempotencyKey: "core-revision-lifecycle-agent-archive-0001",
-        kind: "archive",
-      },
-    );
-    expect(agentArchived.revision.version).toBe(3);
+    ))).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
     expect(application.service.history(fixture.restrictedGrant.actorId, fixture.agentProject.id)
-      .map((revision) => revision.version)).toEqual([3, 2, 1]);
+      .map((revision) => revision.version)).toEqual([1]);
     expect(captureDomainError(
       () => application.service.authorizeDesignMigration(
         fixture.restrictedGrant.actorId,

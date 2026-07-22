@@ -166,6 +166,30 @@ function createDesign(
   };
 }
 
+function startDesignPreviewTask(
+  application: DesignerApplication,
+  actorId: string,
+  designId: string,
+  frameId: string,
+  label: string,
+): string {
+  const task = application.enterprise.createAgentTask(actorId, {
+    designId,
+    brief: `Core preview authorization ${label}`,
+    selection: [frameId],
+    baseVersion: 1,
+    expectedOutput: "design_preview",
+    idempotencyKey: `core-preview-task-${label}-0001`,
+    expiresInSeconds: 3_600,
+  });
+  application.enterprise.claimAgentTask(actorId, task.id);
+  application.enterprise.transitionAgentTask(actorId, task.id, {
+    expectedStatus: "claimed",
+    toStatus: "in_progress",
+  });
+  return task.id;
+}
+
 async function setup(label: string): Promise<Fixture> {
   const application = await serverApplication(label);
   await warm(application, ADMIN);
@@ -189,7 +213,15 @@ async function setup(label: string): Promise<Fixture> {
     id: `core_preview_foreign_${label}`,
     organizationId: `organization_core_preview_foreign_${label}`,
     projectIds: [],
-    scopes: ["design:read", "design:preview", "design:write"],
+    scopes: [
+      "design:read",
+      "design:preview",
+      "design:write",
+      "task:create",
+      "task:read",
+      "task:claim",
+      "task:update",
+    ],
   });
   const foreign = createDesign(
     application,
@@ -315,6 +347,13 @@ describe("core preview HTTP authorization", () => {
   it("keeps foreign and swapped design or preview IDs opaque without mutating state", async () => {
     const fixture = await setup("opaque");
     const { application } = fixture;
+    const foreignTaskId = startDesignPreviewTask(
+      application,
+      fixture.foreignActorId,
+      fixture.foreign.id,
+      fixture.foreign.frameId,
+      "opaque-foreign",
+    );
     const localPreview = application.service.createPreview("local", fixture.allowed.id, {
       baseVersion: 1,
       operations: [{
@@ -330,6 +369,7 @@ describe("core preview HTTP authorization", () => {
         node_id: fixture.foreign.frameId,
         patch: { name: "FOREIGN_CORE_PREVIEW_MARKER_9180cb" },
       }],
+      taskId: foreignTaskId,
     });
     const hidden = [
       "LOCAL_CORE_PREVIEW_MARKER_38fd6e",
@@ -404,8 +444,24 @@ describe("core preview HTTP authorization", () => {
     const grant = installGrant(application, {
       id: "core_preview_project_scoped",
       projectIds: [fixture.allowed.id],
-      scopes: ["design:read", "design:preview", "design:write"],
+      scopes: [
+        "design:read",
+        "design:preview",
+        "design:write",
+        "task:create",
+        "task:read",
+        "task:claim",
+        "task:update",
+      ],
     });
+
+    const taskId = startDesignPreviewTask(
+      application,
+      grant.actorId,
+      fixture.allowed.id,
+      fixture.allowed.frameId,
+      "project-scoped",
+    );
 
     const allowedPreview = application.service.createPreview(grant.actorId, fixture.allowed.id, {
       baseVersion: 1,
@@ -414,19 +470,20 @@ describe("core preview HTTP authorization", () => {
         node_id: fixture.allowed.frameId,
         patch: { name: "SCOPED_ALLOWED_PREVIEW_MARKER_634b8d" },
       }],
+      taskId,
     });
     expect(application.service.getPreview(grant.actorId, fixture.allowed.id, allowedPreview.id).id)
       .toBe(allowedPreview.id);
-    const committed = application.service.commitPreview(grant.actorId, fixture.allowed.id, {
+    expect(() => application.service.commitPreview(grant.actorId, fixture.allowed.id, {
       previewId: allowedPreview.id,
       expectedBaseVersion: 1,
       idempotencyKey: "core-preview-scoped-commit-0001",
-    });
-    expect(committed.design.version).toBe(2);
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
     const archivePreview = application.service.createPreview(grant.actorId, fixture.allowed.id, {
-      baseVersion: 2,
+      baseVersion: 1,
       operations: [{ type: "archive_nodes", node_ids: [fixture.allowed.frameId] }],
       kind: "archive",
+      taskId,
     });
     expect(archivePreview).toMatchObject({ kind: "archive", destructive: true });
 
@@ -439,6 +496,7 @@ describe("core preview HTTP authorization", () => {
           node_id: fixture.denied.frameId,
           patch: { name: PRIVATE_MARKER },
         }],
+        taskId,
       }),
       () => application.service.getPreview(grant.actorId, fixture.denied.id, deniedPreview.id),
       () => application.service.commitPreview(grant.actorId, fixture.denied.id, {
@@ -450,9 +508,13 @@ describe("core preview HTTP authorization", () => {
         baseVersion: 1,
         operations: [{ type: "archive_nodes", node_ids: [fixture.denied.frameId] }],
         kind: "archive",
+        taskId,
       }),
     ];
-    for (const call of deniedCalls) expect(call).toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
+    const expectedCodes = ["NOT_FOUND", "NOT_FOUND", "FORBIDDEN", "NOT_FOUND"];
+    deniedCalls.forEach((call, index) => {
+      expect(call).toThrowError(expect.objectContaining({ code: expectedCodes[index] }));
+    });
     expect(previewState(application)).toEqual(beforeDenied);
   });
 

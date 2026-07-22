@@ -1010,9 +1010,16 @@ export interface AgentTaskRecord {
   expiresAt: string;
   transitions: AgentTaskTransitionRecord[];
   launchUrl: string;
+  websiteTaskLink?: string;
+  reviewDeepLink?: string | null;
 }
 
-function asAgentTaskRecord(input: unknown, launchUrl?: string): AgentTaskRecord {
+function asAgentTaskRecord(
+  input: unknown,
+  launchUrl?: string,
+  websiteTaskLink?: string,
+  reviewDeepLink?: string | null,
+): AgentTaskRecord {
   const task = input as Record<string, unknown>;
   const id = String(task.id);
   const transitions = Array.isArray(task.transitions) ? task.transitions.map((item) => {
@@ -1032,6 +1039,12 @@ function asAgentTaskRecord(input: unknown, launchUrl?: string): AgentTaskRecord 
       createdAt: String(transition.createdAt ?? transition.created_at ?? ""),
     } satisfies AgentTaskTransitionRecord;
   }) : [];
+  const taskWebsiteLink = String(task.websiteTaskLink ?? task.website_task_link ?? "") || undefined;
+  const resolvedWebsiteLink = websiteTaskLink ?? taskWebsiteLink;
+  const taskReviewLink = task.reviewDeepLink === null || task.review_deep_link === null
+    ? null
+    : String(task.reviewDeepLink ?? task.review_deep_link ?? "") || undefined;
+  const resolvedReviewLink = reviewDeepLink ?? taskReviewLink;
   return {
     id,
     status: String(task.status ?? transitions.at(-1)?.toStatus ?? "queued") as AgentTaskStatus,
@@ -1049,6 +1062,8 @@ function asAgentTaskRecord(input: unknown, launchUrl?: string): AgentTaskRecord 
     transitions,
     launchUrl: launchUrl ?? String(task.launchUrl ?? task.launch_url
       ?? `codex://new?prompt=${encodeURIComponent(`[@FormaSpec](plugin://formaspec@formaspec)\n\nUse FormaSpec. Claim task ${id} with task_claim and return an exact persisted preview for website approval. Do not commit it.`)}`),
+    ...(resolvedWebsiteLink ? { websiteTaskLink: resolvedWebsiteLink } : {}),
+    ...(resolvedReviewLink !== undefined ? { reviewDeepLink: resolvedReviewLink } : {}),
   };
 }
 
@@ -1067,6 +1082,7 @@ export async function createAgentTask(input: {
   brief: string;
   selection: string[];
   expectedOutput?: string;
+  idempotencyKey?: string;
 }): Promise<AgentTaskRecord> {
   const result = await request<Record<string, unknown>>(
     `/designs/${encodeURIComponent(input.designId)}/agent-tasks`,
@@ -1077,17 +1093,37 @@ export async function createAgentTask(input: {
         selection: input.selection,
         baseVersion: input.baseVersion,
         expectedOutput: input.expectedOutput ?? "design_preview",
-        idempotencyKey: createClientKey("agent_task"),
+        idempotencyKey: input.idempotencyKey ?? createClientKey("agent_task"),
       }),
     },
   );
   const task = result.task && typeof result.task === "object" ? result.task : result;
-  return asAgentTaskRecord(task, String(result.launchUrl ?? result.launch_url ?? "") || undefined);
+  return asAgentTaskRecord(
+    task,
+    String(result.launchUrl ?? result.launch_url ?? "") || undefined,
+    String(result.websiteTaskLink ?? result.website_task_link ?? "") || undefined,
+    result.reviewDeepLink === null || result.review_deep_link === null
+      ? null
+      : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
+  );
+}
+
+export async function readAgentTask(taskId: string): Promise<AgentTaskRecord> {
+  const result = await request<Record<string, unknown>>(`/agent-tasks/${encodeURIComponent(taskId)}`);
+  const task = result.task && typeof result.task === "object" ? result.task : result;
+  return asAgentTaskRecord(
+    task,
+    String(result.launchUrl ?? result.launch_url ?? "") || undefined,
+    String(result.websiteTaskLink ?? result.website_task_link ?? "") || undefined,
+    result.reviewDeepLink === null || result.review_deep_link === null
+      ? null
+      : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
+  );
 }
 
 export async function listAgentTasks(designId: string, limit = 25): Promise<AgentTaskRecord[]> {
   const result = await request<{ tasks?: unknown[] }>(
-    `/designs/${encodeURIComponent(designId)}/agent-tasks?limit=${encodeURIComponent(limit)}`,
+    `/designs/${encodeURIComponent(designId)}/agent-tasks?limit=${encodeURIComponent(limit)}&expectedOutput=design_preview`,
   );
   return (result.tasks ?? []).map((task) => asAgentTaskRecord(task));
 }
@@ -1099,7 +1135,7 @@ export async function transitionAgentTask(input: {
   message?: string;
   data?: Record<string, unknown>;
 }): Promise<AgentTaskRecord> {
-  const result = await request<{ task?: unknown }>(`/agent-tasks/${encodeURIComponent(input.taskId)}/transition`, {
+  const result = await request<Record<string, unknown>>(`/agent-tasks/${encodeURIComponent(input.taskId)}/transition`, {
     method: "POST",
     body: JSON.stringify({
       expectedStatus: input.expectedStatus,
@@ -1108,7 +1144,19 @@ export async function transitionAgentTask(input: {
       ...(input.data === undefined ? {} : { data: input.data }),
     }),
   });
-  return asAgentTaskRecord(result.task);
+  return asAgentTaskRecord(
+    result.task,
+    String(result.launchUrl ?? result.launch_url ?? "") || undefined,
+    String(result.websiteTaskLink ?? result.website_task_link ?? "") || undefined,
+    result.reviewDeepLink === null || result.review_deep_link === null
+      ? null
+      : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
+  );
+}
+
+export function designPreviewReviewPath(designId: string, previewId: string, taskId: string): string {
+  const query = new URLSearchParams({ task: taskId });
+  return `/design/${encodeURIComponent(designId)}/previews/${encodeURIComponent(previewId)}/review?${query}`;
 }
 
 export interface DesignPreviewDiagnostic {
@@ -1755,6 +1803,7 @@ export interface ServerEvent {
   type: "design.updated" | "context.updated" | "asset.created" | string;
   designId?: string;
   version?: number;
+  archived?: boolean;
   data?: unknown;
 }
 
@@ -1767,6 +1816,7 @@ export function subscribeToEvents(onEvent: (event: ServerEvent) => void): () => 
         type: String(data.type ?? event.type),
         ...(data.designId || data.design_id ? { designId: String(data.designId ?? data.design_id) } : {}),
         ...(data.version || data.revision ? { version: Number(data.version ?? data.revision) } : {}),
+        ...(typeof data.archived === "boolean" ? { archived: data.archived } : {}),
         data,
       });
     } catch {

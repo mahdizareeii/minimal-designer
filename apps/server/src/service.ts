@@ -59,6 +59,7 @@ import {
   type PreviewRenderCapture,
   type PreviewRenderMetadata,
 } from "./preview-render-metadata.js";
+import { bindPreviewToTask, requirePreviewTaskBinding } from "./preview-task-binding.js";
 
 interface DesignRow {
   id: string;
@@ -400,9 +401,16 @@ export class DesignerService {
 
   authorizeDesignRevision(actorId: string, designId: string): void {
     const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") {
+      throw new DomainError(
+        "FORBIDDEN",
+        "Agent connections cannot write design revisions directly; publish an exact task preview for website approval.",
+        403,
+        { details: { requiredAction: "website_human_approval" } },
+      );
+    }
     assertDesignWrite(access);
     this.requireDesign(actorId, designId);
-    if (access.role === "agent") this.assertAgentDesignMutationNotReserved(access, designId);
   }
 
   authorizeDesignMigration(actorId: string, designId: string): void {
@@ -460,6 +468,11 @@ export class DesignerService {
       this.database.sqlite.prepare(
         "INSERT INTO system_metadata (key, value, updated_at) VALUES (?, ?, ?)",
       ).run(designArchiveMetadataKey(design.id), canonicalJson(tombstone), archivedAt);
+      this.database.sqlite.prepare(
+        `UPDATE contexts
+         SET design_id = NULL, page_id = NULL, selection_json = '[]', updated_at = ?
+         WHERE organization_id = ? AND design_id = ?`,
+      ).run(archivedAt, design.organization_id, design.id);
       appendAuditEvent(this.database.sqlite, access, "design.archive", "design", design.id, {
         version: design.current_version,
         revisionId: design.current_revision_id,
@@ -619,9 +632,20 @@ export class DesignerService {
     }));
   }
 
-  authorizePreviewCreation(actorId: string, designId: string): void {
+  authorizePreviewCreation(actorId: string, designId: string, taskId?: string, expectedBaseVersion?: number): void {
     const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role === "agent") assertScope(access, "design:preview");
+    if (access.role === "agent") {
+      assertScope(access, "design:preview");
+      if (!taskId) {
+        throw new DomainError(
+          "VALIDATION_FAILED",
+          "Agent design previews must be attached to an immutable claimed task.",
+          422,
+          { details: { requiredField: "task_id" } },
+        );
+      }
+      this.assertAgentPreviewTask(access, designId, taskId, expectedBaseVersion);
+    }
     this.requireDesign(actorId, designId);
   }
 
@@ -630,7 +654,16 @@ export class DesignerService {
   }
 
   authorizePreviewCommit(actorId: string, designId: string, previewId: string, taskId?: string): void {
-    assertDesignWrite(resolveAccess(this.database.sqlite, actorId));
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") {
+      throw new DomainError(
+        "FORBIDDEN",
+        "Agent connections cannot commit design previews; publish the task preview for human approval.",
+        403,
+        { details: { requiredAction: "human_approval" } },
+      );
+    }
+    assertDesignWrite(access);
     this.loadPreview(actorId, designId, previewId, taskId, "commit");
   }
 
@@ -639,8 +672,9 @@ export class DesignerService {
     basePreviewId?: string;
     operations: unknown;
     kind?: PreviewKind;
+    taskId?: string;
   }): PreviewResult {
-    this.authorizePreviewCreation(actorId, designId);
+    this.authorizePreviewCreation(actorId, designId, input.taskId, input.baseVersion);
     if (!this.database.sqlite.inTransaction) {
       const transaction = this.database.sqlite.transaction(() => this.createPreview(actorId, designId, input));
       return transaction.immediate();
@@ -664,6 +698,9 @@ export class DesignerService {
 
     if (input.basePreviewId) {
       const preview = this.requirePreviewForRead(actorId, designId, input.basePreviewId);
+      if (input.taskId !== undefined) {
+        requirePreviewTaskBinding(this.database.sqlite, preview.id, input.taskId);
+      }
       if (preview.status === "committed") {
         throw new DomainError("PREVIEW_ALREADY_COMMITTED", "A committed preview cannot be refined; use the new design head.", 409, {
           details: { committedRevisionId: preview.committed_revision_id },
@@ -695,6 +732,10 @@ export class DesignerService {
       baseRevisionId = baseRevision.id;
       baseSnapshotHash = baseRevision.snapshot_hash;
       baseDocument = this.documentForRevision(baseRevision);
+    }
+    const previewAccess = resolveAccess(this.database.sqlite, actorId);
+    if (previewAccess.role === "agent") {
+      this.assertAgentPreviewTask(previewAccess, designId, input.taskId as string, rootBaseVersion);
     }
 
     assertOperationPayloadLimit([...priorOperations, ...input.operations], "preview");
@@ -767,6 +808,9 @@ export class DesignerService {
       now,
       expiresAt,
     );
+    if (input.taskId !== undefined) {
+      bindPreviewToTask(this.database.sqlite, previewId, input.taskId, now);
+    }
 
     return {
       id: previewId,
@@ -813,8 +857,9 @@ export class DesignerService {
     document: AnyDesignDocument;
     diagnostics?: Diagnostic[];
     createdIds?: unknown;
+    taskId?: string;
   }): PreviewResult {
-    this.authorizePreviewCreation(actorId, designId);
+    this.authorizePreviewCreation(actorId, designId, input.taskId, input.baseVersion);
     if (!this.database.sqlite.inTransaction) {
       const transaction = this.database.sqlite.transaction(() => this.createPreparedPreview(actorId, designId, input));
       return transaction.immediate();
@@ -884,6 +929,9 @@ export class DesignerService {
       now,
       expiresAt,
     );
+    if (input.taskId !== undefined) {
+      bindPreviewToTask(this.database.sqlite, previewId, input.taskId, now);
+    }
 
     return {
       id: previewId,
@@ -975,6 +1023,7 @@ export class DesignerService {
     designId: string,
     previewId: string,
     capture: PreviewRenderCapture,
+    options: { taskId?: string } = {},
   ): PreviewRenderMetadata {
     if (!this.database.sqlite.inTransaction) {
       const transaction = this.database.sqlite.transaction(() => this.recordPreviewRenderMetadata(
@@ -982,12 +1031,17 @@ export class DesignerService {
         designId,
         previewId,
         capture,
+        options,
       ));
       return transaction.immediate();
     }
 
-    this.authorizePreviewCreation(actorId, designId);
-    const row = this.loadPreview(actorId, designId, previewId, undefined, "read");
+    this.authorizePreviewCreation(actorId, designId, options.taskId);
+    const row = this.loadPreview(actorId, designId, previewId, options.taskId, "read");
+    const previewAccess = resolveAccess(this.database.sqlite, actorId);
+    if (previewAccess.role === "agent") {
+      this.assertAgentPreviewTask(previewAccess, designId, options.taskId as string, row.root_base_version);
+    }
     if (row.actor_id !== actorId) throw new DomainError("NOT_FOUND", "Preview not found.", 404);
     const now = new Date().toISOString();
     if (row.status === "committed") {
@@ -999,7 +1053,7 @@ export class DesignerService {
     if (row.status !== "ready" && row.status !== "blocked") {
       throw new DomainError("PREVIEW_NOT_COMMITTABLE", "The preview is not available for render capture.", 409);
     }
-    const preview = this.getPreview(actorId, designId, previewId);
+    const preview = this.getPreview(actorId, designId, previewId, options);
     const metadata = buildPreviewRenderMetadata(preview.canonicalDocument, capture);
     const serialized = canonicalJson(metadata);
     if (preview.renderMetadata !== null) {
@@ -2317,6 +2371,9 @@ export class DesignerService {
       "SELECT * FROM previews WHERE id = ? AND design_id = ? AND organization_id = ?",
     ).get(previewId, designId, design.organization_id) as PreviewRow | undefined;
     if (!preview) throw new DomainError("NOT_FOUND", "Preview not found.", 404);
+    if (taskId !== undefined) {
+      requirePreviewTaskBinding(this.database.sqlite, preview.id, taskId);
+    }
     if (preview.actor_id !== actorId) {
       this.assertAgentTaskPreviewAccess(actorId, designId, preview, taskId, accessMode);
     }
@@ -2369,6 +2426,48 @@ export class DesignerService {
       403,
       { details: { taskId: task.id, requiredAction: "human_approval" } },
     );
+  }
+
+  private assertAgentPreviewTask(
+    access: ReturnType<typeof resolveAccess>,
+    designId: string,
+    taskId: string,
+    expectedBaseVersion?: number,
+  ): void {
+    const task = this.database.sqlite.prepare(
+      `SELECT task.base_version, task.expires_at, current.to_status,
+              (
+                SELECT claimed.actor_id FROM agent_task_transitions claimed
+                WHERE claimed.task_id = task.id AND claimed.to_status = 'claimed'
+                ORDER BY claimed.rowid LIMIT 1
+              ) AS claimed_by
+       FROM agent_tasks task
+       JOIN agent_task_transitions current ON current.rowid = (
+         SELECT latest.rowid FROM agent_task_transitions latest
+         WHERE latest.task_id = task.id ORDER BY latest.rowid DESC LIMIT 1
+       )
+       WHERE task.id = ? AND task.organization_id = ? AND task.design_id = ?
+         AND task.expected_output = 'design_preview'`,
+    ).get(taskId, access.organizationId, designId) as {
+      base_version: number;
+      expires_at: string;
+      to_status: string;
+      claimed_by: string | null;
+    } | undefined;
+    if (!task || (expectedBaseVersion !== undefined && task.base_version !== expectedBaseVersion)) {
+      throw new DomainError("NOT_FOUND", "Agent task not found.", 404);
+    }
+    if (task.claimed_by !== access.principalId) {
+      throw new DomainError("FORBIDDEN", "Only the agent that claimed this task may create its design preview.", 403);
+    }
+    if (task.expires_at <= new Date().toISOString()) {
+      throw new DomainError("TASK_EXPIRED", "The agent task expired before preview creation.", 410);
+    }
+    if (task.to_status !== "in_progress") {
+      throw new DomainError("TASK_STATE_CONFLICT", "The agent task must be in progress before preview creation.", 409, {
+        details: { expectedStatus: "in_progress", currentStatus: task.to_status },
+      });
+    }
   }
 
   private requirePreviewForRead(actorId: string, designId: string, previewId: string, taskId?: string): PreviewRow {

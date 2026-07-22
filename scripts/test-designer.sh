@@ -323,6 +323,8 @@ run_location_and_read_only_tests() {
   # Doctor intentionally returns 1 when neither supported runtime is ready.
   expect_status_zero_or_one "doctor completes with a documented readiness status"
   expect_contains "FormaSpec doctor" "doctor prints its diagnostic heading"
+  expect_contains "server readiness" "doctor checks the running FormaSpec server instead of only prerequisites"
+  expect_contains "local bridge" "doctor checks the supervised local bridge"
   expect_absent "$doctor_runtime" "doctor creates no runtime state"
 
   local target runtime

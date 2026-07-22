@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { resolveAccess } from "./authorization.js";
@@ -28,7 +28,7 @@ function installAgent(application: DesignerApplication, designId: string, id = "
   const actorId = `grant_${id}`;
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 60 * 60 * 1_000).toISOString();
-  const scopes = ["design:read", "design:preview", "design:write", "task:read", "task:claim", "task:update"];
+  const scopes = ["design:read", "design:preview", "design:write", "task:create", "task:read", "task:claim", "task:update"];
   application.database.sqlite.prepare(
     `INSERT INTO principals (id, organization_id, kind, display_name, external_id, created_at)
      VALUES (?, 'organization_legacy', 'agent', ?, ?, ?)`,
@@ -77,6 +77,101 @@ function captureThrown(callback: () => unknown): unknown {
   throw new Error("Expected callback to throw.");
 }
 
+async function callMcpTool<T>(
+  application: DesignerApplication,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ output: T; content: Array<{ type: string; text?: string; mimeType?: string }> }> {
+  const response = await application.app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: {
+      host: "127.0.0.1:4310",
+      authorization: `Bearer ${token}`,
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+  });
+  expect(response.statusCode, response.body).toBe(200);
+  const body = response.json<{
+    result: {
+      content: Array<{ type: string; text?: string; mimeType?: string }>;
+      structuredContent: ({ ok: true } & T) | { ok: false; error: { code: string; message: string; details?: unknown } };
+    };
+  }>();
+  if (!body.result.structuredContent.ok) {
+    throw new Error(JSON.stringify(body.result.structuredContent.error));
+  }
+  return { output: body.result.structuredContent, content: body.result.content };
+}
+
+async function callMcpToolError(
+  application: DesignerApplication,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ code: string; message: string; details?: Record<string, unknown> }> {
+  const response = await application.app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: {
+      host: "127.0.0.1:4310",
+      authorization: `Bearer ${token}`,
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+  });
+  expect(response.statusCode, response.body).toBe(200);
+  const structured = response.json<{
+    result: { structuredContent: { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } } };
+  }>().result.structuredContent;
+  expect(structured.ok).toBe(false);
+  return structured.error;
+}
+
+async function callMcpInputError(
+  application: DesignerApplication,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const response = await application.app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: {
+      host: "127.0.0.1:4310",
+      authorization: `Bearer ${token}`,
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+  });
+  expect(response.statusCode, response.body).toBe(200);
+  const result = response.json<{
+    result: { isError: boolean; content: Array<{ type: string; text?: string }> };
+  }>().result;
+  expect(result.isError).toBe(true);
+  return result.content.map((item) => item.text ?? "").join("\n");
+}
+
 function persistExactRender(
   application: DesignerApplication,
   actorId: string,
@@ -84,6 +179,7 @@ function persistExactRender(
   previewId: string,
   pageId: string,
   nodeId: string,
+  taskId?: string,
 ): void {
   const width = 24;
   const height = 16;
@@ -94,7 +190,7 @@ function persistExactRender(
     height,
     renderer: "software",
     warnings: ["Deterministic task approval test render."],
-  });
+  }, taskId === undefined ? {} : { taskId });
 }
 
 describe("task-scoped agent preview review", () => {
@@ -106,7 +202,167 @@ describe("task-scoped agent preview review", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await application.app.close();
+  });
+
+  it("requires a direct MCP preview to use a claimed task and returns the exact human review link", async () => {
+    const created = application.service.createDesign("local", {
+      name: "Direct MCP review",
+      preset: "phone",
+      idempotencyKey: "direct-mcp-review-design-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const other = application.service.createDesign("local", {
+      name: "Wrong direct MCP target",
+      preset: "web",
+      idempotencyKey: "direct-mcp-review-other-design-0001",
+    });
+    const otherFrameId = other.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId, "direct_mcp_review_agent");
+    const previewArgs = {
+      design_id: designId,
+      base_version: 1,
+      max_size: 512,
+      operations: [{
+        type: "update_node",
+        node_id: frameId,
+        patch: { name: "Direct MCP proposal" },
+      }],
+    };
+
+    expect(await callMcpInputError(application, agent.token, "design_preview_changes", previewArgs))
+      .toContain("task_id");
+
+    const createdTask = await callMcpTool<{
+      task: { id: string; designId: string; status: string };
+      codexLaunchUrl: string;
+      websiteTaskLink: string;
+    }>(application, agent.token, "task_create", {
+      design_id: designId,
+      brief: "Create a direct task-backed proposal",
+      selection: [frameId],
+      base_version: 1,
+      expected_output: "design_preview",
+      idempotency_key: "direct-mcp-review-task-0001",
+    });
+    expect(createdTask.output.task).toMatchObject({ designId, status: "queued" });
+    expect(new URL(createdTask.output.codexLaunchUrl).protocol).toBe("codex:");
+    const websiteTaskLink = new URL(createdTask.output.websiteTaskLink);
+    expect(websiteTaskLink.pathname).toBe(`/design/${designId}`);
+    expect(websiteTaskLink.searchParams.get("task")).toBe(createdTask.output.task.id);
+    expect(await callMcpToolError(application, agent.token, "task_create", {
+      design_id: designId,
+      brief: "A second proposal must focus the active task instead",
+      selection: [frameId],
+      base_version: 1,
+      expected_output: "design_preview",
+      idempotency_key: "direct-mcp-review-task-conflict-0001",
+    })).toMatchObject({
+      code: "TASK_STATE_CONFLICT",
+      details: {
+        designId,
+        activeTaskId: createdTask.output.task.id,
+        activeStatus: "queued",
+      },
+    });
+
+    await callMcpTool(application, agent.token, "task_claim", { task_id: createdTask.output.task.id });
+    const inProgress = await callMcpTool<{ task: { status: string }; reviewDeepLink: string | null }>(
+      application,
+      agent.token,
+      "task_transition",
+      { task_id: createdTask.output.task.id, expected_status: "claimed", to_status: "in_progress" },
+    );
+    expect(inProgress.output).toMatchObject({ task: { status: "in_progress" }, reviewDeepLink: null });
+
+    const visibleProjects = JSON.stringify([designId, other.document.id]);
+    application.database.sqlite.prepare(
+      "UPDATE agent_connections SET project_ids_json = ? WHERE principal_id = ?",
+    ).run(visibleProjects, agent.principalId);
+    application.database.sqlite.prepare(
+      "UPDATE agent_grants SET project_ids_json = ? WHERE principal_id = ?",
+    ).run(visibleProjects, agent.principalId);
+    expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
+      design_id: other.document.id,
+      task_id: createdTask.output.task.id,
+      base_version: 1,
+      max_size: 512,
+      operations: [{
+        type: "update_node",
+        node_id: otherFrameId,
+        patch: { name: "Must not switch projects" },
+      }],
+    })).toMatchObject({ code: "NOT_FOUND", message: "Agent task not found." });
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM previews WHERE design_id = ?",
+    ).get(other.document.id)).toEqual({ count: 0 });
+
+    const previewed = await callMcpTool<{
+      preview: {
+        id: string;
+        projectDeepLink: string;
+        reviewDeepLink: string | null;
+        canCommit: boolean;
+      };
+    }>(application, agent.token, "design_preview_changes", {
+      ...previewArgs,
+      task_id: createdTask.output.task.id,
+    });
+    expect(previewed.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "image", mimeType: "image/png" }),
+    ]));
+    expect(previewed.output.preview).toMatchObject({ canCommit: true, reviewDeepLink: null });
+    expect(new URL(previewed.output.preview.projectDeepLink).pathname).toBe(`/design/${designId}`);
+    expect(previewed.output.preview.projectDeepLink).not.toContain(previewed.output.preview.id);
+    expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+
+    const awaiting = await callMcpTool<{ task: { status: string }; reviewDeepLink: string | null }>(
+      application,
+      agent.token,
+      "task_transition",
+      {
+        task_id: createdTask.output.task.id,
+        expected_status: "in_progress",
+        to_status: "awaiting_approval",
+        data: { previewId: previewed.output.preview.id },
+      },
+    );
+    expect(awaiting.output.task.status).toBe("awaiting_approval");
+    const reviewLink = new URL(awaiting.output.reviewDeepLink as string);
+    expect(reviewLink.pathname).toBe(`/design/${designId}/previews/${previewed.output.preview.id}/review`);
+    expect(reviewLink.searchParams.get("task")).toBe(createdTask.output.task.id);
+    expect(awaiting.content.find((item) => item.type === "text")).toMatchObject({
+      type: "text",
+      text: expect.stringContaining(awaiting.output.reviewDeepLink as string),
+    });
+    const reread = await callMcpTool<{ task: { status: string }; reviewDeepLink: string | null }>(
+      application,
+      agent.token,
+      "task_read",
+      { task_id: createdTask.output.task.id },
+    );
+    expect(reread.output).toMatchObject({
+      task: { status: "awaiting_approval" },
+      reviewDeepLink: awaiting.output.reviewDeepLink,
+    });
+
+    const approved = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${designId}/previews/${previewed.output.preview.id}/commit`,
+      payload: {
+        expectedBaseVersion: 1,
+        idempotencyKey: "direct-mcp-review-human-commit-0001",
+        taskId: createdTask.output.task.id,
+      },
+    });
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(approved.json<{ task: { status: string }; version: number }>()).toMatchObject({
+      task: { status: "completed" },
+      version: 2,
+    });
   });
 
   it("lets an authorized human read and commit only the preview linked by an awaiting-approval task", async () => {
@@ -137,7 +393,10 @@ describe("task-scoped agent preview review", () => {
     const preview = application.service.createPreview(agent.actorId, designId, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Agent-refined checkout" } }],
+      taskId: task.id,
     });
+
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
 
     const hiddenBeforeApproval = await application.app.inject({
       method: "GET",
@@ -151,7 +410,6 @@ describe("task-scoped agent preview review", () => {
       message: "Ready for product-manager review",
       data: { previewId: preview.id },
     });
-    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
 
     expect(captureThrown(() => application.service.commitPreview(agent.actorId, designId, {
       previewId: preview.id,
@@ -287,7 +545,7 @@ describe("task-scoped agent preview review", () => {
     });
   });
 
-  it("rolls back atomic approval without persisting completion or idempotency when exact render evidence is missing", async () => {
+  it("refuses awaiting approval until exact render evidence is persisted", async () => {
     const created = application.service.createDesign("local", {
       name: "Atomic approval rollback",
       preset: "phone",
@@ -314,12 +572,13 @@ describe("task-scoped agent preview review", () => {
     const preview = application.service.createPreview(agent.actorId, designId, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Needs render evidence" } }],
+      taskId: task.id,
     });
-    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+    expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
       data: { previewId: preview.id },
-    });
+    }))).toMatchObject({ code: "PREVIEW_ENGINE_MISMATCH", statusCode: 409 });
 
     const payload = {
       expectedBaseVersion: 1,
@@ -327,16 +586,9 @@ describe("task-scoped agent preview review", () => {
       message: "Approve only with exact evidence",
       taskId: task.id,
     };
-    const rejected = await application.app.inject({
-      method: "POST",
-      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
-      payload,
-    });
-    expect(rejected.statusCode, rejected.body).toBe(409);
-    expect(rejected.json()).toMatchObject({ error: { code: "PREVIEW_ENGINE_MISMATCH" } });
     expect(application.service.getDesign("local", designId).revision.version).toBe(1);
     expect(application.database.sqlite.prepare("SELECT status FROM previews WHERE id = ?").get(preview.id)).toEqual({ status: "ready" });
-    expect(application.enterprise.readAgentTask("local", task.id).status).toBe("awaiting_approval");
+    expect(application.enterprise.readAgentTask("local", task.id).status).toBe("in_progress");
     expect(application.database.sqlite.prepare(
       "SELECT COUNT(*) AS count FROM agent_task_transitions WHERE task_id = ? AND to_status = 'completed'",
     ).get(task.id)).toEqual({ count: 0 });
@@ -344,7 +596,12 @@ describe("task-scoped agent preview review", () => {
       "SELECT COUNT(*) AS count FROM idempotency WHERE scope = ? AND key = ?",
     ).get(`task:${task.id}:approve-design-preview`, payload.idempotencyKey)).toEqual({ count: 0 });
 
-    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.id },
+    });
     const retried = await application.app.inject({
       method: "POST",
       url: `/api/designs/${designId}/previews/${preview.id}/commit`,
@@ -381,13 +638,14 @@ describe("task-scoped agent preview review", () => {
     const preview = application.service.createPreview(agent.actorId, designId, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Must roll back" } }],
+      taskId: task.id,
     });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
     application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
       data: { previewId: preview.id },
     });
-    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
     const before = {
       audits: (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM audit_events").get() as { count: number }).count,
       outbox: (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count,
@@ -447,20 +705,16 @@ describe("task-scoped agent preview review", () => {
     const pageId = created.document.pages[0]!.id;
     const frameId = created.document.pages[0]!.children[0]!;
     const agent = installAgent(application, designId);
-    const preview = application.service.createPreview(agent.actorId, designId, {
-      baseVersion: 1,
-      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Too late to approve" } }],
-    });
-    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
     const taskId = "task_expired_human_approval_0001";
     const local = resolveAccess(application.database.sqlite, "local");
-    const createdAt = "2000-01-01T00:00:00.000Z";
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.parse(createdAt) + 60_000).toISOString();
     application.database.sqlite.prepare(
       `INSERT INTO agent_tasks
        (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
         expected_output, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, '2000-01-01T01:00:00.000Z')`,
-    ).run(taskId, local.organizationId, designId, local.principalId, "Expired exact preview approval", JSON.stringify([frameId]), createdAt);
+       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, ?)`,
+    ).run(taskId, local.organizationId, designId, local.principalId, "Expired exact preview approval", JSON.stringify([frameId]), createdAt, expiresAt);
     const insertTransition = application.database.sqlite.prepare(
       `INSERT INTO agent_task_transitions
        (id, task_id, from_status, to_status, actor_id, message, data_json, created_at)
@@ -469,6 +723,12 @@ describe("task-scoped agent preview review", () => {
     insertTransition.run("transition_expired_human_queued_0001", taskId, null, "queued", local.principalId, "Task created", "{}", createdAt);
     insertTransition.run("transition_expired_human_claimed_0001", taskId, "queued", "claimed", agent.principalId, "Task claimed", "{}", createdAt);
     insertTransition.run("transition_expired_human_progress_0001", taskId, "claimed", "in_progress", agent.principalId, "Task started", "{}", createdAt);
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Too late to approve" } }],
+      taskId,
+    });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, taskId);
     insertTransition.run(
       "transition_expired_human_approval_0001",
       taskId,
@@ -480,37 +740,43 @@ describe("task-scoped agent preview review", () => {
       createdAt,
     );
     const beforeOutbox = (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count;
-    const rejected = await application.app.inject({
-      method: "POST",
-      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
-      payload: {
-        expectedBaseVersion: 1,
-        idempotencyKey: "expired-human-approval-commit-0001",
-        message: "Late human approval",
-        taskId,
-      },
-    });
-    expect(rejected.statusCode, rejected.body).toBe(410);
-    expect(rejected.json()).toMatchObject({ error: { code: "TASK_EXPIRED" } });
-    expect(application.service.getDesign("local", designId).revision.version).toBe(1);
-    expect(application.database.sqlite.prepare(
-      "SELECT status, committed_revision_id FROM previews WHERE id = ?",
-    ).get(preview.id)).toEqual({ status: "ready", committed_revision_id: null });
-    const expiredTask = application.enterprise.readAgentTask("local", taskId);
-    expect(expiredTask.status).toBe("expired");
-    expect(expiredTask.transitions.at(-1)).toMatchObject({
-      fromStatus: "awaiting_approval",
-      toStatus: "expired",
-      data: { previewId: preview.id },
-    });
-    expect((application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count)
-      .toBe(beforeOutbox + 1);
-    expect(application.database.sqlite.prepare(
-      "SELECT action, target_id FROM audit_events WHERE target_id = ? ORDER BY rowid DESC LIMIT 1",
-    ).get(taskId)).toEqual({ action: "agent_task.expire", target_id: taskId });
-    expect(application.database.sqlite.prepare(
-      "SELECT COUNT(*) AS count FROM idempotency WHERE scope = ? AND key = ?",
-    ).get(`task:${taskId}:approve-design-preview`, "expired-human-approval-commit-0001")).toEqual({ count: 0 });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.parse(expiresAt) + 1_000));
+    try {
+      const rejected = await application.app.inject({
+        method: "POST",
+        url: `/api/designs/${designId}/previews/${preview.id}/commit`,
+        payload: {
+          expectedBaseVersion: 1,
+          idempotencyKey: "expired-human-approval-commit-0001",
+          message: "Late human approval",
+          taskId,
+        },
+      });
+      expect(rejected.statusCode, rejected.body).toBe(410);
+      expect(rejected.json()).toMatchObject({ error: { code: "TASK_EXPIRED" } });
+      expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+      expect(application.database.sqlite.prepare(
+        "SELECT status, committed_revision_id FROM previews WHERE id = ?",
+      ).get(preview.id)).toEqual({ status: "ready", committed_revision_id: null });
+      const expiredTask = application.enterprise.readAgentTask("local", taskId);
+      expect(expiredTask.status).toBe("expired");
+      expect(expiredTask.transitions.at(-1)).toMatchObject({
+        fromStatus: "awaiting_approval",
+        toStatus: "expired",
+        data: { previewId: preview.id },
+      });
+      expect((application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count)
+        .toBe(beforeOutbox + 1);
+      expect(application.database.sqlite.prepare(
+        "SELECT action, target_id FROM audit_events WHERE target_id = ? ORDER BY rowid DESC LIMIT 1",
+      ).get(taskId)).toEqual({ action: "agent_task.expire", target_id: taskId });
+      expect(application.database.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM idempotency WHERE scope = ? AND key = ?",
+      ).get(`task:${taskId}:approve-design-preview`, "expired-human-approval-commit-0001")).toEqual({ count: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("requires compatible persisted render evidence for ordinary and archive REST commits", async () => {
@@ -560,7 +826,7 @@ describe("task-scoped agent preview review", () => {
     }
   });
 
-  it("does not overblock an unrelated direct preview after a matching task expires without a transition", () => {
+  it("keeps agent preview commits human-only after a matching task expires", () => {
     const created = application.service.createDesign("local", {
       name: "Expired task direct preview",
       preset: "phone",
@@ -573,12 +839,13 @@ describe("task-scoped agent preview review", () => {
     const taskId = "task_expired_without_transition_0001";
     const local = resolveAccess(application.database.sqlite, "local");
     const now = new Date().toISOString();
+    const expiresAt = new Date(Date.parse(now) + 60_000).toISOString();
     application.database.sqlite.prepare(
       `INSERT INTO agent_tasks
        (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
         expected_output, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, '2000-01-01T00:00:00.000Z')`,
-    ).run(taskId, local.organizationId, designId, local.principalId, "Expired task without an expiry transition", JSON.stringify([frameId]), now);
+       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, ?)`,
+    ).run(taskId, local.organizationId, designId, local.principalId, "Expired task without an expiry transition", JSON.stringify([frameId]), now, expiresAt);
     const insertTransition = application.database.sqlite.prepare(
       `INSERT INTO agent_task_transitions
        (id, task_id, from_status, to_status, actor_id, message, data_json, created_at)
@@ -590,19 +857,26 @@ describe("task-scoped agent preview review", () => {
     const preview = application.service.createPreview(agent.actorId, designId, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Independent direct preview" } }],
+      taskId,
     });
-    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
-    const committed = application.service.commitPreview(agent.actorId, designId, {
-      previewId: preview.id,
-      expectedBaseVersion: 1,
-      idempotencyKey: "expired-task-direct-commit-0001",
-      message: "Commit unrelated direct preview",
-      requireRenderEvidence: true,
-    });
-    expect(committed.revision.version).toBe(2);
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, taskId);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.parse(expiresAt) + 1_000));
+    try {
+      expect(captureThrown(() => application.service.commitPreview(agent.actorId, designId, {
+        previewId: preview.id,
+        expectedBaseVersion: 1,
+        idempotencyKey: "expired-task-direct-commit-0001",
+        message: "Commit unrelated direct preview",
+        requireRenderEvidence: true,
+      }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+      expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("reserves every unexpired claimed design task against agent commits, revisions, restores, and early expiry", () => {
+  it("forbids every agent direct commit, revision, and restore path and rejects early expiry", () => {
     const direct = application.service.createDesign("local", {
       name: "Unreserved direct restore",
       preset: "phone",
@@ -610,17 +884,17 @@ describe("task-scoped agent preview review", () => {
     });
     const directFrameId = direct.document.pages[0]!.children[0]!;
     const directAgent = installAgent(application, direct.document.id, "task_preview_direct_restore_agent");
-    application.service.applyRevision(directAgent.actorId, direct.document.id, {
+    expect(captureThrown(() => application.service.applyRevision(directAgent.actorId, direct.document.id, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: directFrameId, patch: { name: "Direct version two" } }],
       idempotencyKey: "unreserved-direct-revision-0001",
-    });
-    const restored = application.service.restoreRevision(directAgent.actorId, direct.document.id, {
+    }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+    expect(captureThrown(() => application.service.restoreRevision(directAgent.actorId, direct.document.id, {
       targetVersion: 1,
-      expectedBaseVersion: 2,
+      expectedBaseVersion: 1,
       idempotencyKey: "unreserved-direct-restore-0001",
-    });
-    expect(restored.revision.version).toBe(3);
+    }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+    expect(application.service.getDesign("local", direct.document.id).revision.version).toBe(1);
 
     for (const [index, terminal] of (["failed", "cancelled"] as const).entries()) {
       const created = application.service.createDesign("local", {
@@ -649,8 +923,9 @@ describe("task-scoped agent preview review", () => {
       const preview = application.service.createPreview(agent.actorId, designId, {
         baseVersion: 1,
         operations: [{ type: "update_node", node_id: frameId, patch: { name: `Reserved ${terminal} preview` } }],
+        taskId: task.id,
       });
-      persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+      persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
       application.enterprise.transitionAgentTask(agent.actorId, task.id, {
         expectedStatus: "in_progress",
         toStatus: terminal,
@@ -703,6 +978,231 @@ describe("task-scoped agent preview review", () => {
     expect(application.enterprise.readAgentTask("local", earlyTask.id).status).toBe("in_progress");
   });
 
+  it("never lets a preview from a failed task satisfy or refine a replacement task", () => {
+    const created = application.service.createDesign("local", {
+      name: "Cross-task preview binding",
+      preset: "phone",
+      idempotencyKey: "cross-task-binding-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId, "cross_task_binding_agent");
+    const firstTask = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Create the first proposal",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "cross-task-binding-first-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(agent.actorId, firstTask.id);
+    application.enterprise.transitionAgentTask(agent.actorId, firstTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    const firstPreview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "First task proposal" } }],
+      taskId: firstTask.id,
+    });
+    persistExactRender(application, agent.actorId, designId, firstPreview.id, pageId, frameId, firstTask.id);
+    application.enterprise.transitionAgentTask(agent.actorId, firstTask.id, {
+      expectedStatus: "in_progress",
+      toStatus: "failed",
+      message: "Regenerate from a fresh task",
+    });
+
+    const secondTask = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Create a replacement proposal",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "cross-task-binding-second-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(agent.actorId, secondTask.id);
+    application.enterprise.transitionAgentTask(agent.actorId, secondTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+
+    expect(captureThrown(() => application.service.createPreview(agent.actorId, designId, {
+      basePreviewId: firstPreview.id,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Illegal cross-task refinement" } }],
+      taskId: secondTask.id,
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, secondTask.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: firstPreview.id },
+    }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
+    expect(application.enterprise.readAgentTask("local", secondTask.id).status).toBe("in_progress");
+    expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+  });
+
+  it("rejects exact render evidence that omits, crosses, or names the wrong changed page", async () => {
+    const created = application.service.createDesign("local", {
+      name: "Exact render page scope",
+      preset: "phone",
+      idempotencyKey: "exact-render-page-scope-create-0001",
+    });
+    const designId = created.document.id;
+    const firstPageId = created.document.pages[0]!.id;
+    const firstFrameId = created.document.pages[0]!.children[0]!;
+    const secondPageId = "page_exact_render_scope_second_0001";
+    const secondRootId = "node_exact_render_scope_second_0001";
+    application.service.applyRevision("local", designId, {
+      baseVersion: 1,
+      idempotencyKey: "exact-render-page-scope-setup-0001",
+      operations: [
+        { type: "create_page", page: { id: secondPageId, name: "Second render page" } },
+        {
+          type: "create_tree",
+          parent: { page_id: secondPageId },
+          root_ids: [secondRootId],
+          nodes: [{
+            id: secondRootId,
+            type: "rectangle",
+            name: "Second page surface",
+            layout: {
+              x: 0,
+              y: 0,
+              width: 320,
+              height: 180,
+              mode: "absolute",
+              width_sizing: "fixed",
+              height_sizing: "fixed",
+            },
+            style: { fill: "#ffffff" },
+            visible: true,
+            locked: false,
+            archived: false,
+            metadata: {},
+          }],
+        },
+      ],
+    });
+    const agent = installAgent(application, designId, "exact_render_page_scope_agent");
+    const task = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Propose one exact renderable page at a time",
+      selection: [firstFrameId, secondRootId],
+      baseVersion: 2,
+      expectedOutput: "design_preview",
+      idempotencyKey: "exact-render-page-scope-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(agent.actorId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+
+    expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
+      design_id: designId,
+      task_id: task.id,
+      base_version: 2,
+      operations: [
+        { type: "update_node", node_id: firstFrameId, patch: { name: "Changed first page" } },
+        { type: "update_node", node_id: secondRootId, patch: { name: "Changed second page" } },
+      ],
+      max_size: 512,
+    })).toMatchObject({ code: "AMBIGUOUS_CONTEXT" });
+
+    expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
+      design_id: designId,
+      task_id: task.id,
+      base_version: 2,
+      operations: [{
+        type: "move_node",
+        node_id: secondRootId,
+        parent: { node_id: firstFrameId },
+        position: { x: 20, y: 24 },
+      }],
+      max_size: 512,
+    })).toMatchObject({ code: "AMBIGUOUS_CONTEXT" });
+
+    expect(await callMcpToolError(application, agent.token, "design_preview_changes", {
+      design_id: designId,
+      task_id: task.id,
+      base_version: 2,
+      operations: [{ type: "update_node", node_id: firstFrameId, patch: { name: "First page only" } }],
+      page_id: secondPageId,
+      max_size: 512,
+    })).toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(application.service.getDesign("local", designId).revision.version).toBe(2);
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM previews WHERE design_id = ? AND render_metadata_json IS NOT NULL",
+    ).get(designId)).toEqual({ count: 0 });
+    expect(firstPageId).not.toBe(secondPageId);
+  });
+
+  it("terminalizes a task when its exact preview expires and allows a replacement task", () => {
+    const created = application.service.createDesign("local", {
+      name: "Preview TTL replacement",
+      preset: "phone",
+      idempotencyKey: "preview-ttl-replacement-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId, "preview_ttl_replacement_agent");
+    const task = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Create a proposal whose preview expires first",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "preview-ttl-replacement-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(agent.actorId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Expiring proposal" } }],
+      taskId: task.id,
+    });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.id },
+    });
+    application.database.sqlite.prepare(
+      "UPDATE previews SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+    ).run(preview.id);
+
+    expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "awaiting_approval",
+      toStatus: "in_progress",
+      message: "Expired previews cannot be resumed",
+    }))).toMatchObject({ code: "PREVIEW_EXPIRED", statusCode: 410 });
+    expect(application.enterprise.readAgentTask("local", task.id)).toMatchObject({
+      status: "expired",
+      transitions: expect.arrayContaining([
+        expect.objectContaining({ toStatus: "expired", data: expect.objectContaining({ previewId: preview.id }) }),
+      ]),
+    });
+
+    const replacement = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Regenerate after preview expiry",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "preview-ttl-replacement-task-0002",
+      expiresInSeconds: 3_600,
+    });
+    expect(replacement).toMatchObject({ status: "queued", baseVersion: 1 });
+  });
+
   it("atomically expires a discarded task preview so its creating agent cannot commit it later", () => {
     const created = application.service.createDesign("local", {
       name: "Discard agent review",
@@ -710,6 +1210,7 @@ describe("task-scoped agent preview review", () => {
       idempotencyKey: "task-preview-discard-create-0001",
     });
     const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
     const frameId = created.document.pages[0]!.children[0]!;
     const agent = installAgent(application, designId);
     const task = application.enterprise.createAgentTask("local", {
@@ -729,7 +1230,9 @@ describe("task-scoped agent preview review", () => {
     const preview = application.service.createPreview(agent.actorId, designId, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Discard me" } }],
+      taskId: task.id,
     });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
     application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",

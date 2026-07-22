@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BackupVerification } from "./backup.js";
-import type { BridgeController } from "./bridge-lifecycle.js";
+import { FORMASPEC_ESSENTIAL_MCP_TOOLS, type BridgeController } from "./bridge-lifecycle.js";
 import { runCli, type CliIo } from "./command.js";
 import { CLI_SUPPORTED_DATABASE_VERSION } from "./migrations.js";
 import type { CommandOptions } from "./process.js";
@@ -28,15 +28,19 @@ function fakeBridge(): BridgeController & {
   starts: number;
   stops: number;
   authorizations: number;
+  running: boolean;
+  verificationError?: Error;
   pairingTickets: Array<{ nonce: string; connectionId?: string } | undefined>;
 } {
   return {
     starts: 0,
     stops: 0,
     authorizations: 0,
+    running: false,
     pairingTickets: [],
     async ensureStarted() {
       this.starts += 1;
+      this.running = true;
       return { running: true, url: "http://127.0.0.1:4312", owned: true };
     },
     async authorizeAgent(pairing) {
@@ -44,8 +48,17 @@ function fakeBridge(): BridgeController & {
       this.pairingTickets.push(pairing);
       return { connectionId: "connection_test", status: "active", expiresAt: "2099-01-01T00:00:00.000Z" };
     },
-    async stop() { this.stops += 1; return true; },
-    async status() { return { running: false, url: "http://127.0.0.1:4312", owned: false }; },
+    async verifyAgent() {
+      if (this.verificationError) throw this.verificationError;
+      return {
+        verified: true as const,
+        checks: ["initialize", "tools/list"],
+        serverName: "formaspec" as const,
+        essentialTools: [...FORMASPEC_ESSENTIAL_MCP_TOOLS],
+      };
+    },
+    async stop() { this.stops += 1; this.running = false; return true; },
+    async status() { return { running: this.running, url: "http://127.0.0.1:4312", owned: this.running }; },
   };
 }
 
@@ -140,7 +153,7 @@ if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "add" ]; then
-  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.0","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.1","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.1","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then exit 9; fi
@@ -243,18 +256,18 @@ describe("formaspecctl", () => {
     });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "formaspec",
-      version: "0.2.0",
+      version: "0.2.1",
       interface: { displayName: "FormaSpec" },
     });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "minimal-ui",
-      version: "0.2.0",
+      version: "0.2.1",
       interface: { displayName: "Minimal UI" },
     });
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
       ],
     });
     expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
@@ -418,8 +431,8 @@ describe("formaspecctl", () => {
     expect(calls).toContain("plugin add minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
       ],
     });
   });
@@ -493,8 +506,8 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
       ],
     });
   });
@@ -530,7 +543,7 @@ describe("formaspecctl", () => {
       .toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
     expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui", "legacy.txt"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8")))
-      .toMatchObject({ name: "minimal-ui", version: "0.2.0", interface: { displayName: "Minimal UI" } });
+      .toMatchObject({ name: "minimal-ui", version: "0.2.1", interface: { displayName: "Minimal UI" } });
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"))).toBe(true);
     const calls = fs.readFileSync(log, "utf8");
@@ -538,8 +551,8 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
       ],
     });
   });
@@ -573,8 +586,8 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
       ],
     });
   });
@@ -594,6 +607,191 @@ describe("formaspecctl", () => {
     expect(bridge.authorizations).toBe(0);
     expect(io.output.join("\n")).toContain('"url": "http://127.0.0.1:4312/mcp"');
     expect(io.output.join("\n").toLowerCase()).not.toContain("bearer");
+  });
+
+  it("fails normal doctor when server health, bridge health, or authenticated MCP verification is unavailable", async () => {
+    const root = makeProject(temporaryDirectory());
+    const environment = { HOME: root, PATH: "/usr/bin:/bin" };
+    const healthyFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"ok":true}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const runner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    const stoppedBridge = fakeBridge();
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge: stoppedBridge,
+      io: collectingIo(),
+      environment,
+      commandRunner: runner,
+    })).toBe(1);
+
+    const unauthorizedBridge = fakeBridge();
+    unauthorizedBridge.running = true;
+    unauthorizedBridge.verificationError = new Error("AGENT_AUTHORIZATION_MISSING");
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge: unauthorizedBridge,
+      io: collectingIo(),
+      environment,
+      commandRunner: runner,
+    })).toBe(1);
+
+    const healthyBridge = fakeBridge();
+    healthyBridge.running = true;
+    healthyFetch.mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/render") ? '{"ok":false}' : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge: healthyBridge,
+      io: collectingIo(),
+      environment,
+      commandRunner: runner,
+    })).toBe(1);
+  });
+
+  it("passes normal doctor only after readiness, renderer, bridge, and essential MCP checks pass", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bridge = fakeBridge();
+    bridge.running = true;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"ok":true}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    const result = await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+
+    expect(result).toBe(0);
+    expect(io.output.join("\n")).toContain("Server readiness: verified");
+    expect(io.output.join("\n")).toContain("Renderer health: verified");
+    expect(io.output.join("\n")).toContain("verified as formaspec");
+    expect(io.output.join("\n")).toContain(`${FORMASPEC_ESSENTIAL_MCP_TOOLS.length} essential tools`);
+  });
+
+  it("uses the recorded public Host while probing a loopback server-mode runtime", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "server\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "7443\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "https://design.company.example\n");
+    const hosts: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      hosts.push(new Headers(init?.headers).get("host"));
+      return new Response('{"ok":true}', { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const bridge = fakeBridge();
+    bridge.running = true;
+
+    expect(await runCli(["doctor", "server"], {
+      projectRoot: root,
+      bridge,
+      io: collectingIo(),
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(0);
+    expect(hosts).toEqual(["design.company.example", "design.company.example"]);
+  });
+
+  it("refreshes an already-authorized managed Codex install on startup without prompting again", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    const environment = fakeEnvironment(root, bin, log, state);
+    fs.mkdirSync(path.join(root, ".codex"), { recursive: true });
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "writes"',
+      "",
+    ].join("\n"));
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "skills", "formaspec"));
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
+    }));
+    const bridge = fakeBridge();
+    let confirmations = 0;
+    const io = collectingIo();
+    const runner = async (executable: string, args: readonly string[], options?: CommandOptions) => {
+      if (executable === path.join(root, "designer")) return { exitCode: 0, stdout: "", stderr: "" };
+      const { runCommand } = await import("./process.js");
+      return runCommand(executable, args, options);
+    };
+
+    const result = await runCli(["start", "local", "--no-open"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment,
+      commandRunner: runner,
+      confirm: async () => { confirmations += 1; return false; },
+    });
+
+    expect(result).toBe(0);
+    expect(confirmations).toBe(0);
+    expect(bridge.authorizations).toBe(1);
+    expect(io.output).toContain("Refreshing the already-authorized managed Codex connection and FormaSpec skills.");
+    expect(fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"), "utf8"))
+      .toContain("Never call `design_commit_preview`");
+    expect(fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", "SKILL.md"), "utf8"))
+      .toContain("Minimal UI is a compatibility alias");
+    expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+      ],
+    });
+  });
+
+  it("still prompts on startup when the Codex install is unmanaged", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    const environment = fakeEnvironment(root, bin, log, state);
+    fs.mkdirSync(path.join(root, ".codex", "skills", "formaspec"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"), "user-owned\n");
+    fs.mkdirSync(path.join(root, ".codex"), { recursive: true });
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), '[mcp_servers.formaspec]\nurl = "http://127.0.0.1:4312/mcp"\n');
+    const bridge = fakeBridge();
+    let confirmations = 0;
+
+    const result = await runCli(["start", "local", "--no-open"], {
+      projectRoot: root,
+      bridge,
+      io: collectingIo(),
+      environment,
+      commandRunner: async (executable, args, options) => {
+        if (executable === path.join(root, "designer")) return { exitCode: 0, stdout: "", stderr: "" };
+        const { runCommand } = await import("./process.js");
+        return runCommand(executable, args, options);
+      },
+      confirm: async () => { confirmations += 1; return false; },
+    });
+
+    expect(result).toBe(0);
+    expect(confirmations).toBe(1);
+    expect(bridge.authorizations).toBe(0);
+    expect(fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"), "utf8")).toBe("user-owned\n");
   });
 
   it("delegates lifecycle commands without a shell and starts the bridge after the launcher succeeds", async () => {

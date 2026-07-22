@@ -176,7 +176,7 @@ describe("EnterpriseService.listAgentTasks project authorization", () => {
       designId: fixture.allowedDesignId,
       brief: "Newer cancelled allowed task",
       baseVersion: 1,
-      expectedOutput: "design_preview",
+      expectedOutput: "product_spec_preview",
       idempotencyKey: "task-list-cancelled-task-0001",
     });
     fixture.enterprise.transitionAgentTask("local", cancelled.id, {
@@ -233,6 +233,30 @@ describe("agent-task list HTTP project authorization", () => {
     expect(`${missing.body}\n${restricted.body}`).not.toContain(fixture.deniedTask.id);
     expect(totalChanges(fixture.database)).toBe(before);
   });
+
+  it("filters for design previews before the limit so newer non-design tasks cannot hide review work", async () => {
+    const fixture = taskListFixture();
+    for (let index = 0; index < 30; index += 1) {
+      fixture.setNow(`2099-07-21T00:01:${String(index).padStart(2, "0")}.000Z`);
+      fixture.enterprise.createAgentTask("local", {
+        designId: fixture.allowedDesignId,
+        brief: `Newer non-design task ${index}`,
+        baseVersion: 1,
+        expectedOutput: "product_spec_preview",
+        idempotencyKey: `task-list-http-non-design-${index}-0001`,
+      });
+    }
+    const app = await taskListHttpApp(fixture);
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/designs/${fixture.allowedDesignId}/agent-tasks?limit=25&expectedOutput=design_preview`,
+      headers: { "x-test-actor-id": fixture.actorId },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json<{ tasks: AgentTaskResult[] }>().tasks).toEqual([
+      expect.objectContaining({ id: fixture.allowedTask.id, expectedOutput: "design_preview" }),
+    ]);
+  });
 });
 
 describe("agent-task list MCP project authorization", () => {
@@ -276,7 +300,7 @@ describe("agent-task list MCP project authorization", () => {
       designId: allowed.document.id,
       brief: "Newer cancelled MCP task",
       baseVersion: 1,
-      expectedOutput: "design_preview",
+      expectedOutput: "product_spec_preview",
       idempotencyKey: "task-list-mcp-cancelled-task-0001",
     });
     application.enterprise.transitionAgentTask("local", cancelled.id, {

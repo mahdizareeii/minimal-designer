@@ -3,7 +3,11 @@ import { PLANNING_SECTIONS } from "@designer/core";
 import { z } from "zod";
 
 import { AgentTaskTransitionRequestSchema } from "./agent-task-schema.js";
-import { agentTaskCodexLaunchUrl } from "./agent-task-launch.js";
+import {
+  agentTaskCodexLaunchUrl,
+  agentTaskPreviewReviewLink,
+  agentTaskWebsiteLink,
+} from "./agent-task-launch.js";
 import {
   AGENT_CONNECTION_SCOPES,
   AGENT_TASK_EXPECTED_OUTPUTS,
@@ -40,6 +44,7 @@ function specificationPreviewResponse(result: ProductSpecificationPreviewResult)
 export function registerEnterpriseHttpRoutes(
   app: FastifyInstance,
   enterprise: EnterpriseService,
+  publicBaseUrl = "http://127.0.0.1:4310",
 ): void {
   app.get("/api/designs/:id/product-specification", async (request) => {
     const { id } = designParams.parse(request.params);
@@ -141,6 +146,7 @@ export function registerEnterpriseHttpRoutes(
     const { id } = designParams.parse(request.params);
     const query = z.object({
       status: z.enum(AGENT_TASK_STATUSES).optional(),
+      expectedOutput: z.enum(AGENT_TASK_EXPECTED_OUTPUTS).optional(),
       limit: z.coerce.number().int().min(1).max(100).optional(),
     }).strict().parse(request.query);
     return { tasks: enterprise.listAgentTasks(request.actorId, { designId: id, ...query }) };
@@ -162,13 +168,31 @@ export function registerEnterpriseHttpRoutes(
       designId: id,
       ...input,
     });
-    return reply.code(201).send({ task, launchUrl: agentTaskCodexLaunchUrl(task.id) });
+    return reply.code(201).send({
+      task,
+      launchUrl: agentTaskCodexLaunchUrl(task.id),
+      websiteTaskLink: agentTaskWebsiteLink(publicBaseUrl, task.designId, task.id),
+    });
   });
 
   app.get("/api/agent-tasks/:taskId", async (request) => {
     const { taskId } = taskParams.parse(request.params);
     const task = enterprise.readAgentTask(request.actorId, taskId);
-    return { task, launchUrl: agentTaskCodexLaunchUrl(task.id) };
+    const current = task.transitions.at(-1);
+    const previewId = task.expectedOutput === "design_preview"
+      && task.status === "awaiting_approval"
+      && current
+      && typeof current.data.previewId === "string"
+      ? current.data.previewId
+      : null;
+    return {
+      task,
+      launchUrl: agentTaskCodexLaunchUrl(task.id),
+      websiteTaskLink: agentTaskWebsiteLink(publicBaseUrl, task.designId, task.id),
+      reviewDeepLink: previewId === null
+        ? null
+        : agentTaskPreviewReviewLink(publicBaseUrl, task.designId, previewId, task.id),
+    };
   });
 
   app.post("/api/agent-tasks/:taskId/claim", async (request) => {
@@ -179,7 +203,20 @@ export function registerEnterpriseHttpRoutes(
   app.post("/api/agent-tasks/:taskId/transition", async (request) => {
     const { taskId } = taskParams.parse(request.params);
     const input = AgentTaskTransitionRequestSchema.parse(request.body);
-    return { task: enterprise.transitionAgentTask(request.actorId, taskId, input) };
+    const task = enterprise.transitionAgentTask(request.actorId, taskId, input);
+    const current = task.transitions.at(-1);
+    const previewId = task.expectedOutput === "design_preview"
+      && task.status === "awaiting_approval"
+      && current
+      && typeof current.data.previewId === "string"
+      ? current.data.previewId
+      : null;
+    return {
+      task,
+      reviewDeepLink: previewId === null
+        ? null
+        : agentTaskPreviewReviewLink(publicBaseUrl, task.designId, previewId, task.id),
+    };
   });
 
   app.get("/api/agent-authorization-context", async (request, reply) => {

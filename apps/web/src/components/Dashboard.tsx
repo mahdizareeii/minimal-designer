@@ -268,7 +268,7 @@ export function DashboardProjectCard({
           <span className="project-version">v{project.version}</span>
         </div>
         <div className="project-card-meta">
-          <div><strong>{project.name}</strong><small><Clock3 size={12} /> Updated {relativeTime(project.updatedAt)}</small></div>
+          <div><strong dir="auto" title={project.name}>{project.name}</strong><small><Clock3 size={12} /> Updated {relativeTime(project.updatedAt)}</small></div>
           <span className="open-project"><ArrowRight size={16} /></span>
         </div>
       </button>

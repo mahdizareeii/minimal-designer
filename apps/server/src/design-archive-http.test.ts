@@ -102,6 +102,11 @@ describe("confirmed project archival", () => {
       idempotencyKey: "archive-success-replay-0001",
       confirmationName: created.design.name,
     };
+    service.setContext(actorId, {
+      designId: created.design.id,
+      pageId: created.document.pages[0]?.id,
+      selection: [],
+    });
     const archived = service.archiveDesign(actorId, created.design.id, input);
     expect(archived).toMatchObject({
       id: created.design.id,
@@ -129,6 +134,7 @@ describe("confirmed project archival", () => {
 
     expect(service.listDesigns(actorId).designs).toEqual([]);
     expectDomainError(() => service.getDesign(actorId, created.design.id), "NOT_FOUND");
+    expect(service.getContext(actorId)).toMatchObject({ designId: null, pageId: null, selection: [] });
     expect(database.sqlite.prepare("SELECT COUNT(*) AS count FROM designs WHERE id = ?").get(created.design.id))
       .toEqual({ count: 1 });
     expect(database.sqlite.prepare("SELECT COUNT(*) AS count FROM revisions WHERE design_id = ?").get(created.design.id))
@@ -187,6 +193,11 @@ describe("confirmed project archival", () => {
       preset: "phone",
       idempotencyKey: "create-atomic-archive-0001",
     });
+    service.setContext("local", {
+      designId: created.design.id,
+      pageId: created.document.pages[0]?.id,
+      selection: [],
+    });
     database.sqlite.exec(`
       CREATE TRIGGER reject_design_archive_audit
       BEFORE INSERT ON audit_events
@@ -208,6 +219,7 @@ describe("confirmed project archival", () => {
       "SELECT id FROM event_outbox WHERE json_extract(payload_json, '$.archived') = 1",
     ).get()).toBeUndefined();
     expect(service.getDesign("local", created.design.id).design.id).toBe(created.design.id);
+    expect(service.getContext("local")).toMatchObject({ designId: created.design.id });
   });
 
   it("exposes one strict confirmed-archive REST endpoint and filters subsequent list/read requests", async () => {

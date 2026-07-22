@@ -34,9 +34,10 @@ describe("explicit editor save and page-management contract", () => {
     const editorSource = readFileSync(new URL("../components/Editor.tsx", import.meta.url), "utf8");
 
     expect(editorSource).toContain('className="document-title"');
-    expect(editorSource).toContain('title="Save now"');
+    expect(editorSource).toContain('archiveReview ? "Review pending destructive changes" : "Save now"');
     expect(editorSource).toContain("Save / Commit");
-    expect(editorSource).toContain("save-status is-${saveState}");
+    expect(editorSource).toContain("save-status is-${workspaceSaveState}");
+    expect(editorSource).toContain('archiveReview ? "Review changes" : "Save / Commit"');
   });
 
   it("has no ordinary-edit autosave and exposes the three in-app leave choices", () => {
@@ -61,10 +62,14 @@ describe("explicit editor save and page-management contract", () => {
 
     expect(layersSource).toContain('className="page-row-shell"');
     expect(layersSource).toContain('className="page-row-delete"');
-    expect(layersSource).toContain("Its layers will remain recoverable in immutable history");
+    expect(layersSource).toContain('role="dialog"');
+    expect(layersSource).toContain("Create deletion preview");
+    expect(layersSource).toContain("Immutable history remains recoverable");
+    expect(layersSource).not.toContain("window.confirm");
     expect(styles).toMatch(/\.editor-topbar-left\s*\{[^}]*overflow:\s*hidden;/s);
     expect(styles).toMatch(/\.document-title strong\s*\{[^}]*text-overflow:\s*ellipsis;/s);
     expect(styles).toMatch(/\.page-row-shell\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 28px;/s);
     expect(styles).toMatch(/\.page-row-detailed strong\s*\{[^}]*text-overflow:\s*ellipsis;/s);
+    expect(styles).toMatch(/\.canvas-frame-label strong\s*\{[^}]*text-overflow:\s*ellipsis;/s);
   });
 });

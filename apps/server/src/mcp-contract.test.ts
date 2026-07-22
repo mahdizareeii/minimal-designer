@@ -176,11 +176,11 @@ const expectedMcpSuccessFields = {
   planning_session_create: [["session", "sections"]],
   planning_session_read: [["session", "sections"]],
   planning_session_save_answer: [["session"]],
-  task_create: [["task", "deepLink"]],
+  task_create: [["task", "codexLaunchUrl", "websiteTaskLink"]],
   task_list: [["tasks"]],
-  task_read: [["task"]],
+  task_read: [["task", "reviewDeepLink"]],
   task_claim: [["task"]],
-  task_transition: [["task"]],
+  task_transition: [["task", "reviewDeepLink"]],
   design_system_read: [["designSystem"]],
   design_system_list: [["designSystems"]],
   design_system_release_read: [["release"]],
@@ -334,6 +334,8 @@ describe("MCP contract matrix", () => {
       expect(previewOperationSchema).toContain(operationType);
     }
     expect(previewOperationSchema).toContain("tmp:");
+    expect(tools.find((entry) => entry.name === "design_preview_changes")?.inputSchema.properties)
+      .toHaveProperty("task_id");
 
     const taskTransitionInput = tools.find((entry) => entry.name === "task_transition")?.inputSchema;
     expect(taskTransitionInput?.anyOf).toHaveLength(6);
@@ -485,11 +487,13 @@ describe("MCP contract matrix", () => {
       node_search: { design_id: "document_contract0001" },
       design_preview_changes: {
         design_id: "document_contract0001",
+        task_id: "task_contract0001",
         base_version: 1,
         operations: [{ type: "set_metadata", target: { kind: "document" }, metadata: { probe: true } }],
       },
       design_preview_archive_nodes: {
         design_id: "document_contract0001",
+        task_id: "task_contract0001",
         base_version: 1,
         operations: [{ type: "archive_nodes", node_ids: ["node_contract0001"] }],
       },
@@ -554,6 +558,7 @@ describe("MCP contract matrix", () => {
       design_system_project_pin_read: { design_id: "document_contract0001" },
       design_system_component_insert_preview: {
         design_id: "document_contract0001",
+        task_id: "task_contract0001",
         base_version: 1,
         component_definition_id: "component_contract0001",
         parent: { node_id: "node_contract0001" },
@@ -608,9 +613,7 @@ describe("MCP contract matrix", () => {
     for (const [name, args] of Object.entries(probes).filter(([name]) => [
       "design_preview_changes",
       "design_preview_archive_nodes",
-      "design_commit_preview",
-      "design_commit_archive_preview",
-      "design_restore_revision",
+      "design_system_component_insert_preview",
     ].includes(name))) {
       const response = await toolCall(application, missingReadToken, name, args);
       expect(response.json<{ result: { structuredContent: unknown } }>().result.structuredContent, name).toMatchObject({

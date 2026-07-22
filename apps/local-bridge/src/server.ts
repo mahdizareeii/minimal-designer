@@ -19,6 +19,20 @@ const CODEX_REQUESTED_SCOPES = [
   "redesign:read", "redesign:assessment", "redesign:review",
   "redesign:interview", "redesign:proposal", "redesign:design", "redesign:handoff",
 ] as const;
+const REQUIRED_CODEX_MCP_TOOLS = [
+  "organization_policy_read",
+  "context_get",
+  "design_list",
+  "design_read",
+  "node_search",
+  "design_preview_changes",
+  "design_render",
+  "design_lint",
+  "task_create",
+  "task_read",
+  "task_claim",
+  "task_transition",
+] as const;
 const ALLOWED_REQUEST_HEADERS = [
   "accept",
   "content-type",
@@ -160,6 +174,11 @@ interface StoredGrantAuthorizationContext {
   projectIds: string[];
 }
 
+interface McpGrantProbe {
+  serverName: "formaspec";
+  essentialTools: string[];
+}
+
 class BridgeControlError extends Error {
   constructor(
     readonly statusCode: number,
@@ -230,32 +249,65 @@ async function probeMcpGrant(
   upstream: URL,
   token: string,
   fetchImplementation: typeof fetch,
-): Promise<boolean> {
+): Promise<McpGrantProbe | null> {
   try {
-    const probe = await fetchImplementation(upstream, {
-      method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "formaspec-bridge-probe",
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "formaspec-local-bridge", version: "0.2.0" },
+    const call = async (
+      id: string,
+      method: string,
+      params: Record<string, unknown>,
+    ): Promise<Record<string, unknown> | null> => {
+      const response = await fetchImplementation(upstream, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
         },
-      }),
-      redirect: "error",
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        redirect: "error",
+        signal: AbortSignal.timeout(6_000),
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return null;
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > 65_536) {
+        await response.body?.cancel();
+        return null;
+      }
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > 65_536) return null;
+      const envelope = recordValue(JSON.parse(text));
+      const result = recordValue(envelope?.result);
+      return envelope?.jsonrpc === "2.0"
+        && envelope.id === id
+        && envelope.error === undefined
+        && result !== null
+        ? result
+        : null;
+    };
+    const initialize = await call("formaspec-bridge-initialize", "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "formaspec-local-bridge", version: "0.2.0" },
     });
-    const valid = probe.ok;
-    await probe.body?.cancel();
-    return valid;
+    const serverInfo = recordValue(initialize?.serverInfo);
+    if (typeof initialize?.protocolVersion !== "string"
+      || recordValue(initialize.capabilities) === null
+      || serverInfo?.name !== "formaspec"
+      || typeof serverInfo.version !== "string"
+      || serverInfo.version.length === 0) return null;
+
+    const toolsResult = await call("formaspec-bridge-tools", "tools/list", {});
+    if (!Array.isArray(toolsResult?.tools)) return null;
+    const toolNames = toolsResult.tools.map((tool) => recordValue(tool)?.name);
+    if (!toolNames.every((name): name is string => typeof name === "string" && name.length > 0)) return null;
+    const available = new Set(toolNames);
+    if (!REQUIRED_CODEX_MCP_TOOLS.every((name) => available.has(name))) return null;
+    return { serverName: "formaspec", essentialTools: [...REQUIRED_CODEX_MCP_TOOLS] };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -391,7 +443,7 @@ async function authorizeAgentConnection(
     existingToken = null;
   }
   if (existingToken) {
-    if (await probeMcpGrant(upstream, existingToken, fetchImplementation)) {
+    if (await probeMcpGrant(upstream, existingToken, fetchImplementation) !== null) {
       const authorizationContext = await readStoredGrantAuthorizationContext(
         apiOrigin,
         existingToken,
@@ -450,12 +502,16 @@ async function authorizeAgentConnection(
     || typeof paired.connection?.id !== "string") {
     throw new Error("FormaSpec returned an invalid scoped agent grant.");
   }
+  if (await probeMcpGrant(upstream, paired.grant.token, fetchImplementation) === null) {
+    throw new Error("The new scoped Codex grant could not initialize MCP and list its tools.");
+  }
   await credentialStore.write(paired.grant.token);
   return {
     connectionId: paired.connection.id,
     status: paired.connection.status,
     expiresAt: paired.connection.expiresAt,
     credentialStored: true,
+    verified: true,
   };
 }
 
@@ -474,7 +530,7 @@ async function reuseStoredAgentConnection(
     token,
     fetchImplementation,
   );
-  if (authorizationContext === null || !await probeMcpGrant(upstream, token, fetchImplementation)) {
+  if (authorizationContext === null || await probeMcpGrant(upstream, token, fetchImplementation) === null) {
     await credentialStore.clear();
     return null;
   }
@@ -527,7 +583,7 @@ async function pairIssuedAgentConnection(
     throw new BridgeControlError(409, "PAIRING_CONNECTION_MISMATCH", "The pairing ticket activated a different connection.");
   }
   const verifiedContext = await readStoredGrantAuthorizationContext(apiOrigin, token, fetchImplementation);
-  if (!await probeMcpGrant(upstream, token, fetchImplementation)
+  if (await probeMcpGrant(upstream, token, fetchImplementation) === null
     || verifiedContext === null
     || !sameStringSet(verifiedContext.scopes, scopes)
     || !sameStringSet(verifiedContext.projectIds, projectIds)) {
@@ -645,6 +701,30 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
         sendJson(response, 200, result);
         return;
       }
+      if (request.method === "POST" && requestUrl.pathname === "/_control/verify-agent") {
+        const body = JSON.parse((await readBody(request, 4096)).toString("utf8")) as { instanceId?: unknown };
+        if (body.instanceId !== instanceId) {
+          sendJson(response, 403, { error: "CONTROL_AUTHORIZATION_FAILED" });
+          return;
+        }
+        const token = await credentialStore.read();
+        if (!token || !/^fsg_[A-Za-z0-9_-]+$/.test(token)) {
+          sendJson(response, 409, { error: "AGENT_AUTHORIZATION_MISSING" });
+          return;
+        }
+        const probe = await probeMcpGrant(upstream, token, fetchImplementation);
+        if (probe === null) {
+          sendJson(response, 502, { error: "AGENT_AUTHORIZATION_VERIFICATION_FAILED" });
+          return;
+        }
+        sendJson(response, 200, {
+          verified: true,
+          checks: ["initialize", "tools/list"],
+          serverName: probe.serverName,
+          essentialTools: probe.essentialTools,
+        });
+        return;
+      }
       if (requestUrl.pathname === "/mcp") {
         await proxyMcpRequest(request, response, upstream, credentialProvider, fetchImplementation);
         return;
@@ -684,6 +764,7 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
     url: `http://${displayHost}:${address.port}`,
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
     }),
   };
 }

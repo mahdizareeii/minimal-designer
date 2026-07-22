@@ -641,8 +641,13 @@ export function Canvas() {
           style={{ transform: viewportTransform.toCssTransform() }}
         >
           {frameLabels.map((frame) => (
-            <div key={`label-${frame.id}`} className="canvas-frame-label" style={{ left: frame.x, top: frame.y - 24 }}>
-              {frame.name} <span>{Math.round(frame.width)} × {Math.round(frame.height)}</span>
+            <div
+              key={`label-${frame.id}`}
+              className="canvas-frame-label"
+              style={{ left: frame.x, top: frame.y - 24, width: Math.max(1, frame.width) }}
+              title={`${frame.name} · ${Math.round(frame.width)} × ${Math.round(frame.height)}`}
+            >
+              <strong dir="auto">{frame.name}</strong><span>{Math.round(frame.width)} × {Math.round(frame.height)}</span>
             </div>
           ))}
           {page.children.map((nodeId) => (

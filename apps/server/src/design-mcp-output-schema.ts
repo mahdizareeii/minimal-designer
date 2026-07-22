@@ -175,7 +175,8 @@ export const DesignPreviewSummaryResultSchema = z.object({
   versions: runtimeVersionsSchema,
   diagnostics: DesignDiagnosticsResultSchema,
   createdIds: DesignCreatedIdsResultSchema,
-  editorDeepLink: boundedLink,
+  projectDeepLink: boundedLink,
+  reviewDeepLink: boundedLink.nullable(),
 }).strict();
 
 export const DesignRenderResultSchema = z.object({

@@ -270,7 +270,7 @@ async function createFixture(label: string): Promise<Fixture> {
     id: `core_asset_foreign_${label}`,
     organizationId: `organization_core_asset_foreign_${label}`,
     projectIds: [],
-    scopes: ["context:write", "design:read", "design:preview", "design:write", "task:read", "task:claim", "task:update"],
+    scopes: ["context:write", "design:read", "design:preview", "design:write", "task:create", "task:read", "task:claim", "task:update"],
   });
   const foreign = createDesign(
     application,
@@ -297,9 +297,24 @@ async function createFixture(label: string): Promise<Fixture> {
     baseVersion: 1,
     operations: [{ type: "update_node", node_id: denied.frameId, patch: { name: PRIVATE_MARKER } }],
   });
+  const foreignTask = application.enterprise.createAgentTask(foreignGrant.actorId, {
+    designId: foreign.id,
+    brief: "Prepare a foreign task-owned preview",
+    selection: [foreign.frameId],
+    baseVersion: 1,
+    expectedOutput: "design_preview",
+    idempotencyKey: `core-preview-context-assets-foreign-task-${label}-0001`,
+    expiresInSeconds: 3_600,
+  });
+  application.enterprise.claimAgentTask(foreignGrant.actorId, foreignTask.id);
+  application.enterprise.transitionAgentTask(foreignGrant.actorId, foreignTask.id, {
+    expectedStatus: "claimed",
+    toStatus: "in_progress",
+  });
   const foreignPreview = application.service.createPreview(foreignGrant.actorId, foreign.id, {
     baseVersion: 1,
     operations: [{ type: "update_node", node_id: foreign.frameId, patch: { name: FOREIGN_MARKER } }],
+    taskId: foreignTask.id,
   });
 
   const task = application.enterprise.createAgentTask(ADMIN_ACTOR, {
@@ -319,7 +334,16 @@ async function createFixture(label: string): Promise<Fixture> {
   const taskPreview = application.service.createPreview(restrictedGrant.actorId, agentProject.id, {
     baseVersion: 1,
     operations: [{ type: "update_node", node_id: agentProject.frameId, patch: { name: "Task preview" } }],
+    taskId: task.id,
   });
+  application.service.recordPreviewRenderMetadata(restrictedGrant.actorId, agentProject.id, taskPreview.id, {
+    options: { pageId: agentProject.pageId, nodeId: agentProject.frameId, maxSize: 256 },
+    png: PNG,
+    width: 1,
+    height: 1,
+    renderer: "software",
+    warnings: [],
+  }, { taskId: task.id });
   application.enterprise.transitionAgentTask(restrictedGrant.actorId, task.id, {
     expectedStatus: "in_progress",
     toStatus: "awaiting_approval",

@@ -12,6 +12,15 @@ afterEach(() => {
   for (const database of databases.splice(0)) database.close();
 });
 
+function captureThrown(callback: () => unknown): unknown {
+  try {
+    callback();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected callback to throw.");
+}
+
 describe("component insertion preview service", () => {
   it("resolves the pinned release, persists exact prepared bytes, and commits through ordinary preview CAS", () => {
     const database = new DesignerDatabase(":memory:");
@@ -95,5 +104,38 @@ describe("component insertion preview service", () => {
       "SELECT COUNT(*) AS count FROM previews WHERE design_id = ?",
     ).get(sourceRevision.designId) as { count: number };
     expect(previews.count).toBe(0);
+  });
+
+  it("does not expose component libraries or previews for archived projects", () => {
+    const database = new DesignerDatabase(":memory:");
+    databases.push(database);
+    const designer = new DesignerService(database, new EventHub(), 900);
+    const parentId = "node_component_insertion_parent_03";
+    const sourceRevision = createComponentSourceRevisionFixture(
+      database,
+      designer,
+      "local",
+      [parentId],
+      "component-insertion-archived",
+    );
+    const current = designer.getDesign("local", sourceRevision.designId, 2);
+    designer.archiveDesign("local", sourceRevision.designId, {
+      expectedVersion: 2,
+      idempotencyKey: "component-insertion-archive-0001",
+      confirmationName: current.design.name,
+    });
+    const insertions = new ComponentInsertionService(database, designer);
+    const selection = FORMASPEC_FOUNDATION_SYSTEM.release.component_versions[0]!;
+
+    expect(captureThrown(() => insertions.library("local", sourceRevision.designId)))
+      .toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => insertions.preview("local", sourceRevision.designId, {
+      baseVersion: 2,
+      componentDefinitionId: selection.component_definition_id,
+      parent: { node_id: parentId },
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM previews WHERE design_id = ?",
+    ).get(sourceRevision.designId)).toEqual({ count: 0 });
   });
 });

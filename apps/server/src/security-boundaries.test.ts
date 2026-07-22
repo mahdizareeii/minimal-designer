@@ -396,7 +396,15 @@ describe("public security boundaries", () => {
       id: "foreign_organization_agent",
       organizationId: "organization_foreign_security",
       projectIds: [],
-      scopes: ["design:read", "design:preview", "design:write"],
+      scopes: [
+        "design:read",
+        "design:preview",
+        "design:write",
+        "task:create",
+        "task:read",
+        "task:claim",
+        "task:update",
+      ],
     });
     const foreignDesign = application.service.createDesign(foreignGrant.actorId, {
       name: "Foreign confidential design",
@@ -404,9 +412,24 @@ describe("public security boundaries", () => {
       idempotencyKey: "security-idor-foreign-create-0001",
     });
     const foreignFrameId = foreignDesign.document.pages[0]!.children[0]!;
+    const foreignTask = application.enterprise.createAgentTask(foreignGrant.actorId, {
+      designId: foreignDesign.document.id,
+      brief: "Create a task-bound foreign preview",
+      selection: [foreignFrameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "security-idor-foreign-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(foreignGrant.actorId, foreignTask.id);
+    application.enterprise.transitionAgentTask(foreignGrant.actorId, foreignTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
     const foreignPreview = application.service.createPreview(foreignGrant.actorId, foreignDesign.document.id, {
       baseVersion: 1,
       operations: [{ type: "update_node", node_id: foreignFrameId, patch: { name: "Foreign confidential preview" } }],
+      taskId: foreignTask.id,
     });
     const foreignAsset = application.service.saveAsset(foreignGrant.actorId, {
       designId: foreignDesign.document.id,
@@ -523,8 +546,9 @@ describe("public security boundaries", () => {
       url: `/api/designs/${created.document.id}/archive`,
       payload: { nodeIds: [frameId] },
     });
-    expect(shortcut.statusCode).toBe(404);
-    expect(shortcut.json<{ error: { code: string } }>().error.code).toBe("NOT_FOUND");
+    expect(shortcut.statusCode).toBe(422);
+    expect(shortcut.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_FAILED");
+    expect(application.service.getDesign("local", created.document.id).design.version).toBe(1);
   });
 
   it("enforces the human role matrix on public read, revision, restore, and archive routes", async () => {
@@ -819,6 +843,7 @@ describe("public security boundaries", () => {
 
     const readOnlyPreview = await mcpTool(application, readOnly.token, "design_preview_changes", {
       design_id: allowed.document.id,
+      task_id: "task_security_read_only_probe",
       base_version: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Denied preview" } }],
       max_size: 256,
@@ -852,10 +877,23 @@ describe("public security boundaries", () => {
     const previewOnly = installGrant(application, {
       id: "preview_only_scope",
       projectIds: [allowed.document.id],
-      scopes: ["design:read", "design:preview"],
+      scopes: ["design:read", "design:preview", "task:claim", "task:update"],
+    });
+    const previewTask = application.enterprise.createAgentTask("local", {
+      designId: allowed.document.id,
+      brief: "Exercise the task-backed preview-only scope",
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "security-scope-preview-task-0001",
+    });
+    application.enterprise.claimAgentTask(previewOnly.actorId, previewTask.id);
+    application.enterprise.transitionAgentTask(previewOnly.actorId, previewTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
     });
     const proposed = await mcpTool(application, previewOnly.token, "design_preview_changes", {
       design_id: allowed.document.id,
+      task_id: previewTask.id,
       base_version: 1,
       operations: [{ type: "update_node", node_id: frameId, patch: { name: "Preview-only proposal" } }],
       max_size: 256,
@@ -875,7 +913,7 @@ describe("public security boundaries", () => {
       result: { structuredContent: { ok: boolean; error: { code: string; message: string } } };
     }>().result.structuredContent).toMatchObject({
       ok: false,
-      error: { code: "FORBIDDEN", message: expect.stringContaining("design:write") },
+      error: { code: "FORBIDDEN", message: expect.stringContaining("website") },
     });
     const previewOnlyRestore = await mcpTool(application, previewOnly.token, "design_restore_revision", {
       design_id: allowed.document.id,
@@ -889,6 +927,7 @@ describe("public security boundaries", () => {
 
     const ordinaryArchiveBypass = await mcpTool(application, previewOnly.token, "design_preview_changes", {
       design_id: allowed.document.id,
+      task_id: previewTask.id,
       base_version: 1,
       operations: [{ type: "archive_nodes", node_ids: [frameId] }],
       max_size: 256,
@@ -902,6 +941,7 @@ describe("public security boundaries", () => {
       "design_preview_archive_nodes",
       {
         design_id: allowed.document.id,
+        task_id: previewTask.id,
         base_version: 1,
         operations: [{ type: "update_node", node_id: frameId, patch: { name: "Not an archive" } }],
         max_size: 256,
@@ -910,14 +950,34 @@ describe("public security boundaries", () => {
     expect(archiveWithoutArchiveOperation.json<{
       result: { structuredContent: { ok: boolean; error: { code: string } } };
     }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "VALIDATION_FAILED" } });
+    application.enterprise.transitionAgentTask(previewOnly.actorId, previewTask.id, {
+      expectedStatus: "in_progress",
+      toStatus: "failed",
+      message: "Complete the preview-only scope probe",
+    });
 
     const writer = installGrant(application, {
       id: "write_scope",
       projectIds: [allowed.document.id],
-      scopes: ["design:read", "design:preview", "design:write"],
+      scopes: ["design:read", "design:preview", "design:write", "task:claim", "task:update"],
+    });
+    const archiveTask = application.enterprise.createAgentTask("local", {
+      designId: allowed.document.id,
+      brief: "Archive through an exact human-approved preview",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "security-scope-archive-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(writer.actorId, archiveTask.id);
+    application.enterprise.transitionAgentTask(writer.actorId, archiveTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
     });
     const archiveProposal = await mcpTool(application, writer.token, "design_preview_archive_nodes", {
       design_id: allowed.document.id,
+      task_id: archiveTask.id,
       base_version: 1,
       operations: [{ type: "archive_nodes", node_ids: [frameId] }],
       max_size: 256,
@@ -928,6 +988,11 @@ describe("public security boundaries", () => {
     expect(archiveProposalBody).toMatchObject({
       ok: true,
       preview: { destructive: true, kind: "archive" },
+    });
+    application.enterprise.transitionAgentTask(writer.actorId, archiveTask.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: archiveProposalBody.preview.id },
     });
     const wrongCommitPath = await mcpTool(application, writer.token, "design_commit_preview", {
       design_id: allowed.document.id,
@@ -940,10 +1005,7 @@ describe("public security boundaries", () => {
       result: { structuredContent: { ok: boolean; error: { code: string; details?: { requiredTool?: string } } } };
     }>().result.structuredContent).toMatchObject({
       ok: false,
-      error: {
-        code: "VALIDATION_FAILED",
-        details: { requiredTool: "design_commit_archive_preview" },
-      },
+      error: { code: "FORBIDDEN" },
     });
     const committedArchive = await mcpTool(application, writer.token, "design_commit_archive_preview", {
       design_id: allowed.document.id,
@@ -953,8 +1015,20 @@ describe("public security boundaries", () => {
       message: "Approved scoped archive",
     });
     expect(committedArchive.json<{
-      result: { structuredContent: { ok: boolean; design: { version: number } } };
-    }>().result.structuredContent).toMatchObject({ ok: true, design: { version: 2 } });
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+    const humanCommit = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${allowed.document.id}/archive-previews/${archiveProposalBody.preview.id}/commit`,
+      payload: {
+        expectedBaseVersion: 1,
+        idempotencyKey: "security-scope-archive-human-commit-0001",
+        message: "Approve scoped archive",
+        taskId: archiveTask.id,
+      },
+    });
+    expect(humanCommit.statusCode, humanCommit.body).toBe(200);
+    expect(humanCommit.json()).toMatchObject({ version: 2, task: { status: "completed" } });
   });
 
   it("rejects expired, revoked, disconnected, and disabled scoped MCP credentials at the HTTP boundary", async () => {
@@ -1221,11 +1295,24 @@ describe("public security boundaries", () => {
     const grant = installGrant(application, {
       id: "prompt_data_agent",
       projectIds: [created.document.id],
-      scopes: ["design:read", "design:preview", "design:write"],
+      scopes: ["design:read", "design:preview", "design:write", "task:claim", "task:update"],
+    });
+    const task = application.enterprise.createAgentTask("local", {
+      designId: created.document.id,
+      brief: "Preserve prompt-like text as inert design data",
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "security-prompt-data-task-0001",
+    });
+    application.enterprise.claimAgentTask(grant.actorId, task.id);
+    application.enterprise.transitionAgentTask(grant.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
     });
 
     const previewResponse = await mcpTool(application, grant.token, "design_preview_changes", {
       design_id: created.document.id,
+      task_id: task.id,
       base_version: 1,
       operations: [{
         type: "create_tree",
@@ -1280,18 +1367,27 @@ describe("public security boundaries", () => {
       expect.objectContaining({ type: "image", mimeType: "image/png" }),
     ]));
     const promptNodeId = preview.result.structuredContent.preview.createdIds.temporary["tmp:prompt-text"]!;
+    application.enterprise.transitionAgentTask(grant.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.result.structuredContent.preview.id },
+    });
 
-    const commitResponse = await mcpTool(application, grant.token, "design_commit_preview", {
-      design_id: created.document.id,
-      preview_id: preview.result.structuredContent.preview.id,
-      expected_base_version: 1,
-      idempotency_key: "security-prompt-data-commit-0001",
-      message: "Store untrusted product copy as design data",
+    const commitResponse = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${created.document.id}/previews/${preview.result.structuredContent.preview.id}/commit`,
+      payload: {
+        expectedBaseVersion: 1,
+        idempotencyKey: "security-prompt-data-commit-0001",
+        message: "Store untrusted product copy as design data",
+        taskId: task.id,
+      },
     });
     expect(commitResponse.statusCode).toBe(200);
-    expect(commitResponse.json<{
-      result: { structuredContent: { ok: boolean; revision: { version: number } } };
-    }>().result.structuredContent).toMatchObject({ ok: true, revision: { version: 2 } });
+    expect(commitResponse.json<{ version: number; task: { status: string } }>()).toMatchObject({
+      version: 2,
+      task: { status: "completed" },
+    });
 
     const readResponse = await mcpTool(application, grant.token, "design_read", {
       design_id: created.document.id,
@@ -1334,7 +1430,7 @@ describe("public security boundaries", () => {
     });
 
     expect(application.service.history(grant.actorId, created.document.id)).toHaveLength(2);
-    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM agent_tasks").get()).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM agent_tasks").get()).toEqual({ count: 1 });
   });
 
   it("keeps prompt-like product specifications and repository inventories as inert bounded data", async () => {

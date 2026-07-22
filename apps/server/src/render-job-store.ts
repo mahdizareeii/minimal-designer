@@ -7,6 +7,7 @@ import {
   RENDERER_VERSION,
 } from "@designer/core";
 
+import { activeDesignSqlPredicate, isDesignArchived } from "./active-design.js";
 import { canonicalJson, createId } from "./ids.js";
 
 export type RenderJobKind = "render" | "normalize_raster";
@@ -206,13 +207,16 @@ export class SqliteRenderJobStore implements RenderJobRecorder {
          FROM designs d
          LEFT JOIN revisions r
            ON r.design_id = d.id AND r.version = ?
-         WHERE d.id = ?`,
+         WHERE d.id = ? AND ${activeDesignSqlPredicate("d")}`,
       ).get(input.documentRevision ?? -1, input.documentId) as {
         design_id: string;
         organization_id: string;
         revision_id: string | null;
       } | undefined
       : undefined;
+    if (input.documentId !== undefined && !resolved && isDesignArchived(this.sqlite, input.documentId)) {
+      throw new Error("Render-job document references an archived design.");
+    }
     let organizationId = resolved?.organization_id ?? null;
     let designId = resolved?.design_id ?? null;
     let scopeKind: "organization" | "internal" = resolved ? "organization" : "internal";
@@ -220,7 +224,10 @@ export class SqliteRenderJobStore implements RenderJobRecorder {
     if (!operation) throw new Error("Render-job operation is required.");
     if (input.scope?.kind === "organization") {
       const scopedDesign = input.scope.designId
-        ? this.sqlite.prepare("SELECT id, organization_id FROM designs WHERE id = ?").get(input.scope.designId) as {
+        ? this.sqlite.prepare(
+          `SELECT id, organization_id FROM designs
+           WHERE id = ? AND ${activeDesignSqlPredicate("designs")}`,
+        ).get(input.scope.designId) as {
           id: string;
           organization_id: string;
         } | undefined

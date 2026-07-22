@@ -50,9 +50,10 @@ export function changedNodeSummaries(
 }
 
 function reviewPage(document: DesignDocument, requestedPageId: PageId | null): DesignDocument["pages"][number] | null {
-  return document.pages.find((page) => page.id === requestedPageId && !page.archived)
-    ?? document.pages.find((page) => !page.archived)
-    ?? null;
+  if (requestedPageId !== null) {
+    return document.pages.find((page) => page.id === requestedPageId && !page.archived) ?? null;
+  }
+  return document.pages.find((page) => !page.archived) ?? null;
 }
 
 function visiblePageRoots(document: DesignDocument, pageId: PageId | null): DesignNode[] {
@@ -397,6 +398,8 @@ export function AgentPreviewReviewDialog({
   onCommit,
   onDiscard,
   onRetryPreviewRender,
+  presentation = "dialog",
+  showActions = true,
 }: {
   open: boolean;
   task: AgentTaskRecord;
@@ -407,10 +410,12 @@ export function AgentPreviewReviewDialog({
   actionError: string | null;
   baseMatchesHead: boolean;
   previewRenderStatus: PreviewRenderStatus;
-  onClose: () => void;
+  onClose?: () => void;
   onCommit: () => void;
   onDiscard: () => void;
   onRetryPreviewRender: () => void;
+  presentation?: "dialog" | "inline";
+  showActions?: boolean;
 }) {
   const [mode, setMode] = useState<"side-by-side" | "toggle">("side-by-side");
   const [visibleVersion, setVisibleVersion] = useState<"before" | "after">("after");
@@ -448,8 +453,13 @@ export function AgentPreviewReviewDialog({
   };
 
   return (
-    <div className="agent-review-backdrop" role="presentation">
-      <section className="agent-review-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-review-title">
+    <div className={presentation === "dialog" ? "agent-review-backdrop" : "agent-review-inline"} role={presentation === "dialog" ? "presentation" : undefined}>
+      <section
+        className={`agent-review-dialog ${presentation === "inline" ? "is-inline" : ""}`}
+        role={presentation === "dialog" ? "dialog" : "region"}
+        aria-modal={presentation === "dialog" ? "true" : undefined}
+        aria-labelledby="agent-review-title"
+      >
         <header className="agent-review-header">
           <div className="agent-review-heading">
             <span><GitCompareArrows size={19} /></span>
@@ -469,7 +479,7 @@ export function AgentPreviewReviewDialog({
             ) : (
               <button className="button button-secondary" disabled><Maximize2 size={12} /> Exact PNG unavailable</button>
             )}
-            <button className="icon-button" disabled={busy} onClick={onClose} aria-label="Close proposal review"><X size={16} /></button>
+            {presentation === "dialog" && <button className="icon-button" disabled={busy} onClick={onClose} aria-label="Close proposal review"><X size={16} /></button>}
           </div>
         </header>
 
@@ -539,7 +549,7 @@ export function AgentPreviewReviewDialog({
                   : !baseMatchesHead ? <span className="agent-review-action-error"><AlertTriangle size={12} /> The project head changed. Create a new preview; FormaSpec never auto-merges.</span>
                     : <span><CheckCircle2 size={12} /> Preview snapshot and hashes are persisted for exact commit.</span>}
           </div>
-          <div>
+          {showActions && <div>
             <button className="button button-secondary" disabled={busy || task.status !== "awaiting_approval"} onClick={onDiscard}><Trash2 size={13} /> Discard proposal</button>
             {previewRenderStatus === "unavailable" && <button className="button button-secondary" disabled={busy} onClick={onRetryPreviewRender}><RefreshCcw size={13} /> Retry PNG</button>}
             <button
@@ -550,7 +560,7 @@ export function AgentPreviewReviewDialog({
               {busy ? <LoaderCircle size={14} className="spin" /> : preview.destructive ? <ShieldAlert size={14} /> : <CheckCircle2 size={14} />}
               {preview.destructive ? "Commit archive" : "Commit exact preview"}
             </button>
-          </div>
+          </div>}
         </footer>
       </section>
     </div>

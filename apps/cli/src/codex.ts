@@ -3,13 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { AgentPairingTicket, BridgeController } from "./bridge-lifecycle.js";
+import {
+  FORMASPEC_ESSENTIAL_MCP_TOOLS,
+  type AgentPairingTicket,
+  type BridgeController,
+} from "./bridge-lifecycle.js";
 import { findExecutable, type CommandRunner } from "./process.js";
 
 const MANAGED_MARKER = ".formaspec-managed.json";
 const MANAGER_ID = "formaspecctl";
 const MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024;
-const FORMASPEC_PLUGIN_VERSION = "0.2.0";
+const FORMASPEC_PLUGIN_VERSION = "0.2.1";
 
 export const FORMASPEC_CODEX_PLUGIN_ID = "formaspec@formaspec";
 export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";
@@ -47,6 +51,11 @@ export interface ConnectCodexResult {
   changedMcp: boolean;
   changedPlugin: boolean;
   changedApprovalPolicy: boolean;
+}
+
+export interface InspectManagedCodexOptions {
+  environment: NodeJS.ProcessEnv;
+  commandRunner: CommandRunner;
 }
 
 function resolveCodexHome(environment: NodeJS.ProcessEnv): string {
@@ -181,6 +190,58 @@ function isDesiredConfiguration(stdout: string, mcpUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isCredentialFreeLoopbackConfiguration(stdout: string): boolean {
+  try {
+    const configuration = JSON.parse(stdout) as CodexMcpConfiguration;
+    if (configuration.transport?.type !== "streamable_http"
+      || typeof configuration.transport.url !== "string"
+      || configuration.transport.bearer_token_env_var != null
+      || configuration.transport.http_headers != null
+      || configuration.transport.env_http_headers != null) return false;
+    const url = new URL(configuration.transport.url);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return url.protocol === "http:"
+      && ["127.0.0.1", "::1", "localhost"].includes(host)
+      && url.pathname === "/mcp"
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+export async function isManagedCodexInstall(options: InspectManagedCodexOptions): Promise<boolean> {
+  const codexPath = findExecutable("codex", options.environment);
+  if (codexPath === null) return false;
+  let codexHome: string;
+  try {
+    codexHome = resolveCodexHome(options.environment);
+  } catch {
+    return false;
+  }
+  const managedTargets = [
+    path.join(codexHome, "skills", "formaspec"),
+    path.join(codexHome, "skills", "minimal-ui"),
+    path.join(codexHome, "formaspec-marketplace"),
+  ];
+  if (!hasManagedMarker(managedTargets[0]!) || !hasManagedMarker(managedTargets[2]!)) return false;
+  if (fs.existsSync(managedTargets[1]!) && !hasManagedMarker(managedTargets[1]!)) return false;
+  const existing = await options.commandRunner(codexPath, ["mcp", "get", "formaspec", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  if (existing.exitCode !== 0 || !isCredentialFreeLoopbackConfiguration(existing.stdout)) return false;
+  const marketplaceList = await options.commandRunner(codexPath, ["plugin", "marketplace", "list", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  if (marketplaceList.exitCode !== 0) return false;
+  const configuredRoot = parseMarketplaceRoot(marketplaceList.stdout, "formaspec");
+  return configuredRoot === undefined || configuredRoot === path.normalize(managedTargets[2]!);
 }
 
 interface CodexConfigText {
@@ -547,6 +608,14 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   // leave the pending ticket retryable instead of making the server advertise
   // an active connection that Codex cannot use.
   await options.bridge.authorizeAgent(options.pairing);
+  const verification = await options.bridge.verifyAgent();
+  if (!verification.verified
+    || !verification.checks.includes("initialize")
+    || !verification.checks.includes("tools/list")
+    || verification.serverName !== "formaspec"
+    || !FORMASPEC_ESSENTIAL_MCP_TOOLS.every((tool) => verification.essentialTools.includes(tool))) {
+    throw new Error("The authorized FormaSpec MCP connection did not identify FormaSpec and expose its essential design-preview tools.");
+  }
   return {
     codexPath,
     mcpUrl,

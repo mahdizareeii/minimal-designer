@@ -24,12 +24,12 @@ import {
 } from "./agent-task-schema.js";
 import {
   appendAuditEvent,
-  assertProjectAccess,
   assertScope,
   resolveAccess,
   type AccessContext,
   type OrganizationRole,
 } from "./authorization.js";
+import { activeDesignSqlPredicate, requireActiveDesign } from "./active-design.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
 import type { DesignerEventType, EventHub } from "./events.js";
@@ -40,6 +40,7 @@ import {
   type OrganizationPolicy,
 } from "./organization-policy-model.js";
 import { canonicalProductSpecification } from "./product-spec-persistence.js";
+import { previewTaskId } from "./preview-task-binding.js";
 import type { DesignerService, PreviewKind, RevisionResult } from "./service.js";
 
 const MAX_TRANSITION_DATA_BYTES = 65_536;
@@ -162,6 +163,10 @@ interface AgentTaskTransitionRow {
   message: string | null;
   data_json: string;
   created_at: string;
+}
+
+interface ActiveAgentTaskRow extends AgentTaskRow {
+  current_status: AgentTaskStatus;
 }
 
 interface AgentConnectionRow {
@@ -748,6 +753,80 @@ export class EnterpriseService {
     }
   }
 
+  authorizeAgentTaskDesignPreviewWork(
+    actorId: string,
+    input: {
+      taskId?: string;
+      designId: string;
+      baseVersion: number;
+    },
+  ): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role !== "agent") {
+      throw new DomainError("FORBIDDEN", "MCP design preview work requires a scoped agent connection.", 403);
+    }
+    assertScope(access, "design:preview");
+    assertScope(access, "design:read");
+    if (input.taskId === undefined) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "Agent design previews must be attached to an immutable claimed task.",
+        422,
+        {
+          details: {
+            requiredField: "task_id",
+            requiredSequence: ["task_create", "task_claim", "task_transition:in_progress", "design_preview_changes"],
+          },
+        },
+      );
+    }
+
+    let expired = false;
+    let staleCurrentVersion: number | null = null;
+    const transaction = this.database.sqlite.transaction(() => {
+      const task = this.requireAgentTaskRow(access, input.taskId as string);
+      if (task.design_id !== input.designId
+        || task.base_version !== input.baseVersion
+        || task.expected_output !== "design_preview") {
+        throw new DomainError("NOT_FOUND", "Agent task not found.", 404);
+      }
+      const current = this.currentTaskTransition(task.id);
+      if (this.claimedBy(task.id) !== access.principalId) {
+        throw new DomainError("FORBIDDEN", "Only the agent that claimed this task may create its design preview.", 403);
+      }
+      const now = this.nowIso();
+      if (!AGENT_TASK_STATUSES.slice(4).includes(current.to_status) && task.expires_at <= now) {
+        this.materializeTaskTerminalState(access, task, current, "expired", "Task expired before preview creation.", now, {
+          reason: "expired_before_preview",
+        });
+        expired = true;
+        return;
+      }
+      if (current.to_status !== "in_progress") {
+        throw this.taskStateConflict("in_progress", current.to_status);
+      }
+      const design = this.requireDesignForAccess(access, task.design_id);
+      if (design.current_version !== task.base_version) {
+        this.materializeTaskTerminalState(
+          access,
+          task,
+          current,
+          "cancelled",
+          "Task was cancelled because its pinned design version is stale.",
+          now,
+          { reason: "stale_base", expectedBaseVersion: task.base_version, currentVersion: design.current_version },
+        );
+        staleCurrentVersion = design.current_version;
+      }
+    });
+    transaction.immediate();
+    this.flushPendingEventsSafely();
+    if (expired) throw new DomainError("TASK_EXPIRED", "The agent task expired before preview creation.", 410);
+    if (staleCurrentVersion !== null) {
+      throw this.versionConflict(input.baseVersion, staleCurrentVersion, "design");
+    }
+  }
+
   createAgentTask(actorId: string, input: {
     designId: string;
     brief: string;
@@ -768,6 +847,9 @@ export class EnterpriseService {
     }
     this.assertTaskSelection(design.id, input.baseVersion, selection);
     const key = boundedText(input.idempotencyKey, "Idempotency key", 240);
+    if (expectedOutput === "design_preview") {
+      this.materializeDesignPreviewTaskStates(access, design.id, design.current_version, this.nowIso());
+    }
     return this.withIdempotency(access, `task:${design.id}:create`, key, {
       ...input,
       brief,
@@ -779,6 +861,29 @@ export class EnterpriseService {
       if (current.current_version !== input.baseVersion) throw this.versionConflict(input.baseVersion, current.current_version, "design");
       const nowDate = this.#now();
       const now = nowDate.toISOString();
+      if (expectedOutput === "design_preview") {
+        const active = this.activeDesignPreviewTasks(design.id);
+        if (active.length > 0) {
+          const primary = active[0] as ActiveAgentTaskRow;
+          throw new DomainError(
+            "TASK_STATE_CONFLICT",
+            `Project ${design.id} already has a nonterminal design-preview task.`,
+            409,
+            {
+              retryable: false,
+              details: {
+                designId: design.id,
+                expectedOutput: "design_preview",
+                activeTaskId: primary.id,
+                activeStatus: primary.current_status,
+                activeBaseVersion: primary.base_version,
+                activeExpiresAt: primary.expires_at,
+                activeTaskIds: active.map((task) => task.id),
+              },
+            },
+          );
+        }
+      }
       const taskId = workflowId("task");
       const expiresAt = new Date(nowDate.getTime() + expiresInSeconds * 1_000).toISOString();
       this.database.sqlite.prepare(
@@ -800,21 +905,38 @@ export class EnterpriseService {
   readAgentTask(actorId: string, taskId: string): AgentTaskResult {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "task:read");
+    const row = this.requireAgentTaskRow(access, taskId);
+    if (row.expected_output === "design_preview") {
+      const design = this.requireDesignForAccess(access, row.design_id);
+      this.materializeDesignPreviewTaskStates(access, design.id, design.current_version, this.nowIso());
+    }
     return this.agentTaskResult(this.requireAgentTaskRow(access, taskId));
   }
 
   listAgentTasks(actorId: string, input: {
     designId?: string;
     status?: AgentTaskStatus;
+    expectedOutput?: AgentTaskExpectedOutput;
     limit?: number;
   } = {}): AgentTaskResult[] {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "task:read");
-    const designId = input.designId === undefined
+    const design = input.designId === undefined
       ? undefined
-      : this.requireDesignForAccess(access, input.designId).id;
+      : this.requireDesignForAccess(access, input.designId);
+    if (design !== undefined) {
+      this.materializeDesignPreviewTaskStates(access, design.id, design.current_version, this.nowIso());
+    }
+    const designId = design?.id;
     const limit = Math.max(1, Math.min(input.limit ?? 50, 100));
-    const filters = ["task.organization_id = ?"];
+    const filters = [
+      "task.organization_id = ?",
+      `EXISTS (
+        SELECT 1 FROM designs active_design
+        WHERE active_design.id = task.design_id
+          AND ${activeDesignSqlPredicate("active_design")}
+      )`,
+    ];
     const parameters: Array<string | number> = [access.organizationId];
     if (designId) {
       filters.push("task.design_id = ?");
@@ -831,6 +953,10 @@ export class EnterpriseService {
       ) = ?`);
       parameters.push(input.status);
     }
+    if (input.expectedOutput !== undefined) {
+      filters.push("task.expected_output = ?");
+      parameters.push(input.expectedOutput);
+    }
     const rows = this.database.sqlite.prepare(
       `SELECT task.* FROM agent_tasks task
        WHERE ${filters.join(" AND ")}
@@ -844,6 +970,7 @@ export class EnterpriseService {
     if (access.role !== "agent") throw new DomainError("FORBIDDEN", "Only an agent connection can claim an agent task.", 403);
     assertScope(access, "task:claim");
     let expired = false;
+    let staleCurrentVersion: number | null = null;
     const transaction = this.database.sqlite.transaction(() => {
       const row = this.requireAgentTaskRow(access, taskId);
       const current = this.currentTaskTransition(row.id);
@@ -857,7 +984,19 @@ export class EnterpriseService {
         return this.agentTaskResult(row);
       }
       const design = this.requireDesignForAccess(access, row.design_id);
-      if (design.current_version !== row.base_version) throw this.versionConflict(row.base_version, design.current_version, "design");
+      if (design.current_version !== row.base_version) {
+        this.materializeTaskTerminalState(
+          access,
+          row,
+          current,
+          "cancelled",
+          "Task was cancelled because its pinned design version is stale.",
+          now,
+          { reason: "stale_base", expectedBaseVersion: row.base_version, currentVersion: design.current_version },
+        );
+        staleCurrentVersion = design.current_version;
+        return this.agentTaskResult(row);
+      }
       this.appendTaskTransition(access, row.id, "queued", "claimed", "Task claimed", {}, now);
       appendAuditEvent(this.database.sqlite, access, "agent_task.claim", "agent_task", row.id, { designId: row.design_id });
       return this.agentTaskResult(row);
@@ -865,6 +1004,7 @@ export class EnterpriseService {
     const result = transaction.immediate();
     this.flushPendingEventsSafely();
     if (expired) throw new DomainError("TASK_EXPIRED", "The agent task expired before it could be claimed.", 410);
+    if (staleCurrentVersion !== null) throw this.versionConflict(result.baseVersion, staleCurrentVersion, "design");
     return result;
   }
 
@@ -882,9 +1022,42 @@ export class EnterpriseService {
       throw new DomainError("PAYLOAD_TOO_LARGE", "Task transition data may not exceed 64 KiB.", 413);
     }
     let expired = false;
+    let previewExpired = false;
+    let staleCurrentVersion: number | null = null;
     const transaction = this.database.sqlite.transaction(() => {
       const row = this.requireAgentTaskRow(access, taskId);
       const current = this.currentTaskTransition(row.id);
+      if (row.expected_output === "design_preview" && current.to_status === "awaiting_approval") {
+        const currentData = jsonObject(current.data_json, "task transition");
+        const previewId = typeof currentData.previewId === "string" ? currentData.previewId : null;
+        const preview = previewId === null ? undefined : this.database.sqlite.prepare(
+          `SELECT status, expires_at, render_metadata_json FROM previews
+           WHERE id = ? AND design_id = ? AND root_base_version = ?`,
+        ).get(previewId, row.design_id, row.base_version) as {
+          status: string;
+          expires_at: string;
+          render_metadata_json: string | null;
+        } | undefined;
+        if (!preview
+          || previewId === null
+          || previewTaskId(this.database.sqlite, previewId) !== row.id
+          || preview.status !== "ready"
+          || preview.expires_at <= this.nowIso()
+          || preview.render_metadata_json === null) {
+          const now = this.nowIso();
+          this.materializeTaskTerminalState(
+            access,
+            row,
+            current,
+            "expired",
+            "Task expired because its exact design preview is no longer reviewable.",
+            now,
+            { reason: "preview_unavailable", ...(previewId === null ? {} : { previewId }) },
+          );
+          previewExpired = true;
+          return this.agentTaskResult(row);
+        }
+      }
       if (current.to_status !== input.expectedStatus) throw this.taskStateConflict(input.expectedStatus, current.to_status);
       const now = this.nowIso();
       if (!AGENT_TASK_STATUSES.slice(4).includes(current.to_status) && row.expires_at <= now) {
@@ -918,12 +1091,51 @@ export class EnterpriseService {
           && current.to_status === "awaiting_approval" && input.toStatus === "completed";
         if (!canCancel && !canApprove) throw new DomainError("FORBIDDEN", "The current role cannot make this task transition.", 403);
       }
-      if (input.toStatus === "in_progress") {
+      if (input.toStatus === "in_progress"
+        || (row.expected_output === "design_preview" && input.toStatus === "awaiting_approval")) {
         const design = this.requireDesignForAccess(access, row.design_id);
-        if (design.current_version !== row.base_version) throw this.versionConflict(row.base_version, design.current_version, "design");
+        if (design.current_version !== row.base_version) {
+          this.materializeTaskTerminalState(
+            access,
+            row,
+            current,
+            "cancelled",
+            "Task was cancelled because its pinned design version is stale.",
+            now,
+            {
+              reason: "stale_base",
+              expectedBaseVersion: row.base_version,
+              currentVersion: design.current_version,
+              ...(typeof data.previewId === "string" ? { previewId: data.previewId } : {}),
+            },
+          );
+          staleCurrentVersion = design.current_version;
+          return this.agentTaskResult(row);
+        }
       }
       if (input.toStatus === "awaiting_approval" || input.toStatus === "completed") {
-        this.validateTaskCompletion(row, data);
+        try {
+          this.validateTaskCompletion(row, data);
+        } catch (error) {
+          if (error instanceof DomainError
+            && error.code === "PREVIEW_EXPIRED"
+            && row.expected_output === "design_preview"
+            && input.toStatus === "awaiting_approval"
+            && typeof data.previewId === "string") {
+            this.materializeTaskTerminalState(
+              access,
+              row,
+              current,
+              "expired",
+              "Task expired because its exact design preview expired before approval.",
+              now,
+              { reason: "preview_expired", previewId: data.previewId },
+            );
+            previewExpired = true;
+            return this.agentTaskResult(row);
+          }
+          throw error;
+        }
       }
       const discardedPreviewId = input.toStatus === "cancelled"
         ? this.expireDiscardedTaskPreview(row, current, data, now)
@@ -940,6 +1152,12 @@ export class EnterpriseService {
     const result = transaction.immediate();
     this.flushPendingEventsSafely();
     if (expired) throw new DomainError("TASK_EXPIRED", "The agent task expired.", 410);
+    if (previewExpired) {
+      throw new DomainError("PREVIEW_EXPIRED", "The exact task preview expired before approval; create a new task.", 410, {
+        retryable: true,
+      });
+    }
+    if (staleCurrentVersion !== null) throw this.versionConflict(result.baseVersion, staleCurrentVersion, "design");
     return result;
   }
 
@@ -1186,6 +1404,7 @@ export class EnterpriseService {
       const grantToken = `fsg_${randomBytes(32).toString("base64url")}`;
       const scopes = jsonStringArray(row.scopes_json, "connection scopes");
       const projectIds = jsonStringArray(row.project_ids_json, "connection projects");
+      this.assertAgentConnectionProjectsActive(row.organization_id, projectIds);
       const expiresAt = row.expires_at as string;
       const policy = loadOrganizationPolicy(this.database.sqlite, row.organization_id).policy;
       this.assertAgentConnectionPolicy(policy, {
@@ -1273,6 +1492,7 @@ export class EnterpriseService {
       const policy = loadOrganizationPolicy(this.database.sqlite, access.organizationId).policy;
       const scopes = jsonStringArray(row.scopes_json, "connection scopes");
       const projectIds = jsonStringArray(row.project_ids_json, "connection projects");
+      this.assertAgentConnectionProjectsActive(row.organization_id, projectIds);
       const remainingSeconds = row.expires_at
         ? Math.max(0, Math.ceil((new Date(row.expires_at).getTime() - nowDate.getTime()) / 1_000))
         : policy.agents.maximumExpirySeconds;
@@ -1520,7 +1740,7 @@ export class EnterpriseService {
   private requirePlanningSessionRow(access: AccessContext, sessionId: string): PlanningSessionRow {
     const row = this.database.sqlite.prepare("SELECT * FROM planning_sessions WHERE id = ?").get(sessionId) as PlanningSessionRow | undefined;
     if (!row) throw new DomainError("NOT_FOUND", "Planning session not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.design_id);
+    requireActiveDesign(this.database.sqlite, access, row.design_id);
     return row;
   }
 
@@ -1541,6 +1761,122 @@ export class EnterpriseService {
         details: { missingSections: missing },
       });
     }
+  }
+
+  private activeDesignPreviewTasks(designId: string): ActiveAgentTaskRow[] {
+    return this.database.sqlite.prepare(
+      `SELECT task.*, current.to_status AS current_status
+       FROM agent_tasks task
+       JOIN agent_task_transitions current ON current.rowid = (
+         SELECT latest.rowid FROM agent_task_transitions latest
+         WHERE latest.task_id = task.id ORDER BY latest.rowid DESC LIMIT 1
+       )
+       WHERE task.design_id = ?
+         AND task.expected_output = 'design_preview'
+         AND current.to_status IN ('queued', 'claimed', 'in_progress', 'awaiting_approval')
+       ORDER BY CASE current.to_status WHEN 'awaiting_approval' THEN 0 ELSE 1 END,
+                task.created_at DESC, task.id DESC`,
+    ).all(designId) as ActiveAgentTaskRow[];
+  }
+
+  private materializeDesignPreviewTaskStates(
+    access: AccessContext,
+    designId: string,
+    currentVersion: number,
+    now: string,
+  ): void {
+    const execute = () => {
+      for (const task of this.activeDesignPreviewTasks(designId)) {
+        const current = this.currentTaskTransition(task.id);
+        if (task.expires_at <= now) {
+          this.materializeTaskTerminalState(access, task, current, "expired", "Task expired.", now, {
+            reason: "expired",
+          });
+          continue;
+        }
+        if (current.to_status === "awaiting_approval") {
+          const currentData = jsonObject(current.data_json, "task transition");
+          const previewId = typeof currentData.previewId === "string" ? currentData.previewId : null;
+          const preview = previewId === null ? undefined : this.database.sqlite.prepare(
+            `SELECT status, expires_at, render_metadata_json FROM previews
+             WHERE id = ? AND design_id = ? AND root_base_version = ?`,
+          ).get(previewId, task.design_id, task.base_version) as {
+            status: string;
+            expires_at: string;
+            render_metadata_json: string | null;
+          } | undefined;
+          if (!preview
+            || previewId === null
+            || previewTaskId(this.database.sqlite, previewId) !== task.id
+            || preview.status !== "ready"
+            || preview.expires_at <= now
+            || preview.render_metadata_json === null) {
+            this.materializeTaskTerminalState(
+              access,
+              task,
+              current,
+              "expired",
+              "Task expired because its exact design preview is no longer reviewable.",
+              now,
+              { reason: "preview_unavailable", ...(previewId === null ? {} : { previewId }) },
+            );
+            continue;
+          }
+        }
+        if (task.base_version !== currentVersion) {
+          this.materializeTaskTerminalState(
+            access,
+            task,
+            current,
+            "cancelled",
+            "Task was cancelled because its pinned design version is stale.",
+            now,
+            { reason: "stale_base", expectedBaseVersion: task.base_version, currentVersion },
+          );
+        }
+      }
+    };
+    if (this.database.sqlite.inTransaction) {
+      execute();
+      return;
+    }
+    const transaction = this.database.sqlite.transaction(execute);
+    transaction.immediate();
+    this.flushPendingEventsSafely();
+  }
+
+  private materializeTaskTerminalState(
+    access: AccessContext,
+    task: AgentTaskRow,
+    current: AgentTaskTransitionRow,
+    status: "cancelled" | "expired",
+    message: string,
+    now: string,
+    details: Record<string, unknown>,
+  ): void {
+    if (!taskTransitionGraph[current.to_status].includes(status)) return;
+    const currentData = jsonObject(current.data_json, "task transition");
+    const previewId = typeof currentData.previewId === "string"
+      ? currentData.previewId
+      : typeof details.previewId === "string"
+        ? details.previewId
+        : null;
+    if (previewId !== null && task.expected_output === "design_preview") {
+      this.database.sqlite.prepare(
+        `UPDATE previews SET status = 'expired', expires_at = ?
+         WHERE id = ? AND design_id = ? AND root_base_version = ? AND status IN ('ready', 'blocked')`,
+      ).run(now, previewId, task.design_id, task.base_version);
+    }
+    const transitionData = { ...details, ...(previewId === null ? {} : { previewId }) };
+    this.appendTaskTransition(access, task.id, current.to_status, status, message, transitionData, now);
+    appendAuditEvent(
+      this.database.sqlite,
+      access,
+      status === "expired" ? "agent_task.expire" : "agent_task.cancel_stale",
+      "agent_task",
+      task.id,
+      { fromStatus: current.to_status, expectedOutput: task.expected_output, ...transitionData },
+    );
   }
 
   private agentTaskResult(row: AgentTaskRow): AgentTaskResult {
@@ -1596,7 +1932,7 @@ export class EnterpriseService {
   private requireAgentTaskRow(access: AccessContext, taskId: string): AgentTaskRow {
     const row = this.database.sqlite.prepare("SELECT * FROM agent_tasks WHERE id = ?").get(taskId) as AgentTaskRow | undefined;
     if (!row) throw new DomainError("NOT_FOUND", "Agent task not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.design_id);
+    requireActiveDesign(this.database.sqlite, access, row.design_id);
     return row;
   }
 
@@ -1635,11 +1971,26 @@ export class EnterpriseService {
       case "design_preview": {
         const { previewId } = parsed.data as { previewId: string };
         const row = this.database.sqlite.prepare(
-          `SELECT id, actor_id FROM previews
+          `SELECT id, actor_id, expires_at, render_metadata_json FROM previews
            WHERE id = ? AND design_id = ? AND root_base_version = ? AND status IN ('ready', 'committed')`,
-        ).get(previewId, task.design_id, task.base_version) as { id: string; actor_id: string } | undefined;
-        if (!row || !this.taskArtifactBelongsToClaimedAgent(task.id, row.actor_id)) {
+        ).get(previewId, task.design_id, task.base_version) as {
+          id: string;
+          actor_id: string;
+          expires_at: string;
+          render_metadata_json: string | null;
+        } | undefined;
+        if (!row
+          || previewTaskId(this.database.sqlite, previewId) !== task.id
+          || !this.taskArtifactBelongsToClaimedAgent(task.id, row.actor_id)) {
           throw new DomainError("VALIDATION_FAILED", "The completed design preview does not match the task base or claimed agent.", 422);
+        }
+        if (row.expires_at <= this.nowIso()) {
+          throw new DomainError("PREVIEW_EXPIRED", "The exact task preview expired before approval.", 410, { retryable: true });
+        }
+        if (row.render_metadata_json === null) {
+          throw new DomainError("PREVIEW_ENGINE_MISMATCH", "The exact task preview has no persisted render evidence.", 409, {
+            retryable: true,
+          });
         }
         return;
       }
@@ -1710,7 +2061,9 @@ export class EnterpriseService {
       `SELECT id, actor_id FROM previews
        WHERE id = ? AND design_id = ? AND root_base_version = ? AND status = 'ready'`,
     ).get(previewId, task.design_id, task.base_version) as { id: string; actor_id: string } | undefined;
-    if (!preview || !this.taskArtifactBelongsToClaimedAgent(task.id, preview.actor_id)) {
+    if (!preview
+      || previewTaskId(this.database.sqlite, previewId) !== task.id
+      || !this.taskArtifactBelongsToClaimedAgent(task.id, preview.actor_id)) {
       throw new DomainError("VALIDATION_FAILED", "The discarded preview does not match the task base or claimed agent.", 422);
     }
     const updated = this.database.sqlite.prepare(
@@ -1732,17 +2085,32 @@ export class EnterpriseService {
       const current = this.currentTaskTransition(task.id);
       const currentData = jsonObject(current.data_json, "task transition");
       if (current.to_status === "expired") return currentData.previewId === previewId;
-      if (current.to_status !== "awaiting_approval" || task.expires_at > now) return false;
+      if (current.to_status !== "awaiting_approval") return false;
       if (currentData.previewId !== previewId) {
         throw new DomainError("VALIDATION_FAILED", "The preview does not match the expired task proposal.", 422);
       }
+      const preview = this.database.sqlite.prepare(
+        `SELECT status, expires_at FROM previews
+         WHERE id = ? AND design_id = ? AND root_base_version = ?`,
+      ).get(previewId, task.design_id, task.base_version) as {
+        status: string;
+        expires_at: string;
+      } | undefined;
+      const taskExpired = task.expires_at <= now;
+      const previewExpired = !preview
+        || previewTaskId(this.database.sqlite, previewId) !== task.id
+        || preview.status !== "ready"
+        || preview.expires_at <= now;
+      if (!taskExpired && !previewExpired) return false;
       this.appendTaskTransition(
         access,
         task.id,
         "awaiting_approval",
         "expired",
-        "Task expired before its exact preview was approved.",
-        { previewId },
+        previewExpired
+          ? "Task expired because its exact preview was no longer reviewable."
+          : "Task expired before its exact preview was approved.",
+        { previewId, reason: previewExpired ? "preview_expired" : "task_expired" },
         now,
       );
       appendAuditEvent(this.database.sqlite, access, "agent_task.expire", "agent_task", task.id, {
@@ -1856,12 +2224,19 @@ export class EnterpriseService {
   }
 
   private requireDesignForAccess(access: AccessContext, designId: string): DesignAccessRow {
-    const row = this.database.sqlite.prepare(
-      "SELECT id, organization_id, current_version, current_revision_id FROM designs WHERE id = ?",
-    ).get(designId) as DesignAccessRow | undefined;
-    if (!row) throw new DomainError("NOT_FOUND", "Design not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.id);
-    return row;
+    return requireActiveDesign(this.database.sqlite, access, designId);
+  }
+
+  private assertAgentConnectionProjectsActive(organizationId: string, projectIds: readonly string[]): void {
+    const lookup = this.database.sqlite.prepare(
+      `SELECT id FROM designs
+       WHERE id = ? AND organization_id = ? AND ${activeDesignSqlPredicate("designs")}`,
+    );
+    for (const projectId of projectIds) {
+      if (!lookup.get(projectId, organizationId)) {
+        throw new DomainError("NOT_FOUND", "Design not found.", 404);
+      }
+    }
   }
 
   private assertProductSpecificationWrite(access: AccessContext, scope: "product_spec:preview" | "product_spec:write"): void {

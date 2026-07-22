@@ -391,15 +391,18 @@ describe("core inspect, restore, export, and render HTTP authorization", () => {
       expect(error).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
       for (const value of hidden) expect(JSON.stringify(error.toJSON())).not.toContain(value);
     }
-    for (const callback of [
+    const restrictedRead = captureDomainError(
       () => application.service.authorizeDesignRead(fixture.restrictedGrant.actorId, fixture.denied.id),
+    );
+    expect(restrictedRead).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+    expect(JSON.stringify(restrictedRead.toJSON())).not.toContain(fixture.denied.id);
+    expect(JSON.stringify(restrictedRead.toJSON())).not.toContain(fixture.denied.name);
+    const restrictedRestore = captureDomainError(
       () => application.service.authorizeDesignRestore(fixture.restrictedGrant.actorId, fixture.denied.id),
-    ]) {
-      const error = captureDomainError(callback);
-      expect(error).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
-      expect(JSON.stringify(error.toJSON())).not.toContain(fixture.denied.id);
-      expect(JSON.stringify(error.toJSON())).not.toContain(fixture.denied.name);
-    }
+    );
+    expect(restrictedRestore).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+    expect(JSON.stringify(restrictedRestore.toJSON())).not.toContain(fixture.denied.id);
+    expect(JSON.stringify(restrictedRestore.toJSON())).not.toContain(fixture.denied.name);
 
     const foreignHidden = [
       ...hidden,
@@ -472,7 +475,7 @@ describe("core inspect, restore, export, and render HTTP authorization", () => {
     expect(await filesBelow(fixture.root)).toEqual(beforeFiles);
   });
 
-  it("preserves valid trusted-header UI and scoped-agent inspect, restore, export, and render behavior", async () => {
+  it("preserves valid trusted-header UI inspect, restore, export, and render behavior while denying agent writes", async () => {
     const fixture = await createFixture("allowed");
     const { application } = fixture;
     const inspect = await application.app.inject({
@@ -553,7 +556,7 @@ describe("core inspect, restore, export, and render HTTP authorization", () => {
       restore: { targetVersion: 1 },
     });
 
-    const agentUpdated = application.service.applyRevision(
+    expect(captureDomainError(() => application.service.applyRevision(
       fixture.restrictedGrant.actorId,
       fixture.agentProject.id,
       {
@@ -565,19 +568,16 @@ describe("core inspect, restore, export, and render HTTP authorization", () => {
         }],
         idempotencyKey: "core-inspect-restore-agent-update-0001",
       },
-    );
-    expect(agentUpdated.revision.version).toBe(2);
-    const agentRestored = application.service.restoreRevision(
+    ))).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+    expect(captureDomainError(() => application.service.restoreRevision(
       fixture.restrictedGrant.actorId,
       fixture.agentProject.id,
       {
         targetVersion: 1,
-        expectedBaseVersion: 2,
+        expectedBaseVersion: 1,
         idempotencyKey: "core-inspect-restore-agent-restore-0001",
       },
-    );
-    expect(agentRestored.revision.version).toBe(3);
-    expect(agentRestored.restore.targetVersion).toBe(1);
+    ))).toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
     const agentHistorical = application.service.getDesign(
       fixture.restrictedGrant.actorId,
       fixture.agentProject.id,

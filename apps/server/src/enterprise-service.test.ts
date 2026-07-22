@@ -267,6 +267,124 @@ describe("22-section planning workflow", () => {
 });
 
 describe("immutable agent task workflow", () => {
+  it("allows only one nonterminal design-preview task per project and preserves idempotent retries", () => {
+    const opened = setup();
+    try {
+      const input = {
+        designId: opened.created.document.id,
+        brief: "First active proposal",
+        baseVersion: 1,
+        expectedOutput: "design_preview" as const,
+        idempotencyKey: "single-active-task-0001",
+      };
+      const first = opened.enterprise.createAgentTask("local", input);
+      expect(opened.enterprise.createAgentTask("local", input)).toEqual(first);
+
+      expect(captureThrown(() => opened.enterprise.createAgentTask("local", {
+        ...input,
+        brief: "Conflicting proposal",
+        idempotencyKey: "single-active-task-0002",
+      }))).toMatchObject({
+        code: "TASK_STATE_CONFLICT",
+        statusCode: 409,
+        retryable: false,
+        details: {
+          designId: opened.created.document.id,
+          expectedOutput: "design_preview",
+          activeTaskId: first.id,
+          activeStatus: "queued",
+          activeBaseVersion: 1,
+          activeTaskIds: [first.id],
+        },
+      });
+
+      opened.enterprise.transitionAgentTask("local", first.id, {
+        expectedStatus: "queued",
+        toStatus: "cancelled",
+      });
+      const next = opened.enterprise.createAgentTask("local", {
+        ...input,
+        brief: "Replacement proposal",
+        idempotencyKey: "single-active-task-0003",
+      });
+      expect(next).toMatchObject({ status: "queued", designId: opened.created.document.id });
+      expect(next.id).not.toBe(first.id);
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("materializes an expired active task before accepting its replacement", () => {
+    const opened = setup();
+    try {
+      const first = opened.enterprise.createAgentTask("local", {
+        designId: opened.created.document.id,
+        brief: "Short-lived proposal",
+        baseVersion: 1,
+        expectedOutput: "design_preview",
+        idempotencyKey: "expired-active-task-0001",
+        expiresInSeconds: 60,
+      });
+      const future = new EnterpriseService(opened.database, opened.events, {
+        designerService: opened.designer,
+        now: () => new Date(Date.now() + 120_000),
+      });
+      const replacement = future.createAgentTask("local", {
+        designId: opened.created.document.id,
+        brief: "Replacement after expiry",
+        baseVersion: 1,
+        expectedOutput: "design_preview",
+        idempotencyKey: "expired-active-task-0002",
+      });
+      expect(replacement.status).toBe("queued");
+      expect(future.readAgentTask("local", first.id)).toMatchObject({
+        status: "expired",
+        transitions: expect.arrayContaining([
+          expect.objectContaining({ toStatus: "expired", data: { reason: "expired" } }),
+        ]),
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("materializes a stale queued task before accepting a task pinned to the new head", () => {
+    const opened = setup();
+    try {
+      const stale = opened.enterprise.createAgentTask("local", {
+        designId: opened.created.document.id,
+        brief: "Queued against the old head",
+        baseVersion: 1,
+        expectedOutput: "design_preview",
+        idempotencyKey: "stale-active-task-0001",
+      });
+      opened.designer.applyRevision("local", opened.created.document.id, {
+        baseVersion: 1,
+        operations: [{ type: "update_node", node_id: opened.frameId, patch: { name: "Version two" } }],
+        idempotencyKey: "stale-active-task-head-0001",
+      });
+      const replacement = opened.enterprise.createAgentTask("local", {
+        designId: opened.created.document.id,
+        brief: "Pinned to the new head",
+        baseVersion: 2,
+        expectedOutput: "design_preview",
+        idempotencyKey: "stale-active-task-0002",
+      });
+      expect(replacement).toMatchObject({ status: "queued", baseVersion: 2 });
+      expect(opened.enterprise.readAgentTask("local", stale.id)).toMatchObject({
+        status: "cancelled",
+        transitions: expect.arrayContaining([
+          expect.objectContaining({
+            toStatus: "cancelled",
+            data: { reason: "stale_base", expectedBaseVersion: 1, currentVersion: 2 },
+          }),
+        ]),
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
   it("claims a task, validates the expected output, and preserves its transition chain", () => {
     const opened = setup();
     try {
@@ -296,18 +414,13 @@ describe("immutable agent task workflow", () => {
       const preview = opened.designer.createPreview("usr_codex", opened.created.document.id, {
         baseVersion: 1,
         operations: [{ type: "update_node", node_id: opened.frameId, patch: { name: "Refined checkout" } }],
+        taskId: task.id,
       });
       expect(captureThrown(() => opened.enterprise.transitionAgentTask("usr_codex", task.id, {
         expectedStatus: "in_progress",
         toStatus: "completed",
         data: { previewId: preview.id, unexpected: true },
       }))).toMatchObject({ code: "VALIDATION_FAILED" });
-      const awaitingApproval = opened.enterprise.transitionAgentTask("usr_codex", task.id, {
-        expectedStatus: "in_progress",
-        toStatus: "awaiting_approval",
-        data: { previewId: preview.id },
-      });
-      expect(awaitingApproval.status).toBe("awaiting_approval");
       const png = encodeRgbaPng(16, 16, Buffer.alloc(16 * 16 * 4, 255));
       opened.designer.recordPreviewRenderMetadata("usr_codex", opened.created.document.id, preview.id, {
         options: { nodeId: opened.frameId, maxSize: 256 },
@@ -316,7 +429,13 @@ describe("immutable agent task workflow", () => {
         height: 16,
         renderer: "software",
         warnings: [],
+      }, { taskId: task.id });
+      const awaitingApproval = opened.enterprise.transitionAgentTask("usr_codex", task.id, {
+        expectedStatus: "in_progress",
+        toStatus: "awaiting_approval",
+        data: { previewId: preview.id },
       });
+      expect(awaitingApproval.status).toBe("awaiting_approval");
       const completed = opened.enterprise.approveAgentTaskDesignPreview("local", task.id, {
         designId: opened.created.document.id,
         previewId: preview.id,
@@ -354,6 +473,10 @@ describe("immutable agent task workflow", () => {
         expectedStatus: "claimed",
         toStatus: "in_progress",
       }))).toMatchObject({ code: "FORBIDDEN" });
+      opened.enterprise.transitionAgentTask("local", ownedTask.id, {
+        expectedStatus: "claimed",
+        toStatus: "cancelled",
+      });
 
       const staleTask = opened.enterprise.createAgentTask("local", {
         designId: opened.created.document.id,
@@ -371,6 +494,70 @@ describe("immutable agent task workflow", () => {
         code: "VERSION_CONFLICT",
         statusCode: 409,
       });
+      expect(opened.enterprise.readAgentTask("local", staleTask.id)).toMatchObject({
+        status: "cancelled",
+        transitions: expect.arrayContaining([
+          expect.objectContaining({
+            toStatus: "cancelled",
+            data: { reason: "stale_base", expectedBaseVersion: 1, currentVersion: 2 },
+          }),
+        ]),
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("cancels a task and expires its proposal when the design changes before approval", () => {
+    const opened = setup();
+    try {
+      const task = opened.enterprise.createAgentTask("local", {
+        designId: opened.created.document.id,
+        brief: "Proposal that will become stale",
+        baseVersion: 1,
+        expectedOutput: "design_preview",
+        idempotencyKey: "task-stale-before-approval-0001",
+      });
+      opened.enterprise.claimAgentTask("usr_codex", task.id);
+      opened.enterprise.transitionAgentTask("usr_codex", task.id, {
+        expectedStatus: "claimed",
+        toStatus: "in_progress",
+      });
+      const preview = opened.designer.createPreview("usr_codex", opened.created.document.id, {
+        baseVersion: 1,
+        operations: [{ type: "update_node", node_id: opened.frameId, patch: { name: "Stale proposal" } }],
+        taskId: task.id,
+      });
+      opened.designer.applyRevision("local", opened.created.document.id, {
+        baseVersion: 1,
+        operations: [{ type: "update_node", node_id: opened.frameId, patch: { name: "Human head" } }],
+        idempotencyKey: "task-stale-before-approval-human-head",
+      });
+
+      expect(captureThrown(() => opened.enterprise.transitionAgentTask("usr_codex", task.id, {
+        expectedStatus: "in_progress",
+        toStatus: "awaiting_approval",
+        data: { previewId: preview.id },
+      }))).toMatchObject({
+        code: "VERSION_CONFLICT",
+        details: { expectedVersion: 1, currentVersion: 2, subject: "design" },
+      });
+      expect(opened.enterprise.readAgentTask("local", task.id)).toMatchObject({
+        status: "cancelled",
+        transitions: expect.arrayContaining([
+          expect.objectContaining({
+            toStatus: "cancelled",
+            data: {
+              reason: "stale_base",
+              expectedBaseVersion: 1,
+              currentVersion: 2,
+              previewId: preview.id,
+            },
+          }),
+        ]),
+      });
+      expect(opened.database.sqlite.prepare("SELECT status FROM previews WHERE id = ?").get(preview.id))
+        .toEqual({ status: "expired" });
     } finally {
       opened.database.close();
     }

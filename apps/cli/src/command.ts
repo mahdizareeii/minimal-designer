@@ -9,6 +9,7 @@ import { createBridgeController, type BridgeController } from "./bridge-lifecycl
 import {
   connectCodex,
   FORMASPEC_CODEX_MENTION,
+  isManagedCodexInstall,
   MINIMAL_UI_CODEX_MENTION,
 } from "./codex.js";
 import { captureDockerRuntimeBinding, persistDockerRuntimeBinding } from "./docker-runtime-binding.js";
@@ -177,6 +178,52 @@ function recordedRuntimeMode(projectRoot: string, environment: NodeJS.ProcessEnv
   throw new Error(`Recorded FormaSpec runtime mode is unknown: ${value}. Run 'formaspecctl stop' and inspect the configured runtime run directory before restoring.`);
 }
 
+function runtimeHealthTarget(
+  projectRoot: string,
+  environment: NodeJS.ProcessEnv,
+): { origin: string; hostHeader?: string } {
+  const rawPort = optionalRuntimeFile(projectRoot, "api-port", environment) ?? "4310";
+  const port = Number(rawPort);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("The recorded FormaSpec API port is invalid.");
+  }
+  const mode = optionalRuntimeFile(projectRoot, "mode", environment);
+  const recordedUrl = optionalRuntimeFile(projectRoot, "url", environment);
+  if (mode === "server" && recordedUrl?.startsWith("https://")) {
+    const publicUrl = new URL(recordedUrl);
+    if (publicUrl.username || publicUrl.password || publicUrl.pathname !== "/" || publicUrl.search || publicUrl.hash) {
+      throw new Error("The recorded FormaSpec public server URL is invalid.");
+    }
+    return { origin: `http://127.0.0.1:${port}`, hostHeader: publicUrl.host };
+  }
+  return { origin: `http://127.0.0.1:${port}` };
+}
+
+async function verifyHealthEndpoint(
+  origin: string,
+  pathname: "/health/ready" | "/health/render",
+  hostHeader?: string,
+): Promise<void> {
+  const response = await fetch(`${origin}${pathname}`, {
+    headers: { accept: "application/json", ...(hostHeader === undefined ? {} : { host: hostHeader }) },
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > 65_536) {
+    await response.body?.cancel();
+    throw new Error("response was too large");
+  }
+  const text = await response.text();
+  if (Buffer.byteLength(text, "utf8") > 65_536) throw new Error("response was too large");
+  const body = JSON.parse(text) as { ok?: unknown };
+  if (body === null || typeof body !== "object" || body.ok !== true) throw new Error("response did not report ok=true");
+}
+
 function managedPidIsAlive(projectRoot: string, environment: NodeJS.ProcessEnv): boolean {
   const value = optionalRuntimeFile(projectRoot, "pid", environment);
   if (value === undefined) return false;
@@ -343,7 +390,20 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         io.stdout("Codex was not detected; FormaSpec is running and can be connected later with 'formaspecctl agent connect codex'.");
         return;
       }
-      const authorized = alreadyAuthorized || assumeYes || await confirm(
+      let managedRefresh = false;
+      if (!alreadyAuthorized && !assumeYes) {
+        try {
+          const bridgeStatus = await bridge().status();
+          if (bridgeStatus.running) {
+            await bridge().verifyAgent();
+            managedRefresh = await isManagedCodexInstall({ environment, commandRunner: runner });
+          }
+        } catch {
+          managedRefresh = false;
+        }
+      }
+      if (managedRefresh) io.stdout("Refreshing the already-authorized managed Codex connection and FormaSpec skills.");
+      const authorized = alreadyAuthorized || assumeYes || managedRefresh || await confirm(
         "Allow FormaSpec to configure Codex, install the managed FormaSpec plugin plus the Minimal UI compatibility alias, and verify the loopback MCP connection?",
       );
       if (!authorized) {
@@ -398,11 +458,36 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (strict !== undefined && strict !== "--strict") throw new Error(`Unexpected doctor option: ${strict}`);
       if (arguments_.length > 0) throw new Error(`Unexpected doctor option: ${arguments_[0]}`);
       const exitCode = await delegate(["doctor", target, ...(strict === undefined ? [] : [strict])]);
+      let runtimeUnavailable = false;
+      const healthTarget = runtimeHealthTarget(projectRoot(), environment);
+      for (const [pathname, label] of [
+        ["/health/ready", "Server readiness"],
+        ["/health/render", "Renderer health"],
+      ] as const) {
+        try {
+          await verifyHealthEndpoint(healthTarget.origin, pathname, healthTarget.hostHeader);
+          io.stdout(`${label}: verified (${healthTarget.origin}${pathname})`);
+        } catch (error) {
+          runtimeUnavailable = true;
+          io.stdout(`${label}: unavailable (${error instanceof Error ? error.message : String(error)})`);
+        }
+      }
       const codex = findExecutable("codex", environment);
       io.stdout(codex === null ? "Codex: not detected" : `Codex: detected at ${codex}`);
       const bridgeStatus = await bridge().status();
       io.stdout(`Local bridge: ${bridgeStatus.running ? "running" : "stopped"} (${bridgeStatus.url})`);
-      return exitCode;
+      if (!bridgeStatus.running) {
+        io.stdout("Codex MCP authorization: not checked because the bridge is stopped. Run './designer start local', then rerun doctor.");
+        return 1;
+      }
+      try {
+        const verification = await bridge().verifyAgent();
+        io.stdout(`Codex MCP authorization: verified as ${verification.serverName} (${verification.checks.join(" + ")}; ${verification.essentialTools.length} essential tools)`);
+      } catch (error) {
+        io.stdout(`Codex MCP authorization: unavailable (${error instanceof Error ? error.message : String(error)})`);
+        return 1;
+      }
+      return exitCode === 0 && !runtimeUnavailable ? 0 : 1;
     }
 
     if (command === "status") {
@@ -438,6 +523,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (["docker", "server"].includes(recordedRuntimeMode(projectRoot(), environment) ?? "")) await recordDockerBinding();
       const bridgeStatus = await bridge().ensureStarted();
       io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
+      await offerCodexConnection();
       return 0;
     }
 

@@ -532,6 +532,10 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       .map((result) => result.session.id)).toContain(fixture.allowedSession.session.id);
     expect(application.enterprise.listAgentTasks(actorId, { designId: fixture.allowed.id })
       .map((task) => task.id)).toContain(fixture.allowedTask.id);
+    application.enterprise.transitionAgentTask("local", fixture.allowedTask.id, {
+      expectedStatus: "queued",
+      toStatus: "cancelled",
+    });
 
     const createdSession = application.enterprise.createPlanningSession(actorId, {
       designId: fixture.allowed.id,
@@ -654,6 +658,11 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     expect(planningRetry.statusCode, planningRetry.body).toBe(201);
     expect(planningRetry.json<PlanningSessionResult>().session.id).toBe(planning.session.id);
 
+    application.enterprise.transitionAgentTask("local", fixture.allowedTask.id, {
+      expectedStatus: "queued",
+      toStatus: "cancelled",
+    });
+
     const taskPayload = {
       brief: "Create a professional review-ready design proposal",
       selection: [],
@@ -670,7 +679,11 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       payload: taskPayload,
     });
     expect(createdTaskResponse.statusCode, createdTaskResponse.body).toBe(201);
-    const createdTask = createdTaskResponse.json<{ task: AgentTaskResult; launchUrl: string }>();
+    const createdTask = createdTaskResponse.json<{
+      task: AgentTaskResult;
+      launchUrl: string;
+      websiteTaskLink: string;
+    }>();
     expect(createdTask.task).toMatchObject({
       designId: fixture.allowed.id,
       status: "queued",
@@ -687,6 +700,11 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     expect(taskLaunch.searchParams.get("prompt")).toContain("returned PNG in Codex");
     expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
     expect(taskLaunch.searchParams.get("prompt")).toContain("Do not commit it");
+    const websiteTaskLink = new URL(createdTask.websiteTaskLink);
+    expect(websiteTaskLink.origin).toBe(PUBLIC_ORIGIN);
+    expect(websiteTaskLink.pathname).toBe(`/design/${fixture.allowed.id}`);
+    expect(websiteTaskLink.searchParams.get("task")).toBe(createdTask.task.id);
+    expect([...websiteTaskLink.searchParams.keys()]).toEqual(["task"]);
     for (const marker of fixture.hidden) expect(createdTaskResponse.body).not.toContain(marker);
     const taskRetry = await application.app.inject({
       method: "POST",
@@ -706,7 +724,8 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     });
     expect(queuedTasks.statusCode, queuedTasks.body).toBe(200);
     const queuedIds = queuedTasks.json<{ tasks: AgentTaskResult[] }>().tasks.map((task) => task.id);
-    expect(queuedIds).toEqual(expect.arrayContaining([fixture.allowedTask.id, createdTask.task.id]));
+    expect(queuedIds).toContain(createdTask.task.id);
+    expect(queuedIds).not.toContain(fixture.allowedTask.id);
     for (const marker of fixture.hidden) expect(queuedTasks.body).not.toContain(marker);
 
     const beforeViewerWrites = workflowState(application);
@@ -743,10 +762,15 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       headers: serverHeaders(DESIGN_EDITOR_IDENTITY),
       payload: { ...taskPayload, idempotencyKey: "planning-task-editor-task-create-0001" },
     });
-    expect(editorTask.statusCode, editorTask.body).toBe(201);
-    expect(editorTask.json<{ task: AgentTaskResult }>().task).toMatchObject({
-      designId: fixture.allowed.id,
-      status: "queued",
+    expect(editorTask.statusCode, editorTask.body).toBe(409);
+    expect(editorTask.json<{ error: { code: string; details: Record<string, unknown> } }>().error).toMatchObject({
+      code: "TASK_STATE_CONFLICT",
+      details: {
+        designId: fixture.allowed.id,
+        expectedOutput: "design_preview",
+        activeTaskId: createdTask.task.id,
+        activeStatus: "queued",
+      },
     });
     for (const marker of fixture.hidden) expect(editorTask.body).not.toContain(marker);
   });

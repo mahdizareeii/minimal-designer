@@ -156,6 +156,15 @@ export function linuxCompatibilityLauncher(version: string): string {
   return `#!/bin/sh
 set -eu
 ${userRuntimePreamble()}NO_OPEN=0
+if [ "\${FORMASPEC_LEGACY_DELEGATE:-0}" != 1 ]; then
+  DELEGATE_COMMAND=''
+  for ARG in "$@"; do
+    case "\${ARG}" in --yes|--no-open) ;; *) DELEGATE_COMMAND="\${ARG}"; break ;; esac
+  done
+  case "\${DELEGATE_COMMAND}" in
+    doctor|status|start|stop|restart) exec "\${INSTALL_ROOT}/bin/formaspecctl" "$@" ;;
+  esac
+fi
 while [ "\${1:-}" = "--yes" ] || [ "\${1:-}" = "--no-open" ]; do
   if [ "$1" = "--no-open" ]; then NO_OPEN=1; fi
   shift

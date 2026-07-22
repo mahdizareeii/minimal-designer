@@ -113,6 +113,8 @@ describe("native Linux installer layout", () => {
     expect(cli).toContain("apps/cli/dist/index.js");
     expect(launcher).toContain("/usr/bin/systemctl");
     expect(launcher).toContain("/health/ready");
+    expect(launcher).toContain('doctor|status|start|stop|restart) exec "${INSTALL_ROOT}/bin/formaspecctl"');
+    expect(launcher).toContain('FORMASPEC_LEGACY_DELEGATE:-0');
     expect(launcher).toContain("echo 'FormaSpec 0.2.0'");
     expect(launcher).toContain("id -u");
     expect(launcher).toContain("DISPLAY");

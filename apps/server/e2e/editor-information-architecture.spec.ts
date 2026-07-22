@@ -297,32 +297,27 @@ test("enterprise editor workspaces are accessible and remain switchable", async 
   await page.locator(`[data-layer-node-id="${fixture.frameId}"]`).click();
   await page.keyboard.press("Delete");
   await page.getByTitle("Save now").click();
-  const archiveDialog = page.getByRole("dialog", { name: "Review destructive change" });
-  await expect(archiveDialog).toBeVisible();
-  await expect(archiveDialog).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(archiveDialog).toBeHidden();
   await expectPressed(beforeAfterButton, true);
   await expect(page.getByText("Archive comparison", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review commit actions" }).click();
-  await expect(archiveDialog).toBeVisible();
-  await expect(archiveDialog).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(archiveDialog.getByRole("button", { name: "Minimize archive review" })).toBeFocused();
-  await archiveDialog.getByRole("button", { name: "Discard preview" }).click();
-  await expect(archiveDialog).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "Review destructive change" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Commit archive" })).toBeVisible();
+  await page.getByRole("button", { name: "Discard preview" }).click();
   await expect(page.getByText("No archive preview selected", { exact: true })).toBeVisible();
 });
 
 test("long project and page titles stay truncated inside their reserved controls", async ({ page, request }) => {
   const projectName = "Enterprise dispatch operations workspace with a deliberately long project title that must never overlap save or panel controls";
   const pageName = "Customer support escalation and bilingual incident-resolution workflow with an intentionally long page title";
+  const frameName = "Persian and English courier assignment frame title that must stay inside its narrow canvas frame container";
   const fixture = await createEditorFixture(request, projectName);
   const longPageId = createId("page");
   const revision = await request.post(`/api/designs/${encodeURIComponent(fixture.designId)}/revisions`, {
     data: {
       baseVersion: 1,
-      operations: [{ type: "create_page", page: { id: longPageId, name: pageName } }],
+      operations: [
+        { type: "create_page", page: { id: longPageId, name: pageName } },
+        { type: "update_node", node_id: fixture.frameId, patch: { name: frameName, layout: { width: 220 } } },
+      ],
       idempotencyKey: `long-editor-titles-${crypto.randomUUID()}`,
       message: "Add a long page-title overflow fixture",
     },
@@ -371,6 +366,24 @@ test("long project and page titles stay truncated inside their reserved controls
   expect(pageMetrics.textOverflow).toBe("ellipsis");
   expect(deleteBox).not.toBeNull();
   expect(pageMetrics.right).toBeLessThanOrEqual(deleteBox!.x + 0.75);
+
+  await page.locator(`[data-page-id="${fixture.pageId}"] .page-row`).click();
+  const frameLabel = page.locator(".canvas-frame-label").filter({ hasText: frameName });
+  const frameTitle = frameLabel.locator("strong");
+  const frameDimensions = frameLabel.locator("span");
+  const frameMetrics = await frameTitle.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    right: element.getBoundingClientRect().right,
+    overflow: getComputedStyle(element).overflow,
+    textOverflow: getComputedStyle(element).textOverflow,
+  }));
+  const dimensionsBox = await frameDimensions.boundingBox();
+  expect(frameMetrics.scrollWidth).toBeGreaterThan(frameMetrics.clientWidth);
+  expect(frameMetrics.overflow).toBe("hidden");
+  expect(frameMetrics.textOverflow).toBe("ellipsis");
+  expect(dimensionsBox).not.toBeNull();
+  expect(frameMetrics.right).toBeLessThanOrEqual(dimensionsBox!.x + 0.75);
 });
 
 test("page archival stays unsaved until Save / Commit and leaving offers save, discard, or cancel", async ({ page, request }) => {
@@ -383,6 +396,8 @@ test("page archival stays unsaved until Save / Commit and leaving offers save, d
   await projectNavigation.getByRole("button", { name: "pages", exact: true }).click();
   await page.getByRole("button", { name: "Add page" }).click();
   await expect(page.getByText("Page 2", { exact: true })).toBeVisible();
+  const draftBrief = "Preserve this unsaved product brief together with the explicit canvas commit.";
+  await page.getByRole("textbox", { name: "Describe the product, business logic, and constraints" }).fill(draftBrief);
   await expect(page.getByTitle("Save now")).toBeEnabled();
   await expect(page.locator(".save-status")).toContainText("Unsaved");
   expect(await page.evaluate(() => {
@@ -419,20 +434,25 @@ test("page archival stays unsaved until Save / Commit and leaving offers save, d
   const secondPage = saved.document.pages.find((candidate) => candidate.name === "Page 2");
   expect(secondPage).toBeTruthy();
   expect(secondPage?.archived).toBe(false);
+  const savedSpecificationResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/product-specification`);
+  expect(savedSpecificationResponse.ok(), await savedSpecificationResponse.text()).toBe(true);
+  expect(await savedSpecificationResponse.json()).toMatchObject({ version: 1, naturalLanguageBrief: draftBrief });
 
   await page.goto(`/design/${encodeURIComponent(fixture.designId)}?page=${encodeURIComponent(secondPage!.id)}`);
   await projectNavigation.getByRole("button", { name: "pages", exact: true }).click();
   const deleteSecondPage = page.getByRole("button", { name: "Delete page Page 2" });
-  const confirmationPromise = page.waitForEvent("dialog");
-  const deleteClick = deleteSecondPage.click();
-  const confirmation = await confirmationPromise;
-  expect(confirmation.message()).toContain("Archive page “Page 2”?");
-  expect(confirmation.message()).toContain("recoverable in immutable history");
-  await confirmation.accept();
-  await deleteClick;
+  await deleteSecondPage.click();
+  const deletionDialog = page.getByRole("dialog", { name: "Delete page?" });
+  await expect(deletionDialog).toBeVisible();
+  await expect(deletionDialog).toBeFocused();
+  await expect(deletionDialog).toContainText("Immutable history remains recoverable");
+  await deletionDialog.getByRole("button", { name: "Create deletion preview" }).click();
+  await expect(deletionDialog).toBeHidden();
 
   await expect(page.getByText("Page 2", { exact: true })).toBeHidden();
-  await expect(page.locator(".save-status")).toContainText("Unsaved");
+  await expect(page.locator(".save-status")).toContainText("Review archive");
+  await expect(page.getByText("Archive comparison", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review changes" })).toBeVisible();
   const beforeArchiveCommit = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
   expect(beforeArchiveCommit.ok(), await beforeArchiveCommit.text()).toBe(true);
   expect(await beforeArchiveCommit.json()).toMatchObject({
@@ -440,14 +460,12 @@ test("page archival stays unsaved until Save / Commit and leaving offers save, d
     document: { pages: expect.arrayContaining([expect.objectContaining({ id: secondPage!.id, archived: false })]) },
   });
 
-  await page.getByTitle("Save now").click();
-  const archiveDialog = page.getByRole("dialog", { name: "Review destructive change" });
-  await expect(archiveDialog).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Review destructive change" })).toHaveCount(0);
   const stillUncommitted = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
   expect(stillUncommitted.ok(), await stillUncommitted.text()).toBe(true);
   expect(await stillUncommitted.json()).toMatchObject({ version: 2 });
-  await archiveDialog.getByRole("button", { name: "Commit archive" }).click();
-  await expect(archiveDialog).toBeHidden();
+  await page.getByRole("button", { name: "Commit archive" }).click();
+  await expect(page.getByText("No archive preview selected", { exact: true })).toBeVisible();
   await expect(page.locator(".document-title")).toContainText("Version 3");
 
   const committedResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
@@ -563,6 +581,27 @@ test("product brief submission shows progress, persists the specification, queue
   await expect(submitStatus).toContainText("Describe the product, business logic, and constraints");
   await expect(submit).toBeEnabled();
 
+  const brief = "Design an accessible bilingual dispatch dashboard with clear urgent-order states and audited assignment rules.";
+  await page.getByRole("navigation", { name: "Project structure" }).getByRole("button", { name: "pages", exact: true }).click();
+  await page.getByRole("button", { name: "Add page" }).click();
+  await textbox.fill(brief);
+  await submit.click();
+  await expect(submitStatus).toHaveAttribute("role", "alert");
+  await expect(submitStatus).toContainText("Save / Commit the design first");
+  const focusedSave = page.getByTitle("Save now");
+  await expect(focusedSave).toBeFocused();
+  const dirtyHeadResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
+  expect(dirtyHeadResponse.ok(), await dirtyHeadResponse.text()).toBe(true);
+  expect(await dirtyHeadResponse.json()).toMatchObject({ version: 1 });
+  const noTaskResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`);
+  expect(noTaskResponse.ok(), await noTaskResponse.text()).toBe(true);
+  expect(await noTaskResponse.json()).toMatchObject({ tasks: [] });
+  await focusedSave.click();
+  await expect(page.locator(".save-status")).toContainText("Saved", { timeout: 15_000 });
+  const savedHeadResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
+  expect(savedHeadResponse.ok(), await savedHeadResponse.text()).toBe(true);
+  expect(await savedHeadResponse.json()).toMatchObject({ version: 2 });
+
   const taskEndpoint = `**/api/designs/${fixture.designId}/agent-tasks`;
   let releaseTaskRequest!: () => void;
   let markTaskRequestSeen!: () => void;
@@ -578,8 +617,6 @@ test("product brief submission shows progress, persists the specification, queue
     await route.continue();
   });
 
-  const brief = "Design an accessible bilingual dispatch dashboard with clear urgent-order states and audited assignment rules.";
-  await textbox.fill(brief);
   await submit.click();
   await expect(submitStatus).toHaveAttribute("role", "status");
   await expect(submitStatus).toContainText("Submitting to @FormaSpec");
@@ -733,6 +770,7 @@ test("website design commands capture the Codex launch URL and simulate the MCP 
 
   const previewed = await callTool<{ preview: { id: string; canCommit: boolean } }>("design_preview_changes", {
     design_id: fixture.designId,
+    task_id: task.id,
     base_version: 1,
     max_size: 720,
     operations: [{

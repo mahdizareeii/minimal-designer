@@ -43,6 +43,10 @@ import {
   type ConflictRecovery,
 } from "../lib/conflict-recovery";
 import type { InspectorPanelTab } from "../lib/editor-information-architecture";
+import {
+  manualMutationIdempotency,
+  mutationFingerprint,
+} from "../lib/mutation-idempotency";
 import { clampCanvasZoom, type ViewportState } from "../lib/viewport-transform";
 import {
   ApiError,
@@ -81,12 +85,40 @@ export interface ArchiveReview {
 
 export type DesignerSaveState = "idle" | "dirty" | "saving" | "saved" | "review" | "error" | "conflict";
 
+export interface ProductBriefDraftGuard {
+  designId: string;
+  draft: string;
+  persisted: string;
+  dirty: boolean;
+  saving: boolean;
+  save: () => Promise<void>;
+  discard: () => void;
+}
+
+export interface ArchivedDesignState {
+  designId: string;
+  name: string;
+  hadUnsavedChanges: boolean;
+  recoveryJson: string | null;
+}
+
+export function canApplyDesignRefresh(
+  state: {
+    document: { id: string } | null;
+    archivedDesignState: Pick<ArchivedDesignState, "designId"> | null;
+  },
+  designId: string,
+): boolean {
+  return state.document?.id === designId && state.archivedDesignState?.designId !== designId;
+}
+
 export interface UnsavedDesignerChangesState {
   saving: boolean;
   pendingOperations: readonly DesignOperation[];
   saveState: DesignerSaveState;
   archiveReview: ArchiveReview | null;
   conflictRecovery?: ConflictRecovery | null;
+  productBriefGuard?: ProductBriefDraftGuard | null;
 }
 
 export function hasUnsavedDesignerChanges(state: UnsavedDesignerChangesState): boolean {
@@ -94,6 +126,8 @@ export function hasUnsavedDesignerChanges(state: UnsavedDesignerChangesState): b
     || state.pendingOperations.length > 0
     || state.archiveReview !== null
     || state.conflictRecovery != null
+    || state.productBriefGuard?.dirty === true
+    || state.productBriefGuard?.saving === true
     || state.saveState === "dirty"
     || state.saveState === "review"
     || state.saveState === "error"
@@ -130,6 +164,8 @@ interface DesignerState {
   archiveReview: ArchiveReview | null;
   conflictRecovery: ConflictRecovery | null;
   conflictRecoveryDurable: boolean;
+  productBriefGuard: ProductBriefDraftGuard | null;
+  archivedDesignState: ArchivedDesignState | null;
   loadProjects: () => Promise<void>;
   createProject: (name: string, preset: DevicePreset) => Promise<string>;
   archiveProject: (projectId: string, confirmationName: string) => Promise<void>;
@@ -144,6 +180,7 @@ interface DesignerState {
   setInspectorTab: (tab: InspectorPanelTab) => void;
   setNotice: (notice: string | null) => void;
   setSidebarsHidden: (hidden: boolean) => void;
+  setProductBriefDraftGuard: (guard: ProductBriefDraftGuard | null) => void;
   setProductBrief: (brief: string) => void;
   updateNode: (nodeId: NodeId, patch: UpdateNodePatch) => void;
   updateNodes: (updates: Array<{ nodeId: NodeId; patch: UpdateNodePatch }>) => void;
@@ -373,6 +410,8 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   archiveReview: null,
   conflictRecovery: null,
   conflictRecoveryDurable: false,
+  productBriefGuard: null,
+  archivedDesignState: null,
 
   loadProjects: async () => {
     set({ dashboardLoading: true, error: null });
@@ -415,6 +454,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     const current = get();
     const project = current.projects.find((candidate) => candidate.id === projectId);
     if (!project) {
+      manualMutationIdempotency.clear(`project-archive:${projectId}`);
       const error = new ApiError("The project is no longer available in the active workspace.", {
         code: "NOT_FOUND",
         status: 404,
@@ -430,14 +470,26 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       throw error;
     }
 
+    const attemptScope = `project-archive:${project.id}`;
+    const attemptFingerprint = mutationFingerprint("project_archive", {
+      projectId: project.id,
+      expectedVersion: project.version,
+      confirmationName,
+    });
+    const idempotencyKey = manualMutationIdempotency.keyFor(
+      attemptScope,
+      attemptFingerprint,
+      "archive-project",
+    );
     set({ archivingProjectId: projectId, error: null });
     try {
       await archiveRemoteDesign(
         project.id,
         project.version,
         confirmationName,
-        createClientKey("archive-project"),
+        idempotencyKey,
       );
+      manualMutationIdempotency.complete(attemptScope, attemptFingerprint);
       set((state) => ({
         projects: state.projects.filter((candidate) => candidate.id !== projectId),
         archivingProjectId: state.archivingProjectId === projectId ? null : state.archivingProjectId,
@@ -446,6 +498,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         notice: `Deleted “${project.name}” from the active workspace. Immutable history and assets remain retained.`,
       }));
     } catch (error) {
+      manualMutationIdempotency.fail(attemptScope, attemptFingerprint, error);
       set((state) => state.archivingProjectId !== projectId ? {} : {
         archivingProjectId: null,
         offline: error instanceof ApiError && error.code === "NETWORK_ERROR",
@@ -466,6 +519,8 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       archiveReview: null,
       conflictRecovery: null,
       conflictRecoveryDurable: false,
+      productBriefGuard: null,
+      archivedDesignState: null,
     });
     try {
       const [document, conflictRecovery] = await Promise.all([
@@ -522,6 +577,8 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     archiveReview: null,
     conflictRecovery: null,
     conflictRecoveryDurable: false,
+    productBriefGuard: null,
+    archivedDesignState: null,
     saving: false,
     saveState: "idle",
     error: null,
@@ -558,6 +615,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   setInspectorTab: (inspectorTab) => set({ inspectorTab }),
   setNotice: (notice) => set({ notice }),
   setSidebarsHidden: (sidebarsHidden) => set({ sidebarsHidden }),
+  setProductBriefDraftGuard: (productBriefGuard) => set({ productBriefGuard }),
 
   setProductBrief: (brief) => set((state) => {
     if (!state.document) return state;
@@ -748,13 +806,24 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     const review = current.archiveReview;
     const designId = current.document?.id;
     if (!review || !designId || current.saving) return;
+    const attemptScope = `archive-preview:${designId}:${review.previewId}`;
+    const attemptFingerprint = mutationFingerprint("archive_preview_commit", {
+      designId,
+      previewId: review.previewId,
+      expectedBaseVersion: review.baseVersion,
+    });
+    const idempotencyKey = manualMutationIdempotency.keyFor(
+      attemptScope,
+      attemptFingerprint,
+      "archive",
+    );
     set({ saving: true, saveState: "saving", error: null });
     try {
       const result = await commitArchivePreview(
         designId,
         review.previewId,
         review.baseVersion,
-        createClientKey("archive"),
+        idempotencyKey,
       );
       const committed = result.document ?? await readDesign(designId);
       set((latest) => {
@@ -775,7 +844,9 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
           notice: `Committed destructive preview for ${review.changedNodeIds.length} changed layer${review.changedNodeIds.length === 1 ? "" : "s"}.`,
         };
       });
+      manualMutationIdempotency.complete(attemptScope, attemptFingerprint);
     } catch (error) {
+      manualMutationIdempotency.fail(attemptScope, attemptFingerprint, error);
       if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
         const latest = get();
         const operations = [...review.operations, ...latest.pendingOperations];
@@ -817,6 +888,9 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   discardArchiveReview: () => set((state) => {
     const review = state.archiveReview;
     if (!review) return state;
+    if (state.document) {
+      manualMutationIdempotency.clear(`archive-preview:${state.document.id}:${review.previewId}`);
+    }
     try {
       const document = state.pendingOperations.length > 0
         ? applyOperations(review.baseDocument, state.pendingOperations, { expectedRevision: review.baseDocument.revision }).document
@@ -1060,23 +1134,40 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
           });
           return;
         }
-        const result = await commitRevision(designId, baseVersion, operations, createClientKey("revision"));
-        const serverDocument = result.document ?? await readDesign(designId);
-        set((latest) => {
-          if (latest.document?.id !== designId) return { saving: false };
-          let document = serverDocument;
-          if (latest.pendingOperations.length > 0) {
-            document = applyOperations(serverDocument, latest.pendingOperations, { expectedRevision: serverDocument.revision }).document;
-          }
-          return {
-            document,
-            baseVersion: result.version,
-            saving: false,
-            saveState: latest.pendingOperations.length ? "dirty" : "saved",
-            offline: false,
-            error: null,
-          };
+        const attemptScope = `revision:${designId}`;
+        const attemptFingerprint = mutationFingerprint("revision_commit", {
+          designId,
+          baseVersion,
+          operations,
         });
+        const idempotencyKey = manualMutationIdempotency.keyFor(
+          attemptScope,
+          attemptFingerprint,
+          "revision",
+        );
+        try {
+          const result = await commitRevision(designId, baseVersion, operations, idempotencyKey);
+          const serverDocument = result.document ?? await readDesign(designId);
+          set((latest) => {
+            if (latest.document?.id !== designId) return { saving: false };
+            let document = serverDocument;
+            if (latest.pendingOperations.length > 0) {
+              document = applyOperations(serverDocument, latest.pendingOperations, { expectedRevision: serverDocument.revision }).document;
+            }
+            return {
+              document,
+              baseVersion: result.version,
+              saving: false,
+              saveState: latest.pendingOperations.length ? "dirty" : "saved",
+              offline: false,
+              error: null,
+            };
+          });
+          manualMutationIdempotency.complete(attemptScope, attemptFingerprint);
+        } catch (error) {
+          manualMutationIdempotency.fail(attemptScope, attemptFingerprint, error);
+          throw error;
+        }
       } catch (error) {
         if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
           const latest = get();
@@ -1300,11 +1391,60 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
 
   connectEvents: () => subscribeToEvents((event) => {
     const state = get();
-    if (event.type !== "design.updated" || !event.designId || event.designId !== state.document?.id || !event.version) return;
+    if (event.type !== "design.updated" || !event.designId || event.designId !== state.document?.id) return;
+    if (event.archived === true) {
+      const hadUnsavedChanges = hasUnsavedDesignerChanges(state);
+      const recoveryJson = hadUnsavedChanges && state.document
+        ? JSON.stringify({
+          format: "formaspec-archived-local-recovery",
+          schemaVersion: 1,
+          capturedAt: new Date().toISOString(),
+          designId: state.document.id,
+          projectName: state.document.name,
+          baseVersion: state.baseVersion,
+          document: state.document,
+          pendingOperations: state.pendingOperations,
+          productBriefDraft: state.productBriefGuard?.draft ?? null,
+          productBriefPersisted: state.productBriefGuard?.persisted ?? null,
+        }, null, 2)
+        : null;
+      const archivedDesignState: ArchivedDesignState = {
+        designId: event.designId,
+        name: state.document.name,
+        hadUnsavedChanges,
+        recoveryJson,
+      };
+      set({
+        projects: state.projects.filter((project) => project.id !== event.designId),
+        document: null,
+        baseVersion: 0,
+        activePageId: null,
+        selectedIds: [],
+        pendingOperations: [],
+        undoStack: [],
+        redoStack: [],
+        archiveReview: null,
+        conflictRecovery: null,
+        conflictRecoveryDurable: false,
+        productBriefGuard: null,
+        archivedDesignState,
+        saving: false,
+        saveState: "idle",
+        offline: false,
+        error: null,
+        notice: hadUnsavedChanges
+          ? "This project was deleted elsewhere. Download the protected local recovery before leaving."
+          : "This project was deleted elsewhere and removed from the active workspace.",
+      });
+      void updateContext({ designId: null, selectedNodeIds: [] }).catch(() => undefined);
+      return;
+    }
+    if (!event.version) return;
     if (event.version <= state.baseVersion || state.pendingOperations.length > 0 || state.saving) return;
     const updatedDesignId: string = event.designId;
     void readDesign(updatedDesignId).then((document) => {
       const latest = get();
+      if (!canApplyDesignRefresh(latest, updatedDesignId)) return;
       const activePageId = document.pages.some((page) => page.id === latest.activePageId && !page.archived)
         ? latest.activePageId
         : document.pages.find((page) => !page.archived)?.id ?? null;
@@ -1327,6 +1467,36 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     }).catch(() => undefined);
   }),
 }));
+
+export async function saveAllDesignerChanges(): Promise<void> {
+  const initial = useDesignerStore.getState();
+  await initial.save();
+  const afterDesign = useDesignerStore.getState();
+  if (afterDesign.saving
+    || afterDesign.pendingOperations.length > 0
+    || afterDesign.archiveReview
+    || afterDesign.conflictRecovery
+    || afterDesign.saveState === "review"
+    || afterDesign.saveState === "conflict"
+    || afterDesign.saveState === "error") return;
+  const guard = afterDesign.productBriefGuard;
+  if (!guard?.dirty || guard.saving) return;
+  useDesignerStore.setState((state) => state.productBriefGuard?.designId !== guard.designId
+    ? state
+    : { productBriefGuard: { ...state.productBriefGuard, saving: true } });
+  try {
+    await guard.save();
+    useDesignerStore.setState((state) => {
+      const latest = state.productBriefGuard;
+      if (!latest || latest.designId !== guard.designId || latest.draft !== guard.draft) return state;
+      return { productBriefGuard: { ...latest, persisted: latest.draft, dirty: false, saving: false } };
+    });
+  } finally {
+    useDesignerStore.setState((state) => state.productBriefGuard?.designId !== guard.designId
+      ? state
+      : { productBriefGuard: { ...state.productBriefGuard, saving: false } });
+  }
+}
 
 export function activePage(document: DesignDocument | null, pageId: PageId | null) {
   return document?.pages.find((page) => page.id === pageId) ?? document?.pages.find((page) => !page.archived) ?? null;

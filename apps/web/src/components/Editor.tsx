@@ -19,7 +19,6 @@ import {
   Play,
   Redo2,
   Save,
-  ShieldAlert,
   Smartphone,
   Sparkles,
   Tablet,
@@ -28,14 +27,14 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { navigate } from "../App";
 import { DEVICE_PRESETS, type DevicePreset } from "../domain";
-import { exactPreviewRenderUrl, exportUrl, portableExportUrl, renderUrl, updateContext } from "../lib/api";
+import { exportUrl, portableExportUrl, renderUrl, updateContext } from "../lib/api";
 import { createConflictPatchArtifact } from "../lib/conflict-recovery";
 import { CENTER_WORKSPACE_TABS, type CenterWorkspaceTab } from "../lib/editor-information-architecture";
-import { hasUnsavedDesignerChanges, useDesignerStore } from "../store/designer-store";
+import { hasUnsavedDesignerChanges, saveAllDesignerChanges, useDesignerStore } from "../store/designer-store";
 import { Canvas, PrototypeCanvas } from "./Canvas";
 import { ConflictRecoveryPanel } from "./ConflictRecoveryPanel";
 import { InspectorPanel } from "./InspectorPanel";
@@ -89,10 +88,11 @@ export function Editor({ designId }: { designId: string }) {
   const archiveReview = useDesignerStore((state) => state.archiveReview);
   const conflictRecovery = useDesignerStore((state) => state.conflictRecovery);
   const conflictRecoveryDurable = useDesignerStore((state) => state.conflictRecoveryDurable);
+  const productBriefGuard = useDesignerStore((state) => state.productBriefGuard);
+  const archivedDesignState = useDesignerStore((state) => state.archivedDesignState);
   const openDesign = useDesignerStore((state) => state.openDesign);
   const closeDesign = useDesignerStore((state) => state.closeDesign);
   const connectEvents = useDesignerStore((state) => state.connectEvents);
-  const save = useDesignerStore((state) => state.save);
   const undo = useDesignerStore((state) => state.undo);
   const redo = useDesignerStore((state) => state.redo);
   const loadLatestForConflict = useDesignerStore((state) => state.loadLatestForConflict);
@@ -113,11 +113,9 @@ export function Editor({ designId }: { designId: string }) {
   const setSidebarsHidden = useDesignerStore((state) => state.setSidebarsHidden);
   const [frameMenu, setFrameMenu] = useState(false);
   const [stageTab, setStageTab] = useState<CenterWorkspaceTab>("canvas");
-  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [exporting, setExporting] = useState<"json" | "png" | "bundle" | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState<"load" | "export" | "duplicate" | "discard" | null>(null);
   const copiedNodeIds = useRef<typeof selectedIds>([]);
-  const archiveDialogRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void openDesign(designId);
@@ -156,39 +154,18 @@ export function Editor({ designId }: { designId: string }) {
     return () => window.clearTimeout(timer);
   }, [notice, setNotice]);
 
-  useEffect(() => {
-    if (!archiveReview) {
-      setArchiveDialogOpen(false);
-      return;
-    }
-    setStageTab("before-after");
-    setArchiveDialogOpen(true);
-  }, [archiveReview?.previewId]);
+  const saveWorkspace = () => {
+    void saveAllDesignerChanges().catch((cause) => {
+      const message = cause instanceof Error ? cause.message : "The workspace could not be saved.";
+      useDesignerStore.setState({ saveState: "error", error: message });
+      setNotice(`Save failed: ${message}`);
+    });
+  };
 
   useEffect(() => {
-    if (!archiveDialogOpen || !archiveReview) return;
-    const dialog = archiveDialogRef.current;
-    if (!dialog) return;
-    const previousFocus = window.document.activeElement instanceof HTMLElement
-      ? window.document.activeElement
-      : null;
-    const editorRoot = dialog.parentElement?.parentElement;
-    const background = editorRoot
-      ? [...editorRoot.children].filter((element) => !element.classList.contains("archive-review-backdrop"))
-      : [];
-    for (const element of background) {
-      element.setAttribute("inert", "");
-      element.setAttribute("aria-hidden", "true");
-    }
-    window.requestAnimationFrame(() => dialog.focus());
-    return () => {
-      for (const element of background) {
-        element.removeAttribute("inert");
-        element.removeAttribute("aria-hidden");
-      }
-      if (previousFocus?.isConnected) window.requestAnimationFrame(() => previousFocus.focus());
-    };
-  }, [archiveDialogOpen, archiveReview]);
+    if (!archiveReview) return;
+    setStageTab("before-after");
+  }, [archiveReview?.previewId]);
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -203,17 +180,10 @@ export function Editor({ designId }: { designId: string }) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (archiveDialogOpen) {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          setArchiveDialogOpen(false);
-        }
-        return;
-      }
       const target = event.target as HTMLElement | null;
       const typing = target?.matches("input, textarea, select, [contenteditable=true]");
       const modifier = event.metaKey || event.ctrlKey;
-      if (modifier && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); return; }
+      if (modifier && event.key.toLowerCase() === "s") { event.preventDefault(); saveWorkspace(); return; }
       if (modifier && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redo() : undo(); return; }
       if (modifier && event.key.toLowerCase() === "c" && !typing && selectedIds.length > 0) {
         event.preventDefault();
@@ -236,43 +206,23 @@ export function Editor({ designId }: { designId: string }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [save, undo, redo, duplicate, deleteSelection, setTool, addNode, prototypeOpen, closePrototype, select, selectedIds, setNotice, archiveDialogOpen]);
-
-  const handleArchiveDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setArchiveDialogOpen(false);
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const dialog = archiveDialogRef.current;
-    if (!dialog) return;
-    const focusable = [...dialog.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    )].filter((element) => !element.hasAttribute("inert"));
-    if (focusable.length === 0) {
-      event.preventDefault();
-      dialog.focus();
-      return;
-    }
-    const currentIndex = focusable.indexOf(window.document.activeElement as HTMLElement);
-    const nextIndex = event.shiftKey
-      ? currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1
-      : currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1;
-    event.preventDefault();
-    focusable[nextIndex]!.focus();
-  };
+  }, [undo, redo, duplicate, deleteSelection, setTool, addNode, prototypeOpen, closePrototype, select, selectedIds, setNotice]);
 
   const performExport = async (kind: "json" | "png" | "bundle") => {
     if (!document) return;
     setExporting(kind);
     try {
-      if (pendingCount > 0 || saving) await save();
       const current = useDesignerStore.getState();
       const currentDocument = current.document;
       if (!currentDocument) return;
-      if (current.saving || current.pendingOperations.length > 0 || current.saveState !== "saved") {
-        throw new Error("Save the current edits before exporting a versioned artifact.");
+      if (current.saving
+        || current.pendingOperations.length > 0
+        || current.archiveReview
+        || current.conflictRecovery
+        || current.productBriefGuard?.dirty
+        || current.saveState !== "saved") {
+        window.requestAnimationFrame(() => window.document.querySelector<HTMLButtonElement>(".editor-save-button")?.focus());
+        throw new Error("Use Save / Commit before exporting a versioned artifact. Export never silently commits editor changes.");
       }
       if (kind === "json") {
         await downloadFile(exportUrl(currentDocument.id, current.baseVersion), `${currentDocument.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-v${current.baseVersion}.json`);
@@ -347,6 +297,29 @@ export function Editor({ designId }: { designId: string }) {
   if (loading) return <div className="loading-screen"><div><div className="loading-orbit" />Opening structured canvas…</div></div>;
 
   if (!document) {
+    if (archivedDesignState?.designId === designId) {
+      return (
+        <div className="loading-screen archived-design-screen">
+          <div>
+            <Trash2 size={30} />
+            <strong>“{archivedDesignState.name}” was deleted</strong>
+            <span>{archivedDesignState.hadUnsavedChanges
+              ? "The active project was archived elsewhere. Your local canvas and product-brief draft were captured before the editor closed."
+              : "The project was archived elsewhere and removed from the active workspace. Immutable server history remains retained for administrators."}</span>
+            <div>
+              {archivedDesignState.recoveryJson && (
+                <button className="button button-secondary" onClick={() => downloadTextFile(
+                  archivedDesignState.recoveryJson!,
+                  "application/json",
+                  `${archivedDesignState.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "formaspec"}-local-recovery.json`,
+                )}><Download size={14} /> Download local recovery</button>
+              )}
+              <button className="button button-primary" onClick={() => navigate("/")}><ArrowLeft size={14} /> Projects</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="loading-screen">
         <div>
@@ -362,13 +335,20 @@ export function Editor({ designId }: { designId: string }) {
     );
   }
 
-  const saveIcon = saveState === "saving"
+  const briefDirty = productBriefGuard?.dirty === true;
+  const workspaceSaveState = productBriefGuard?.saving
+    ? "saving"
+    : saveState === "saved" && briefDirty
+      ? "dirty"
+      : saveState;
+  const workspaceSaving = saving || productBriefGuard?.saving === true;
+  const saveIcon = workspaceSaveState === "saving"
     ? <LoaderCircle size={12} className="spin" />
-    : saveState === "review"
+    : workspaceSaveState === "review"
       ? <Eye size={12} />
-      : saveState === "error" || saveState === "conflict"
+      : workspaceSaveState === "error" || workspaceSaveState === "conflict"
         ? <CloudOff size={12} />
-        : saveState === "dirty"
+        : workspaceSaveState === "dirty"
           ? <Save size={12} />
           : <Check size={12} />;
   const page = document.pages.find((item) => item.id === prototypePageId);
@@ -395,7 +375,7 @@ export function Editor({ designId }: { designId: string }) {
       <header className="editor-topbar">
         <div className="editor-topbar-left">
           <button className="topbar-home" onClick={leaveEditor} aria-label="Back to projects"><Sparkles size={14} /></button>
-          <div className="document-title"><strong title={document.name}>{document.name}</strong><span className={offline ? "is-offline" : ""}><i /><span>{offline ? "Connection issue" : `Version ${useDesignerStore.getState().baseVersion}`}</span></span></div>
+          <div className="document-title"><strong title={document.name} dir="auto">{document.name}</strong><span className={offline ? "is-offline" : ""}><i /><span>{offline ? "Connection issue" : `Version ${useDesignerStore.getState().baseVersion}`}</span></span></div>
           <button className="icon-button" onClick={() => setSidebarsHidden(!sidebarsHidden)} aria-label="Toggle panels">{sidebarsHidden ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}</button>
         </div>
         <div className="editor-topbar-center">
@@ -420,8 +400,13 @@ export function Editor({ designId }: { designId: string }) {
           </div>
         </div>
         <div className="editor-topbar-right">
-          <div className={`save-status is-${saveState}`}>{saveIcon}{saveState === "saving" ? "Saving" : saveState === "dirty" ? "Unsaved" : saveState === "review" ? "Review archive" : saveState === "error" ? "Retry save" : saveState === "conflict" ? "Conflict" : "Saved"}</div>
-          <button className="button editor-save-button" onClick={() => void save()} disabled={saving || pendingCount === 0 || saveState === "conflict" || saveState === "review"} title="Save now"><Save size={13} /><span>Save / Commit</span></button>
+          <div className={`save-status is-${workspaceSaveState}`}>{saveIcon}{workspaceSaveState === "saving" ? "Saving" : workspaceSaveState === "dirty" ? "Unsaved" : workspaceSaveState === "review" ? "Review archive" : workspaceSaveState === "error" ? "Retry save" : workspaceSaveState === "conflict" ? "Conflict" : "Saved"}</div>
+          <button
+            className="button editor-save-button"
+            onClick={() => archiveReview ? setStageTab("before-after") : saveWorkspace()}
+            disabled={workspaceSaving || (pendingCount === 0 && !briefDirty && !archiveReview) || workspaceSaveState === "conflict"}
+            title={archiveReview ? "Review pending destructive changes" : "Save now"}
+          ><Save size={13} /><span>{archiveReview ? "Review changes" : "Save / Commit"}</span></button>
           <button className="tool-button" onClick={() => void performExport("json")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export JSON">{exporting === "json" ? <LoaderCircle size={13} /> : <FileJson size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("png")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export PNG">{exporting === "png" ? <LoaderCircle size={13} /> : <ImageDown size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("bundle")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export portable FormaSpec bundle">{exporting === "bundle" ? <LoaderCircle size={13} /> : <Download size={13} />}</button>
@@ -470,7 +455,10 @@ export function Editor({ designId }: { designId: string }) {
               <div className="editor-comparison-workspace">
                 <header>
                   <div><strong>Archive comparison</strong><span>Base v{archiveReview.baseVersion} · {archiveReview.changedNodeIds.length} changed layer{archiveReview.changedNodeIds.length === 1 ? "" : "s"}</span></div>
-                  <button className="button button-secondary" onClick={() => setArchiveDialogOpen(true)}>Review commit actions</button>
+                  <div className="editor-comparison-actions" role="group" aria-label="Archive preview approval actions">
+                    <button className="button button-secondary" disabled={saving} onClick={discardArchiveReview}>Discard preview</button>
+                    <button className="button button-danger" disabled={saving} onClick={() => void approveArchiveReview()}>{saving ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />} Commit archive</button>
+                  </div>
                 </header>
                 <div className="editor-comparison-grid">
                   <article><header><span>Before</span><strong>Version {archiveReview.baseVersion}</strong></header><div><PrototypeCanvas document={archiveReview.baseDocument} pageId={comparisonBasePageId} onNavigate={() => undefined} /></div></article>
@@ -494,52 +482,6 @@ export function Editor({ designId }: { designId: string }) {
       </footer>
 
       {notice && <div className="toast"><Sparkles size={13} />{notice}<button className="icon-button" onClick={() => setNotice(null)}><X size={11} /></button></div>}
-
-      {archiveReview && archiveDialogOpen && (
-        <div className="archive-review-backdrop" role="presentation">
-          <section
-            className="archive-review"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="archive-review-title"
-            tabIndex={-1}
-            ref={archiveDialogRef}
-            onKeyDown={handleArchiveDialogKeyDown}
-          >
-            <header>
-              <div className="archive-review-heading">
-                <span><ShieldAlert size={18} /></span>
-                <div>
-                  <h2 id="archive-review-title">Review destructive change</h2>
-                  <p>The preview is persisted but no revision has been created. Compare both versions before committing.</p>
-                </div>
-              </div>
-              <div className="archive-review-meta">
-                <span>Base v{archiveReview.baseVersion}</span>
-                <span>{archiveReview.changedNodeIds.length} changed layer{archiveReview.changedNodeIds.length === 1 ? "" : "s"}</span>
-                <button className="icon-button" onClick={() => setArchiveDialogOpen(false)} aria-label="Minimize archive review"><X size={15} /></button>
-              </div>
-            </header>
-            <div className="archive-review-grid">
-              <figure>
-                <figcaption><strong>Before</strong><span>Immutable base revision</span></figcaption>
-                <div><img src={renderUrl(document.id, { version: archiveReview.baseVersion, pageId: activePageId ?? undefined, maxSize: 1600 })} alt="Design before archival" /></div>
-              </figure>
-              <figure>
-                <figcaption><strong>After</strong><span>Exact archive preview</span></figcaption>
-                <div><img src={exactPreviewRenderUrl(document.id, archiveReview.previewId)} alt="Design after archival" /></div>
-              </figure>
-            </div>
-            <footer>
-              <p><ShieldAlert size={13} /> Archival is a soft deletion. Immutable history remains available for restore.</p>
-              <div>
-                <button className="button button-secondary" disabled={saving} onClick={discardArchiveReview}>Discard preview</button>
-                <button className="button button-danger" disabled={saving} onClick={() => void approveArchiveReview()}>{saving ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />} Commit archive</button>
-              </div>
-            </footer>
-          </section>
-        </div>
-      )}
 
       {prototypeOpen && prototypePageId && (
         <div className="prototype-backdrop">

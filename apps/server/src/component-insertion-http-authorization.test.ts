@@ -355,19 +355,41 @@ describe("component insertion preview HTTP authorization", () => {
     const allowedChallenge = fixture.enterprise.createAgentConnection(ADMIN_ACTOR, {
       adapter: "codex",
       displayName: "Component insertion MCP allowed",
-      scopes: ["design:preview", "design:read", "design:write", "design_system:read"],
+      scopes: [
+        "design:preview",
+        "design:read",
+        "design:write",
+        "design_system:read",
+        "task:read",
+        "task:claim",
+        "task:update",
+      ],
       projectIds: [allowed.designId],
       expiresInSeconds: 3_600,
     });
     const missingScopeChallenge = fixture.enterprise.createAgentConnection(ADMIN_ACTOR, {
       adapter: "codex",
       displayName: "Component insertion MCP missing scope",
-      scopes: ["design:preview", "design:read"],
+      scopes: ["design:preview", "design:read", "task:read", "task:claim", "task:update"],
       projectIds: [allowed.designId],
       expiresInSeconds: 3_600,
     });
     const allowedGrant = fixture.enterprise.pairAgentConnection(allowedChallenge.nonce).grant;
     const missingScopeGrant = fixture.enterprise.pairAgentConnection(missingScopeChallenge.nonce).grant;
+    const task = fixture.enterprise.createAgentTask(ADMIN_ACTOR, {
+      designId: allowed.designId,
+      brief: "Insert a pinned component as an exact proposal",
+      selection: [allowedParentId],
+      baseVersion: 2,
+      expectedOutput: "design_preview",
+      idempotencyKey: "component-insertion-mcp-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    fixture.enterprise.claimAgentTask(allowedGrant.actorId, task.id);
+    fixture.enterprise.transitionAgentTask(allowedGrant.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
     const renderedPng = encodeRgbaPng(160, 44, Buffer.alloc(160 * 44 * 4, 255));
     vi.spyOn(fixture.renderer, "render").mockResolvedValue({
       png: renderedPng,
@@ -378,6 +400,7 @@ describe("component insertion preview HTTP authorization", () => {
     });
     const args = {
       design_id: allowed.designId,
+      task_id: task.id,
       base_version: 2,
       component_definition_id: FORMASPEC_FOUNDATION_SYSTEM.release.component_versions[0]!.component_definition_id,
       parent: { node_id: allowedParentId },
@@ -411,7 +434,7 @@ describe("component insertion preview HTTP authorization", () => {
     }>();
     expect(allowedBody.result, allowedResponse.body).toBeDefined();
     expect(allowedBody.result.structuredContent, allowedResponse.body).toBeDefined();
-    expect(allowedBody.result.structuredContent).toMatchObject({
+    expect(allowedBody.result.structuredContent, allowedResponse.body).toMatchObject({
       ok: true,
       preview: { canCommit: true },
       component: { instanceId: expect.stringMatching(/^node_/) },
@@ -454,6 +477,7 @@ describe("component insertion preview HTTP authorization", () => {
     const versionBeforeMissingEvidenceCommit = fixture.service.getDesign(ADMIN_ACTOR, allowed.designId).revision.version;
     const missingEvidencePreview = fixture.componentInsertions.preview(allowedGrant.actorId, allowed.designId, {
       baseVersion: 2,
+      taskId: task.id,
       componentDefinitionId: args.component_definition_id,
       parent: { node_id: allowedParentId },
       position: { x: 40, y: 50 },
@@ -476,7 +500,7 @@ describe("component insertion preview HTTP authorization", () => {
       result: { structuredContent: { ok: boolean; error: { code: string } } };
     }>().result.structuredContent).toMatchObject({
       ok: false,
-      error: { code: "PREVIEW_ENGINE_MISMATCH" },
+      error: { code: "FORBIDDEN" },
     });
     expect(fixture.service.getDesign(ADMIN_ACTOR, allowed.designId).revision.version)
       .toBe(versionBeforeMissingEvidenceCommit);
@@ -493,17 +517,6 @@ describe("component insertion preview HTTP authorization", () => {
       result: { structuredContent: { ok: boolean; error: { code: string } } };
     }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
 
-    const missingScopeResponse = await mcpTool(
-      fixture,
-      missingScopeGrant.token,
-      "design_system_component_insert_preview",
-      args,
-    );
-    expect(missingScopeResponse.statusCode, missingScopeResponse.body).toBe(200);
-    expect(missingScopeResponse.json<{
-      result: { structuredContent: { ok: boolean; error: { code: string } } };
-    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
-
     const commitArguments = {
       design_id: allowed.designId,
       preview_id: allowedContent.preview.id,
@@ -519,9 +532,10 @@ describe("component insertion preview HTTP authorization", () => {
     );
     expect(committedResponse.statusCode, committedResponse.body).toBe(200);
     const committedContent = committedResponse.json<{
-      result: { structuredContent: { ok: boolean; design: { version: number }; revision: { id: string } } };
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
     }>().result.structuredContent;
-    expect(committedContent).toMatchObject({ ok: true, design: { version: 3 } });
+    expect(committedContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+    expect(fixture.service.getDesign(ADMIN_ACTOR, allowed.designId).revision.version).toBe(2);
 
     fixture.service.versions.renderer = `${fixture.service.versions.renderer}-upgraded`;
     const retriedCommitResponse = await mcpTool(
@@ -534,6 +548,36 @@ describe("component insertion preview HTTP authorization", () => {
     expect(retriedCommitResponse.json<{
       result: { structuredContent: typeof committedContent };
     }>().result.structuredContent).toEqual(committedContent);
+
+    fixture.enterprise.transitionAgentTask(allowedGrant.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "failed",
+      message: "Finish authorization checks without committing",
+    });
+    const missingScopeTask = fixture.enterprise.createAgentTask(ADMIN_ACTOR, {
+      designId: allowed.designId,
+      brief: "Prove component-library scope is still required",
+      selection: [allowedParentId],
+      baseVersion: 2,
+      expectedOutput: "design_preview",
+      idempotencyKey: "component-insertion-missing-scope-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    fixture.enterprise.claimAgentTask(missingScopeGrant.actorId, missingScopeTask.id);
+    fixture.enterprise.transitionAgentTask(missingScopeGrant.actorId, missingScopeTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    const missingScopeResponse = await mcpTool(
+      fixture,
+      missingScopeGrant.token,
+      "design_system_component_insert_preview",
+      { ...args, task_id: missingScopeTask.id },
+    );
+    expect(missingScopeResponse.statusCode, missingScopeResponse.body).toBe(200);
+    expect(missingScopeResponse.json<{
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
 
     fixture.enterprise.revokeAgentConnection(ADMIN_ACTOR, allowedChallenge.connection.id);
     const revokedResponse = await mcpTool(

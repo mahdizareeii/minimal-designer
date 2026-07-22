@@ -362,6 +362,42 @@ afterEach(() => {
 });
 
 describe("RedesignStudioService", () => {
+  it("makes design-backed assessments opaque after the project is archived", () => {
+    const opened = setup();
+    const assessment = opened.studio.createOneClickAssessment("local", {
+      designId: opened.created.document.id,
+      expectedDesignVersion: 1,
+      brief: "Retain this assessment as immutable evidence after project archival.",
+    });
+
+    opened.designer.archiveDesign("local", opened.created.document.id, {
+      expectedVersion: 1,
+      idempotencyKey: "redesign-archive-opacity-0001",
+      confirmationName: opened.created.design.name,
+    });
+
+    expect(captureThrown(() => opened.studio.getAssessment("local", assessment.id)))
+      .toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.studio.getStageArtifact(
+      "local",
+      assessment.id,
+      "connect_inspect",
+    ))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.studio.reviseCurrentStage("local", assessment.id, {
+      expectedVersion: 1,
+      expectedDesignVersion: 1,
+      content: { finding: "Archived projects cannot be mutated through retained assessments." },
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.studio.createOneClickAssessment("local", {
+      designId: opened.created.document.id,
+      expectedDesignVersion: 1,
+      brief: "Archived projects cannot start new redesign assessments.",
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(opened.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM redesign_assessments WHERE id = ?",
+    ).get(assessment.id)).toEqual({ count: 1 });
+  });
+
   it("creates an assessment-only workflow without rewriting project source or design history", () => {
     const opened = setup();
     const before = {

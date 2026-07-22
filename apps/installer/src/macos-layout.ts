@@ -108,6 +108,15 @@ export function compatibilityLauncher(version: string): string {
   return `#!/bin/sh
 set -eu
 INSTALL_ROOT='${MACOS_INSTALL_ROOT}'
+if [ "\${FORMASPEC_LEGACY_DELEGATE:-0}" != 1 ]; then
+  DELEGATE_COMMAND=''
+  for ARG in "$@"; do
+    case "\${ARG}" in --yes|--no-open) ;; *) DELEGATE_COMMAND="\${ARG}"; break ;; esac
+  done
+  case "\${DELEGATE_COMMAND}" in
+    doctor|status|start|stop|restart) exec "\${INSTALL_ROOT}/bin/formaspecctl" "$@" ;;
+  esac
+fi
 RUNTIME_ROOT="\${FORMASPEC_RUNTIME_DIR:-\${HOME}/Library/Application Support/FormaSpec/runtime}"
 RUN_ROOT="\${RUNTIME_ROOT}/run"
 NO_OPEN=0

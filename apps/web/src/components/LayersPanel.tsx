@@ -10,6 +10,7 @@ import {
   Layers3,
   Lock,
   LockOpen,
+  LoaderCircle,
   Minus,
   MoveDown,
   MoveUp,
@@ -18,10 +19,12 @@ import {
   Plus,
   Sparkles,
   Square,
+  ShieldAlert,
   Trash2,
   Type,
+  X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import {
   isNodeContainer,
@@ -68,6 +71,65 @@ export function selectNodeAcrossPages(
   setActivePage(pageId);
   select([nodeId]);
   return true;
+}
+
+export function PageDeleteDialog({
+  pageName,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  pageName: string;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    window.requestAnimationFrame(() => dialogRef.current?.focus());
+  }, []);
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape" && !busy) {
+      event.preventDefault();
+      onCancel();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const buttons = [...(dialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? [])];
+    if (buttons.length === 0) return;
+    const index = buttons.indexOf(window.document.activeElement as HTMLButtonElement);
+    const nextIndex = event.shiftKey
+      ? index <= 0 ? buttons.length - 1 : index - 1
+      : index < 0 || index === buttons.length - 1 ? 0 : index + 1;
+    event.preventDefault();
+    buttons[nextIndex]?.focus();
+  };
+  return (
+    <section
+      className="page-delete-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="page-delete-title"
+      aria-describedby="page-delete-description"
+      tabIndex={-1}
+      ref={dialogRef}
+      onKeyDown={onKeyDown}
+    >
+      <header>
+        <span><ShieldAlert size={18} /></span>
+        <div><h2 id="page-delete-title">Delete page?</h2><p id="page-delete-description">“{pageName}” and its layers will be soft-deleted only after you review the exact before-and-after preview.</p></div>
+        <button className="icon-button" disabled={busy} onClick={onCancel} aria-label="Close page deletion confirmation"><X size={15} /></button>
+      </header>
+      <div className="page-delete-retention"><ShieldAlert size={14} /><span>Immutable history remains recoverable. FormaSpec will not commit the archive from this dialog.</span></div>
+      {error && <div className="page-delete-error" role="alert">{error}</div>}
+      <footer>
+        <button className="button button-secondary" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button className="button button-danger" disabled={busy} onClick={onConfirm}>{busy ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />} Create deletion preview</button>
+      </footer>
+    </section>
+  );
 }
 
 function LayerRow({ nodeId, depth, collapsed, toggleCollapsed }: {
@@ -126,15 +188,56 @@ export function LayersPanel() {
   const select = useDesignerStore((state) => state.select);
   const addPage = useDesignerStore((state) => state.addPage);
   const deletePage = useDesignerStore((state) => state.deletePage);
+  const save = useDesignerStore((state) => state.save);
+  const setNotice = useDesignerStore((state) => state.setNotice);
   const addNode = useDesignerStore((state) => state.addNode);
   const insertTemplate = useDesignerStore((state) => state.insertTemplate);
   const [tab, setTab] = useState<LeftPanelTab>("layers");
   const [collapsed, setCollapsed] = useState<Set<NodeId>>(new Set());
+  const [deleteTargetId, setDeleteTargetId] = useState<PageId | null>(null);
+  const [deletingPage, setDeletingPage] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const page = activePage(document, activePageId);
   const pages = useMemo(() => document?.pages.filter((candidate) => !candidate.archived) ?? [], [document]);
   const components = useMemo(() => Object.values(document?.nodes ?? {})
     .filter((node) => !node.archived && (node.type === "component" || node.type === "instance")), [document]);
   const assets = useMemo(() => Object.values(document?.assets ?? {}), [document]);
+  const deleteTarget = document?.pages.find((candidate) => candidate.id === deleteTargetId) ?? null;
+
+  const requestPageDelete = (pageId: PageId) => {
+    const current = useDesignerStore.getState();
+    if (current.pendingOperations.length > 0
+      || current.saving
+      || current.archiveReview
+      || current.conflictRecovery
+      || current.saveState !== "saved") {
+      setNotice("Use Save / Commit for current canvas edits before deleting a page.");
+      window.requestAnimationFrame(() => window.document.querySelector<HTMLButtonElement>(".editor-save-button")?.focus());
+      return;
+    }
+    setDeleteTargetId(pageId);
+    setDeleteError(null);
+  };
+
+  const confirmPageDelete = async () => {
+    if (!deleteTarget || deletingPage) return;
+    setDeletingPage(true);
+    setDeleteError(null);
+    deletePage(deleteTarget.id);
+    try {
+      await save();
+      const current = useDesignerStore.getState();
+      if (!current.archiveReview) {
+        throw new Error(current.error ?? "The page deletion preview could not be created.");
+      }
+      setDeleteTargetId(null);
+      setNotice(`Deletion preview for “${deleteTarget.name}” is ready. Compare it, then Commit archive or Discard preview.`);
+    } catch (cause) {
+      setDeleteError(cause instanceof Error ? cause.message : "The page deletion preview could not be created.");
+    } finally {
+      setDeletingPage(false);
+    }
+  };
 
   const selectAssetUsage = (assetId: string) => {
     if (!document) return;
@@ -166,7 +269,7 @@ export function LayersPanel() {
                 <div className="page-row-shell" key={item.id} data-page-id={item.id}>
                   <button className={`page-row page-row-detailed ${item.id === page?.id ? "is-active" : ""}`} title={item.name} onClick={() => setActivePage(item.id)}>
                     <File size={12} />
-                    <span><strong>{item.name}</strong><small>{activeChildren.length} root {activeChildren.length === 1 ? "frame" : "frames"}</small></span>
+                    <span><strong dir="auto">{item.name}</strong><small>{activeChildren.length} root {activeChildren.length === 1 ? "frame" : "frames"}</small></span>
                     {item.id === page?.id && <Minus size={9} />}
                   </button>
                   <button
@@ -174,10 +277,7 @@ export function LayersPanel() {
                     disabled={pages.length <= 1}
                     aria-label={`Delete page ${item.name}`}
                     title={pages.length <= 1 ? "A design must keep at least one page" : `Delete ${item.name}`}
-                    onClick={() => {
-                      if (!window.confirm(`Archive page “${item.name}”? Its layers will remain recoverable in immutable history.`)) return;
-                      deletePage(item.id);
-                    }}
+                    onClick={() => requestPageDelete(item.id)}
                   >
                     <Trash2 size={11} />
                   </button>
@@ -198,7 +298,10 @@ export function LayersPanel() {
             <button onClick={() => insertTemplate("button")}><MousePointerClick size={12} />Button</button>
             <button onClick={() => insertTemplate("card")}><PanelsTopLeft size={12} />Card</button>
           </div>
-          <div className="sidebar-section-heading"><span>{page?.name ?? "Layers"}</span><span>{page?.children.length ?? 0}</span></div>
+          <div className="sidebar-section-heading sidebar-section-heading-titled">
+            <span dir="auto" title={page?.name ?? "Layers"}>{page?.name ?? "Layers"}</span>
+            <span aria-label={`${page?.children.length ?? 0} root layers`}>{page?.children.length ?? 0}</span>
+          </div>
           <div className="layers-scroll">
             {page?.children.map((nodeId) => (
               <LayerRow
@@ -250,6 +353,19 @@ export function LayersPanel() {
             })}
             {assets.length === 0 && <div className="sidebar-empty"><Image size={17} /><strong>No uploaded assets</strong><small>Add an image layer, then upload PNG, JPEG, or WebP from Content.</small><button onClick={() => addNode("image")}><Plus size={11} /> Add image layer</button></div>}
           </div>
+        </div>
+      )}
+      {deleteTarget && (
+        <div className="modal-backdrop page-delete-backdrop" role="presentation" onMouseDown={(event) => {
+          if (!deletingPage && event.currentTarget === event.target) setDeleteTargetId(null);
+        }}>
+          <PageDeleteDialog
+            pageName={deleteTarget.name}
+            busy={deletingPage}
+            error={deleteError}
+            onCancel={() => { if (!deletingPage) setDeleteTargetId(null); }}
+            onConfirm={() => void confirmPageDelete()}
+          />
         </div>
       )}
     </aside>

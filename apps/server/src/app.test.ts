@@ -388,7 +388,7 @@ describe("designer server", () => {
     }
   });
 
-  it("does not expose the removed one-call archive mutation", async () => {
+  it("reserves the archive route for exact-name project soft deletion, not node mutation", async () => {
     const created = await createDesign(application.app, "alice", "create-no-archive-shortcut-0001");
     const response = await application.app.inject({
       method: "POST",
@@ -399,8 +399,9 @@ describe("designer server", () => {
         idempotencyKey: "removed-archive-shortcut-0001",
       },
     });
-    expect(response.statusCode).toBe(404);
-    expect(response.json<{ error: { code: string } }>().error.code).toBe("NOT_FOUND");
+    expect(response.statusCode).toBe(422);
+    expect(response.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_FAILED");
+    expect(application.service.getDesign("alice", created.document.id).revision.version).toBe(1);
   });
 
   it("serves exact product-specification previews, planning sessions, and immutable agent tasks", async () => {
@@ -763,6 +764,7 @@ describe("designer server", () => {
   });
 
   it("initializes the stateless Streamable HTTP MCP endpoint", async () => {
+    let mcpToken: string | undefined;
     const mcpRequest = (payload: Record<string, unknown>) => application.app.inject({
       method: "POST",
       url: "/mcp",
@@ -770,6 +772,7 @@ describe("designer server", () => {
         accept: "application/json, text/event-stream",
         "content-type": "application/json",
         "x-designer-user": "alice",
+        ...(mcpToken === undefined ? {} : { authorization: `Bearer ${mcpToken}` }),
       },
       payload,
     });
@@ -995,6 +998,57 @@ describe("designer server", () => {
     });
     expect(Object.keys(subtree.result.structuredContent.subtree.nodes)).toEqual([rootNodeId]);
 
+    const previewConnection = application.enterprise.createAgentConnection("local", {
+      adapter: "codex",
+      displayName: "MCP task-preview integration",
+      scopes: [
+        "design:read",
+        "design:preview",
+        "design:write",
+        "task:create",
+        "task:read",
+        "task:claim",
+        "task:update",
+      ],
+      projectIds: [created.result.structuredContent.document.id],
+      expiresInSeconds: 3_600,
+    });
+    mcpToken = application.enterprise.pairAgentConnection(previewConnection.nonce).grant.token;
+    const taskResponse = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 51,
+      method: "tools/call",
+      params: {
+        name: "task_create",
+        arguments: {
+          design_id: created.result.structuredContent.document.id,
+          brief: "Create the MCP card as an exact proposal",
+          selection: [rootNodeId],
+          base_version: 1,
+          expected_output: "design_preview",
+          idempotency_key: "mcp-preview-task-create-0001",
+        },
+      },
+    });
+    const taskId = taskResponse.json<{
+      result: { structuredContent: { task: { id: string } } };
+    }>().result.structuredContent.task.id;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 52,
+      method: "tools/call",
+      params: { name: "task_claim", arguments: { task_id: taskId } },
+    });
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 53,
+      method: "tools/call",
+      params: {
+        name: "task_transition",
+        arguments: { task_id: taskId, expected_status: "claimed", to_status: "in_progress" },
+      },
+    });
+
     const previewResponse = await mcpRequest({
       jsonrpc: "2.0",
       id: 6,
@@ -1003,6 +1057,7 @@ describe("designer server", () => {
         name: "design_preview_changes",
         arguments: {
           design_id: created.result.structuredContent.document.id,
+          task_id: taskId,
           base_version: 1,
           operations: [{
             type: "create_tree",
@@ -1029,14 +1084,42 @@ describe("designer server", () => {
       result: {
         content: Array<{ type: string; mimeType?: string }>;
         structuredContent: {
-          preview: { id: string; rootBaseVersion: number; editorDeepLink: string; createdIds: { temporary: Record<string, string> } };
+          preview: {
+            id: string;
+            rootBaseVersion: number;
+            projectDeepLink: string;
+            reviewDeepLink: string | null;
+            createdIds: { temporary: Record<string, string> };
+          };
         };
       };
     }>();
     expect(preview.result.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image", mimeType: "image/png" })]));
     expect(preview.result.structuredContent.preview.rootBaseVersion).toBe(1);
     expect(preview.result.structuredContent.preview.createdIds.temporary["tmp:card"]).toMatch(/^node_/);
-    expect(preview.result.structuredContent.preview.editorDeepLink).toContain(`/design/${created.result.structuredContent.document.id}`);
+    expect(preview.result.structuredContent.preview.projectDeepLink).toContain(`/design/${created.result.structuredContent.document.id}`);
+    expect(preview.result.structuredContent.preview.reviewDeepLink).toBeNull();
+
+    const awaitingResponse = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 61,
+      method: "tools/call",
+      params: {
+        name: "task_transition",
+        arguments: {
+          task_id: taskId,
+          expected_status: "in_progress",
+          to_status: "awaiting_approval",
+          data: { previewId: preview.result.structuredContent.preview.id },
+        },
+      },
+    });
+    expect(awaitingResponse.json<{
+      result: { structuredContent: { task: { status: string }; reviewDeepLink: string } };
+    }>().result.structuredContent).toMatchObject({
+      task: { status: "awaiting_approval" },
+      reviewDeepLink: expect.stringContaining(preview.result.structuredContent.preview.id),
+    });
 
     const commitResponse = await mcpRequest({
       jsonrpc: "2.0",
@@ -1054,15 +1137,61 @@ describe("designer server", () => {
       },
     });
     const committed = commitResponse.json<{
-      result: { structuredContent: { ok: boolean; design: { version: number }; deepLink: string } };
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
     }>();
     expect(committed.result.structuredContent).toMatchObject({
-      ok: true,
-      design: { version: 2 },
-      deepLink: `http://127.0.0.1:4310/design/${created.result.structuredContent.document.id}`,
+      ok: false,
+      error: { code: "FORBIDDEN" },
     });
+    const humanCommit = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${created.result.structuredContent.document.id}/previews/${preview.result.structuredContent.preview.id}/commit`,
+      headers: { "x-designer-user": "alice" },
+      payload: {
+        expectedBaseVersion: 1,
+        idempotencyKey: "mcp-human-commit-key-0001",
+        message: "Approve MCP card",
+        taskId,
+      },
+    });
+    expect(humanCommit.statusCode, humanCommit.body).toBe(200);
+    expect(humanCommit.json()).toMatchObject({ version: 2, task: { status: "completed" } });
 
     const createdCardId = preview.result.structuredContent.preview.createdIds.temporary["tmp:card"]!;
+    const archiveTaskResponse = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 62,
+      method: "tools/call",
+      params: {
+        name: "task_create",
+        arguments: {
+          design_id: created.result.structuredContent.document.id,
+          brief: "Archive the MCP card after human review",
+          selection: [createdCardId],
+          base_version: 2,
+          expected_output: "design_preview",
+          idempotency_key: "mcp-archive-task-create-0001",
+        },
+      },
+    });
+    const archiveTaskId = archiveTaskResponse.json<{
+      result: { structuredContent: { task: { id: string } } };
+    }>().result.structuredContent.task.id;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 63,
+      method: "tools/call",
+      params: { name: "task_claim", arguments: { task_id: archiveTaskId } },
+    });
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 64,
+      method: "tools/call",
+      params: {
+        name: "task_transition",
+        arguments: { task_id: archiveTaskId, expected_status: "claimed", to_status: "in_progress" },
+      },
+    });
     const archivePreviewResponse = await mcpRequest({
       jsonrpc: "2.0",
       id: 8,
@@ -1071,6 +1200,7 @@ describe("designer server", () => {
         name: "design_preview_archive_nodes",
         arguments: {
           design_id: created.result.structuredContent.document.id,
+          task_id: archiveTaskId,
           base_version: 2,
           operations: [{ type: "archive_nodes", node_ids: [createdCardId] }],
           max_size: 512,
@@ -1081,6 +1211,20 @@ describe("designer server", () => {
       result: { structuredContent: { preview: { id: string; destructive: boolean } } };
     }>();
     expect(archivePreview.result.structuredContent.preview.destructive).toBe(true);
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 65,
+      method: "tools/call",
+      params: {
+        name: "task_transition",
+        arguments: {
+          task_id: archiveTaskId,
+          expected_status: "in_progress",
+          to_status: "awaiting_approval",
+          data: { previewId: archivePreview.result.structuredContent.preview.id },
+        },
+      },
+    });
 
     const ordinaryArchiveCommit = await mcpRequest({
       jsonrpc: "2.0",
@@ -1101,7 +1245,7 @@ describe("designer server", () => {
       result: { structuredContent: { ok: boolean; error: { code: string; details?: { requiredTool?: string } } } };
     }>().result.structuredContent).toMatchObject({
       ok: false,
-      error: { code: "VALIDATION_FAILED", details: { requiredTool: "design_commit_archive_preview" } },
+      error: { code: "FORBIDDEN" },
     });
 
     const destructiveArchiveCommit = await mcpRequest({
@@ -1120,8 +1264,21 @@ describe("designer server", () => {
       },
     });
     expect(destructiveArchiveCommit.json<{
-      result: { structuredContent: { ok: boolean; design: { version: number } } };
-    }>().result.structuredContent).toMatchObject({ ok: true, design: { version: 3 } });
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+    const humanArchiveCommit = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${created.result.structuredContent.document.id}/archive-previews/${archivePreview.result.structuredContent.preview.id}/commit`,
+      headers: { "x-designer-user": "alice" },
+      payload: {
+        expectedBaseVersion: 2,
+        idempotencyKey: "mcp-archive-human-commit-0001",
+        message: "Approve MCP card archive",
+        taskId: archiveTaskId,
+      },
+    });
+    expect(humanArchiveCommit.statusCode, humanArchiveCommit.body).toBe(200);
+    expect(humanArchiveCommit.json()).toMatchObject({ version: 3, task: { status: "completed" } });
   });
 
   it("serves, updates, audits, and exports the strict secret-free organization policy", async () => {

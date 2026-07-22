@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DesignerDatabase } from "./db/database.js";
+import { EnterpriseService } from "./enterprise-service.js";
 import { EventHub } from "./events.js";
 import { canonicalJson } from "./ids.js";
 import { encodeRgbaPng } from "./render.js";
@@ -15,7 +16,9 @@ const temporaryDirectories: string[] = [];
 
 function fixture(filename = ":memory:") {
   const database = new DesignerDatabase(filename);
-  const service = new DesignerService(database, new EventHub(), 900);
+  const events = new EventHub();
+  const service = new DesignerService(database, events, 900);
+  const enterprise = new EnterpriseService(database, events, { designerService: service });
   const created = service.createDesign("alice", {
     name: "Preview render metadata",
     preset: "phone",
@@ -28,7 +31,7 @@ function fixture(filename = ":memory:") {
     baseVersion: 1,
     operations: [{ type: "update_node", node_id: frameId, patch: { name: "Rendered frame" } }],
   });
-  return { database, service, created, preview, pageId, frameId };
+  return { database, service, enterprise, created, preview, pageId, frameId };
 }
 
 function temporaryDatabase(): string {
@@ -43,7 +46,7 @@ function installPreviewGrant(database: DesignerDatabase, designId: string): stri
   const actorId = `grant_${grantId}`;
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
-  const scopes = JSON.stringify(["design:read", "design:preview"]);
+  const scopes = JSON.stringify(["design:read", "design:preview", "task:claim", "task:update"]);
   const projects = JSON.stringify([designId]);
   database.sqlite.prepare(
     `INSERT INTO principals (id, organization_id, kind, display_name, external_id, created_at)
@@ -288,6 +291,20 @@ describe("exact preview render metadata", () => {
     const granted = fixture();
     try {
       const actorId = installPreviewGrant(granted.database, granted.created.document.id);
+      const task = granted.enterprise.createAgentTask("local", {
+        designId: granted.created.document.id,
+        brief: "Render one exact agent-owned preview",
+        selection: [granted.frameId],
+        baseVersion: 1,
+        expectedOutput: "design_preview",
+        idempotencyKey: "preview-render-agent-task-0001",
+        expiresInSeconds: 3_600,
+      });
+      granted.enterprise.claimAgentTask(actorId, task.id);
+      granted.enterprise.transitionAgentTask(actorId, task.id, {
+        expectedStatus: "claimed",
+        toStatus: "in_progress",
+      });
       const agentPreview = granted.service.createPreview(actorId, granted.created.document.id, {
         baseVersion: 1,
         operations: [{
@@ -295,6 +312,7 @@ describe("exact preview render metadata", () => {
           node_id: granted.frameId,
           patch: { name: "Agent render" },
         }],
+        taskId: task.id,
       });
       granted.database.sqlite.prepare(
         "UPDATE agent_grants SET revoked_at = ? WHERE id = 'preview_render_grant'",

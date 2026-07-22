@@ -91,7 +91,7 @@ function persistedState(app: DesignerApplication, designId: string) {
 }
 
 describe("V2 design restore pin consistency", () => {
-  it("documents and preserves the active pin through idempotent REST and MCP content restores", async () => {
+  it("preserves the active pin through idempotent human REST restores and denies MCP restores", async () => {
     const app = await application();
     const created = app.service.createDesign("local", {
       name: "Restore pin surfaces",
@@ -135,8 +135,8 @@ describe("V2 design restore pin consistency", () => {
     const restoreTool = tools.json<{
       result: { tools: Array<{ name: string; description?: string }> };
     }>().result.tools.find((tool) => tool.name === "design_restore_revision");
-    expect(restoreTool?.description).toContain("V1 restores have no document pin policy");
-    expect(restoreTool?.description).toContain("reject blocking incompatibilities");
+    expect(restoreTool?.description).toContain("Compatibility placeholder only");
+    expect(restoreTool?.description).toContain("human");
 
     const httpPayload = {
       targetVersion: 2,
@@ -219,28 +219,13 @@ describe("V2 design restore pin consistency", () => {
       result: {
         structuredContent: {
           ok: boolean;
-          design: { version: number };
-          revision: { id: string };
-          diagnostics: Array<Record<string, unknown>>;
-          restore: { designSystem: { status: string } };
-          restorePolicy: { designSystem: string };
+          error: { code: string };
         };
       };
     }>().result.structuredContent;
-    expect(mcpBody).toMatchObject({
-      ok: true,
-      design: { version: 5 },
-      restore: { designSystem: { status: "active_pin_preserved" } },
-      restorePolicy: { designSystem: "active_pin_preserved" },
-      diagnostics: expect.arrayContaining([expect.objectContaining({
-        code: "RESTORE_DESIGN_SYSTEM_PIN_PRESERVED",
-        active_release_id: release.id,
-        historical_release_id: "release_formaspec_foundation_1",
-      })]),
-    });
+    expect(mcpBody).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
     const afterMcp = persistedState(app, created.design.id);
-    expect(afterMcp.revisionCount).toBe(afterHttp.revisionCount + 1);
-    expect(afterMcp.pin).toEqual(before.pin);
+    expect(afterMcp).toEqual(afterHttp);
 
     const mcpReplay = await app.app.inject({
       method: "POST",
@@ -258,8 +243,8 @@ describe("V2 design restore pin consistency", () => {
       },
     });
     expect(mcpReplay.json<{
-      result: { structuredContent: { revision: { id: string } } };
-    }>().result.structuredContent.revision.id).toBe(mcpBody.revision.id);
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
     expect(persistedState(app, created.design.id)).toEqual(afterMcp);
 
     const v1Http = await app.app.inject({
@@ -267,7 +252,7 @@ describe("V2 design restore pin consistency", () => {
       url: `/api/designs/${created.design.id}/restore`,
       payload: {
         targetVersion: 1,
-        expectedBaseVersion: 5,
+        expectedBaseVersion: 4,
         idempotencyKey: "restore-pin-http-v1-policy-0001",
       },
     });
@@ -302,7 +287,7 @@ describe("V2 design restore pin consistency", () => {
           arguments: {
             design_id: created.design.id,
             target_version: 1,
-            expected_base_version: 6,
+            expected_base_version: 5,
             idempotency_key: "restore-pin-mcp-v1-policy-0001",
           },
         },
@@ -312,19 +297,13 @@ describe("V2 design restore pin consistency", () => {
       result: {
         content: Array<{ type: string; text: string }>;
         structuredContent: {
-          restore: { targetSchemaVersion: number; designSystem: { status: string } };
-          restorePolicy: { designSystem: string };
+          ok: boolean;
+          error: { code: string };
         };
       };
     }>().result;
-    expect(v1McpBody.content[0]?.text).toContain("Restored V1 content");
-    expect(v1McpBody.structuredContent).toMatchObject({
-      restore: {
-        targetSchemaVersion: 1,
-        designSystem: { status: "not_applicable_v1" },
-      },
-      restorePolicy: { designSystem: "not_applicable_v1" },
-    });
+    expect(v1McpBody.content[0]?.text).toContain("FORBIDDEN");
+    expect(v1McpBody.structuredContent).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
     expect(app.designSystems.readProjectPin("local", created.design.id)).toEqual(before.pin);
   });
 });

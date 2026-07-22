@@ -1,6 +1,6 @@
 {
   "name": "minimal-ui",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Use the Minimal UI compatibility identity to design, inspect, refine, and hand off structured projects through FormaSpec.",
   "author": {
     "name": "FormaSpec"

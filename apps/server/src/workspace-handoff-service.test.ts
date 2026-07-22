@@ -845,9 +845,95 @@ describe("revision-pinned implementation mappings", () => {
       idempotencyKey: "mapping-wrong-project-denied",
     }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
   });
+
+  it("keeps mapping evidence immutable but makes it opaque after project archival", () => {
+    const opened = setup();
+    const v2 = upgradeFixtureToV2(opened);
+    const persistedInventory = opened.handoffs.persistRepositoryInventory("local", mappingInventory());
+    const created = opened.handoffs.createImplementationMappings("local", mappingRequest(
+      opened,
+      v2.revisionId,
+      persistedInventory.id,
+      {
+        idempotencyKey: "mapping-archive-opacity-0001",
+        mappings: [{
+          entityKind: "component",
+          entityId: mappingIds.component,
+          inventoryEntityId: mappingIds.sourceComponent,
+        }],
+      },
+    ));
+    const design = opened.designer.getDesign("local", opened.designId, 2);
+    opened.designer.archiveDesign("local", opened.designId, {
+      expectedVersion: 2,
+      idempotencyKey: "mapping-project-archive-0001",
+      confirmationName: design.design.name,
+    });
+
+    expect(captureThrown(() => opened.handoffs.readImplementationMapping(
+      "local",
+      created.mappings[0]!.id,
+    ))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.handoffs.listImplementationMappings("local", {
+      designId: opened.designId,
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.handoffs.createImplementationMappings("local", {
+      ...mappingRequest(opened, v2.revisionId, persistedInventory.id),
+      idempotencyKey: "mapping-after-project-archive-0001",
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(opened.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM implementation_mappings WHERE design_id = ?",
+    ).get(opened.designId)).toEqual({ count: 1 });
+  });
 });
 
 describe("approval-gated engineering handoffs", () => {
+  it("filters archived-project handoffs before pagination and rejects retained IDs as not found", () => {
+    const opened = setup();
+    const persistedInventory = opened.handoffs.persistRepositoryInventory("local", inventory());
+    const handoff = opened.handoffs.createHandoff("local", {
+      designId: opened.designId,
+      revisionId: opened.revisionId,
+      expectedDesignVersion: 1,
+      inventoryId: persistedInventory.id,
+      specification: specification(),
+    });
+    const design = opened.designer.getDesign("local", opened.designId, 1);
+    opened.designer.archiveDesign("local", opened.designId, {
+      expectedVersion: 1,
+      idempotencyKey: "handoff-project-archive-0001",
+      confirmationName: design.design.name,
+    });
+
+    expect(captureThrown(() => opened.handoffs.readHandoff("local", handoff.id)))
+      .toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.handoffs.updateHandoff("local", handoff.id, {
+      expectedVersion: 1,
+      specification: specification({ summary: "Archived projects remain immutable and hidden." }),
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(opened.handoffs.listHandoffs("local", { limit: 1 })).toEqual([]);
+    expect(opened.handoffs.listHandoffSummaries("local", { limit: 1 })).toEqual({
+      handoffs: [],
+      nextCursor: null,
+    });
+    expect(captureThrown(() => opened.handoffs.listHandoffs("local", {
+      designId: opened.designId,
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.handoffs.listHandoffSummaries("local", {
+      designId: opened.designId,
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(captureThrown(() => opened.handoffs.createHandoff("local", {
+      designId: opened.designId,
+      revisionId: opened.revisionId,
+      expectedDesignVersion: 1,
+      inventoryId: persistedInventory.id,
+      specification: specification(),
+    }))).toMatchObject({ code: "NOT_FOUND", statusCode: 404 });
+    expect(opened.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM handoffs WHERE id = ?",
+    ).get(handoff.id)).toEqual({ count: 1 });
+  });
+
   it("keeps immutable specification history, enforces CAS, and requires explicit review, approval, implementation, and completion gates", () => {
     const opened = setup();
     setRole(opened.database, "pm-user", "product_manager");

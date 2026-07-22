@@ -62,6 +62,8 @@ describe("unsigned macOS installer layout", () => {
     expect(cli).toContain("Library/Application Support/FormaSpec");
     const launcher = compatibilityLauncher("1.2.3");
     expect(launcher).toContain("/health/ready");
+    expect(launcher).toContain('doctor|status|start|stop|restart) exec "${INSTALL_ROOT}/bin/formaspecctl"');
+    expect(launcher).toContain('FORMASPEC_LEGACY_DELEGATE:-0');
     expect(launcher).toContain("echo 'FormaSpec 1.2.3'");
     expect(applicationInfoPlist("0.2.0")).toContain("<string>formaspec</string>");
     const handler = protocolHandler();

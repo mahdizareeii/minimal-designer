@@ -8,10 +8,27 @@ import { startBridgeServer, validateLoopbackMcpUrl, type RunningBridge } from ".
 
 const bridges: RunningBridge[] = [];
 const upstreams: http.Server[] = [];
+const essentialTools = [
+  "organization_policy_read",
+  "context_get",
+  "design_list",
+  "design_read",
+  "node_search",
+  "design_preview_changes",
+  "design_render",
+  "design_lint",
+  "task_create",
+  "task_read",
+  "task_claim",
+  "task_transition",
+].map((name) => ({ name }));
 
 afterEach(async () => {
   await Promise.allSettled(bridges.splice(0).map((bridge) => bridge.close()));
-  await Promise.allSettled(upstreams.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  await Promise.allSettled(upstreams.splice(0).map((server) => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  })));
 });
 
 async function startUpstream(handler: http.RequestListener): Promise<{ url: string }> {
@@ -43,6 +60,25 @@ async function postWithHost(url: string, hostHeader: string, body: string): Prom
     request.once("error", reject);
     request.end(body);
   });
+}
+
+function respondToValidMcpProbe(request: http.IncomingMessage, response: http.ServerResponse): boolean {
+  if (request.url !== "/mcp" || request.method !== "POST") return false;
+  const chunks: Buffer[] = [];
+  request.on("data", (chunk: Buffer) => chunks.push(chunk));
+  request.on("end", () => {
+    const rpc = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string; method: string };
+    const result = rpc.method === "initialize"
+      ? {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        serverInfo: { name: "formaspec", version: "0.2.0" },
+      }
+      : { tools: essentialTools };
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
+  });
+  return true;
 }
 
 describe("FormaSpec local bridge", () => {
@@ -191,8 +227,20 @@ describe("FormaSpec local bridge", () => {
       }
       if (request.url === "/mcp" && request.method === "POST") {
         verifiedAuthorization = request.headers.authorization;
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end('{"jsonrpc":"2.0","result":{}}');
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          const rpc = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string; method: string };
+          const result = rpc.method === "initialize"
+            ? {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              serverInfo: { name: "formaspec", version: "0.2.0" },
+            }
+            : { tools: essentialTools };
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
+        });
         return;
       }
       response.writeHead(404).end();
@@ -228,6 +276,19 @@ describe("FormaSpec local bridge", () => {
     expect(verifiedAuthorization).toBe("Bearer fsg_browser-issued-secret");
     expect(await credentialStore.read()).toBe("fsg_browser-issued-secret");
 
+    const verification = await fetch(`${bridge.url}/_control/verify-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "ticket-pairing-bridge" }),
+    });
+    expect(verification.status).toBe(200);
+    expect(await verification.json()).toEqual({
+      verified: true,
+      checks: ["initialize", "tools/list"],
+      serverName: "formaspec",
+      essentialTools: essentialTools.map(({ name }) => name),
+    });
+
     const reused = await fetch(`${bridge.url}/_control/authorize-agent`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -241,6 +302,54 @@ describe("FormaSpec local bridge", () => {
       credentialStored: true,
     });
     expect(apiPosts).toEqual(["/api/agent-connections/pair"]);
+  });
+
+  it("rejects HTTP-success MCP probes with RPC errors, the wrong server, or missing essential tools", async () => {
+    let mode: "rpc-error" | "wrong-server" | "missing-tools" = "rpc-error";
+    const upstream = await startUpstream((request, response) => {
+      if (request.url === "/mcp" && request.method === "POST") {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          const rpc = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string; method: string };
+          response.writeHead(200, { "content-type": "application/json" });
+          if (mode === "rpc-error") {
+            response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, error: { code: -32_000, message: "denied" } }));
+            return;
+          }
+          const result = rpc.method === "initialize"
+            ? {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              serverInfo: { name: mode === "wrong-server" ? "not-formaspec" : "formaspec", version: "0.2.0" },
+            }
+            : { tools: mode === "missing-tools" ? essentialTools.slice(0, -1) : essentialTools };
+          response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
+        });
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    const credentialStore = new MemoryCredentialStore();
+    await credentialStore.write("fsg_probe-shape-secret");
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "probe-shape-bridge",
+      credentialStore,
+    });
+    bridges.push(bridge);
+
+    const verify = () => fetch(`${bridge.url}/_control/verify-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "probe-shape-bridge" }),
+    });
+    expect((await verify()).status).toBe(502);
+    mode = "wrong-server";
+    expect((await verify()).status).toBe(502);
+    mode = "missing-tools";
+    expect((await verify()).status).toBe(502);
   });
 
   it("rejects hostile Host, browser-origin, fetch-metadata, and no-cors content types before proxying", async () => {
@@ -357,8 +466,7 @@ describe("FormaSpec local bridge", () => {
       }
       if (request.url === "/mcp") {
         observedMcpAuthorization = request.headers.authorization;
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end('{"jsonrpc":"2.0","result":{}}');
+        respondToValidMcpProbe(request, response);
         return;
       }
       response.writeHead(404).end();
@@ -484,6 +592,7 @@ describe("FormaSpec local bridge", () => {
         }));
         return;
       }
+      if (respondToValidMcpProbe(request, response)) return;
       response.writeHead(404).end();
     });
     const credentialStore = new MemoryCredentialStore();
@@ -609,8 +718,7 @@ describe("FormaSpec local bridge", () => {
         return;
       }
       if (request.url === "/mcp" && request.method === "POST") {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end('{"jsonrpc":"2.0","result":{}}');
+        respondToValidMcpProbe(request, response);
         return;
       }
       if (request.url === "/api/agent-authorization-context" && request.method === "GET") {

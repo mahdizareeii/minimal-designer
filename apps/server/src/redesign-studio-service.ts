@@ -19,12 +19,12 @@ import { z } from "zod";
 
 import {
   appendAuditEvent,
-  assertProjectAccess,
   assertScope,
   resolveAccess,
   type AccessContext,
   type OrganizationRole,
 } from "./authorization.js";
+import { requireActiveDesign } from "./active-design.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { BoundedJsonObjectSchema } from "./bounded-json-schema.js";
 import { DomainError } from "./errors.js";
@@ -1158,11 +1158,7 @@ export class RedesignStudioService {
   }
 
   private requireDesign(access: AccessContext, designId: string, expectedVersion?: number): DesignRow {
-    const row = this.database.sqlite.prepare(
-      "SELECT id, organization_id, current_version, current_revision_id FROM designs WHERE id = ?",
-    ).get(designId) as DesignRow | undefined;
-    if (!row) throw new DomainError("NOT_FOUND", "Design not found.", 404);
-    assertProjectAccess(access, row.organization_id, row.id);
+    const row = requireActiveDesign(this.database.sqlite, access, designId);
     if (expectedVersion !== undefined && row.current_version !== expectedVersion) {
       throw this.versionConflict(expectedVersion, row.current_version, "design");
     }
@@ -1205,7 +1201,7 @@ export class RedesignStudioService {
       throw new DomainError("NOT_FOUND", "Redesign assessment not found.", 404);
     }
     if (row.design_id) {
-      assertProjectAccess(access, row.organization_id, row.design_id);
+      requireActiveDesign(this.database.sqlite, access, row.design_id);
     } else if (access.projectIds.length > 0) {
       throw new DomainError("NOT_FOUND", "Redesign assessment not found.", 404);
     }
@@ -1311,7 +1307,7 @@ export class RedesignStudioService {
   }
 
   private result(access: AccessContext, row: AssessmentRow): RedesignAssessmentResult {
-    if (row.design_id) assertProjectAccess(access, row.organization_id, row.design_id);
+    if (row.design_id) requireActiveDesign(this.database.sqlite, access, row.design_id);
     const versionRows = this.database.sqlite.prepare(
       "SELECT * FROM redesign_assessment_versions WHERE assessment_id = ? ORDER BY version",
     ).all(row.id) as VersionRow[];

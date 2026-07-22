@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_MANAGED_ASSET_BYTES = 256 * 1024;
-const MANAGED_PLUGIN_VERSION = "0.2.0";
+const MANAGED_PLUGIN_VERSION = "0.2.1";
 
 export interface ManagedCodexAssetIdentity {
   skillName: string;
@@ -179,11 +179,16 @@ export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAsset
       identity,
       `Managed ${identity.displayName} Codex skill metadata`,
     );
+    const standaloneSkill = readText(root, `skills/${identity.skillName}/SKILL.md`);
+    const pluginSkill = readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`);
     requireSkillIdentity(
-      readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`),
+      pluginSkill,
       identity,
       `Managed ${identity.displayName} Codex plugin skill`,
     );
+    if (standaloneSkill !== pluginSkill) {
+      throw new Error(`Managed ${identity.displayName} standalone and plugin skills must be byte-identical.`);
+    }
     requireOpenAiIdentity(
       readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`),
       identity,

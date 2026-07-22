@@ -16,6 +16,7 @@ import {
 import {
   AgentSubmissionStatus,
   agentPreviewReadFailureDisposition,
+  commitInlineAgentPreviewWhenAllowed,
   productSpecificationRequiresCommit,
   summarizeCodexConnection,
 } from "../components/ProductBriefPanel";
@@ -84,6 +85,34 @@ afterEach(() => {
 });
 
 describe("agent before/after review", () => {
+  it("blocks inline preview approval while the product brief is dirty without committing or reopening", async () => {
+    const commit = vi.fn(async () => ({ version: 5 }));
+    const openDesign = vi.fn(async () => undefined);
+
+    const outcome = await commitInlineAgentPreviewWhenAllowed({
+      editor: {
+        baseVersion: 4,
+        pendingOperations: [],
+        saving: false,
+        archiveReview: null,
+        conflictRecovery: null,
+        saveState: "saved",
+        productBriefGuard: { dirty: true, saving: false },
+      },
+      previewRenderStatus: "available",
+      previewBaseVersion: 4,
+      commit,
+      openDesign,
+    });
+
+    expect(outcome).toEqual({
+      status: "blocked",
+      message: expect.stringMatching(/Save \/ Commit.*product brief/i),
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(openDesign).not.toHaveBeenCalled();
+  });
+
   it("persists a missing version-zero specification before queuing an agent task", () => {
     const missing = { version: 0, naturalLanguageBrief: "Existing document metadata brief", specification: null };
     const committed = { version: 1, naturalLanguageBrief: "Saved brief", specification: { goals: [] } };

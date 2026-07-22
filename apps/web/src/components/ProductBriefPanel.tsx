@@ -14,16 +14,18 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { navigate } from "../App";
 import {
   ApiError,
   commitDesignPreview,
   commitProductSpecification,
   createAgentTask,
+  designPreviewReviewPath,
   listAgentConnections,
   listAgentTasks,
   previewProductSpecification,
-  readDesign,
   readDesignPreview,
+  readAgentTask,
   readProductSpecification,
   subscribeToEvents,
   taskPreviewId,
@@ -40,7 +42,6 @@ import { PlanningInterview } from "./PlanningInterview";
 import { EngineeringHandoffPanel } from "./EngineeringHandoffPanel";
 import {
   AgentTaskWorkflowCard,
-  AgentPreviewReviewDialog,
   PreviewDiagnosticsSummary,
   PreviewRevisionSummary,
   FORMASPEC_AGENT_MENTION,
@@ -49,7 +50,6 @@ import {
   type AgentConnectionViewState,
   type PreviewRenderStatus,
 } from "./AgentPreviewReview";
-import type { DesignDocument } from "../domain";
 
 type SpecView = "brief" | "structured";
 
@@ -64,6 +64,7 @@ export type AgentSubmissionPhase =
   | "saving_design"
   | "saving_specification"
   | "queueing_task"
+  | "saved_without_task"
   | "success"
   | "error";
 
@@ -86,6 +87,56 @@ export function productSpecificationRequiresCommit(
   return briefChanged || specification === null || !Number.isInteger(specification.version) || specification.version <= 0;
 }
 
+export interface InlineAgentPreviewEditorState {
+  baseVersion: number;
+  pendingOperations: readonly unknown[];
+  saving: boolean;
+  archiveReview: unknown | null;
+  conflictRecovery: unknown | null;
+  saveState: string;
+  productBriefGuard?: { dirty: boolean; saving: boolean } | null;
+}
+
+export type InlineAgentPreviewCommitOutcome<T> =
+  | { status: "blocked"; message: string }
+  | { status: "committed"; value: T };
+
+export async function commitInlineAgentPreviewWhenAllowed<T>(input: {
+  editor: InlineAgentPreviewEditorState;
+  previewRenderStatus: PreviewRenderStatus;
+  previewBaseVersion: number;
+  commit: () => Promise<T>;
+  openDesign: () => Promise<void>;
+}): Promise<InlineAgentPreviewCommitOutcome<T>> {
+  if (input.previewRenderStatus !== "available") {
+    return {
+      status: "blocked",
+      message: "The rendered PNG must load successfully before the exact preview can be committed. Retry the PNG first.",
+    };
+  }
+  if (input.editor.pendingOperations.length > 0
+    || input.editor.saving
+    || input.editor.archiveReview
+    || input.editor.conflictRecovery
+    || input.editor.saveState !== "saved"
+    || input.editor.productBriefGuard?.dirty
+    || input.editor.productBriefGuard?.saving) {
+    return {
+      status: "blocked",
+      message: "Save / Commit the design and product brief before committing an agent preview.",
+    };
+  }
+  if (input.editor.baseVersion !== input.previewBaseVersion) {
+    return {
+      status: "blocked",
+      message: "The project head changed. Ask FormaSpec for a new preview; FormaSpec does not auto-merge.",
+    };
+  }
+  const value = await input.commit();
+  await input.openDesign();
+  return { status: "committed", value };
+}
+
 export function AgentSubmissionStatus({
   feedback,
   onOpenCodex,
@@ -96,6 +147,7 @@ export function AgentSubmissionStatus({
   if (feedback.phase === "idle") return null;
   const pending = ["checking_design", "saving_design", "saving_specification", "queueing_task"].includes(feedback.phase);
   const failed = feedback.phase === "error";
+  const savedWithoutTask = feedback.phase === "saved_without_task";
   return (
     <div
       className={`product-submit-status is-${feedback.phase}`}
@@ -106,7 +158,7 @@ export function AgentSubmissionStatus({
     >
       {pending ? <LoaderCircle size={14} className="spin" /> : failed ? <MessageSquareText size={14} /> : <CheckCircle2 size={14} />}
       <span>
-        <strong>{pending ? "Submitting to @FormaSpec" : failed ? "Submission failed" : "Task ready for Codex"}</strong>
+        <strong>{pending ? "Submitting to @FormaSpec" : failed ? "Submission failed" : savedWithoutTask ? "Specification saved; no task queued" : "Task ready for Codex"}</strong>
         <small>{feedback.message}</small>
       </span>
       {feedback.phase === "success" && feedback.task && (
@@ -252,17 +304,28 @@ function openExternalAppLink(url: string, protocol: "formaspec:" | "codex:", hos
   anchor.remove();
 }
 
+async function withSubmissionTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 30_000): Promise<T> {
+  let timeout = 0;
+  const timedOut = new Promise<never>((_, reject) => {
+    timeout = window.setTimeout(() => reject(new Error(`${label} timed out. Retry safely; FormaSpec will reuse the same idempotency key.`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timedOut]);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export function ProductBriefPanel() {
   const document = useDesignerStore((state) => state.document);
   const baseVersion = useDesignerStore((state) => state.baseVersion);
-  const activePageId = useDesignerStore((state) => state.activePageId);
   const selectedIds = useDesignerStore((state) => state.selectedIds);
   const pendingCount = useDesignerStore((state) => state.pendingOperations.length);
   const savingDesign = useDesignerStore((state) => state.saving);
   const archiveReview = useDesignerStore((state) => state.archiveReview);
-  const saveDesign = useDesignerStore((state) => state.save);
   const openDesign = useDesignerStore((state) => state.openDesign);
   const setNotice = useDesignerStore((state) => state.setNotice);
+  const setProductBriefDraftGuard = useDesignerStore((state) => state.setProductBriefDraftGuard);
   const [collapsed, setCollapsed] = useState(false);
   const [panelTab, setPanelTab] = useState<ActivityPanelTab>("activity");
   const [specView, setSpecView] = useState<SpecView>("brief");
@@ -279,8 +342,6 @@ export function ProductBriefPanel() {
   const [latestTask, setLatestTask] = useState<AgentTaskRecord | null>(null);
   const [reviewTask, setReviewTask] = useState<AgentTaskRecord | null>(null);
   const [reviewPreview, setReviewPreview] = useState<DesignPreviewRecord | null>(null);
-  const [reviewBaseDocument, setReviewBaseDocument] = useState<DesignDocument | null>(null);
-  const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [previewRenderStatus, setPreviewRenderStatus] = useState<PreviewRenderStatus>("loading");
@@ -290,12 +351,16 @@ export function ProductBriefPanel() {
   const refreshSequence = useRef(0);
   const displayedPreviewId = useRef<string | null>(null);
   const previewCommitKeys = useRef(new Map<string, string>());
+  const specificationCommitAttempt = useRef<{
+    fingerprint: string;
+    previewId: string | null;
+    idempotencyKey: string;
+  } | null>(null);
+  const taskCreateAttempt = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
 
   const clearAgentReview = useCallback(() => {
     setReviewTask(null);
     setReviewPreview(null);
-    setReviewBaseDocument(null);
-    setReviewOpen(false);
     setPreviewRenderStatus("loading");
     setPreviewRenderRetryKey((value) => value + 1);
     displayedPreviewId.current = null;
@@ -334,7 +399,7 @@ export function ProductBriefPanel() {
     }).catch((cause) => {
       if (!active) return;
       if (cause instanceof ApiError && cause.code === "NOT_FOUND") {
-        setSpecification({ version: 0, naturalLanguageBrief: fallbackBrief, specification: null });
+        setSpecification(null);
         setBrief(fallbackBrief);
         setLoadedBrief(fallbackBrief);
         setLoading(false);
@@ -367,7 +432,20 @@ export function ProductBriefPanel() {
       }
       if (tasksResult.status === "rejected") throw tasksResult.reason;
       const tasks = tasksResult.value;
-      const newestDesignTask = tasks.find((task) => task.expectedOutput === "design_preview") ?? null;
+      const requestedTaskId = new URLSearchParams(window.location.search).get("task")?.trim() ?? "";
+      let requestedTask = requestedTaskId ? tasks.find((task) => task.id === requestedTaskId) ?? null : null;
+      if (requestedTaskId && !requestedTask) requestedTask = await readAgentTask(requestedTaskId);
+      if (requestedTask && requestedTask.designId !== designId) {
+        throw new Error("The requested task belongs to another project and was not opened here.");
+      }
+      if (requestedTask && requestedTask.expectedOutput !== "design_preview") {
+        throw new Error("The requested task does not produce a design preview for this review surface.");
+      }
+      const designTasks = tasks.filter((task) => task.expectedOutput === "design_preview");
+      const newestDesignTask = requestedTask
+        ?? designTasks.find((task) => task.status === "awaiting_approval")
+        ?? designTasks[0]
+        ?? null;
       setLatestTask(newestDesignTask ?? tasks[0] ?? null);
       const previewId = taskPreviewId(newestDesignTask);
       if (!newestDesignTask
@@ -377,14 +455,10 @@ export function ProductBriefPanel() {
         setReviewError(null);
         return;
       }
-      const [preview, baseDocument] = await Promise.all([
-        readDesignPreview(designId, previewId, newestDesignTask.id),
-        readDesign(designId, newestDesignTask.baseVersion),
-      ]);
+      const preview = await readDesignPreview(designId, previewId, newestDesignTask.id);
       if (sequence !== refreshSequence.current) return;
       setReviewTask(newestDesignTask);
       setReviewPreview(preview);
-      setReviewBaseDocument(baseDocument);
       setReviewError(null);
       if (displayedPreviewId.current !== preview.previewId) {
         displayedPreviewId.current = preview.previewId;
@@ -399,7 +473,6 @@ export function ProductBriefPanel() {
       const failure = agentPreviewReadFailureDisposition(cause);
       setLatestTask((current) => current?.designId === designId ? current : null);
       if (failure.clearReview) clearAgentReview();
-      if (failure.closeDialog) setReviewOpen(false);
       setReviewError(failure.message);
     }
   }, [clearAgentReview, designId]);
@@ -431,7 +504,7 @@ export function ProductBriefPanel() {
     [agentConnections, connectionError, connectionLoading, designId],
   );
 
-  const persistBrief = async (): Promise<ProductSpecificationRecord> => {
+  const persistBrief = useCallback(async (): Promise<ProductSpecificationRecord> => {
     if (!designId) throw new Error("Open a project before saving its product specification.");
     const normalizedBrief = brief.trim();
     if (!normalizedBrief) throw new Error("Describe the product before creating a specification or agent task.");
@@ -441,23 +514,63 @@ export function ProductBriefPanel() {
     setError(null);
     try {
       const currentVersion = specification?.version ?? 0;
-      const preview = await previewProductSpecification(designId, currentVersion, normalizedBrief);
-      if (!preview.canCommit) throw new Error("The product specification preview contains validation errors.");
-      const committed = await commitProductSpecification(
+      const fingerprint = `${designId}\u0000${currentVersion}\u0000${normalizedBrief}`;
+      let attempt = specificationCommitAttempt.current;
+      if (!attempt || attempt.fingerprint !== fingerprint) {
+        attempt = { fingerprint, previewId: null, idempotencyKey: createClientKey("product_spec") };
+        specificationCommitAttempt.current = attempt;
+      }
+      if (!attempt.previewId) {
+        const preview = await withSubmissionTimeout(
+          previewProductSpecification(designId, currentVersion, normalizedBrief),
+          "Product specification preview",
+        );
+        if (!preview.canCommit) throw new Error("The product specification preview contains validation errors.");
+        attempt.previewId = preview.previewId;
+      }
+      const committed = await withSubmissionTimeout(commitProductSpecification(
         designId,
-        preview.previewId,
+        attempt.previewId,
         currentVersion,
-        createClientKey("product_spec"),
-      );
+        attempt.idempotencyKey,
+      ), "Product specification commit");
+      specificationCommitAttempt.current = null;
       setSpecification(committed);
       setBrief(committed.naturalLanguageBrief);
       setLoadedBrief(committed.naturalLanguageBrief);
       setNotice(`Product specification version ${committed.version} saved.`);
       return committed;
+    } catch (cause) {
+      if (cause instanceof ApiError && ["PREVIEW_EXPIRED", "NOT_FOUND", "VERSION_CONFLICT"].includes(cause.code)) {
+        specificationCommitAttempt.current = null;
+      }
+      throw cause;
     } finally {
       setSavingSpec(false);
     }
-  };
+  }, [brief, briefChanged, designId, setNotice, specification]);
+
+  useEffect(() => {
+    if (!designId) return;
+    const discard = () => {
+      setBrief(loadedBrief);
+      setError(null);
+      specificationCommitAttempt.current = null;
+    };
+    setProductBriefDraftGuard({
+      designId,
+      draft: brief,
+      persisted: loadedBrief,
+      dirty: briefChanged,
+      saving: savingSpec,
+      save: async () => { await persistBrief(); },
+      discard,
+    });
+    return () => {
+      const current = useDesignerStore.getState().productBriefGuard;
+      if (current?.designId === designId) setProductBriefDraftGuard(null);
+    };
+  }, [brief, briefChanged, designId, loadedBrief, persistBrief, savingSpec, setProductBriefDraftGuard]);
 
   const saveBrief = async () => {
     try {
@@ -486,23 +599,16 @@ export function ProductBriefPanel() {
       if (!current.document || current.document.id !== designId) {
         throw new Error("The open project changed before submission. Reopen the intended project and try again.");
       }
-      if (current.pendingOperations.length > 0 || current.saving) {
-        setSubmissionFeedback({
-          phase: "saving_design",
-          message: "Saving the latest editor changes before creating the task…",
-          task: null,
-        });
-        await saveDesign();
+      if (current.pendingOperations.length > 0
+        || current.saving
+        || current.archiveReview
+        || current.conflictRecovery
+        || current.saveState !== "saved") {
+        window.requestAnimationFrame(() => window.document.querySelector<HTMLButtonElement>(".editor-save-button")?.focus());
+        throw new Error("Save / Commit the design first. Submit to @FormaSpec never silently commits canvas changes.");
       }
-      current = useDesignerStore.getState();
-      if (!current.document || current.document.id !== designId) {
-        throw new Error("The open project changed while FormaSpec was preparing the task. Nothing was queued.");
-      }
-      if (current.archiveReview) throw new Error("Commit or discard the destructive preview before starting an agent task.");
-      if (current.saveState !== "saved" || current.pendingOperations.length > 0 || current.saving) {
-        const storeError = current.error?.trim();
-        throw new Error(storeError || "The latest design revision could not be saved. Resolve the editor state, then submit again.");
-      }
+      const submissionBaseVersion = current.baseVersion;
+      const submissionSelection = [...current.selectedIds];
       setSubmissionFeedback({
         phase: "saving_specification",
         message: productSpecificationRequiresCommit(specification, briefChanged)
@@ -511,21 +617,44 @@ export function ProductBriefPanel() {
         task: null,
       });
       const committedSpec = await persistBrief();
+      current = useDesignerStore.getState();
+      const selectionUnchanged = current.selectedIds.length === submissionSelection.length
+        && current.selectedIds.every((id, index) => id === submissionSelection[index]);
+      if (!current.document
+        || current.document.id !== designId
+        || current.baseVersion !== submissionBaseVersion
+        || current.pendingOperations.length > 0
+        || current.saving
+        || current.archiveReview
+        || current.conflictRecovery
+        || current.saveState !== "saved"
+        || !selectionUnchanged) {
+        const message = `Product specification version ${committedSpec.version} was saved, but the editor context changed. No stale task was queued.`;
+        setSubmissionFeedback({ phase: "saved_without_task", message, task: null });
+        setNotice(message);
+        return;
+      }
       setSubmissionFeedback({
         phase: "queueing_task",
         message: "Creating an immutable design task and direct Codex launch action…",
         task: null,
       });
-      const task = await createAgentTask({
+      const taskFingerprint = `${designId}\u0000${submissionBaseVersion}\u0000${submissionSelection.join("\u0001")}\u0000${committedSpec.version}\u0000${committedSpec.naturalLanguageBrief}`;
+      if (!taskCreateAttempt.current || taskCreateAttempt.current.fingerprint !== taskFingerprint) {
+        taskCreateAttempt.current = { fingerprint: taskFingerprint, idempotencyKey: createClientKey("agent_task") };
+      }
+      const task = await withSubmissionTimeout(createAgentTask({
         designId,
-        baseVersion: current.baseVersion,
+        baseVersion: submissionBaseVersion,
         brief: committedSpec.naturalLanguageBrief,
-        selection: current.selectedIds,
+        selection: submissionSelection,
         expectedOutput: "design_preview",
-      });
+        idempotencyKey: taskCreateAttempt.current.idempotencyKey,
+      }), "Agent task creation");
       if (!task.id || task.designId !== designId) {
         throw new Error("The server returned an invalid FormaSpec task. No Codex launch action was accepted.");
       }
+      taskCreateAttempt.current = null;
       setLatestTask(task);
       clearAgentReview();
       setCollapsed(false);
@@ -569,6 +698,10 @@ export function ProductBriefPanel() {
       setReviewError("No queued FormaSpec task is available to open. Submit the product brief first.");
       return;
     }
+    if (!["queued", "claimed", "in_progress"].includes(task.status)) {
+      setReviewError("This task is already terminal or awaiting website approval and cannot be relaunched in Codex.");
+      return;
+    }
     try {
       openExternalAppLink(codexTaskLaunchUrl(task), "codex:", "new");
       setNotice(`Requested Codex to open task ${task.id} with @FormaSpec prefilled. Review the instruction, then press Send.`);
@@ -577,40 +710,47 @@ export function ProductBriefPanel() {
     }
   };
 
+  const openExactReview = () => {
+    if (!designId || !reviewTask || !reviewPreview) {
+      setReviewError("No exact persisted preview is ready for review yet.");
+      return;
+    }
+    navigate(designPreviewReviewPath(designId, reviewPreview.previewId, reviewTask.id));
+  };
+
   const commitAgentPreview = async () => {
     if (!designId || !reviewTask || !reviewPreview) return;
-    if (previewRenderStatus !== "available") {
-      setReviewError("The rendered PNG must load successfully before the exact preview can be committed. Retry the PNG first.");
-      return;
-    }
     const current = useDesignerStore.getState();
-    if (current.pendingOperations.length > 0 || current.saving || current.archiveReview) {
-      setReviewError("Save or discard local editor changes before committing an agent preview.");
-      return;
-    }
-    if (current.baseVersion !== reviewPreview.rootBaseVersion) {
-      setReviewError("The project head changed. Ask FormaSpec for a new preview; FormaSpec does not auto-merge.");
-      return;
-    }
     setReviewBusy(true);
     setReviewError(null);
-    const idempotencyKey = previewCommitKeys.current.get(reviewPreview.previewId)
-      ?? createClientKey("agent_preview_commit");
-    previewCommitKeys.current.set(reviewPreview.previewId, idempotencyKey);
     try {
-      const approved = await commitDesignPreview({
-        designId,
-        previewId: reviewPreview.previewId,
-        taskId: reviewTask.id,
-        expectedBaseVersion: reviewPreview.rootBaseVersion,
-        idempotencyKey,
-        message: `Approve FormaSpec proposal from task ${reviewTask.id}`,
-        kind: reviewPreview.kind,
+      const outcome = await commitInlineAgentPreviewWhenAllowed({
+        editor: current,
+        previewRenderStatus,
+        previewBaseVersion: reviewPreview.rootBaseVersion,
+        commit: async () => {
+          const idempotencyKey = previewCommitKeys.current.get(reviewPreview.previewId)
+            ?? createClientKey("agent_preview_commit");
+          previewCommitKeys.current.set(reviewPreview.previewId, idempotencyKey);
+          return commitDesignPreview({
+            designId,
+            previewId: reviewPreview.previewId,
+            taskId: reviewTask.id,
+            expectedBaseVersion: reviewPreview.rootBaseVersion,
+            idempotencyKey,
+            message: `Approve FormaSpec proposal from task ${reviewTask.id}`,
+            kind: reviewPreview.kind,
+          });
+        },
+        openDesign: async () => { await openDesign(designId); },
       });
+      if (outcome.status === "blocked") {
+        setReviewError(outcome.message);
+        return;
+      }
+      const approved = outcome.value;
       if (approved.task) setLatestTask(approved.task);
-      await openDesign(designId);
       await refreshAgentActivity();
-      setReviewOpen(false);
       setNotice(`Committed FormaSpec preview as immutable version ${approved.version}.`);
     } catch (cause) {
       setReviewError(cause instanceof Error ? cause.message : "The agent preview could not be committed.");
@@ -690,7 +830,7 @@ export function ProductBriefPanel() {
               <div>
                 {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Task {latestTask.id} · {latestTask.status}</span> : <span>Agent mention: <code>{FORMASPEC_AGENT_MENTION}</code></span>}
               </div>
-              <button className="button button-secondary" disabled={!briefChanged || savingSpec || startingAgent || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
+              <button className="button button-secondary" disabled={!productSpecificationRequiresCommit(specification, briefChanged) || savingSpec || startingAgent || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
               <button className="button button-primary" disabled={savingSpec || startingAgent} onClick={() => void startWithCodex()}>{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} Submit to @FormaSpec</button>
             </div>
           </div>
@@ -721,7 +861,7 @@ export function ProductBriefPanel() {
               retryPreviewRender();
               void refreshAgentActivity();
             }}
-            onOpenReview={() => setReviewOpen(true)}
+            onOpenReview={openExactReview}
             onCommit={() => void commitAgentPreview()}
             onDiscard={() => void discardAgentPreview()}
             onPreviewRenderStatusChange={setPreviewRenderStatus}
@@ -743,29 +883,12 @@ export function ProductBriefPanel() {
           preview={reviewPreview}
           previewRenderStatus={previewRenderStatus}
           previewRenderRetryKey={previewRenderRetryKey}
-          onOpen={() => setReviewOpen(true)}
+          onOpen={openExactReview}
           onPreviewRenderStatusChange={setPreviewRenderStatus}
           onRetryPreviewRender={retryPreviewRender}
         />
       )}
       <PlanningInterview designId={document.id} open={planningOpen} onClose={() => setPlanningOpen(false)} />
-      {reviewTask && reviewPreview && reviewBaseDocument && (
-        <AgentPreviewReviewDialog
-          open={reviewOpen}
-          task={reviewTask}
-          preview={reviewPreview}
-          baseDocument={reviewBaseDocument}
-          activePageId={activePageId}
-          busy={reviewBusy}
-          actionError={reviewError}
-          baseMatchesHead={baseVersion === reviewPreview.rootBaseVersion && pendingCount === 0 && !savingDesign && !archiveReview}
-          previewRenderStatus={previewRenderStatus}
-          onClose={() => setReviewOpen(false)}
-          onCommit={() => void commitAgentPreview()}
-          onDiscard={() => void discardAgentPreview()}
-          onRetryPreviewRender={retryPreviewRender}
-        />
-      )}
     </section>
   );
 }

@@ -355,7 +355,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   registerSessionAuthenticationRoutes(app, config, database, sessions);
   registerMaintenanceStatusRoute(app, maintenance);
   registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance, operations });
-  registerEnterpriseHttpRoutes(app, enterprise);
+  registerEnterpriseHttpRoutes(app, enterprise, config.publicBaseUrl);
   registerEnterpriseDomainHttpRoutes(app, {
     designSystems,
     componentInsertions,

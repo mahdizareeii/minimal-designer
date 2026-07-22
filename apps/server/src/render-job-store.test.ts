@@ -95,6 +95,47 @@ describe("persistent render jobs", () => {
     }
   });
 
+  it("rejects archived projects as render-job document or explicit scope context", () => {
+    const database = new DesignerDatabase(":memory:");
+    try {
+      const service = new DesignerService(database, new EventHub(), 900);
+      const created = service.createDesign("local", {
+        name: "Archived render project",
+        preset: "phone",
+        idempotencyKey: "render-archive-create-0001",
+      });
+      service.archiveDesign("local", created.document.id, {
+        expectedVersion: created.document.revision,
+        idempotencyKey: "render-archive-project-0001",
+        confirmationName: created.design.name,
+      });
+      const store = new SqliteRenderJobStore(database.sqlite);
+
+      expect(() => store.queue({
+        kind: "render",
+        requestHash: "9".repeat(64),
+        requestMetadata: { documentSha256: "a".repeat(64) },
+        documentId: created.document.id,
+        documentRevision: created.document.revision,
+      })).toThrow(/archived design/);
+      expect(() => store.queue({
+        kind: "render",
+        requestHash: "b".repeat(64),
+        requestMetadata: { documentSha256: "c".repeat(64) },
+        scope: {
+          kind: "organization",
+          organizationId: "organization_legacy",
+          designId: created.document.id,
+          operation: "archived_render",
+        },
+      })).toThrow(/unknown or cross-organization design/);
+      expect(database.sqlite.prepare("SELECT COUNT(*) AS count FROM render_jobs").get())
+        .toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   it("leases jobs to one API owner and recovers only expired owners", () => {
     const database = new DesignerDatabase(":memory:");
     try {

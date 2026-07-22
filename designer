@@ -478,7 +478,7 @@ ensure_docker() {
         info "Waiting for Docker Desktop (up to 2 minutes)..."
         wait_for_docker && return 0
       fi
-      die "Start Docker Desktop, wait until it reports Engine running, then retry."
+    die "Start Docker Desktop, wait until it reports Engine running, then retry; or run '$SCRIPT_PATH start local' to use the supported native development mode."
       ;;
     linux)
       if command -v systemctl >/dev/null 2>&1 && confirm "Start the Docker service with sudo?"; then
@@ -1233,7 +1233,7 @@ show_status() {
     containers="$(docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.Names}} {{.Status}}' 2>/dev/null || true)"
     if [ -n "$containers" ]; then pass "Docker container: $containers"; found=1; fi
   elif docker_cli_ready; then
-    warn "Docker CLI is installed, but Docker Desktop/Engine is stopped."
+    warn "Docker CLI is installed, but Docker Desktop/Engine is stopped. Start Docker Desktop or run '$SCRIPT_PATH start local'."
   fi
   if [ -n "$url" ]; then
     if curl_ok "http://127.0.0.1:$(cat "$API_PORT_FILE" 2>/dev/null || printf 4310)/health/ready" "$health_host"; then pass "Health check passed."; else warn "Saved service URL is not healthy."; fi
@@ -1374,7 +1374,8 @@ backup_data() {
 }
 
 doctor() {
-  local target="${1:-auto}" failures=0 local_ok=1 docker_ok=1 server_config_ok=1 pnpm_path="" port=""
+  local target="${1:-auto}" failures=0 local_ok=1 docker_ok=1 server_config_ok=1 runtime_ok=1 pnpm_path="" port=""
+  local recorded_mode="" health_host="" bridge_port="${FORMASPEC_BRIDGE_PORT:-4312}" bridge_state="" instance_id=""
   case "$target" in auto|local|docker|server) ;; *) usage_error "Unknown doctor target: $target" ;; esac
   detect_platform
   say "${C_BOLD}FormaSpec doctor${C_RESET}"
@@ -1404,7 +1405,7 @@ doctor() {
     if docker_cli_ready; then pass "Docker CLI is installed: $(docker --version 2>/dev/null | head -n 1)"; else docker_ok=0; fail "Docker CLI is missing."; fi
     if docker_compose_ready; then pass "Docker Compose is installed: $(docker compose version 2>/dev/null | head -n 1)"; else docker_ok=0; fail "Docker Compose v2 is missing."; fi
     if docker_daemon_ready; then pass "Docker daemon is running."
-    else docker_ok=0; warn "Docker Desktop/Engine is installed but not running."; fi
+    else docker_ok=0; warn "Docker Desktop/Engine is installed but not running. Start it or use '$SCRIPT_PATH start local'."; fi
   fi
   if [ "$target" = "server" ]; then
     if [ -f "$SERVER_ENV" ]; then
@@ -1429,6 +1430,43 @@ doctor() {
     if port_busy "$port"; then warn "Port $port is already in use."; port_owner "$port"; else pass "Port $port is available."; fi
   fi
   if [ "$OS_KIND" = "wsl" ]; then case "$PROJECT_ROOT" in /mnt/*) warn "The project is under /mnt; moving it into the Linux filesystem improves pnpm and file watching." ;; esac; fi
+  [ -f "$MODE_FILE" ] && recorded_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  [ -f "$API_PORT_FILE" ] && port="$(cat "$API_PORT_FILE" 2>/dev/null || true)"
+  if ! validate_port "$port"; then port="$DEFAULT_API_PORT"; fi
+  if [ "$recorded_mode" = "server" ] && [ -f "$URL_FILE" ]; then
+    local recorded_url
+    recorded_url="$(cat "$URL_FILE" 2>/dev/null || true)"
+    case "$recorded_url" in https://*) health_host="${recorded_url#https://}"; health_host="${health_host%/}" ;; esac
+  fi
+  if curl_ok "http://127.0.0.1:$port/health/ready" "$health_host"; then pass "Server readiness endpoint is healthy."
+  else runtime_ok=0; fail "FormaSpec server readiness is unavailable at http://127.0.0.1:$port/health/ready."; fi
+  if curl_ok "http://127.0.0.1:$port/health/render" "$health_host"; then pass "Renderer health endpoint is healthy."
+  else runtime_ok=0; fail "FormaSpec renderer health is unavailable at http://127.0.0.1:$port/health/render."; fi
+  if ! validate_port "$bridge_port"; then
+    runtime_ok=0
+    fail "FORMASPEC_BRIDGE_PORT is invalid."
+  elif ! curl_ok "http://127.0.0.1:$bridge_port/health"; then
+    runtime_ok=0
+    fail "The supervised FormaSpec local bridge is unavailable at http://127.0.0.1:$bridge_port/health."
+  else
+    bridge_state="$RUN_DIR/formaspec-bridge.json"
+    if [ -f "$bridge_state" ]; then
+      instance_id="$(sed -n 's/^.*"instanceId":"\([A-Za-z0-9-]*\)".*$/\1/p' "$bridge_state" 2>/dev/null | head -n 1)"
+    fi
+    case "$instance_id" in
+      ''|*[!A-Za-z0-9-]*) runtime_ok=0; fail "The supervised bridge ownership state is missing or invalid." ;;
+      *)
+        if curl -fsS --max-time 5 -X POST -H 'content-type: application/json' \
+          --data "{\"instanceId\":\"$instance_id\"}" \
+          "http://127.0.0.1:$bridge_port/_control/verify-agent" >/dev/null 2>&1; then
+          pass "Authenticated MCP initialize and tools/list verification passed."
+        else
+          runtime_ok=0
+          fail "The local bridge could not verify the authenticated FormaSpec MCP connection."
+        fi
+        ;;
+    esac
+  fi
   case "$target" in
     local) [ "$local_ok" -eq 1 ] || failures=$((failures + 1)) ;;
     docker) [ "$docker_ok" -eq 1 ] || failures=$((failures + 1)) ;;
@@ -1438,7 +1476,9 @@ doctor() {
       ;;
     auto) if [ "$local_ok" -ne 1 ] && [ "$docker_ok" -ne 1 ]; then failures=$((failures + 1)); fi ;;
   esac
+  [ "$runtime_ok" -eq 1 ] || failures=$((failures + 1))
   if [ "$failures" -eq 0 ]; then pass "Selected mode can run."; return 0; fi
+  info "For the supported native fallback, run '$SCRIPT_PATH start local' and then rerun doctor."
   fail "Selected mode is not ready yet. Follow the remedies above."
   return 1
 }
