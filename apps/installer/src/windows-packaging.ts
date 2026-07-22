@@ -8,15 +8,18 @@ import {
   assertWindowsPackageArchitecture,
   assertWindowsRelativePath,
   WINDOWS_INSTALL_MANIFEST_RELATIVE_PATH,
+  WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH,
   WINDOWS_SERVICE_CONFIGURATION_RELATIVE_PATH,
   WINDOWS_SERVICE_HOST_RELATIVE_PATH,
   WINDOWS_SERVICE_LICENSE_RELATIVE_PATH,
   WINDOWS_SERVICE_PROVENANCE_RELATIVE_PATH,
   windowsServiceConfiguration,
+  windowsProtocolHandlerSource,
   windowsWixSource,
   type WindowsPackageArchitecture,
   type WindowsPayloadFile,
 } from "./windows-layout.js";
+import { inspectManagedCodexAssets } from "./codex-assets.js";
 import {
   runPackageCommand,
   spawnPackageCommandRunner,
@@ -35,6 +38,8 @@ const SHA256 = /^[a-f0-9]{64}$/;
 
 const REQUIRED_APPLICATION_FILES = [
   "runtime/node.exe",
+  "app/designer",
+  "app/pnpm-workspace.yaml",
   "app/apps/server/dist/index.js",
   "app/apps/server/dist/renderer-worker.js",
   "app/apps/web/dist/index.html",
@@ -436,6 +441,7 @@ function assertRequiredApplicationPayload(payloadRoot: string, architecture: Win
   for (const relativePath of REQUIRED_APPLICATION_FILES) {
     requireRegularFile(path.join(payloadRoot, ...relativePath.split("/")), `Required Windows payload file ${relativePath}`);
   }
+  inspectManagedCodexAssets(path.join(payloadRoot, "app/apps/cli/assets"));
   if (windowsPeArchitecture(path.join(payloadRoot, "runtime", "node.exe")) !== architecture) {
     throw new Error(`Bundled Windows Node.js runtime does not match requested ${architecture} architecture.`);
   }
@@ -538,6 +544,10 @@ export function stageWindowsPayload(options: StageWindowsPayloadOptions): Window
     writeFile(
       path.join(payloadRoot, ...WINDOWS_SERVICE_CONFIGURATION_RELATIVE_PATH.split("/")),
       windowsServiceConfiguration(version, architecture),
+    );
+    writeFile(
+      path.join(payloadRoot, ...WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH.split("/")),
+      windowsProtocolHandlerSource(),
     );
     const files = collectWindowsPayloadFiles(payloadRoot);
     const manifest = manifestFor(version, architecture, sourceDateEpoch, verifiedServiceHost, files);

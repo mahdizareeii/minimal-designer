@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -25,6 +28,18 @@ import {
   linuxUrlHandler,
   rpmVersion,
 } from "./linux-layout.js";
+
+function writeExecutable(filename: string, contents: string): void {
+  fs.writeFileSync(filename, contents, { mode: 0o700 });
+}
+
+async function waitForFile(filename: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fs.existsSync(filename)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for protocol capture: ${filename}`);
+}
 
 describe("native Linux installer layout", () => {
   it("maps only the initially supported package architectures", () => {
@@ -109,7 +124,88 @@ describe("native Linux installer layout", () => {
     expect(handler).toContain("formaspec://connect-agent");
     expect(handler).toContain("Unsupported or malformed FormaSpec URL");
     expect(handler).toContain("http://127.0.0.1:4310/administration");
-    expect(handler).not.toMatch(/eval|Bearer|--yes|token=/);
+    expect(handler).toContain("--pairing-nonce");
+    expect(handler).toContain("--connection-id");
+    expect(handler).toContain('[ "${#URL}" -le 512 ]');
+    expect(handler).toContain('[ "${#1}" -eq 50 ]');
+    expect(handler).toContain('[ "${#1}" -eq 43 ]');
+    expect(handler).not.toMatch(/eval|Bearer|token=/);
+  });
+
+  it("executes only canonical pairing URLs and forwards exact CLI arguments", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-linux-protocol-"));
+    try {
+      const cli = path.join(root, "formaspecctl");
+      const opener = path.join(root, "xdg-open");
+      const script = path.join(root, "formaspec-open");
+      const capture = path.join(root, "cli-arguments.txt");
+      const openCapture = path.join(root, "open-arguments.txt");
+      writeExecutable(cli, '#!/bin/sh\nprintf "%s\\n" "$@" >"${FORMASPEC_PROTOCOL_CAPTURE}"\n');
+      writeExecutable(opener, '#!/bin/sh\nprintf "%s\\n" "$@" >"${FORMASPEC_OPEN_CAPTURE}"\n');
+      writeExecutable(script, linuxUrlHandler()
+        .replace("FORMASPECCTL='/usr/bin/formaspecctl'", `FORMASPECCTL='${cli}'`)
+        .replace("XDG_OPEN='/usr/bin/xdg-open'", `XDG_OPEN='${opener}'`));
+      const nonce = `fspair_${"n".repeat(43)}`;
+      const connectionId = `connection_${"a".repeat(32)}`;
+      const environment = {
+        ...process.env,
+        HOME: root,
+        XDG_STATE_HOME: path.join(root, "state"),
+        FORMASPEC_PROTOCOL_CAPTURE: capture,
+        FORMASPEC_OPEN_CAPTURE: openCapture,
+      };
+      const accepted = spawnSync("/bin/sh", [
+        script,
+        `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}`,
+      ], { env: environment, encoding: "utf8" });
+      expect(accepted.status, accepted.stderr).toBe(0);
+      await waitForFile(capture);
+      expect(fs.readFileSync(capture, "utf8").trim().split("\n")).toEqual([
+        "agent", "connect", "codex",
+        "--pairing-nonce", nonce,
+        "--connection-id", connectionId,
+        "--yes",
+      ]);
+      expect(fs.readFileSync(openCapture, "utf8").trim()).toBe("http://127.0.0.1:4310/administration");
+
+      fs.rmSync(capture, { force: true });
+      fs.rmSync(openCapture, { force: true });
+      const nonceOnly = spawnSync("/bin/sh", [script, `formaspec://connect-agent?nonce=${nonce}`], {
+        env: environment,
+        encoding: "utf8",
+      });
+      expect(nonceOnly.status, nonceOnly.stderr).toBe(0);
+      await waitForFile(capture);
+      expect(fs.readFileSync(capture, "utf8").trim().split("\n")).toEqual([
+        "agent", "connect", "codex", "--pairing-nonce", nonce, "--yes",
+      ]);
+
+      fs.rmSync(capture, { force: true });
+      fs.rmSync(openCapture, { force: true });
+      const queryless = spawnSync("/bin/sh", [script, "formaspec://connect-agent"], {
+        env: environment,
+        encoding: "utf8",
+      });
+      expect(queryless.status, queryless.stderr).toBe(0);
+      expect(fs.existsSync(capture)).toBe(false);
+      expect(fs.readFileSync(openCapture, "utf8").trim()).toBe("http://127.0.0.1:4310/administration");
+
+      for (const candidate of [
+        `formaspec://connect-agent?nonce=${nonce}&connection=${connectionId}`,
+        `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}&extra=1`,
+        `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}&nonce=${nonce}`,
+        `formaspec://connect-agent?connection=connection_${"A".repeat(32)}&nonce=${nonce}`,
+        "formaspec://connect-agent?nonce=fspair_short",
+        `formaspec://connect-agent?nonce=${nonce}%3Bopen`,
+        `formaspec://connect-agent?nonce=${nonce}\ncontrol`,
+        `formaspec://connect-agent?nonce=${"n".repeat(600)}`,
+      ]) {
+        const rejected = spawnSync("/bin/sh", [script, candidate], { env: environment, encoding: "utf8" });
+        expect(rejected.status, candidate).toBe(2);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("refuses unmanaged paths, requires systemd, and preserves state on removal", () => {

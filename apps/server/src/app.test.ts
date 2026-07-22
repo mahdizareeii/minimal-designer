@@ -37,7 +37,7 @@ function testConfig() {
   return loadConfig({
     HOST: "127.0.0.1",
     PORT: "4310",
-    DATA_DIR: "/tmp/minimal-ui-designer-tests",
+    DATA_DIR: "/tmp/formaspec-designer-tests",
     DESIGNER_DATABASE_PATH: ":memory:",
     PUBLIC_BASE_URL: "http://127.0.0.1:4310",
     AUTH_MODE: "none",
@@ -215,7 +215,7 @@ describe("designer server", () => {
 
     const render = await application.app.inject({
       method: "GET",
-      url: `/api/designs/${created.document.id}/previews/${preview.previewId}/render.png?maxSize=512`,
+      url: `/api/designs/${created.document.id}/previews/${preview.previewId}/render.png?mode=adhoc&maxSize=512`,
       headers: { "x-designer-user": "alice" },
     });
     expect(render.statusCode).toBe(200);
@@ -778,6 +778,12 @@ describe("designer server", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json<{ result: { serverInfo: { name: string }; instructions: string } }>();
     expect(body.result.serverInfo.name).toBe("formaspec");
+    expect(body.result.instructions).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
+    expect(body.result.instructions).toContain("Use FormaSpec");
+    expect(body.result.instructions).toContain("Minimal UI");
+    expect(body.result.instructions).toContain("Use Minimal UI");
+    expect(body.result.instructions).not.toContain("plugin://minimal-ui");
+    expect(body.result.instructions).not.toContain("plugin://minimal-ui@formaspec");
     expect(body.result.instructions).toContain("Preview, inspect, and lint");
     expect(body.result.instructions).toContain("tmp:<label>");
     expect(body.result.instructions.length).toBeLessThanOrEqual(512);
@@ -1183,7 +1189,7 @@ describe("designer server", () => {
       APP_MODE: "server",
       HOST: "0.0.0.0",
       PORT: "4310",
-      DATA_DIR: "/tmp/minimal-ui-designer-tests",
+      DATA_DIR: "/tmp/formaspec-designer-tests",
       DESIGNER_DATABASE_PATH: ":memory:",
       PUBLIC_BASE_URL: "https://designer.example.test",
       AUTH_MODE: "trusted-header",
@@ -1367,7 +1373,7 @@ describe("designer server", () => {
       APP_MODE: "server",
       HOST: "0.0.0.0",
       PORT: "4310",
-      DATA_DIR: "/tmp/minimal-ui-designer-tests",
+      DATA_DIR: "/tmp/formaspec-designer-tests",
       DESIGNER_DATABASE_PATH: ":memory:",
       PUBLIC_BASE_URL: "https://designer.example.test",
       AUTH_MODE: "trusted-header",

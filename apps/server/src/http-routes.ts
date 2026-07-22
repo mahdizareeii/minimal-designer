@@ -14,7 +14,7 @@ import { canReadDesignerEvent } from "./event-authorization.js";
 import type { DesignerEvent, EventHub } from "./events.js";
 import type { MaintenanceStore } from "./maintenance.js";
 import type { OperationsService } from "./operations-service.js";
-import type { PngRenderer } from "./render.js";
+import type { PngRenderer, RenderOptions } from "./render.js";
 import { createPortableProjectBundle, readPortableProjectBundle } from "./portable-export.js";
 import {
   buildRevisionInspectSnapshot,
@@ -36,6 +36,15 @@ const previewSchema = z.object({
   baseVersion: z.number().int().positive().optional(),
   basePreviewId: z.string().min(1).optional(),
   operations: z.array(z.unknown()).min(1).max(500),
+}).strict();
+
+const previewRenderQuerySchema = z.object({
+  taskId: z.string().min(1).max(240).optional(),
+  _retry: z.string().max(100).optional(),
+  mode: z.enum(["exact", "adhoc"]).default("exact"),
+  pageId: z.string().min(1).max(300).optional(),
+  nodeId: z.string().min(1).max(300).optional(),
+  maxSize: z.coerce.number().int().min(64).max(4096).optional(),
 }).strict();
 
 const revisionSchema = z.object({
@@ -94,6 +103,7 @@ function previewResponse(preview: PreviewResult): Record<string, unknown> {
     committedRevisionId: preview.committedRevisionId,
     changedNodeIds: preview.changedNodeIds,
     versions: preview.versions,
+    renderMetadata: preview.renderMetadata,
     diagnostics: preview.diagnostics,
     createdIds: preview.createdIds,
     document: preview.document,
@@ -510,6 +520,19 @@ export function registerHttpRoutes(
       .send(result.canonicalDocument);
   });
 
+  const renderCanonicalDocument = async (
+    actorId: string,
+    document: Parameters<PngRenderer["render"]>[0],
+    options: RenderOptions,
+  ) => renderer.render(document, options, (assetId) => {
+      try {
+        const asset = service.getAsset(actorId, assetId);
+        return `data:${asset.mimeType};base64,${asset.data.toString("base64")}`;
+      } catch {
+        return null;
+      }
+    });
+
   const renderDocument = async (
     actorId: string,
     designId: string,
@@ -522,17 +545,13 @@ export function registerHttpRoutes(
       }).canonicalDocument
       : service.getDesign(actorId, designId, source.version).canonicalDocument;
     const maxSize = parseInteger(query.maxSize, 2048);
-    return renderer.render(document, {
+    if (maxSize !== undefined && (maxSize < 64 || maxSize > 4096)) {
+      throw new DomainError("VALIDATION_FAILED", "Render maxSize must be between 64 and 4096.", 422);
+    }
+    return renderCanonicalDocument(actorId, document, {
       ...(typeof query.pageId === "string" ? { pageId: query.pageId } : {}),
       ...(typeof query.nodeId === "string" ? { nodeId: query.nodeId } : {}),
       ...(maxSize === undefined ? {} : { maxSize }),
-    }, (assetId) => {
-      try {
-        const asset = service.getAsset(actorId, assetId);
-        return `data:${asset.mimeType};base64,${asset.data.toString("base64")}`;
-      } catch {
-        return null;
-      }
     });
   };
 
@@ -558,11 +577,44 @@ export function registerHttpRoutes(
       rawRequestField(request.query, "taskId") || undefined,
     );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
-    const query = request.query as Record<string, unknown>;
-    const rendered = await renderDocument(request.actorId, params.id, { previewId: params.previewId }, query);
+    const query = previewRenderQuerySchema.parse(request.query);
+    if (query.mode === "adhoc") {
+      const rendered = await renderDocument(request.actorId, params.id, { previewId: params.previewId }, query);
+      return reply
+        .header("content-type", "image/png")
+        .header("cache-control", "no-store")
+        .header("x-formaspec-preview-render-mode", "adhoc")
+        .header("x-designer-renderer", rendered.renderer)
+        .header("x-designer-render-warnings", rendered.warnings.join(" | ").slice(0, 1000))
+        .send(rendered.png);
+    }
+    if (query.pageId !== undefined || query.nodeId !== undefined || query.maxSize !== undefined) {
+      throw new DomainError(
+        "PREVIEW_ENGINE_MISMATCH",
+        "Exact preview renders do not accept page, node, or size overrides; use mode=adhoc for an explicit ad-hoc render.",
+        409,
+      );
+    }
+    const access = query.taskId === undefined ? {} : { taskId: query.taskId };
+    const exact = service.getExactPreviewForRender(request.actorId, params.id, params.previewId, access);
+    const rendered = await renderCanonicalDocument(
+      request.actorId,
+      exact.preview.canonicalDocument,
+      exact.renderMetadata.options,
+    );
+    const verified = service.verifyExactPreviewRender(request.actorId, params.id, params.previewId, {
+      png: rendered.png,
+      width: rendered.width,
+      height: rendered.height,
+      renderer: rendered.renderer,
+      warnings: rendered.warnings,
+    }, access);
     return reply
       .header("content-type", "image/png")
       .header("cache-control", "no-store")
+      .header("etag", `"${verified.sha256}"`)
+      .header("x-formaspec-preview-render-mode", "exact")
+      .header("x-formaspec-preview-render-sha256", verified.sha256)
       .header("x-designer-renderer", rendered.renderer)
       .header("x-designer-render-warnings", rendered.warnings.join(" | ").slice(0, 1000))
       .send(rendered.png);

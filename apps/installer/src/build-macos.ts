@@ -21,6 +21,7 @@ import {
   protocolHandler,
   rendererWrapper,
 } from "./macos-layout.js";
+import { inspectManagedCodexAssets } from "./codex-assets.js";
 
 function requirePath(target: string, kind: "file" | "directory"): void {
   const stat = fs.statSync(target);
@@ -480,6 +481,7 @@ export function buildUnsignedMacPackage(options: MacPackageBuildOptions): string
       "packages/core/package.json",
       "packages/core/dist",
     ]) copyTreePreservingSymlinks(path.join(options.workspaceRoot, relative), path.join(appRoot, relative));
+    inspectManagedCodexAssets(path.join(appRoot, "apps/cli/assets"));
 
     for (const relative of [
       "node_modules",

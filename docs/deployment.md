@@ -1,6 +1,6 @@
 # FormaSpec deployment
 
-Last audited: 2026-07-21
+Last audited: 2026-07-22
 
 ## Deployment decision
 
@@ -11,16 +11,17 @@ Docker/server planned and explicitly authorized offline restore foundations
 exist, but release-qualified native packages, clean server planned/offline
 restore and reverse-proxy lifecycle evidence, remote/off-site disaster
 recovery, installer matrix, signed backup
-provenance, and complete release evidence do not exist yet. One isolated local-Docker A/B restore and
-safety-restore exercise has passed; it does not qualify the server deployment
+provenance, and complete release evidence do not exist yet. One historical
+isolated local-Docker A/B restore and safety-restore exercise passed; it does not qualify the server deployment
 path.
 
-Current local schema-13 application, browser, Docker/egress, Firefox/WebKit,
-recovery, and temporary SBOM/license evidence passed before a lock-only
-dependency update. The lockfile now selects `drizzle-orm` 0.45.2 to eliminate
-GHSA-gpj5-g38j-94v9, but installed modules and runtime evidence still used
-0.44.7. A fresh frozen install and complete rerun is required before deployment
-qualification.
+Current schema-15 source passes the seven-package suite 840/840, launcher
+225/225, all workspace typechecks/builds, installer 71/71 plus typecheck/build,
+Compose configuration, editor/Administration 5/5, release E2E 1/1, preview
+integration 2/2, and macOS runtime-smoke contracts 11/11. The broad browser,
+visual, performance, Docker/egress, Firefox/WebKit, copied-bundle recovery, and
+SBOM/license results remain historical schema-13 evidence and require a
+schema-15 release-candidate rerun before deployment qualification.
 
 Do not expose the current Compose port to a LAN or the internet. Do not declare
 an enterprise rollout complete from a successful source or Compose startup.
@@ -55,11 +56,12 @@ pnpm dev
 To connect Codex after a managed start:
 
 ```bash
-./designer --yes agent connect codex
+./designer --yes agent connect codex --pairing-nonce <nonce> [--connection-id <id>]
 ```
 
-The installer normally performs the Codex step automatically when Codex is
-detected. See [OPERATIONS.md](./OPERATIONS.md) for the full command surface.
+Administration supplies the short-lived pairing nonce. The installer completes
+the remaining Codex setup automatically after that explicit authorization. See
+[OPERATIONS.md](./OPERATIONS.md) for the full command surface.
 
 ## Current Docker topology
 
@@ -90,8 +92,11 @@ The renderer remains database-free, and exact 30-day terminal retention requires
 scoped delete permits.
 
 Database schema 13 adds canonical component source JSON/SHA-256 persistence and
-exact design-system upgrade base/result snapshot references. The current
-command engine is 2, renderer 3, renderer IPC protocol 2, and font bundle 1.
+exact design-system upgrade base/result snapshot references. Schema 14 adds
+browser-session authentication, and schema 15 adds bounded write-once exact
+preview-render options, dimensions, renderer backend, warnings, and PNG SHA-256.
+The current command engine is 2, renderer 3, renderer IPC protocol 2, and font
+bundle 1.
 
 Compose publishes container port 4310 to `127.0.0.1` by default, mounts named
 volumes at `/data`, `/backups`, and `/run/formaspec`, allocates renderer shared
@@ -100,7 +105,7 @@ Host/Origin, trusted-proxy, CSRF, and container-local variables. The local MCP
 bridge is not in the image; the source CLI starts it as a separate host process on
 `127.0.0.1:4312`.
 
-The current local schema-13 checkpoint used Compose project
+The historical local schema-13 checkpoint used Compose project
 `formaspeccischema13da9af9d064` and image
 `sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`.
 Design `document_e171c68c7a4c4b3b80a5493a6180e28f` at revision
@@ -119,9 +124,9 @@ snapshot/revision/asset/render/SQLite/FK comparisons and cleanup passed; the
 `NO-GO` summary SHA-256 is
 `1dfecf9b4a4773fed25f73eaa181bc88e30fc21df8b0679c3325241af3ccd433`.
 
-These local results used linked `drizzle-orm` 0.44.7 and must be repeated after
-a fresh frozen install of the now-locked 0.45.2. They are not real remote-host/
-TLS/off-site or hosted release evidence. Prior `final437` schema-12 summaries
+These historical local results used linked `drizzle-orm` 0.44.7 and are not
+schema-15, real remote-host/TLS/off-site, or hosted release evidence. Later
+schema-13 linked-0.45.2 evidence is also historical. Prior `final437` schema-12 summaries
 remain historical regression evidence only. The retained unsigned macOS checkpoint
 under `artifacts/candidates/schema12-current/` retains passing frozen package-
 integrity and non-installing extracted-runtime evidence but was not installed;
@@ -133,7 +138,7 @@ schema 7 to schema 8 while preserving its project, 31 revisions, representative
 asset, and worker render. Current gaps include:
 
 - no release-qualified Windows named-pipe/native worker/service-host packaging;
-- the local schema-13 Docker smoke passes DNS/direct-TCP/non-loopback
+- the historical local schema-13 Docker smoke passes DNS/direct-TCP/non-loopback
   renderer-egress canaries, but no retained hosted/native canary, crash,
   saturation, or long-running load proof exists;
 - no installed schedule supervisor or external alert delivery; online create/
@@ -359,10 +364,10 @@ to a client-provided value.
 
 The automatic Codex setup registers MCP server ID `formaspec` at the
 credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs the managed
-Minimal UI skill/plugin, and provides:
+FormaSpec skill/plugin, and provides:
 
 ```text
-[@Minimal UI](plugin://minimal-ui@formaspec)
+[@FormaSpec](plugin://formaspec@formaspec)
 ```
 
 The bridge creates a scoped, expiring upstream grant and stores it in macOS
@@ -581,12 +586,13 @@ migration fixtures, operator-approved cleanup, and rollback evidence exist.
 
 Production deployment remains **NO-GO** until evidence exists for all of these:
 
-- fresh frozen installation of locked `drizzle-orm` 0.45.2 followed by the
-  complete application/browser/Docker/recovery/SBOM verification set; current
-  passing runtime evidence used linked 0.44.7;
+- retain the current schema-15 package suite 840/840, launcher 225/225,
+  typecheck/build, installer, Compose, targeted browser/preview, and runtime-
+  smoke gates in hosted CI, then rerun the complete browser/Docker/recovery/
+  SBOM verification set at schema 15;
 - Windows native service-host/named-pipe renderer IPC, ACL/process-tree
   packaging plus retained hosted/native egress, crash, saturation, and load
-  evidence beyond the passing local schema-13 Docker worker;
+  evidence beyond the historical local schema-13 Docker worker;
 - strict server-mode proxy/direct-port, managed-ID/offline restore and rollback,
   upgrade, installed scheduling, external alert delivery, and long-running
   Compose evidence; both restore command paths exist but lack clean server and
@@ -599,7 +605,7 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
 - release evidence for the implemented server-mode supervisor covering
   maintenance, safety backup, deterministic render smoke, audit/outbox
   reconciliation, rollback, revocation, crash recovery, and alerting;
-- retained supported-OS/hosted evidence for the passing local schema-13
+- retained supported-OS/hosted evidence replacing the historical local schema-13
   editor/admin/component-insertion 4/4, selection 12/12, handoff 1/1, visual
   7/7, inspect 1/1, 20-step E2E 1/1, and 1,000-node budget 1/1;
 - full organization/role/scope/revocation/CSRF/Host/Origin/archive/asset/
@@ -614,12 +620,11 @@ Production deployment remains **NO-GO** until evidence exists for all of these:
   push/PR workflow around the implemented selected-workspace Codex launch;
   connected grants already persist bounded path-free inventories and explicit
   exact-revision mappings through the authorized local MCP bridge;
-- complete Redesign Studio and product-manager workflow UI beyond the passing
-  20-step PM-to-backup-restore integration scenario;
+- complete Redesign Studio and product-manager workflow UI beyond the
+  historical schema-13 20-step PM-to-backup-restore scenario;
 - artifact-specific container/native SBOMs, dependency/image/OS scanning,
   reproducibility, unsigned/signed artifact instructions, and zero unresolved
-  critical/high security findings. Temporary schema-13 source evidence reported
-  342 components and zero license violations before the lock update. The
-  0.45.2 lock audits with zero high/critical findings, but a fresh install,
-  regenerated SBOM, and full verification remain mandatory and never replace
-  target-artifact evidence.
+  critical/high security findings. Historical linked-0.45.2 schema-13 source
+  evidence reported 342 components and zero license violations. Current
+  schema-15 artifact-specific SBOM/image/OS evidence remains mandatory and never
+  replaces target-artifact evidence.

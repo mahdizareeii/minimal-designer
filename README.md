@@ -1,7 +1,7 @@
 # FormaSpec
 
 FormaSpec is a self-hosted, AI-first product and UI design workspace. Its
-agent-facing name is **Minimal UI**: a product manager can describe a web,
+agent-facing name is **FormaSpec**: a product manager can describe a web,
 phone, or tablet experience to Codex, review a rendered preview, and continue
 editing the same structured document in the browser.
 
@@ -20,7 +20,7 @@ subscription or API usage remains separate.
 Run one installer command from the repository root. It checks the operating
 system and requirements, prepares the selected runtime, starts FormaSpec and
 the loopback bridge, and—when Codex is detected—configures the `formaspec` MCP
-server plus the managed Minimal UI skill/plugin.
+server plus the managed FormaSpec skill/plugin.
 
 Docker is the easiest source installation:
 
@@ -34,8 +34,8 @@ For a local Node.js installation:
 ./designer --yes install local
 ```
 
-The Docker installer and container-local security mode are implemented. Fresh
-exact-current schema-12 Compose project `formaspeccischema118e2818fed6`
+The Docker installer and container-local security mode are implemented.
+Historical schema-12 Compose project `formaspeccischema118e2818fed6`
 reached Playwright-worker readiness without fallback, rendered a real PNG, and
 preserved the same design and version across an API-only restart. Both services
 used image
@@ -69,7 +69,7 @@ Development uses the Vite editor at
 [http://127.0.0.1:4311](http://127.0.0.1:4311), the API at port 4310, and the
 local bridge at port 4312.
 
-## Use Minimal UI from Codex
+## Use FormaSpec from Codex
 
 The installer normally performs this connection automatically. To connect or
 repair it later, run:
@@ -82,9 +82,9 @@ Then start a new Codex task with any of these:
 
 ```text
 Use FormaSpec to design this product flow.
-Use Minimal UI to improve the selected screen.
 Design this with FormaSpec.
-[@Minimal UI](plugin://minimal-ui@formaspec) create a professional mobile onboarding flow.
+Refine this selection with FormaSpec.
+[@FormaSpec](plugin://formaspec@formaspec) create a professional mobile onboarding flow.
 ```
 
 The connection is intentionally token-free in Codex configuration. Codex talks
@@ -259,16 +259,19 @@ These foundations do not close the release gates listed below.
   hash-only, owner-leased lifecycle with exact 30-day retention, but
   organization-configurable retention dashboards and packaged load evidence
   remain open.
-- The local 20-step browser E2E, seven visual baselines, selection alignment,
-  and 1,000-node interaction budgets pass. Cross-platform browser/visual,
-  comprehensive security, and server-deployment matrices remain incomplete.
+- The historical schema-13 20-step browser E2E, seven visual baselines,
+  selection alignment, and 1,000-node interaction budgets passed. Current
+  schema-15 targeted editor/Administration 5/5, release E2E 1/1, and preview
+  integration 2/2 pass; the complete cross-platform browser/visual,
+  performance, security, and server-deployment matrices require schema-15
+  release-candidate reruns.
 - Five repository-native least-privilege workflows now cover frozen source
-  gates, browser alignment/visual/performance/release suites, schema-12 Docker
+  gates, browser alignment/visual/performance/release suites, historical Docker
   smoke, deterministic SBOM/license evidence, unsigned Linux packages, and the
   non-installing macOS extracted-runtime gate. The local evidence helpers pass
   workflow contracts 8/8, cross-browser runner tests 2/2, off-host simulation
   tests 7/7, release-evidence tests 8/8, macOS package-evidence tests 12/12,
-  and macOS runtime-smoke tests 10/10; no GitHub-hosted run or real Ubuntu
+  and macOS runtime-smoke contract tests 11/11; no GitHub-hosted run or real Ubuntu
   DEB/RPM artifact has yet been retained.
 - Complete component/release authoring and upgrade-review UI, framework-aware
   Workspace Bridge mapping/upload/implementation launch, and full Redesign
@@ -382,6 +385,12 @@ Before an upgrade or restore, follow
 
 ## Development verification
 
+Current schema-15 source verification passes the seven-package suite 840/840
+(core 59, server 466, web 91, CLI 96, local bridge 20, Workspace Bridge 37,
+installer 71), launcher 225/225, and all workspace typechecks/builds. Broad
+schema-13 Docker, cross-browser, visual, performance, recovery, and SBOM results
+remain historical release evidence.
+
 ```bash
 pnpm test:run
 pnpm typecheck
@@ -404,8 +413,9 @@ docker compose config --quiet
 ```
 
 `pnpm ci:release-evidence` is the strict source-workspace production dependency
-gate. The current source passes with 342 third-party components and zero policy
-violations after Sharp/libvips was removed. The retained `schema12-current`
+gate. Historical linked-0.45.2 schema-13 source evidence passed with 342 third-
+party components and zero policy violations after Sharp/libvips was removed;
+current schema-15 evidence must be regenerated. The retained `schema12-current`
 unsigned PKG passed its frozen package/workspace integrity check and the
 non-installing extracted-runtime smoke, but the current verifier now records
 expected source drift and it remains an engineering checkpoint: the outer PKG was not

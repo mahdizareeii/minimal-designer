@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,17 @@ async function callTool(
   name: keyof typeof MCP_TOOL_OUTPUT_SCHEMAS,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  return (await callToolEnvelope(built, name, args)).output;
+}
+
+async function callToolEnvelope(
+  built: DesignerApplication,
+  name: keyof typeof MCP_TOOL_OUTPUT_SCHEMAS,
+  args: Record<string, unknown>,
+): Promise<{
+  output: Record<string, unknown>;
+  content: Array<Record<string, unknown>>;
+}> {
   const response = await built.app.inject({
     method: "POST",
     url: "/mcp",
@@ -58,7 +70,11 @@ async function callTool(
   });
   expect(response.statusCode, `${name}: ${response.body}`).toBe(200);
   const body = response.json<{
-    result?: { isError?: boolean; structuredContent?: Record<string, unknown> };
+    result?: {
+      isError?: boolean;
+      structuredContent?: Record<string, unknown>;
+      content?: Array<Record<string, unknown>>;
+    };
     error?: unknown;
   }>();
   expect(body.error, `${name}: ${response.body}`).toBeUndefined();
@@ -66,7 +82,32 @@ async function callTool(
   expect(body.result?.structuredContent, `${name}: ${response.body}`).toMatchObject({ ok: true });
   const output = body.result!.structuredContent!;
   expect(MCP_TOOL_OUTPUT_SCHEMAS[name].safeParse(output).success, name).toBe(true);
-  return output;
+  return { output, content: body.result?.content ?? [] };
+}
+
+async function readResource(built: DesignerApplication, uri: string): Promise<Array<Record<string, unknown>>> {
+  const response = await built.app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: {
+      host: "127.0.0.1:4310",
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id: "preview-render-resource-probe",
+      method: "resources/read",
+      params: { uri },
+    },
+  });
+  expect(response.statusCode, response.body).toBe(200);
+  const body = response.json<{
+    result?: { contents?: Array<Record<string, unknown>> };
+    error?: unknown;
+  }>();
+  expect(body.error, response.body).toBeUndefined();
+  return body.result?.contents ?? [];
 }
 
 function nestedObject(depth: number): Record<string, unknown> {
@@ -102,7 +143,7 @@ describe("exact core-design and planning MCP results", () => {
     });
     await callTool(built, "node_search", { design_id: design.id, query: "screen" });
 
-    const preview = await callTool(built, "design_preview_changes", {
+    const previewEnvelope = await callToolEnvelope(built, "design_preview_changes", {
       design_id: design.id,
       base_version: 1,
       operations: [{
@@ -129,12 +170,87 @@ describe("exact core-design and planning MCP results", () => {
           metadata: {},
         }],
       }],
+      page_id: (created.document as { pages: Array<{ id: string }> }).pages[0]!.id,
+      node_id: frameId,
       max_size: 512,
     });
+    const preview = previewEnvelope.output;
     const previewResult = preview.preview as {
       id: string;
       createdIds: { temporary: Record<string, string> };
     };
+    const previewRender = preview.render as {
+      options: { pageId: string; nodeId: string; maxSize: number };
+      width: number;
+      height: number;
+      renderer: string;
+      warnings: string[];
+      sha256: string;
+      resourceUri: string;
+    };
+    expect(previewRender.options).toEqual({
+      pageId: (created.document as { pages: Array<{ id: string }> }).pages[0]!.id,
+      nodeId: frameId,
+      maxSize: 512,
+    });
+    expect(previewRender.sha256).toMatch(/^[a-f0-9]{64}$/);
+    const previewImage = previewEnvelope.content.find((item) => item.type === "image") as {
+      data?: string;
+      mimeType?: string;
+    } | undefined;
+    expect(previewImage?.mimeType).toBe("image/png");
+    expect(createHash("sha256").update(Buffer.from(previewImage!.data!, "base64")).digest("hex"))
+      .toBe(previewRender.sha256);
+    const persistedMetadata = built.database.sqlite.prepare(
+      "SELECT render_metadata_json FROM previews WHERE id = ?",
+    ).get(previewResult.id) as { render_metadata_json: string };
+    expect(JSON.parse(persistedMetadata.render_metadata_json)).toEqual({
+      options: previewRender.options,
+      width: previewRender.width,
+      height: previewRender.height,
+      renderer: previewRender.renderer,
+      warnings: previewRender.warnings,
+      sha256: previewRender.sha256,
+    });
+    const previewRead = await built.app.inject({
+      method: "GET",
+      url: `/api/designs/${encodeURIComponent(design.id)}/previews/${encodeURIComponent(previewResult.id)}`,
+    });
+    expect(previewRead.statusCode, previewRead.body).toBe(200);
+    expect(previewRead.json<{ renderMetadata: unknown }>().renderMetadata).toEqual({
+      options: previewRender.options,
+      width: previewRender.width,
+      height: previewRender.height,
+      renderer: previewRender.renderer,
+      warnings: previewRender.warnings,
+      sha256: previewRender.sha256,
+    });
+    const persistedCrop = await built.app.inject({
+      method: "GET",
+      url: `/api/designs/${encodeURIComponent(design.id)}/previews/${encodeURIComponent(previewResult.id)}/render.png?_retry=1`,
+    });
+    expect(persistedCrop.statusCode, persistedCrop.body).toBe(200);
+    expect(persistedCrop.headers["x-formaspec-preview-render-mode"]).toBe("exact");
+    expect(persistedCrop.headers["x-formaspec-preview-render-sha256"]).toBe(previewRender.sha256);
+    expect(createHash("sha256").update(persistedCrop.rawPayload).digest("hex")).toBe(previewRender.sha256);
+    const override = await built.app.inject({
+      method: "GET",
+      url: `/api/designs/${encodeURIComponent(design.id)}/previews/${encodeURIComponent(previewResult.id)}/render.png?maxSize=256`,
+    });
+    expect(override.statusCode, override.body).toBe(409);
+    expect(override.json<{ error?: { code?: string } }>().error?.code).toBe("PREVIEW_ENGINE_MISMATCH");
+    const adHoc = await built.app.inject({
+      method: "GET",
+      url: `/api/designs/${encodeURIComponent(design.id)}/previews/${encodeURIComponent(previewResult.id)}/render.png?mode=adhoc&nodeId=${encodeURIComponent(frameId)}&maxSize=256`,
+    });
+    expect(adHoc.statusCode, adHoc.body).toBe(200);
+    expect(adHoc.headers["x-formaspec-preview-render-mode"]).toBe("adhoc");
+    expect(createHash("sha256").update(adHoc.rawPayload).digest("hex")).not.toBe(previewRender.sha256);
+    const resource = await readResource(built, previewRender.resourceUri);
+    const resourceImage = resource[0] as { mimeType?: string; blob?: string } | undefined;
+    expect(resourceImage?.mimeType).toBe("image/png");
+    expect(createHash("sha256").update(Buffer.from(resourceImage!.blob!, "base64")).digest("hex"))
+      .toBe(previewRender.sha256);
     const cardId = previewResult.createdIds.temporary["tmp:contract-card"]!;
     await callTool(built, "design_render", { design_id: design.id, preview_id: previewResult.id, max_size: 512 });
     await callTool(built, "design_lint", { design_id: design.id, preview_id: previewResult.id });
@@ -150,8 +266,21 @@ describe("exact core-design and planning MCP results", () => {
       design_id: design.id,
       base_version: 2,
       operations: [{ type: "archive_nodes", node_ids: [cardId] }],
+      page_id: (created.document as { pages: Array<{ id: string }> }).pages[0]!.id,
+      node_id: frameId,
       max_size: 512,
     });
+    expect(archivePreview.render).toMatchObject({
+      options: {
+        pageId: (created.document as { pages: Array<{ id: string }> }).pages[0]!.id,
+        nodeId: frameId,
+        maxSize: 512,
+      },
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(built.database.sqlite.prepare(
+      "SELECT render_metadata_json IS NOT NULL AS persisted FROM previews WHERE id = ?",
+    ).get((archivePreview.preview as { id: string }).id)).toEqual({ persisted: 1 });
     await callTool(built, "design_commit_archive_preview", {
       design_id: design.id,
       preview_id: (archivePreview.preview as { id: string }).id,

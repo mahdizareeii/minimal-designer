@@ -8,6 +8,7 @@ export const WINDOWS_API_SERVICE_NAME = "FormaSpecApi";
 export const WINDOWS_RENDERER_SERVICE_NAME = "FormaSpecRenderer";
 export const WINDOWS_SERVICE_HOST_RELATIVE_PATH = "service/FormaSpec.ServiceHost.exe";
 export const WINDOWS_SERVICE_CONFIGURATION_RELATIVE_PATH = "service/formaspec-service.json";
+export const WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH = "service/formaspec-protocol-handler.cjs";
 export const WINDOWS_SERVICE_PROVENANCE_RELATIVE_PATH = "service/service-host-provenance.json";
 export const WINDOWS_SERVICE_LICENSE_RELATIVE_PATH = "service/SERVICE-HOST-LICENSE.txt";
 export const WINDOWS_INSTALL_MANIFEST_RELATIVE_PATH = "install-manifest.json";
@@ -29,6 +30,141 @@ export interface WindowsWixSourceOptions {
   version: string;
   architecture: WindowsPackageArchitecture;
   files: readonly WindowsPayloadFile[];
+}
+
+export type WindowsProtocolAction =
+  | { kind: "open" }
+  | { kind: "connect"; pairingNonce?: string; connectionId?: string };
+
+export function parseWindowsProtocolUrl(value: string): WindowsProtocolAction {
+  if (value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error("FormaSpec protocol URL is malformed.");
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("FormaSpec protocol URL is malformed.");
+  }
+  if (url.protocol !== "formaspec:" || url.username || url.password || url.port || url.hash || url.pathname) {
+    throw new Error("FormaSpec protocol URL is malformed.");
+  }
+  if ((url.hostname === "" || url.hostname === "open") && url.search === "") return { kind: "open" };
+  if (url.hostname !== "connect-agent") throw new Error("FormaSpec protocol action is unsupported.");
+  if (url.search === "") return { kind: "connect" };
+  const nonceOnly = /^\?nonce=(fspair_[A-Za-z0-9_-]{43})$/.exec(url.search);
+  if (nonceOnly) return { kind: "connect", pairingNonce: nonceOnly[1]! };
+  const withConnection = /^\?connection=(connection_[a-f0-9]{32})&nonce=(fspair_[A-Za-z0-9_-]{43})$/.exec(url.search);
+  if (withConnection) {
+    return { kind: "connect", connectionId: withConnection[1]!, pairingNonce: withConnection[2]! };
+  }
+  throw new Error("FormaSpec pairing URL is malformed.");
+}
+
+export function windowsProtocolHandlerSource(): string {
+  return `"use strict";
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+
+function fail(message) {
+  process.stderr.write(\`\${message}\\n\`);
+  process.exitCode = 2;
+  return null;
+}
+
+function parseProtocolUrl(value) {
+  if (typeof value !== "string" || value.length > 512 || /[\\u0000-\\u001f\\u007f]/.test(value)) {
+    return fail("FormaSpec protocol URL is malformed.");
+  }
+  let url;
+  try { url = new URL(value); } catch { return fail("FormaSpec protocol URL is malformed."); }
+  if (url.protocol !== "formaspec:" || url.username || url.password || url.port || url.hash || url.pathname) {
+    return fail("FormaSpec protocol URL is malformed.");
+  }
+  if ((url.hostname === "" || url.hostname === "open") && url.search === "") return { kind: "open" };
+  if (url.hostname !== "connect-agent") return fail("FormaSpec protocol action is unsupported.");
+  if (url.search === "") return { kind: "connect" };
+  const nonceOnly = /^\\?nonce=(fspair_[A-Za-z0-9_-]{43})$/.exec(url.search);
+  if (nonceOnly) return { kind: "connect", pairingNonce: nonceOnly[1] };
+  const withConnection = /^\\?connection=(connection_[a-f0-9]{32})&nonce=(fspair_[A-Za-z0-9_-]{43})$/.exec(url.search);
+  if (withConnection) return { kind: "connect", connectionId: withConnection[1], pairingNonce: withConnection[2] };
+  return fail("FormaSpec pairing URL is malformed.");
+}
+
+function openEditor(installRoot) {
+  if (process.platform !== "win32") return;
+  const serviceHost = path.join(installRoot, "service", "FormaSpec.ServiceHost.exe");
+  if (!fs.existsSync(serviceHost)) return;
+  const child = spawn(serviceHost, ["--open-editor"], {
+    detached: true,
+    shell: false,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+}
+
+function packagedEnvironment(installRoot) {
+  const programData = process.env.ProgramData || process.env.PROGRAMDATA;
+  const stateRoot = programData ? path.join(programData, "FormaSpec") : path.join(installRoot, "state");
+  let upstreamAuthMode = "unknown";
+  try {
+    const configurationPath = path.join(installRoot, "service", "formaspec-service.json");
+    const stat = fs.lstatSync(configurationPath);
+    if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 65536) {
+      const configuration = JSON.parse(fs.readFileSync(configurationPath, "utf8"));
+      const configured = configuration && configuration.api && configuration.api.environment
+        ? configuration.api.environment.AUTH_MODE
+        : undefined;
+      if (["none", "session", "trusted-header", "token"].includes(configured)) upstreamAuthMode = configured;
+    }
+  } catch {}
+  return {
+    ...process.env,
+    FORMASPEC_RUNTIME_DIR: process.env.FORMASPEC_RUNTIME_DIR || path.join(stateRoot, "runtime"),
+    FORMASPEC_DATA_DIR: process.env.FORMASPEC_DATA_DIR || path.join(stateRoot, "data"),
+    FORMASPEC_BACKUP_DIR: process.env.FORMASPEC_BACKUP_DIR || path.join(stateRoot, "backups"),
+    FORMASPEC_LOG_DIR: process.env.FORMASPEC_LOG_DIR || path.join(stateRoot, "logs"),
+    FORMASPEC_SUPPORT_DIR: process.env.FORMASPEC_SUPPORT_DIR || path.join(stateRoot, "support-bundles"),
+    FORMASPEC_UPSTREAM_AUTH_MODE: upstreamAuthMode,
+    PLAYWRIGHT_BROWSERS_PATH: path.join(installRoot, "runtime", "ms-playwright"),
+    PATH: [path.join(installRoot, "runtime"), process.env.PATH || ""].filter(Boolean).join(path.delimiter),
+  };
+}
+
+function main() {
+  const action = parseProtocolUrl(process.argv[2] || "");
+  if (!action) return;
+  const installRoot = path.dirname(__dirname);
+  if (action.kind === "open") {
+    openEditor(installRoot);
+    return;
+  }
+  const cliEntry = path.join(installRoot, "app", "apps", "cli", "dist", "index.js");
+  if (!fs.existsSync(cliEntry)) {
+    fail("The packaged formaspecctl entry point is unavailable.");
+    return;
+  }
+  const cliArguments = ["agent", "connect", "codex"];
+  if (action.pairingNonce) cliArguments.push("--pairing-nonce", action.pairingNonce);
+  if (action.connectionId) cliArguments.push("--connection-id", action.connectionId);
+  cliArguments.push("--yes");
+  const child = spawn(process.execPath, [cliEntry, ...cliArguments], {
+    cwd: path.join(installRoot, "app"),
+    detached: true,
+    env: packagedEnvironment(installRoot),
+    shell: false,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+  openEditor(installRoot);
+}
+
+if (require.main === module) main();
+module.exports = { parseProtocolUrl };
+`;
 }
 
 interface DirectoryNode {
@@ -204,6 +340,7 @@ function assertPayloadFileList(files: readonly WindowsPayloadFile[]): WindowsPay
   for (const required of [
     WINDOWS_SERVICE_HOST_RELATIVE_PATH,
     WINDOWS_SERVICE_CONFIGURATION_RELATIVE_PATH,
+    WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH,
     WINDOWS_SERVICE_PROVENANCE_RELATIVE_PATH,
     WINDOWS_SERVICE_LICENSE_RELATIVE_PATH,
     WINDOWS_INSTALL_MANIFEST_RELATIVE_PATH,
@@ -366,7 +503,7 @@ ${installTree}
             <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]service\\FormaSpec.ServiceHost.exe&quot;,0" />
           </RegistryKey>
           <RegistryKey Key="shell\\open\\command">
-            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]service\\FormaSpec.ServiceHost.exe&quot; --protocol &quot;%1&quot;" KeyPath="yes" />
+            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]runtime\\node.exe&quot; &quot;[INSTALLFOLDER]service\\formaspec-protocol-handler.cjs&quot; &quot;%1&quot;" KeyPath="yes" />
           </RegistryKey>
         </RegistryKey>
       </Component>

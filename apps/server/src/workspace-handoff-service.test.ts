@@ -481,7 +481,7 @@ function recordCoreCompletionApprovals(opened: Opened, handoffId: string, diffHa
 describe("persisted Workspace Bridge repository inventories", () => {
   it("persists a bounded path-free inventory, deduplicates exact retries, and supersedes immutable versions", () => {
     const opened = setup();
-    expect(opened.database.schemaVersion()).toBe(14);
+    expect(opened.database.schemaVersion()).toBe(16);
 
     const first = opened.handoffs.persistRepositoryInventory("local", inventory());
     expect(first).toMatchObject({ status: "active", deduplicated: false });

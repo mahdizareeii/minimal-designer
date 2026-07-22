@@ -430,6 +430,77 @@ export function inspectBrowserPayload(browserRoot, expectedRevision, architectur
   };
 }
 
+export function inspectManagedCodexAssets(assetsRoot) {
+  const root = requireContainedDirectory(assetsRoot, assetsRoot, "Packaged FormaSpec Codex asset root");
+  for (const relativePath of [
+    "skills/minimal-ui",
+    "codex-marketplace/plugins/minimal-ui",
+  ]) {
+    if (fs.existsSync(path.join(root, ...relativePath.split("/")))) {
+      throw new Error(`The package still contains the legacy managed Codex path ${relativePath}.`);
+    }
+  }
+  const requiredFiles = [
+    "skills/formaspec/SKILL.md",
+    "skills/formaspec/agents/openai.yaml",
+    "codex-marketplace/.agents/plugins/marketplace.json",
+    "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json",
+    "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
+    "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml",
+  ];
+  for (const relativePath of requiredFiles) {
+    requireContainedRegular(root, path.join(root, ...relativePath.split("/")), `Packaged Codex asset ${relativePath}`);
+  }
+  const plugin = readBoundedJson(
+    path.join(root, "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json"),
+    256 * 1024,
+    "Packaged FormaSpec Codex plugin manifest",
+  );
+  if (plugin?.name !== "formaspec" || plugin?.interface?.displayName !== "FormaSpec") {
+    throw new Error("Packaged Codex plugin identity is not FormaSpec.");
+  }
+  const marketplace = readBoundedJson(
+    path.join(root, "codex-marketplace/.agents/plugins/marketplace.json"),
+    256 * 1024,
+    "Packaged FormaSpec Codex marketplace manifest",
+  );
+  const managedEntries = Array.isArray(marketplace?.plugins)
+    ? marketplace.plugins.filter((entry) => entry?.name === "formaspec")
+    : [];
+  if (
+    marketplace?.name !== "formaspec"
+    || marketplace?.interface?.displayName !== "FormaSpec"
+    || managedEntries.length !== 1
+    || managedEntries[0]?.source?.source !== "local"
+    || managedEntries[0]?.source?.path !== "./plugins/formaspec"
+  ) throw new Error("Packaged Codex marketplace identity is not formaspec@formaspec.");
+  for (const relativePath of [
+    "skills/formaspec/SKILL.md",
+    "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
+  ]) {
+    const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
+    if (!/^name:\s*formaspec\s*$/mu.test(contents)) {
+      throw new Error(`Packaged Codex skill identity is stale: ${relativePath}`);
+    }
+  }
+  for (const relativePath of [
+    "skills/formaspec/agents/openai.yaml",
+    "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml",
+  ]) {
+    const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
+    if (!/^\s*display_name:\s*["']FormaSpec["']\s*$/mu.test(contents)
+      || !/^\s*default_prompt:\s*["'][^"']*\$formaspec\b[^"']*["']\s*$/mu.test(contents)) {
+      throw new Error(`Packaged Codex skill metadata is stale: ${relativePath}`);
+    }
+  }
+  return {
+    skillName: "formaspec",
+    pluginId: "formaspec@formaspec",
+    displayName: "FormaSpec",
+    mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+  };
+}
+
 function inspectExpandedPackage(expandedRoot, packageMetadata) {
   const componentRoot = findExactlyOneComponent(expandedRoot);
   const payloadRoot = path.join(componentRoot, "Payload");
@@ -453,6 +524,11 @@ function inspectExpandedPackage(expandedRoot, packageMetadata) {
   const serverEntry = requireContainedRegular(payloadRoot, path.join(appRoot, "apps/server/dist/index.js"), "Packaged API entry point");
   const rendererEntry = requireContainedRegular(payloadRoot, path.join(appRoot, "apps/server/dist/renderer-worker.js"), "Packaged renderer entry point");
   const cliEntry = requireContainedRegular(payloadRoot, path.join(appRoot, "apps/cli/dist/index.js"), "Packaged CLI entry point");
+  const codexAssets = inspectManagedCodexAssets(requireContainedDirectory(
+    payloadRoot,
+    path.join(appRoot, "apps/cli/assets"),
+    "Packaged FormaSpec Codex assets",
+  ));
   requireContainedRegular(payloadRoot, path.join(appRoot, "designer"), "Packaged compatibility launcher", true);
   requireContainedRegular(payloadRoot, path.join(appRoot, "pnpm-workspace.yaml"), "Packaged workspace marker");
   const manifest = readBoundedJson(path.join(installRoot, "install-manifest.json"), 64 * 1024, "Packaged install manifest");
@@ -489,6 +565,7 @@ function inspectExpandedPackage(expandedRoot, packageMetadata) {
     serverEntry,
     rendererEntry,
     cliEntry,
+    codexAssets,
     browserRoot,
     browser,
     payload: {
@@ -992,9 +1069,9 @@ export async function runMacPackageRuntimeSmoke(options) {
     if (
       typeof initialized.instructions !== "string"
       || initialized.instructions.length > 512
-      || !initialized.instructions.includes("Minimal UI")
+      || !initialized.instructions.includes("FormaSpec")
       || !initialized.instructions.includes("Preview, inspect, and lint")
-    ) throw new Error("Extracted MCP instructions do not contain the bounded FormaSpec/Minimal UI workflow.");
+    ) throw new Error("Extracted MCP instructions do not contain the bounded FormaSpec workflow.");
     const toolsResult = await mcpRequest(baseUrl, "tools/list", {});
     const toolNames = Array.isArray(toolsResult.tools)
       ? toolsResult.tools.map((tool) => tool?.name).filter((name) => typeof name === "string").sort(compareText)
@@ -1062,6 +1139,7 @@ export async function runMacPackageRuntimeSmoke(options) {
       runtime: {
         nodeVersion,
         browser: layout.browser,
+        codexAssets: layout.codexAssets,
       },
       health: {
         live: { ok: live.ok, service: live.service },
@@ -1081,7 +1159,7 @@ export async function runMacPackageRuntimeSmoke(options) {
         protocolVersion: initialized.protocolVersion,
         serverName: initialized.serverInfo.name,
         serverVersion: initialized.serverInfo.version,
-        minimalUiWorkflowPresent: true,
+        formaspecWorkflowPresent: true,
         toolCount: toolNames.length,
         toolNames,
         resourceCount: resources.length,

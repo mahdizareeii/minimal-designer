@@ -1,6 +1,6 @@
 # Server deployment
 
-Last audited: 2026-07-21
+Last audited: 2026-07-22
 
 The detailed deployment guide is [deployment.md](./deployment.md). This file
 records the required public contract.
@@ -11,9 +11,8 @@ Server mode is fail-closed and requires:
 APP_MODE=server
 HOST=0.0.0.0
 PUBLIC_BASE_URL=https://design.example.com
-AUTH_MODE=trusted-header
-DESIGNER_TOKEN=replace-with-a-long-bootstrap-token
-TRUSTED_USER_HEADER=x-designer-user
+AUTH_MODE=session
+FORMASPEC_BOOTSTRAP_TOKEN_HASH=<installer-generated-lowercase-sha256>
 FORMASPEC_ALLOWED_HOSTS=design.example.com
 FORMASPEC_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
 DESIGNER_CORS_ORIGINS=https://design.example.com
@@ -22,24 +21,58 @@ FORMASPEC_CONTAINER_LOCAL=false
 ```
 
 The reverse proxy must terminate HTTPS, remove caller-supplied identity,
-forwarding, and `x-formaspec-proxy-secret` headers; inject one canonical
-identity; overwrite the hop-secret header from secure proxy storage; preserve
-the public origin; and prevent direct public access to the application port.
-Browser writes require the configured Origin and `x-formaspec-csrf: 1` intent
-header. Retrieve the generated hop secret only for operator configuration with
-`./designer proxy-secret`; never place it in source control, shell history,
-client-visible configuration, or access logs.
+forwarding, and `x-formaspec-proxy-secret` headers; overwrite the hop-secret
+header from secure proxy storage; preserve the public Host and Origin; and
+prevent direct public access to the application port. Session mode does not
+trust or require a proxy-injected user identity. Browser writes require the
+exact public Origin and the per-session `x-formaspec-csrf` value returned by
+FormaSpec. Retrieve the generated hop secret only for operator configuration
+with `./designer proxy-secret`; never place it in source control, shell
+history, client-visible configuration, or access logs.
 
-Generate source-mode server configuration with:
+Generate a fresh source-mode server configuration with:
 
 ```bash
 ./designer server init --public-url https://design.example.com
 ```
 
+Session authentication is the default. The initializer generates a one-time
+bootstrap token, writes its plaintext only to the mode-`0600`
+`.designer/env/bootstrap-token` operator file, stores only its SHA-256 in the
+mode-`0600` `server.env`, and prints a fragment URL of this form:
+
+```text
+https://design.example.com/setup#bootstrap=<one-time-token>
+```
+
+The web gate reads the token from the fragment, immediately removes the
+fragment from browser history, and submits the token only with the first-
+administrator bootstrap request. Consumption is atomic and creates exactly one
+enabled human Organization Administrator. Treat the setup URL and plaintext
+operator file as credentials even though neither is a reusable browser session
+or MCP bearer token.
+
+For an existing SSO reverse proxy, retain trusted-header mode explicitly:
+
+```bash
+./designer server init \
+  --public-url https://design.example.com \
+  --trusted-header \
+  --identity-header x-designer-user
+```
+
+In that mode the proxy must strip every caller copy of the identity header and
+inject exactly one canonical mapped identity. Browser writes use the legacy
+`x-formaspec-csrf: 1` intent value, and MCP uses the generated compatibility
+bearer token. Trusted-header mode is an alternative to password sessions, not
+an additional identity source within session mode.
+
 Starting through the current `formaspecctl`/`designer` wrapper records a
-mode-`0600`, secret-free runtime binding for the exact persisted Compose project. An
-Organization Administrator can then select an exact managed backup ID from the
-Administration UI and run the external maintenance workflow on the server host:
+mode-`0600`, secret-free runtime binding for the exact persisted Compose
+project. After the administrator bootstrap or trusted-identity mapping is
+complete, an Organization Administrator can select an exact managed backup ID
+from the Administration UI and run the external maintenance workflow on the
+server host:
 
 ```bash
 ./designer --yes backup restore --backup-id backup_<40-lowercase-hex>
@@ -98,16 +131,20 @@ direct clearing of that state; only a newly selected, fully verified offline
 restore may atomically take over the fence. A disposable unique-Compose worker/
 control smoke passed real schema-11 design/PNG recovery from corrupt live bytes,
 credential revocation, exact forensic byte rollback, durable offline rollback
-state, and cleanup. A later real unique-project `formaspecctl` smoke validates
-the persisted Compose identity through the end-to-end CLI. The exact-current
+state, and cleanup. A later real unique-project `formaspecctl` smoke validated
+the persisted Compose identity through the end-to-end CLI. The historical
 schema-12 image, built from source identity
 `local-uncommitted-final437-eventauth-sqlbounded-cli`, is
 `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f` and
 also passed a same-machine copied-bundle restore into an independently
-mounted clean target with exact state/render equality. No real server-mode
-proxy, remote-host/network/TLS/off-site, or privileged packaged lifecycle has
-run, so this remains an implemented
-foundation rather than a release-qualified recovery service.
+  mounted clean target with exact state/render equality. Current schema-15 source
+  passes the seven-package suite 840/840, launcher 225/225, all workspace
+  typechecks/builds, installer 71/71 plus typecheck/build, Compose configuration,
+  targeted session/browser/preview integration, and macOS runtime-smoke contracts
+  11/11. No real schema-15 server-mode
+proxy, remote-host/network/TLS/off-site restore, or privileged packaged
+lifecycle has run, so this remains an implemented foundation rather than a
+release-qualified service.
 
 Do not expose current source builds as enterprise production services. The
 required clean server planned/offline restore/rollback exercises, signed

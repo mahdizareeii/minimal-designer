@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import { verifyBackup, type BackupVerification } from "./backup.js";
 import { createBridgeController, type BridgeController } from "./bridge-lifecycle.js";
-import { connectCodex } from "./codex.js";
+import { connectCodex, FORMASPEC_CODEX_MENTION } from "./codex.js";
 import { captureDockerRuntimeBinding, persistDockerRuntimeBinding } from "./docker-runtime-binding.js";
 import {
   abortDockerRestore,
@@ -324,10 +324,10 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
     };
     const reportCodexConnection = (result: Awaited<ReturnType<typeof connectCodex>>): void => {
       io.stdout(`Codex MCP 'formaspec' verified at ${result.mcpUrl}.`);
-      io.stdout(`Managed Minimal UI skill installed at ${result.skillPath}.`);
-      io.stdout(`Managed Minimal UI plugin installed at ${result.pluginPath}.`);
-      io.stdout("Codex mention: [@Minimal UI](plugin://minimal-ui@formaspec)");
-      io.stdout("Use FormaSpec, Use Minimal UI, or Design this with FormaSpec in a new Codex task.");
+      io.stdout(`Managed FormaSpec skill installed at ${result.skillPath}.`);
+      io.stdout(`Managed FormaSpec plugin installed at ${result.pluginPath}.`);
+      io.stdout(`Codex mention: ${FORMASPEC_CODEX_MENTION}`);
+      io.stdout("Use FormaSpec or Design this with FormaSpec in a new Codex task.");
     };
     const offerCodexConnection = async (alreadyAuthorized = false): Promise<void> => {
       if (findExecutable("codex", environment) === null) {
@@ -335,7 +335,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         return;
       }
       const authorized = alreadyAuthorized || assumeYes || await confirm(
-        "Allow FormaSpec to configure Codex, install the managed Minimal UI plugin, and verify the loopback MCP connection?",
+        "Allow FormaSpec to configure Codex, install the managed FormaSpec plugin, and verify the loopback MCP connection?",
       );
       if (!authorized) {
         io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");

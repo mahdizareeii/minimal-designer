@@ -11,6 +11,8 @@ import {
 } from "@designer/core";
 import { z } from "zod";
 
+import { PreviewRenderMetadataSchema } from "./preview-render-metadata.js";
+
 const identifier = z.string().trim().min(1).max(300);
 const revisionId = z.string().regex(/^revision_[A-Za-z0-9][A-Za-z0-9_-]{7,}$/);
 const previewId = z.string().regex(/^preview_[A-Za-z0-9][A-Za-z0-9_-]{7,}$/);
@@ -184,6 +186,10 @@ export const DesignRenderResultSchema = z.object({
 }).strict();
 
 export const DesignPreviewRenderResultSchema = DesignRenderResultSchema.extend({
+  resourceUri: boundedLink,
+}).strict();
+
+export const DesignPersistedPreviewRenderResultSchema = PreviewRenderMetadataSchema.extend({
   resourceUri: boundedLink,
 }).strict();
 

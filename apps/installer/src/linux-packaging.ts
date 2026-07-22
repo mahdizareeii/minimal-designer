@@ -12,6 +12,7 @@ import {
   headlessShellDirectoryFromBrowserManifest,
   selectPackagedBrowserDirectories,
 } from "./build-macos.js";
+import { inspectManagedCodexAssets } from "./codex-assets.js";
 import {
   LINUX_API_SERVICE,
   LINUX_CONFIG_ROOT,
@@ -242,6 +243,7 @@ export function stageLinuxPayload(options: LinuxPayloadOptions): void {
   for (const relative of APPLICATION_PATHS) {
     copyTreePreservingSymlinks(path.join(options.workspaceRoot, relative), path.join(appRoot, relative));
   }
+  inspectManagedCodexAssets(path.join(appRoot, "apps/cli/assets"));
   for (const relative of APPLICATION_NODE_MODULES) {
     copyRelocatableNodeModules(options.workspaceRoot, appRoot, relative);
   }

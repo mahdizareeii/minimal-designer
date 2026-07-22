@@ -18,14 +18,16 @@ pnpm formaspecctl status
 Check `/health/live`, `/health/ready`, and `/health/render`. Keep Docker bound
 to `127.0.0.1` in local mode.
 
-## Codex cannot see Minimal UI
+## Codex cannot see FormaSpec
 
 ```bash
 ./designer --yes agent connect codex
 ```
 
 Then verify `codex mcp get formaspec` and start a new Codex task. Codex should
-contain no bearer token for this MCP entry.
+contain no bearer token for this MCP entry. The managed integration is
+`formaspec@formaspec`, invoked as
+`[@FormaSpec](plugin://formaspec@formaspec)`.
 
 ## A write reports VERSION_CONFLICT
 

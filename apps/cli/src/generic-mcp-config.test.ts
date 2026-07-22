@@ -23,7 +23,7 @@ describe("generic MCP client configuration", () => {
     const configuration = createGenericMcpConfiguration();
     expect(configuration).toMatchObject({
       serverId: "formaspec",
-      displayName: "Minimal UI",
+      displayName: "FormaSpec",
       transport: "streamable_http",
       url: "http://127.0.0.1:4312/mcp",
       healthUrl: "http://127.0.0.1:4312/health",

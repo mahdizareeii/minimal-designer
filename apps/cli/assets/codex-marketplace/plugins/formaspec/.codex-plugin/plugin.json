@@ -1,5 +1,5 @@
 {
-  "name": "minimal-ui",
+  "name": "formaspec",
   "version": "0.2.0",
   "description": "Design, inspect, refine, and hand off structured FormaSpec projects through the local FormaSpec MCP connection.",
   "author": {
@@ -8,13 +8,12 @@
   "license": "MIT",
   "keywords": [
     "formaspec",
-    "minimal-ui",
     "product-design",
     "mcp"
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Minimal UI",
+    "displayName": "FormaSpec",
     "shortDescription": "AI-first product design with FormaSpec",
     "longDescription": "Create and refine editable FormaSpec designs, product specifications, previews, diagnostics, and engineering handoffs through the scoped local FormaSpec MCP connection.",
     "developerName": "FormaSpec",
@@ -24,8 +23,8 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use Minimal UI to design this product flow.",
-      "Improve this selection with Minimal UI.",
+      "Use FormaSpec to design this product flow.",
+      "Refine this selection with FormaSpec.",
       "Redesign this project with FormaSpec."
     ],
     "brandColor": "#8172FF"

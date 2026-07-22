@@ -451,7 +451,7 @@ export function Dashboard() {
 
       <footer className="dashboard-footer">
         <span><Check size={13} /> Your design data stays on your server</span>
-        <span>FormaSpec 0.2 · Minimal UI agent alias</span>
+        <span>FormaSpec 0.2 · @FormaSpec agent</span>
       </footer>
 
       {modalOpen && (

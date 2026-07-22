@@ -1,7 +1,7 @@
 # MCP
 
-FormaSpec exposes Streamable HTTP at `/mcp`. The server ID is `formaspec`, the
-display name is **Minimal UI**, and resources use `formaspec://`.
+FormaSpec exposes Streamable HTTP at `/mcp`. The server ID and display name are
+`formaspec` and **FormaSpec**, and resources use `formaspec://`.
 
 For local Codex, connect through the token-free loopback bridge:
 
@@ -36,7 +36,7 @@ credential still never enters Codex configuration.
 The managed mention is:
 
 ```text
-[@Minimal UI](plugin://minimal-ui@formaspec)
+[@FormaSpec](plugin://formaspec@formaspec)
 ```
 
 ## Required workflow

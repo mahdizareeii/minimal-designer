@@ -332,6 +332,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-task-inline-preview { min-width: 0; display: grid; gap: 6px; }
 .agent-task-inline-preview figure { min-width: 0; margin: 0; overflow: hidden; display: grid; place-items: center; border: 1px solid #343b48; border-radius: 8px; background-color: #151a22; background-image: radial-gradient(circle, #303744 1px, transparent 1px); background-size: 14px 14px; }
 .agent-task-inline-preview figure img { display: block; max-width: 100%; max-height: 190px; object-fit: contain; }
+.agent-preview-image-fallback { width: 100%; min-height: 150px; padding: 18px; display: grid; place-content: center; justify-items: center; gap: 6px; color: #9aa3b1; text-align: center; }
+.agent-preview-image-fallback > svg { color: #e2a15c; }
+.agent-preview-image-fallback strong { color: #d8dde5; font-size: 12px; }
+.agent-preview-image-fallback span { max-width: 360px; font-size: 10px; line-height: 1.45; }
+.agent-preview-image-fallback .button { min-height: 31px; margin-top: 3px; padding: 0 10px; font-size: 10px; }
 .agent-task-inline-preview figcaption { width: 100%; padding: 7px 9px; border-top: 1px solid #2a313c; background: #11161d; color: #8992a0; font-size: 11px; text-align: left; }
 .agent-task-preview-actions { display: grid; grid-template-columns: minmax(0, .75fr) minmax(0, 1.25fr); gap: 5px; }
 .agent-task-preview-actions .button { width: 100%; min-height: 36px; padding: 0 10px; font-size: 12px; }
@@ -366,6 +371,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .preview-revision-summary { min-height: 0; padding: 10px 12px; display: grid; grid-template-columns: minmax(260px, .8fr) minmax(360px, 1.2fr); gap: 12px; }
 .preview-revision-thumbnail { min-height: 0; overflow: hidden; display: grid; place-items: center; border: 1px solid #2c3440; border-radius: 9px; background-color: #151a22; background-image: radial-gradient(circle, #303744 1px, transparent 1px); background-size: 14px 14px; }
 .preview-revision-thumbnail img { display: block; max-width: 100%; max-height: 145px; object-fit: contain; box-shadow: 0 12px 34px rgba(0,0,0,.4); }
+.preview-revision-thumbnail .agent-preview-image-fallback { min-height: 145px; }
 .preview-revision-copy { min-width: 0; padding: 4px 2px; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto auto 1fr; align-items: center; column-gap: 12px; }
 .preview-revision-state { width: fit-content; display: inline-flex; align-items: center; gap: 5px; color: #77cba2; font-size: 7px; text-transform: uppercase; letter-spacing: .06em; }
 .preview-revision-state i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }

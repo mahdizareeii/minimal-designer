@@ -1,9 +1,9 @@
 # FormaSpec operations
 
-Last audited: 2026-07-21
+Last audited: 2026-07-22
 
-FormaSpec is the product name. **Minimal UI** is the agent-facing alias used by
-Codex and other MCP-capable clients.
+FormaSpec is both the product name and the agent-facing identity used by Codex
+and other MCP-capable clients.
 
 ## Operational status
 
@@ -22,19 +22,25 @@ restore remains explicitly `HEALTHY_PLANNED_RESTORE_ONLY`, while
 `backup restore offline <bundle> --yes` can recover without opening the current
 database. Release-qualified native installers, clean server-mode planned/
 offline restore evidence, signed provenance, security/browser/performance
-matrices, and complete release evidence remain unfinished. A disposable
-local-Docker A/B restore exercise has passed, but it does not qualify the server
-path or close the broader recovery gate. A controlled actual-socket proxy
-lifecycle passes 1/1 for overwrite/strip, direct-peer denial, append rejection,
+matrices, and complete release evidence remain unfinished. A historical
+disposable local-Docker A/B restore exercise passed, but it does not qualify the
+server path or close the broader recovery gate. A historical controlled actual-
+socket proxy lifecycle passed 1/1 for overwrite/strip, direct-peer denial, append rejection,
 and restart-bound secret rotation; it is not real Nginx/TLS/public-port proof. See
 [Release blockers](#release-blockers).
 
-Current local schema-13 application, browser, Docker/egress, Firefox/WebKit,
-copied-bundle recovery, and temporary SBOM/license gates passed before a
-lock-only dependency update. The lockfile now selects `drizzle-orm` 0.45.2 to
-eliminate GHSA-gpj5-g38j-94v9, but installed modules and all runtime evidence
-still used 0.44.7. Operators must perform a fresh frozen install and repeat the
-full verification set before treating those results as dependency-current.
+The last broad cross-browser, visual, performance, Docker-runtime/egress,
+copied-bundle recovery, and SBOM/license checkpoint was schema 13 and is
+retained as historical evidence only. Current schema-15 package tests pass
+840/840 across core 59, server 466, web 91, CLI 96, local bridge 20, Workspace
+Bridge 37, and installer 71. All seven workspace typechecks/builds, installer
+typecheck/build, launcher 225/225, and `docker compose config --quiet` pass.
+Targeted editor/Administration E2E passes 5/5, current-schema release E2E 1/1,
+server preview integration 2/2, and macOS runtime-smoke contracts 11/11. These
+gates cover the session/pairing and prompt/task/preview/Commit-Discard slice;
+the full cross-browser, visual,
+performance, Docker runtime/recovery, SBOM/image scan, and installed native-
+lifecycle matrices have not been rerun at schema 15.
 
 ## Fastest installation
 
@@ -54,7 +60,7 @@ Local source installer entry point:
 
 Both installers perform the available requirement checks, install the frozen
 workspace dependencies, build the CLI and local bridge, start FormaSpec, start
-the loopback bridge, detect Codex, and configure the managed Minimal UI
+the loopback bridge, detect Codex, and configure the managed FormaSpec
 integration when Codex is available. `--yes` grants that explicit setup
 authorization without further prompts.
 
@@ -100,7 +106,7 @@ The Compose file passes the strict mode variables, uses an explicit
 `FORMASPEC_CONTAINER_LOCAL` exception for an API container whose host-published
 port remains loopback-only, mounts data/backup/socket volumes, and runs a
 separate non-root, read-only, capability-free, network-disabled renderer with
-resource limits. Disposable schema-13 project
+resource limits. Historical disposable schema-13 project
 `formaspeccischema13da9af9d064` used image
 `sha256:166d74686a8ebd52c2765d0c12b362690717af8488a7a4b83f0f1e348d620b97`,
 preserved design `document_e171c68c7a4c4b3b80a5493a6180e28f` at revision
@@ -135,6 +141,21 @@ After dependencies are installed:
 ```bash
 pnpm dev
 ```
+
+That default keeps local loopback `AUTH_MODE=none` for the simplest source
+workflow. To exercise the migration-14 login/bootstrap/session boundary
+locally, start development with:
+
+```bash
+APP_MODE=local \
+AUTH_MODE=session \
+HOST=127.0.0.1 \
+PUBLIC_BASE_URL=http://127.0.0.1:4310 \
+pnpm dev
+```
+
+Open the editor and create the sole local Organization Administrator when
+prompted. Local session mode does not use a public-server bootstrap token.
 
 This keeps all development processes attached to the terminal:
 
@@ -183,7 +204,7 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl audit retention preview [--json]` | Produces a 15-minute, organization-scoped, bounded dry-run using the current audit-retention policy, exact candidate counts/ranges, canonical-byte hashes, and a plan hash. |
 | `pnpm formaspecctl audit retention list [--json]` | Lists immutable retention-run evidence and SHA-256 chain hashes without exposing deleted audit contents. |
 | `pnpm formaspecctl audit retention execute --preview-id <id> --plan-hash <sha256> --yes [--idempotency-key <key>] [--json]` | Revalidates and atomically commits only the reviewed old audit/published-outbox batch, then records immutable hash-chained evidence. |
-| `pnpm formaspecctl agent connect codex [--yes]` | Starts/authorizes the bridge, installs the managed Minimal UI skill/plugin, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. |
+| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts/authorizes the bridge, consumes an Administration-issued ticket in authenticated mode, installs the managed FormaSpec skill/plugin, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. `--connection-id` is optional but valid only with a nonce. |
 | `pnpm formaspecctl agent config generic [--format all\|json\|toml]` | Prints validated client-neutral loopback Streamable HTTP configuration and verification guidance; it never reads or modifies an unknown client file. |
 | `pnpm formaspecctl support-bundle preview [--json]` | Produces a read-only exact inventory of bounded sanitized diagnostic entries. |
 | `pnpm formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]` | Creates the reviewed deterministic archive plus an adjacent local manifest; excludes databases, assets, backups, environment values, source, and credentials. |
@@ -202,17 +223,22 @@ custom volumes, and orchestrators still require deployment-specific procedures. 
 supervisor installation/alerting, application autostart, native package
 install/upgrade/uninstall, approved backup signing/provenance, and a migration
 execution/rollback command are not implemented. The migration-status
-reader is synchronized at version 13. Migration 9 adds the preview/run ledger
+reader is synchronized at version 15. Migration 9 adds the preview/run ledger
 and guarded exact-delete contract; migration 10 adds immutable portable-import
 provenance; migration 11 adds persistent bounded render-job lifecycle records;
 migration 12 adds append-only handoff execution decisions with immutable CAS
 chains and independently scoped authorization. Migration 13 adds canonical
 component source JSON/hash persistence and exact design-system upgrade snapshot
-references without fabricating legacy values.
+references without fabricating legacy values. Migration 14 adds the single-
+administrator password account, browser sessions, bounded persistent login-
+attempt buckets, and one-time public-server bootstrap credential without
+fabricating an administrator or active session. Migration 15 adds bounded,
+write-once exact preview-render options, dimensions, renderer backend, warnings,
+and PNG SHA-256 without fabricating evidence for historical previews.
 None changes stored V1 revisions. The
 copied version-7-to-8 migration
-fixture preserves V1 revision bytes and hashes. A disposable local-Docker
-restore exercise now passes; real customer fixtures, broader data verification,
+fixture preserves V1 revision bytes and hashes. A historical disposable local-
+Docker restore exercise passed; real customer fixtures, broader data verification,
 server-supervisor evidence, and the full release E2E are still required.
 
 ## Compatibility `designer` wrapper
@@ -233,6 +259,7 @@ The wrapper still directly owns legacy-only commands such as:
 ./designer open
 ./designer server init --ssh-only
 ./designer server init --public-url https://designer.company.example
+./designer server init --public-url https://designer.company.example --trusted-header
 ./designer backup
 ./designer version
 ```
@@ -241,16 +268,28 @@ The wrapper still directly owns legacy-only commands such as:
 the preferred FormaSpec integration. Use the bridge-based `formaspec` setup
 described below. New `server init` output includes strict server/proxy values;
 legacy secure env files are overlaid with equivalent Compose values without
-rewriting the token-bearing file.
+rewriting the token-bearing file. A public URL now defaults to session
+authentication and emits the one-time `setup#bootstrap=…` URL. Use
+`--trusted-header` only for the existing SSO alternative.
 
 ## Codex and MCP connection
 
-Installation connects Codex automatically when the `codex` executable is
-detected. If Codex was installed later, or connection was skipped, start
-FormaSpec through the managed launcher and run:
+Installation connects Codex automatically in local `AUTH_MODE=none` when the
+`codex` executable is detected, and authenticated startup can reuse an exact
+still-valid stored grant. Creating or rotating a connection in an authenticated
+mode requires a website-issued ticket:
+
+1. Sign in as an Organization Administrator and open `/administration`.
+2. Choose **Connect Codex** or **Reconnect**.
+3. Allow the `formaspec://connect-agent` handler to run, or copy the exact
+   fallback command shown by the website.
+
+The fallback has this form:
 
 ```bash
-./designer --yes agent connect codex
+./designer --yes agent connect codex \
+  --pairing-nonce <pairing-nonce> \
+  --connection-id <connection-id>
 ```
 
 The resulting setup is:
@@ -258,13 +297,15 @@ The resulting setup is:
 - MCP server ID: `formaspec`;
 - local bridge URL: `http://127.0.0.1:4312/mcp`;
 - upstream FormaSpec MCP URL: `http://127.0.0.1:4310/mcp` by default;
-- Codex mention: `[@Minimal UI](plugin://minimal-ui@formaspec)`;
-- natural-language triggers include “Use FormaSpec,” “Use Minimal UI,” and
-  “Design this with FormaSpec.”
+- Codex mention: `[@FormaSpec](plugin://formaspec@formaspec)`;
+- natural-language triggers prioritize “Use FormaSpec,” “Design this with
+  FormaSpec,” and “Refine this selection with FormaSpec.”
 
-The Codex MCP configuration contains no bearer token. The loopback bridge
-creates a scoped, expiring agent connection and keeps the upstream grant in the
-operating-system credential store:
+The Codex MCP configuration contains no bearer token. Administration creates
+the scoped, expiring connection and one-time nonce. The loopback bridge submits
+only that nonce to exact `POST /api/agent-connections/pair`, verifies the
+optional expected connection ID and returned authorization context, and keeps
+the upstream grant in the operating-system credential store:
 
 - macOS: Keychain;
 - Linux: Secret Service through `secret-tool`;
@@ -285,6 +326,13 @@ expiry to `maximumExpirySeconds`, honors active-connection limits, and includes
 project IDs when `requireProjectRestriction` is enabled. If project restriction
 is mandatory and no project exists, connection fails with an actionable error
 instead of creating an unrestricted grant.
+
+Only the one-time `/api/agent-connections/pair` route is accessible to the
+headless bridge without browser identity. Connection creation, reconnect, and
+revoke remain Organization Administrator browser operations with the active
+session/trusted-header CSRF boundary. In authenticated mode, the CLI without a
+ticket may reuse an exact still-valid stored grant but cannot self-create or
+rotate a connection. Local `AUTH_MODE=none` retains the legacy evaluation flow.
 
 Automatic configuration currently targets Codex only. Other MCP clients can
 use print-only JSON/TOML and verification instructions without any unknown file
@@ -431,9 +479,11 @@ the health probe.
 
 `APP_MODE=local` is the default. `HOST` and `PUBLIC_BASE_URL` must both resolve
 to loopback. Requests from non-loopback addresses are rejected, and browser
-identity/proxy headers are deliberately ignored. Direct local MCP may operate
-as the local actor; the managed Codex flow still uses a scoped grant through
-the bridge.
+identity/proxy headers are deliberately ignored. `AUTH_MODE=none` preserves
+the simplest no-login workflow. `AUTH_MODE=session` adds the migration-14
+browser bootstrap/login/CSRF boundary while remaining loopback-only. Direct
+local MCP may operate as the local actor; the managed Codex flow still uses a
+scoped grant through the bridge.
 
 Never publish a local-mode port to a LAN, public interface, ingress controller,
 or untrusted container network.
@@ -443,14 +493,17 @@ or untrusted container network.
 `APP_MODE=server` refuses startup unless all of these conditions are met:
 
 - `PUBLIC_BASE_URL` is HTTPS;
-- `AUTH_MODE=trusted-header`;
-- `DESIGNER_TOKEN` is configured for the compatibility MCP-token path;
+- `AUTH_MODE=session` or `AUTH_MODE=trusted-header`;
 - `FORMASPEC_TRUSTED_PROXIES` is non-empty;
 - allowed hosts and exact browser origins are configured;
-- the reverse proxy supplies the configured trusted identity header.
+- `FORMASPEC_PROXY_SECRET` is configured separately from every browser/agent
+  credential;
+- a fresh session deployment has the installer-generated
+  `FORMASPEC_BOOTSTRAP_TOKEN_HASH`, or trusted-header mode has its configured
+  identity header and MCP compatibility bearer token.
 
 The application enforces the Host allowlist, exact CORS origins, trusted-proxy
-interpretation, a CSRF intent header on browser API writes, CSP, HSTS, frame
+interpretation, mode-appropriate CSRF on browser API writes, CSP, HSTS, frame
 denial, MIME sniffing protection, and a restrictive permissions policy.
 Server deployments must prevent clients from reaching the application port
 without passing through the authenticated proxy. See
@@ -466,14 +519,15 @@ Important variables:
 | `DATA_DIR` | `./data` | SQLite and persistent application data root. |
 | `BACKUP_DIR` | sibling `backups` directory | Backup-manager destination; the image sets `/backups` and Compose mounts a named backup volume there. |
 | `PUBLIC_BASE_URL` | derived from host/port | Must be a loopback URL locally and HTTPS in server mode. |
-| `AUTH_MODE` | `none` | Server mode requires `trusted-header`. |
-| `DESIGNER_TOKEN` | unset | Minimum 16 characters when token/trusted-header mode is used. Never commit it. |
+| `AUTH_MODE` | `none` | Local supports `none` or `session`; server requires `session` or `trusted-header`. Fresh public initialization defaults to `session`. |
+| `DESIGNER_TOKEN` | unset | Minimum 16 characters and required for `token`/`trusted-header`. Session mode uses scoped Agent Connections for MCP and should normally leave this unset. Never commit it. |
 | `FORMASPEC_PROXY_SECRET` | unset | Required only in server trusted-proxy mode; 32–256 safe characters, separate from `DESIGNER_TOKEN`, injected as `x-formaspec-proxy-secret`, and never sent by browsers or agents. |
-| `TRUSTED_USER_HEADER` | `x-designer-user` | Must be stripped from client input and set only by the trusted proxy. |
+| `FORMASPEC_BOOTSTRAP_TOKEN_HASH` | unset | Server-session-only lowercase SHA-256 generated by `server init`; a fresh public database refuses bootstrap without it. Never substitute the plaintext token. |
+| `TRUSTED_USER_HEADER` | `x-designer-user` | Used only by trusted-header mode; must be stripped from client input and set only by the trusted proxy. |
 | `FORMASPEC_ALLOWED_HOSTS` | public URL host | Comma-separated exact `Host` values. |
 | `FORMASPEC_TRUSTED_PROXIES` | unset | Required in server mode; use only verified proxy addresses/ranges. Raw-peer trust is insufficient without the internal proxy secret. |
 | `DESIGNER_CORS_ORIGINS` | local origins | Comma-separated exact browser origins. |
-| `FORMASPEC_CSRF_HEADER` | `x-formaspec-csrf` | Browser API writes require value `1`. The web app sends it. |
+| `FORMASPEC_CSRF_HEADER` | `x-formaspec-csrf` | Session writes require the exact per-session value; trusted-header writes require `1`. The web app sends the correct mode-specific value. |
 | `MAX_UPLOAD_BYTES` | 5 MiB | Multipart upload limit. |
 | `DESIGNER_MAX_ASSET_BYTES` | `MAX_UPLOAD_BYTES` | Optional canonical raster input/output byte limit; hard-capped at 64 MiB. |
 | `DESIGNER_MAX_ASSET_PIXELS` | `FORMASPEC_RENDER_MAX_PIXELS` | Decoded raster pixel limit; it cannot exceed the renderer pixel limit or the 64,000,000 hard cap. |
@@ -580,7 +634,7 @@ applies pending numbered migrations during database startup in an immediate
 transaction. It refuses a database whose newest migration is newer than the
 application or whose ledger is not a recognized prefix.
 
-For migrations 9 through 11, FormaSpec also validates the required tables,
+For migrations 9 through 14, FormaSpec also validates the required tables,
 columns, indexes, trigger targets, normalized table/trigger SQL, and removal of
 forbidden legacy triggers. Startup validates before and after applying each
 migration. Backup verification, restore preflight/control, and staged restore
@@ -593,6 +647,15 @@ heartbeats, and expired-owner recovery. Stored rows contain bounded hashes,
 versions, dimensions, warnings, and safe errors only—not documents, image/PNG
 bytes, filesystem paths, or filenames. The renderer worker remains database-
 free. Exact 30-day terminal retention is guarded by bounded delete permits.
+
+Migration 14 adds `password_accounts`, `browser_sessions`, `login_attempts`,
+and `bootstrap_credentials`. It does not invent a human account. The browser
+bootstrap transaction creates the sole enabled Organization Administrator,
+uses versioned scrypt for the password, consumes the public-server bootstrap
+credential atomically, and creates a token-hash-only session. Account identity
+and bootstrap consumption are irreversible database invariants; session
+logout, rotation, expiry, principal disablement, and restore reconciliation use
+revocation rather than rewriting identity history.
 
 `formaspecctl migrate status` is read-only and currently checks only the source
 database at `./data/designer.sqlite`. Docker-volume inspection, migration
@@ -796,11 +859,10 @@ Both commands fail closed on conflicting or uncertain evidence.
 
 An inconclusive operation must be resumed first so the journal can finish or
 prove rollback. A successful restore or rollback revokes all restored grants,
-connections, and pairing nonces; reconnect Codex through a fresh authorization:
-
-```bash
-pnpm formaspecctl agent connect codex --yes
-```
+connections, pairing nonces, and browser sessions. Sign in again, open
+Administration, choose **Connect Codex**, and use its new one-time handler or
+fallback command. In authenticated mode, a ticketless CLI command cannot create
+the replacement connection.
 
 The bridge is stopped before managed restore and is not silently re-authorized.
 Keep the safety backup and operation record until the restored application and
@@ -839,8 +901,8 @@ when an over-budget child ignores SIGTERM.
 After preparation, the ordinary restore engine performs the journaled cutover,
 current-schema integrity/foreign-key and deterministic-render checks,
 audit/outbox reconciliation, and atomic revocation of all restored grants,
-connections, and pairing nonces. The API starts under maintenance; normal
-readiness is required before maintenance clears.
+connections, pairing nonces, and browser sessions. The API starts under
+maintenance; normal readiness is required before maintenance clears.
 
 Any offline failure after the fence is acquired remains fenced by default. The
 CLI does not auto-abort, restart the API, or expose corrupt/unverified data; it
@@ -884,8 +946,9 @@ fully cleaned up without touching the user's live project. It manually cleared
 the fence only for disposable cleanup; production semantics leave maintenance
 active and the API stopped. A subsequent real unique-project `formaspecctl`
 smoke validated the persisted Compose project across binding verification,
-offline preparation, worker execution, and cleanup. The schema-13 image also
-passed same-machine copied-bundle restore from `formaspecdrsource3af2259e48`
+offline preparation, worker execution, and cleanup. The historical schema-13
+image also passed same-machine copied-bundle restore from
+`formaspecdrsource3af2259e48`
 into `formaspecdrtarget3af2259e48` with exact state/render/asset/SQLite/FK
 comparison and complete cleanup. That run predates the `drizzle-orm` 0.45.2
 lock update and must be repeated after a fresh frozen install. Server-mode
@@ -943,9 +1006,9 @@ configuration; verify an actual representative PNG render.
 
 Confirm that the API and CLI-owned bridge are running, then inspect
 `.designer/logs/formaspec-bridge.log`. Verify the Codex CLI is on a trusted
-absolute `PATH` and that an unmanaged `minimal-ui` skill or `formaspec`
-marketplace is not blocking the managed installation. The connector refuses to
-overwrite unmanaged content.
+absolute `PATH` and that an unmanaged `formaspec` skill or marketplace is not
+blocking the managed installation. The connector refuses to overwrite
+unmanaged content.
 
 ### Version conflict
 
@@ -964,20 +1027,23 @@ from later event IDs.
 Production readiness remains **NO-GO** until all of the following are resolved
 and evidenced:
 
-- perform a fresh frozen install with locked `drizzle-orm` 0.45.2, then rerun
-  application, browser, Docker/egress, Firefox/WebKit, recovery, and SBOM/
-  license gates; current passing runtime evidence used linked 0.44.7;
+- retain the current schema-15 package suite 840/840, launcher 225/225,
+  typecheck/build, installer, Compose configuration, and targeted browser/
+  preview gates in hosted CI, then rerun the full cross-browser, visual,
+  performance, Docker runtime/egress, recovery, and SBOM/license matrices;
 - add real Windows named-pipe/native renderer/service-host/ACL/process-tree
   packaging and retained hosted egress/crash/saturation/load evidence beyond
-  the passing local schema-13 DNS/TCP/interface canary;
+  the historical local schema-13 DNS/TCP/interface canary;
 - finish and verify real Nginx/TLS server-mode reverse-proxy, public direct-port
   isolation, `HEALTHY_PLANNED_RESTORE_ONLY`/rollback, offline recovery,
   upgrade, alerting, and long-running Compose evidence; controlled actual-
   socket proxy behavior and both restore command paths exist but have not
   passed those deployment release matrices;
-- retain the passing schema-13 editor/admin/component-insertion 4/4,
-  selection 12/12, handoff 1/1, visual 7/7, inspect 1/1, 20-step E2E 1/1, and
-  1,000-node budget 1/1 on pinned hosted/supported-OS release runners;
+- retain the current schema-15 editor/Administration 5/5, release E2E 1/1,
+  preview integration 2/2, and local session smoke, then rerun and retain the
+  historical schema-13 selection 12/12, handoff, visual 7/7, inspect,
+  20-step, cross-browser, and 1,000-node budget matrices on pinned hosted/
+  supported-OS release runners;
 - extend the recorded disposable local-Docker A/B restore exercise beyond the
   passing source-local 20-step V1/V2/product/task/hash/render scenario and
   deterministic schema 1/schema 7–12 fixtures to the full asset/design-system/
@@ -1009,17 +1075,18 @@ and evidenced:
   task UI;
 - produce the comprehensive authorization, CSRF, Host/Origin, asset,
   renderer-egress, archive, traversal, decompression, secret-exclusion, and
-  prompt-injection security evidence;
+  prompt-injection security evidence beyond the current package suite;
 - produce artifact-specific container/native SBOMs, dependency/image/OS scans,
   reproducibility, signed provenance, and release-artifact evidence with no
   unresolved critical/high findings. Repository-native source, browser,
-  schema-13 Docker-smoke, and unsigned Linux packaging workflows now exist.
+  historical schema-13 Docker-smoke, and unsigned Linux packaging workflows
+  exist.
   Five repository workflows are present. Local evidence helpers pass workflow
   contracts 8/8, cross-browser runner
   tests 2/2, off-host simulation tests 7/7, release-evidence tests 8/8, and
-  macOS package-evidence tests 12/12 plus extracted-runtime-smoke tests 10/10,
+  macOS package-evidence tests 12/12 plus extracted-runtime-smoke contract tests 11/11,
   but no GitHub-hosted run or real Ubuntu package artifact has been retained.
-  The temporary schema-13 source evidence reported 342 components and zero
-  license violations before the lock update. Audit now reports zero high/
-  critical findings for the 0.45.2 lock, but fresh installation, SBOM, and full
-  verification are still required.
+  The historical schema-13 source evidence reported 342 components and zero
+  license violations. Audit reports zero high/critical findings for the 0.45.2
+  lock, but current schema-15 artifact-specific SBOM/image/OS and installed
+  lifecycle verification are still required.

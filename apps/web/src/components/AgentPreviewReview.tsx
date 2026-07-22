@@ -20,7 +20,7 @@ import {
 import { useMemo, useState, type CSSProperties } from "react";
 
 import { nodeChildren, type DesignDocument, type DesignNode, type NodeId, type PageId } from "../domain";
-import { previewRenderUrl, type AgentTaskRecord, type DesignPreviewRecord } from "../lib/api";
+import { persistedPreviewRenderUrl, type AgentTaskRecord, type DesignPreviewRecord } from "../lib/api";
 import { NodeView } from "./Canvas";
 
 export interface ChangedNodeSummary {
@@ -134,9 +134,75 @@ function diagnosticIcon(severity: string) {
 }
 
 export type AgentConnectionViewState = "loading" | "active" | "pending" | "unavailable" | "restricted" | "error";
+export type PreviewRenderStatus = "loading" | "available" | "unavailable";
+
+export const FORMASPEC_AGENT_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";
+
+export function exactPreviewCommitAllowed(
+  canCommit: boolean,
+  renderStatus: PreviewRenderStatus,
+  hasPersistedRenderMetadata: boolean,
+): boolean {
+  return canCommit && hasPersistedRenderMetadata && renderStatus === "available";
+}
+
+export function AgentPreviewPng({
+  preview,
+  taskId,
+  maxSize,
+  alt,
+  status,
+  retryKey,
+  busy = false,
+  testId,
+  onStatusChange,
+  onRetry,
+}: {
+  preview: DesignPreviewRecord;
+  taskId: string;
+  maxSize: number;
+  alt: string;
+  status: PreviewRenderStatus;
+  retryKey: number;
+  busy?: boolean;
+  testId?: string;
+  onStatusChange: (status: PreviewRenderStatus) => void;
+  onRetry: () => void;
+}) {
+  if (!preview.renderMetadata) {
+    return (
+      <div className="agent-preview-image-fallback" role="alert" data-testid={testId ? `${testId}-fallback` : undefined}>
+        <AlertTriangle size={18} />
+        <strong>Exact render evidence unavailable</strong>
+        <span>This preview cannot be approved because it has no persisted PNG dimensions and SHA-256. Discard it and ask Codex to regenerate the proposal.</span>
+      </div>
+    );
+  }
+  if (status === "unavailable") {
+    return (
+      <div className="agent-preview-image-fallback" role="alert" data-testid={testId ? `${testId}-fallback` : undefined}>
+        <AlertTriangle size={18} />
+        <strong>Rendered PNG unavailable</strong>
+        <span>Exact commit is disabled until the persisted PNG loads successfully. An awaiting-approval proposal can still be discarded safely.</span>
+        <button type="button" className="button button-secondary" disabled={busy} onClick={onRetry}><RefreshCcw size={12} /> Retry PNG</button>
+      </div>
+    );
+  }
+  return (
+    <img
+      key={`${preview.previewId}:${retryKey}`}
+      src={persistedPreviewRenderUrl(preview, maxSize, taskId, retryKey)}
+      alt={alt}
+      data-testid={testId}
+      aria-busy={status === "loading"}
+      onLoad={() => onStatusChange("available")}
+      onError={() => onStatusChange("unavailable")}
+    />
+  );
+}
 
 export function agentTaskInstruction(task: AgentTaskRecord): string {
-  return `[@Minimal UI](plugin://minimal-ui@formaspec)\n\nUse Minimal UI. Claim FormaSpec task ${task.id}, read its project context and selection, preview the requested design, inspect the rendered result, run linting, and return the exact persisted preview for website approval.`;
+  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim FormaSpec task ${task.id}, read its project context and selection, preview the requested design, inspect the rendered result, run linting, and return the exact persisted preview for website approval.`;
 }
 
 export function codexTaskLaunchUrl(task: AgentTaskRecord): string {
@@ -185,6 +251,8 @@ export function AgentTaskWorkflowCard({
   actionError,
   canCommit,
   canDiscard,
+  previewRenderStatus,
+  previewRenderRetryKey,
   onCopyInstruction,
   onOpenCodex,
   onConnect,
@@ -192,6 +260,8 @@ export function AgentTaskWorkflowCard({
   onOpenReview,
   onCommit,
   onDiscard,
+  onPreviewRenderStatusChange,
+  onRetryPreviewRender,
   onOpenPlanning,
 }: {
   connectionState: AgentConnectionViewState;
@@ -202,6 +272,8 @@ export function AgentTaskWorkflowCard({
   actionError: string | null;
   canCommit: boolean;
   canDiscard: boolean;
+  previewRenderStatus: PreviewRenderStatus;
+  previewRenderRetryKey: number;
   onCopyInstruction: () => void;
   onOpenCodex: () => void;
   onConnect: () => void;
@@ -209,14 +281,21 @@ export function AgentTaskWorkflowCard({
   onOpenReview: () => void;
   onCommit: () => void;
   onDiscard: () => void;
+  onPreviewRenderStatusChange: (status: PreviewRenderStatus) => void;
+  onRetryPreviewRender: () => void;
   onOpenPlanning: () => void;
 }) {
   const waiting = task && ["queued", "claimed", "in_progress"].includes(task.status);
   const terminalError = task && ["failed", "cancelled", "expired"].includes(task.status);
+  const canCommitExactPreview = exactPreviewCommitAllowed(
+    canCommit,
+    previewRenderStatus,
+    Boolean(preview?.renderMetadata),
+  );
   return (
     <aside className={`agent-task-workflow is-${task?.status ?? "idle"}`} aria-label="Agent task workflow">
       <header>
-        <div><Bot size={15} /><span><strong>Minimal UI agent</strong><small>{connectionMessage}</small></span></div>
+        <div><Bot size={15} /><span><strong>FormaSpec agent</strong><small>{connectionMessage}</small></span></div>
         <span className={`agent-connection-state is-${connectionState}`}>{connectionState.replaceAll("_", " ")}</span>
       </header>
 
@@ -248,16 +327,26 @@ export function AgentTaskWorkflowCard({
           {preview ? (
             <div className="agent-task-inline-preview">
               <figure>
-                <img
-                  src={previewRenderUrl(preview.designId, preview.previewId, 720, task.id)}
-                  alt="Minimal UI rendered preview"
-                  data-testid="agent-rendered-preview"
+                <AgentPreviewPng
+                  preview={preview}
+                  taskId={task.id}
+                  maxSize={720}
+                  alt="FormaSpec rendered preview"
+                  status={previewRenderStatus}
+                  retryKey={previewRenderRetryKey}
+                  busy={busy}
+                  testId="agent-rendered-preview"
+                  onStatusChange={onPreviewRenderStatusChange}
+                  onRetry={onRetryPreviewRender}
                 />
-                <figcaption>Version {preview.rootBaseVersion} → {preview.proposedVersion} · {preview.changedNodeIds.length} changed layer{preview.changedNodeIds.length === 1 ? "" : "s"}</figcaption>
+                <figcaption>
+                  Version {preview.rootBaseVersion} → {preview.proposedVersion} · {preview.changedNodeIds.length} changed layer{preview.changedNodeIds.length === 1 ? "" : "s"}
+                  {preview.renderMetadata ? ` · PNG ${preview.renderMetadata.width}×${preview.renderMetadata.height} · ${preview.renderMetadata.sha256.slice(0, 12)}` : ""}
+                </figcaption>
               </figure>
               <div className="agent-task-preview-actions" role="group" aria-label="Agent preview approval actions">
                 <button className="button button-secondary" disabled={busy || !canDiscard} onClick={onDiscard}><Trash2 size={12} /> Discard</button>
-                <button className={`button ${preview.destructive ? "button-danger" : "button-primary"}`} disabled={busy || !canCommit} onClick={onCommit}>
+                <button className={`button ${preview.destructive ? "button-danger" : "button-primary"}`} disabled={busy || !canCommitExactPreview} onClick={onCommit}>
                   {busy ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={13} />} Commit exact preview
                 </button>
               </div>
@@ -292,9 +381,11 @@ export function AgentPreviewReviewDialog({
   busy,
   actionError,
   baseMatchesHead,
+  previewRenderStatus,
   onClose,
   onCommit,
   onDiscard,
+  onRetryPreviewRender,
 }: {
   open: boolean;
   task: AgentTaskRecord;
@@ -304,9 +395,11 @@ export function AgentPreviewReviewDialog({
   busy: boolean;
   actionError: string | null;
   baseMatchesHead: boolean;
+  previewRenderStatus: PreviewRenderStatus;
   onClose: () => void;
   onCommit: () => void;
   onDiscard: () => void;
+  onRetryPreviewRender: () => void;
 }) {
   const [mode, setMode] = useState<"side-by-side" | "toggle">("side-by-side");
   const [visibleVersion, setVisibleVersion] = useState<"before" | "after">("after");
@@ -321,10 +414,10 @@ export function AgentPreviewReviewDialog({
   );
   if (!open) return null;
 
-  const canCommit = preview.canCommit
+  const canCommit = exactPreviewCommitAllowed(preview.canCommit
     && preview.status === "ready"
     && task.status === "awaiting_approval"
-    && baseMatchesHead;
+    && baseMatchesHead, previewRenderStatus, Boolean(preview.renderMetadata));
   const renderPane = (version: "before" | "after") => {
     const before = version === "before";
     return (
@@ -350,17 +443,21 @@ export function AgentPreviewReviewDialog({
           <div className="agent-review-heading">
             <span><GitCompareArrows size={19} /></span>
             <div>
-              <h2 id="agent-review-title">Review Minimal UI proposal</h2>
+              <h2 id="agent-review-title">Review FormaSpec proposal</h2>
               <p>Task {task.id} produced an exact persisted preview. History remains unchanged until you commit it.</p>
             </div>
           </div>
           <div className="agent-review-header-actions">
-            <a
-              className="button button-secondary"
-              href={previewRenderUrl(preview.designId, preview.previewId, 2048, task.id)}
-              target="_blank"
-              rel="noreferrer"
-            ><Maximize2 size={12} /> Exact PNG</a>
+            {preview.renderMetadata ? (
+              <a
+                className="button button-secondary"
+                href={persistedPreviewRenderUrl(preview, 2048, task.id)}
+                target="_blank"
+                rel="noreferrer"
+              ><Maximize2 size={12} /> Exact PNG</a>
+            ) : (
+              <button className="button button-secondary" disabled><Maximize2 size={12} /> Exact PNG unavailable</button>
+            )}
             <button className="icon-button" disabled={busy} onClick={onClose} aria-label="Close proposal review"><X size={16} /></button>
           </div>
         </header>
@@ -370,6 +467,7 @@ export function AgentPreviewReviewDialog({
             <span>Base v{preview.rootBaseVersion}</span>
             <span>Proposed v{preview.proposedVersion}</span>
             <span>{preview.changedNodeIds.length} changed layer{preview.changedNodeIds.length === 1 ? "" : "s"}</span>
+            {preview.renderMetadata && <span>PNG {preview.renderMetadata.width}×{preview.renderMetadata.height} · {preview.renderMetadata.sha256.slice(0, 12)}</span>}
             <span className={`is-${preview.status}`}>{preview.status}</span>
           </div>
           <div className="agent-review-view-controls">
@@ -424,10 +522,15 @@ export function AgentPreviewReviewDialog({
 
         <footer className="agent-review-footer">
           <div>
-            {actionError ? <span className="agent-review-action-error"><AlertTriangle size={12} /> {actionError}</span> : !baseMatchesHead ? <span className="agent-review-action-error"><AlertTriangle size={12} /> The project head changed. Create a new preview; FormaSpec never auto-merges.</span> : <span><CheckCircle2 size={12} /> Preview snapshot and hashes are persisted for exact commit.</span>}
+            {actionError ? <span className="agent-review-action-error"><AlertTriangle size={12} /> {actionError}</span>
+              : previewRenderStatus === "unavailable" ? <span className="agent-review-action-error"><AlertTriangle size={12} /> The rendered PNG is unavailable. Retry it before exact commit.</span>
+                : previewRenderStatus === "loading" ? <span><LoaderCircle size={12} className="spin" /> Verifying the rendered PNG before exact commit…</span>
+                  : !baseMatchesHead ? <span className="agent-review-action-error"><AlertTriangle size={12} /> The project head changed. Create a new preview; FormaSpec never auto-merges.</span>
+                    : <span><CheckCircle2 size={12} /> Preview snapshot and hashes are persisted for exact commit.</span>}
           </div>
           <div>
             <button className="button button-secondary" disabled={busy || task.status !== "awaiting_approval"} onClick={onDiscard}><Trash2 size={13} /> Discard proposal</button>
+            {previewRenderStatus === "unavailable" && <button className="button button-secondary" disabled={busy} onClick={onRetryPreviewRender}><RefreshCcw size={13} /> Retry PNG</button>}
             <button
               className={`button ${preview.destructive ? "button-danger" : "button-primary"}`}
               disabled={busy || !canCommit}
@@ -444,7 +547,7 @@ export function AgentPreviewReviewDialog({
 }
 
 export function PreviewDiagnosticsSummary({ preview }: { preview: DesignPreviewRecord | null }) {
-  if (!preview) return <div className="product-panel-placeholder"><AlertTriangle size={18} /><strong>No agent preview yet</strong><span>Diagnostics appear after Minimal UI returns a persisted design preview for approval.</span></div>;
+  if (!preview) return <div className="product-panel-placeholder"><AlertTriangle size={18} /><strong>No agent preview yet</strong><span>Diagnostics appear after FormaSpec returns a persisted design preview for approval.</span></div>;
   const errors = preview.diagnostics.filter((item) => item.severity === "error").length;
   const warnings = preview.diagnostics.filter((item) => item.severity === "warning").length;
   return (
@@ -461,20 +564,42 @@ export function PreviewDiagnosticsSummary({ preview }: { preview: DesignPreviewR
 export function PreviewRevisionSummary({
   task,
   preview,
+  previewRenderStatus,
+  previewRenderRetryKey,
   onOpen,
+  onPreviewRenderStatusChange,
+  onRetryPreviewRender,
 }: {
   task: AgentTaskRecord | null;
   preview: DesignPreviewRecord | null;
+  previewRenderStatus: PreviewRenderStatus;
+  previewRenderRetryKey: number;
   onOpen: () => void;
+  onPreviewRenderStatusChange: (status: PreviewRenderStatus) => void;
+  onRetryPreviewRender: () => void;
 }) {
-  if (!task || !preview) return <div className="product-panel-placeholder"><GitCompareArrows size={18} /><strong>No revision proposal ready</strong><span>When Minimal UI requests approval, the exact base/proposed versions and changed layers appear here.</span></div>;
+  if (!task || !preview) return <div className="product-panel-placeholder"><GitCompareArrows size={18} /><strong>No revision proposal ready</strong><span>When FormaSpec requests approval, the exact base/proposed versions and changed layers appear here.</span></div>;
   return (
     <div className="preview-revision-summary">
-      <div className="preview-revision-thumbnail"><img src={previewRenderUrl(preview.designId, preview.previewId, 720, task.id)} alt="Minimal UI proposed revision" /></div>
+      <div className="preview-revision-thumbnail">
+        <AgentPreviewPng
+          preview={preview}
+          taskId={task.id}
+          maxSize={720}
+          alt="FormaSpec proposed revision"
+          status={previewRenderStatus}
+          retryKey={previewRenderRetryKey}
+          onStatusChange={onPreviewRenderStatusChange}
+          onRetry={onRetryPreviewRender}
+        />
+      </div>
       <div className="preview-revision-copy">
         <span className="preview-revision-state"><i /> {task.status.replaceAll("_", " ")}</span>
         <h3>Version {preview.rootBaseVersion} → {preview.proposedVersion}</h3>
-        <p>{preview.changedNodeIds.length} changed layer{preview.changedNodeIds.length === 1 ? "" : "s"} · {preview.diagnostics.length} diagnostic{preview.diagnostics.length === 1 ? "" : "s"}</p>
+        <p>
+          {preview.changedNodeIds.length} changed layer{preview.changedNodeIds.length === 1 ? "" : "s"} · {preview.diagnostics.length} diagnostic{preview.diagnostics.length === 1 ? "" : "s"}
+          {preview.renderMetadata ? ` · PNG ${preview.renderMetadata.width}×${preview.renderMetadata.height} · ${preview.renderMetadata.sha256.slice(0, 12)}` : ""}
+        </p>
         <dl><div><dt>Base hash</dt><dd>{preview.baseSnapshotHash.slice(0, 12)}</dd></div><div><dt>Preview hash</dt><dd>{preview.resultSnapshotHash.slice(0, 12)}</dd></div></dl>
         <button className="button button-primary" onClick={onOpen}><GitCompareArrows size={13} /> Review before / after</button>
       </div>

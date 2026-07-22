@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,9 +13,12 @@ import {
   assertWindowsPayloadPathSet,
   assertWindowsRelativePath,
   WINDOWS_INSTALL_MANIFEST_RELATIVE_PATH,
+  WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH,
   WINDOWS_SERVICE_CONFIGURATION_RELATIVE_PATH,
   WINDOWS_SERVICE_HOST_RELATIVE_PATH,
   windowsProductCode,
+  parseWindowsProtocolUrl,
+  windowsProtocolHandlerSource,
   windowsServiceConfiguration,
   windowsUpgradeCode,
 } from "./windows-layout.js";
@@ -68,6 +72,14 @@ function writeFixture(root: string, relativePath: string, contents: Buffer | str
   return target;
 }
 
+async function waitForFile(filename: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fs.existsSync(filename)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for protocol capture: ${filename}`);
+}
+
 function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" = "x64"): string {
   const payload = path.join(root, "application");
   fs.mkdirSync(payload);
@@ -77,6 +89,8 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
     "runtime/ms-playwright/chromium_headless_shell-123/chrome-headless-shell-win64/headless_shell.exe",
     peBytes(architecture),
   );
+  writeFixture(payload, "app/designer", "FormaSpec compatibility launcher\n");
+  writeFixture(payload, "app/pnpm-workspace.yaml", "packages:\n  - apps/*\n  - packages/*\n");
   for (const relativePath of [
     "app/apps/server/dist/index.js",
     "app/apps/server/dist/renderer-worker.js",
@@ -86,6 +100,46 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
     "app/apps/workspace-bridge/dist/cli.js",
     "app/packages/core/dist/index.js",
   ]) writeFixture(payload, relativePath, `fixture:${relativePath}\n`);
+  writeFixture(payload, "app/apps/cli/assets/skills/formaspec/SKILL.md", [
+    "---",
+    "name: formaspec",
+    "description: Fixture managed FormaSpec skill.",
+    "---",
+    "",
+  ].join("\n"));
+  writeFixture(payload, "app/apps/cli/assets/skills/formaspec/agents/openai.yaml", [
+    "interface:",
+    "  display_name: \"FormaSpec\"",
+    "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
+    "",
+  ].join("\n"));
+  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/.agents/plugins/marketplace.json", `${JSON.stringify({
+    name: "formaspec",
+    interface: { displayName: "FormaSpec" },
+    plugins: [{ name: "formaspec", source: { source: "local", path: "./plugins/formaspec" } }],
+  }, null, 2)}\n`);
+  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
+    name: "formaspec",
+    version: "1.2.3",
+    interface: { displayName: "FormaSpec" },
+  }, null, 2)}\n`);
+  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", [
+    "---",
+    "name: formaspec",
+    "description: Fixture managed FormaSpec plugin skill.",
+    "---",
+    "",
+  ].join("\n"));
+  writeFixture(
+    payload,
+    "app/apps/cli/assets/codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml",
+    [
+      "interface:",
+      "  display_name: \"FormaSpec\"",
+      "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
+      "",
+    ].join("\n"),
+  );
   writeFixture(payload, "app/package.json", "{\"private\":true}\n");
   return payload;
 }
@@ -243,6 +297,97 @@ describe("native Windows service-host boundary", () => {
   });
 });
 
+describe("Windows FormaSpec protocol boundary", () => {
+  const nonce = `fspair_${"n".repeat(43)}`;
+  const connectionId = `connection_${"a".repeat(32)}`;
+
+  it("accepts only queryless compatibility and bounded one-time pairing forms", () => {
+    expect(parseWindowsProtocolUrl("formaspec://")).toEqual({ kind: "open" });
+    expect(parseWindowsProtocolUrl("formaspec://open")).toEqual({ kind: "open" });
+    expect(parseWindowsProtocolUrl("formaspec://connect-agent")).toEqual({ kind: "connect" });
+    expect(parseWindowsProtocolUrl(`formaspec://connect-agent?nonce=${nonce}`)).toEqual({
+      kind: "connect",
+      pairingNonce: nonce,
+    });
+    expect(parseWindowsProtocolUrl(
+      `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}`,
+    )).toEqual({ kind: "connect", connectionId, pairingNonce: nonce });
+  });
+
+  it("rejects extra, reordered, encoded, duplicated, credential-bearing, and unsafe pairing data", () => {
+    for (const candidate of [
+      `formaspec://connect-agent?nonce=${nonce}&connection=${connectionId}`,
+      `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}&extra=1`,
+      `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}&nonce=${nonce}`,
+      `formaspec://connect-agent?connection=${connectionId}&nonce=fspair_short`,
+      `formaspec://connect-agent?nonce=${encodeURIComponent(`${nonce};calc.exe`)}`,
+      `formaspec://user@connect-agent?nonce=${nonce}`,
+      `formaspec://connect-agent/path?nonce=${nonce}`,
+      `formaspec://connect-agent?connection=${connectionId}\\&nonce=${nonce}`,
+      `formaspec://connect-agent?task=task_unsafe`,
+      `https://connect-agent?nonce=${nonce}`,
+    ]) expect(() => parseWindowsProtocolUrl(candidate)).toThrow(/malformed|unsupported/);
+  });
+
+  it("emits a shell-free packaged formaspecctl forwarder with strict runtime validation", () => {
+    const source = windowsProtocolHandlerSource();
+    expect(source).toContain('spawn(process.execPath, [cliEntry, ...cliArguments]');
+    expect(source).toContain('shell: false');
+    expect(source).toContain('cliArguments.push("--pairing-nonce", action.pairingNonce)');
+    expect(source).toContain('cliArguments.push("--connection-id", action.connectionId)');
+    expect(source).toContain('cliArguments.push("--yes")');
+    expect(source).toContain('FORMASPEC_UPSTREAM_AUTH_MODE: upstreamAuthMode');
+    expect(source).not.toMatch(/execSync|eval\(|cmd\.exe|powershell|Bearer/);
+  });
+
+  it("executes the generated handler and forwards only validated ticket arguments", async () => {
+    const root = temporaryRoot("formaspec-windows-protocol-");
+    const handler = writeFixture(root, WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH, windowsProtocolHandlerSource());
+    const capture = path.join(root, "capture.json");
+    writeFixture(root, "service/formaspec-service.json", JSON.stringify({
+      api: { environment: { AUTH_MODE: "none" } },
+    }));
+    writeFixture(root, "app/apps/cli/dist/index.js", `
+const fs = require("node:fs");
+fs.writeFileSync(process.env.FORMASPEC_PROTOCOL_CAPTURE, JSON.stringify({
+  arguments: process.argv.slice(2),
+  authMode: process.env.FORMASPEC_UPSTREAM_AUTH_MODE,
+  runtimeDirectory: process.env.FORMASPEC_RUNTIME_DIR,
+}));
+`);
+    const programData = path.join(root, "program-data");
+    const result = spawnSync(process.execPath, [
+      handler,
+      `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}`,
+    ], {
+      env: { ...process.env, FORMASPEC_PROTOCOL_CAPTURE: capture, ProgramData: programData },
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    expect(result.status).toBe(0);
+    await waitForFile(capture);
+    expect(JSON.parse(fs.readFileSync(capture, "utf8"))).toEqual({
+      arguments: [
+        "agent", "connect", "codex",
+        "--pairing-nonce", nonce,
+        "--connection-id", connectionId,
+        "--yes",
+      ],
+      authMode: "none",
+      runtimeDirectory: path.join(programData, "FormaSpec", "runtime"),
+    });
+
+    const rejectedCapture = path.join(root, "rejected.json");
+    const rejected = spawnSync(process.execPath, [handler, `formaspec://connect-agent?nonce=${nonce}&extra=1`], {
+      env: { ...process.env, FORMASPEC_PROTOCOL_CAPTURE: rejectedCapture, ProgramData: programData },
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    expect(rejected.status).toBe(2);
+    expect(fs.existsSync(rejectedCapture)).toBe(false);
+  });
+});
+
 describe("deterministic Windows payload and WiX v4 layout", () => {
   it("stages a manifest-pinned self-contained payload deterministically", () => {
     const firstRoot = temporaryRoot();
@@ -271,7 +416,11 @@ describe("deterministic Windows payload and WiX v4 layout", () => {
     expect(source).toContain('Source="$(var.PayloadRoot)\\service\\FormaSpec.ServiceHost.exe"');
     expect(source).toContain('Arguments="--open-editor"');
     expect(source).toContain('Key="Software\\Classes\\formaspec"');
-    expect(source).toContain('--protocol &quot;%1&quot;');
+    expect(source).toContain('&quot;[INSTALLFOLDER]runtime\\node.exe&quot;');
+    expect(source).toContain('&quot;[INSTALLFOLDER]service\\formaspec-protocol-handler.cjs&quot; &quot;%1&quot;');
+    expect(source).not.toContain('--protocol &quot;%1&quot;');
+    expect(fs.readFileSync(path.join(stageFixture(temporaryRoot()), WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH), "utf8"))
+      .toBe(windowsProtocolHandlerSource());
     expect(source).not.toContain('<RemoveFolder Id="RemoveFormaSpecData');
   });
 
@@ -343,6 +492,21 @@ describe("deterministic Windows payload and WiX v4 layout", () => {
       version: "1.2.3",
       architecture: "x64",
     })).toThrow(/Node.js runtime does not match|service host does not match/);
+  });
+
+  it("rejects a prepared payload without the packaged CLI workspace markers", () => {
+    for (const relativePath of ["app/designer", "app/pnpm-workspace.yaml"]) {
+      const root = temporaryRoot();
+      const application = applicationPayloadFixture(root);
+      fs.rmSync(path.join(application, ...relativePath.split("/")));
+      expect(() => stageWindowsPayload({
+        applicationPayloadRoot: application,
+        payloadRoot: path.join(root, "out"),
+        serviceHost: serviceHostFixture(root),
+        version: "1.2.3",
+        architecture: "x64",
+      })).toThrow(new RegExp(`Required Windows payload file ${relativePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    }
   });
 });
 

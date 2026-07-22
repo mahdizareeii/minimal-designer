@@ -240,7 +240,7 @@ export function Administration() {
             {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>One-time pairing link issued. The fallback command above expires with it and contains no bearer grant.</span></div>}
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading agent connections…</div> : connections.length === 0 ? (
-                <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@Minimal UI](plugin://minimal-ui@formaspec).</span></div>
+                <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@FormaSpec](plugin://formaspec@formaspec).</span></div>
               ) : connections.map((connection) => (
                 <article className="administration-row" key={connection.id}>
                   <div className={`status-icon is-${connection.status}`}>{connection.status === "active" ? <CheckCircle2 size={16} /> : <Bot size={16} />}</div>

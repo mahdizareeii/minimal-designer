@@ -1,6 +1,6 @@
 # FormaSpec architecture
 
-Last audited: 2026-07-21
+Last audited: 2026-07-22
 
 This document distinguishes the architecture that exists in the repository
 today from the approved FormaSpec target. A target description is not evidence
@@ -8,20 +8,20 @@ that the subsystem has been implemented.
 
 ## Current system
 
-The product is named FormaSpec. **Minimal UI** is the agent-facing alias and
-`designer` remains only as a compatibility launcher for existing local state.
+The product and agent-facing identity are both **FormaSpec**. `designer`
+remains only as a compatibility launcher for existing local state.
 The repository is an incremental pnpm TypeScript workspace:
 
 | Area | Current implementation |
 | --- | --- |
 | Shared model | `packages/core`: frozen strict V1 schemas, separate strict V2 schemas, deterministic V1→V2 conversion, typed operations, validation/linting, layout rules, product-specification types, the Foundation System, bounded token exporters, and canonical bounded detached component-source bundles. The core operation union includes a server-only `insert_component_instance` record, but generic MCP operations exclude it. |
 | Browser editor | `apps/web`: React/Vite, Zustand, structured DOM rendering, one viewport transform, Moveable/Selecto in an untransformed interaction overlay, product specification, planning, source-backed component authoring from immutable V2 revisions, and a Components-tab pinned-library flow that previews, renders, diagnoses, explicitly commits, or discards exact component insertions. Design-system administration, engineering handoff, Redesign Studio, inspect, history, prototype, JSON/PNG, and portable export/import surfaces also exist. |
-| HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, organization/project authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, backups, and render orchestration. |
-| Persistence | Better SQLite3 with a numbered version-13 migration ledger, WAL, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, and exact design-system upgrade snapshot references. |
+| HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, password-session and trusted-header browser authentication, organization/project authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, backups, and render orchestration. |
+| Persistence | Better SQLite3 with a numbered version-15 migration ledger, WAL, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, and bounded write-once exact preview-render metadata. |
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
-| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; `formaspecctl` configures token-free Codex MCP plus the managed Minimal UI plugin/skill. |
+| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus the managed FormaSpec plugin/skill. |
 | Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
-| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. The dependency-linked schema-13 image (`sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`) passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery locally with installed `drizzle-orm` 0.45.2. It is not a retained/signed/scanned release artifact. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; native macOS/Linux/Windows lifecycle proof is missing. |
+| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. The dependency-linked schema-13 image (`sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`) is retained historical evidence for deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery with installed `drizzle-orm` 0.45.2; it has not been rebuilt or rerun at schema 15 and is not a retained/signed/scanned release artifact. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; native macOS/Linux/Windows lifecycle proof is missing. |
 
 ```mermaid
 flowchart LR
@@ -42,21 +42,24 @@ six explicit exceptions. The current application suite verifies exact
 inventory/route closure, generated authentication rejection, and direct
 behavioral authorization across all 108 routes with zero uncovered.
 
-Local dependency-linked schema-13 runtime evidence uses disposable Compose
+Historical local dependency-linked schema-13 runtime evidence uses disposable Compose
 project `formaspeccischema1369037dfc8a`. Image
 `sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`
 produced the same 512×339 PNG hash before and after API restart, denied DNS/
 direct-TCP/non-loopback egress, passed Firefox/WebKit 12/12, and passed
 source-to-clean-target copied-bundle recovery with exact database, snapshot,
 revision, asset, render, integrity, and foreign-key comparisons. Cleanup passed
-for every disposable project. These are local `NO-GO` results, not hosted
-provenance or a release image.
+for every disposable project. These are historical local `NO-GO` results, not
+schema-15 verification, hosted provenance, or a release image.
 
-Installed/link verification confirms `drizzle-orm` 0.45.2. Application,
-typecheck/build, launcher, Docker/egress, Firefox/WebKit, recovery, and exact
-SBOM/license gates were rerun against it. Audit currently has zero high/
-critical findings; remaining advisories are under remediation. The broad Chrome
-Playwright matrix still needs a post-update rerun.
+Installed/link verification confirms `drizzle-orm` 0.45.2. Current schema-15
+source passes the seven-package test suite 840/840, all workspace typechecks/
+builds, launcher 225/225, installer 71/71 plus typecheck/build, Compose
+configuration, targeted editor/Administration 5/5, release E2E 1/1, preview
+integration 2/2, and macOS runtime-smoke contracts 11/11. Historical
+schema-13 Docker/egress, Firefox/WebKit, copied-bundle recovery, and exact SBOM/
+license gates have not been rerun at schema 15. The full cross-browser, visual,
+performance, runtime-recovery, and installed-native matrices remain open.
 
 ### Current authoritative data flow
 
@@ -108,8 +111,10 @@ bounded JSON or raster entries are loaded only when parsed or normalized.
 | --- | --- | --- |
 | `designs` | Organization-owned current head with optimistic versioning | Backup-gated V2-head migration exists; operator migration UI, broader customer fixtures, and complete project policy UI remain incomplete. |
 | `snapshots` / `revisions` | Brotli canonical bytes plus immutable parent/snapshot/operation/metadata hash chains | Real copied legacy upgrade fixtures and operator integrity tooling remain release evidence gaps. |
-| `previews` | Exact persisted snapshots, base/result hashes, engine versions, temporary-ID map, changed IDs, expiry, kind, and status | Complete fault injection and every engine-mismatch/already-committed case remain to be proven. |
+| `previews` | Exact persisted snapshots, base/result hashes, engine versions, temporary-ID map, changed IDs, expiry, kind, status, and bounded write-once page/node/max-size render options, dimensions, renderer backend, warnings, and PNG SHA-256 | Complete release-candidate fault injection and every engine-mismatch/already-committed case remain to be proven. |
 | `idempotency` | Organization/principal/scope/key response cache committed atomically with writes | Larger restart/concurrency matrices remain. |
+| `password_accounts` / `bootstrap_credentials` | Exactly one enabled human Organization Administrator may own the immutable bootstrap account identity. Passwords use versioned scrypt hashes. Public server bootstrap stores only the installer-generated token SHA-256 and permits one atomic consumption of the fixed `initial_admin` credential. | Password recovery/change and delegated account administration are not implemented; this is intentionally a single-administrator V1 session boundary. |
+| `browser_sessions` / `login_attempts` | Browser sessions persist only SHA-256 token/CSRF hashes, immutable identity and absolute-expiry metadata, sliding idle expiry, revocation, and bounded global/source/known-identity login-failure buckets. Session actors bind the session ID to the principal ID and revalidate live state on every authorization decision. | Broader multi-process, real-proxy/TLS, sustained-abuse, clock-boundary, and supported-OS lifecycle evidence remains incomplete. |
 | `assets` | Fully decoded deterministic PNG/JPEG/WebP, content-addressed files, and verified legacy-BLOB quarantine fallback | Decode/normalization uses the isolated renderer worker; operator-approved legacy cleanup and broader malformed-image/load evidence are not implemented. |
 | `render_jobs` | Bounded request/output hashes and lifecycle metadata for render and raster-normalization jobs; owner leases protect rolling processes, and exact permit-based 30-day retention deletes one organization/internal scope per bounded batch. Raw documents, assets, paths, and PNG bytes are never stored. | Organization-configurable retention, dashboards, and packaged load evidence remain incomplete. |
 | `event_outbox` | Organization/project-scoped replayable SSE source with guarded retention of published rows and explicit replay gaps | Operational lag monitoring and high-load reconnect evidence remain. |
@@ -117,12 +122,12 @@ bounded JSON or raster entries are loaded only when parsed or normalized.
 | `portable_imports` | Immutable organization-scoped source bundle/revision hash claims, target revision, canonical ID map, manifest, diagnostics, actor, and timestamp | The source revision hash is preserved as a provenance claim; it is not revalidated as a local revision chain. Multipart and per-entry disk staging are bounded, but larger adversarial/concurrent-import and packaged cross-platform evidence remain incomplete. |
 | `handoff_execution_decisions` | Append-only, handoff-version-pinned plan/isolation/diff/validation/commit/push/PR decisions with evidence hashes, explicit supersession, and lifecycle/CAS triggers | Broader packaged-agent and real-repository execution evidence remains incomplete. |
 | `component_definitions` | Immutable definition versions plus paired canonical bounded component `source_json` and SHA-256 `source_hash`; schema-12 rows may remain null-source for compatibility but cannot enter a new release. | Property-to-node/slot bindings and content-hash asset copying are not implemented. |
-| `design_system_upgrade_previews` | Expiring upgrade diagnostics plus immutable base revision, base snapshot, and exact result snapshot hashes for V2 upgrades. | V1 compatibility previews retain their historical null exact-snapshot form; full schema-13 backup/restore and fault-injection evidence is pending. |
+| `design_system_upgrade_previews` | Expiring upgrade diagnostics plus immutable base revision, base snapshot, and exact result snapshot hashes for V2 upgrades. | V1 compatibility previews retain their historical null exact-snapshot form; full schema-15 backup/restore and fault-injection evidence is pending. |
 | Enterprise workflow tables | Organizations, principals, roles, grants, audit, product specs, planning, tasks, connections, design systems/releases/pins, repository inventories, handoffs, redesign assessments, backup/export metadata, and locks | V2-head migration, full authoring/mapping/implementation integration, delegated administration, policy rollout/version migration, and complete retention workflows remain incomplete. |
 
 The `schema_migrations` ledger and database, document, command-engine,
 renderer, font, application, and export versions are explicit and synchronized
-in current source at database schema 13. Runtime metadata is document schema 2,
+in current source at database schema 15. Runtime metadata is document schema 2,
 command engine 2, renderer 3, renderer IPC protocol 2, raster normalizer 1,
 font bundle 1, export format 1, and application build `0.2.0`. Migration-2 DDL
 defaults remain frozen at command engine 1, renderer 2, and font bundle 1 so a
@@ -137,19 +142,34 @@ Migration 12 adds append-only handoff execution decisions and their exact
 sequence/supersession/lifecycle integrity triggers. Migration 13 adds paired
 canonical component source bytes/hash and immutable exact V2 design-system
 upgrade base/result snapshot references without fabricating data for legacy
-rows. None of these migrations changes V1 revisions or removes legacy columns.
+rows. Migration 14 adds password accounts, browser sessions, persistent login-
+attempt buckets, and the one-time bootstrap credential. Database constraints
+permit only one immutable bootstrap-account identity, require its principal to
+be an enabled human Organization Administrator, bind each session to that same
+account/principal/organization tuple, keep session identity and absolute expiry
+immutable, and make bootstrap consumption one-way. Migration 15 adds nullable,
+bounded `previews.render_metadata_json` plus an immutable-once-recorded trigger;
+historical previews remain null rather than receiving fabricated PNG evidence.
+None of these migrations
+changes V1 revisions or removes legacy columns.
 
 The migration ledger is necessary but not sufficient. Database startup and
-backup/restore verification validate the required migration-9/10/11/12/13 tables,
-columns, indexes, trigger targets/SQL, and forbidden legacy triggers. A database
-that claims a ledger version without the required schema shape fails closed.
+backup/restore verification validate the required migration-9/10/11/12/13/14/15
+tables, columns, indexes, trigger targets/SQL, and forbidden legacy triggers. A
+database that claims a ledger version without the required schema shape fails
+closed.
 Deterministic historical fixtures build schema 1 and schema 7–11 by applying
 the real migration prefix to a fresh database, with reviewed schema/data
 digests; they do not derive old schemas by dropping current tables. Focused
 schema-13 tests also upgrade a genuine schema-12 fixture and prove null source/
-exact-preview columns are not synthesized. Same-image schema-13 copied-bundle
-recovery now passes locally; broader server-mode/off-site/native operator
-verification remains pending.
+exact-preview columns are not synthesized. Focused schema-14/15 fixtures advance
+genuine schema-11/schema-12 databases without changing their preserved
+enterprise rows, fabricating an administrator/session, or fabricating historical
+preview-render evidence. Current restore tests
+revoke every restored active browser session together with grants,
+connections, and pairing nonces. Same-image schema-13 copied-bundle recovery is
+historical local evidence; broader schema-15 server-mode/off-site/native
+operator verification remains pending.
 
 ### Current renderer topology
 
@@ -187,19 +207,20 @@ Remaining risks are explicit:
   FormaSpec keeps Moveable as the group gesture engine and renders the
   non-resizable group border from an exact client-space target union.
 - Auto-layout drag/reparent/constraint semantics are not complete.
-- The representative 1,000-node service and 20-sample pinned-Chromium browser
-  gates pass locally, but their reports are not yet retained across pinned
-  release CI images and supported platforms.
-- Verified backup/retention and launcher-local Docker supervision exist, and an
-  isolated 20-step source-local restore scenario plus deterministic schema 1
-  and schema 7–11 fixtures pass; server-mode external supervision, signed
+- The representative 1,000-node service gate passes; the 20-sample pinned-
+  Chromium browser result is historical schema-13 evidence and must be rerun at
+  schema 15 across pinned release CI images and supported platforms.
+- Verified backup/retention and launcher-local Docker supervision exist. The
+  isolated 20-step source-local restore result is historical schema-13 evidence;
+  current deterministic schema 1 and schema 7–11 migration fixtures pass.
+  Server-mode external supervision, signed
   provenance, anonymized real-customer fixtures, and the full asset/failure-
   injection recovery matrix remain incomplete.
 - Strict V2 heads, immutable release pinning/upgrades, source-backed component
   authoring, exact pinned-release insertion previews, and backup-gated migration
   foundations exist. Property-to-node/slot bindings, component asset copying,
   richer upgrade review, broader component-library accessibility/conflict
-  coverage, and retained hosted/native schema-13 release evidence remain
+  coverage, and retained hosted/native schema-15 release evidence remain
   incomplete.
 - The Workspace Bridge persists bounded inventories, exact opaque mappings,
   and handoffs. Selected-workspace launch now requires the immutable
@@ -276,7 +297,18 @@ audit/outbox retention execution, and migration 10 for immutable portable-
 import provenance, migration 11 for persistent render-job lifecycle state, and
 migration 12 for append-only handoff execution decisions. Migration 13 adds
 source-backed component versions and exact design-system upgrade snapshot
-references.
+references. Migration 14 adds the single-administrator password-session
+boundary, persistent bounded login-attempt state, and one-time public-server
+bootstrap authorization.
+
+Migration 14 does not silently create a human identity. Local session mode
+bootstraps the sole Organization Administrator through the browser. A fresh
+public session deployment additionally requires an installer-generated one-
+time token whose SHA-256 is stored in configuration and whose database
+credential is consumed atomically. Account identity cannot be updated or
+deleted; session identity and absolute expiry cannot be rewritten; logout,
+login rotation, expiry, principal disablement, and restore reconciliation make
+the affected sessions unusable through revocation rather than deletion.
 
 No V2 project-head migration may run before a verified backup and clean restore
 test. The deterministic V1-to-V2 migration must preserve project, page, frame,

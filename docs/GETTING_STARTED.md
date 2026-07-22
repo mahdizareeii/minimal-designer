@@ -1,7 +1,7 @@
 # Getting started
 
-FormaSpec is the browser product. **Minimal UI** is the name used when an
-agent invokes FormaSpec through MCP.
+FormaSpec is both the browser product and the identity used when an agent
+invokes it through MCP.
 
 ## Install and start
 
@@ -36,7 +36,7 @@ Open `http://127.0.0.1:4310` for the built application or
 5. Optionally complete the persistent 22-section planning interview.
 6. Select **Start with Codex**, or invoke the agent from Codex directly.
 
-## Use Minimal UI from Codex
+## Use FormaSpec from Codex
 
 The installer normally configures this automatically. To repair or repeat it:
 
@@ -47,11 +47,11 @@ The installer normally configures this automatically. To repair or repeat it:
 Then use:
 
 ```text
-[@Minimal UI](plugin://minimal-ui@formaspec) design a professional mobile flow.
+[@FormaSpec](plugin://formaspec@formaspec) design a professional mobile flow.
 ```
 
-Other supported triggers include `Use FormaSpec`, `Use Minimal UI`, and
-`Design this with FormaSpec`.
+Other supported triggers include `Use FormaSpec`, `Design this with FormaSpec`,
+and `Refine this selection with FormaSpec`.
 
 ## Export and administer
 

@@ -1,7 +1,7 @@
 interface:
-  display_name: "Minimal UI"
+  display_name: "FormaSpec"
   short_description: "Design and refine interfaces with FormaSpec"
-  default_prompt: "Use $minimal-ui to design this interface with FormaSpec."
+  default_prompt: "Use $formaspec to design this interface with FormaSpec."
 dependencies:
   tools:
     - type: "mcp"

@@ -15,6 +15,7 @@ import {
   canonicalJson,
   filesystemTargetsUnchanged,
   inspectBrowserPayload,
+  inspectManagedCodexAssets,
   parseArguments,
   requireContainedDirectory,
   requireContainedRegular,
@@ -116,6 +117,50 @@ test("browser inspection rejects a non-executable browser and unsupported host a
   assert.throws(() => inspectBrowserPayload(root, "1228", "ia32"), /Unsupported macOS runtime architecture/u);
 });
 
+function writeManagedCodexAsset(root, relativePath, contents) {
+  const filename = path.join(root, ...relativePath.split("/"));
+  fs.mkdirSync(path.dirname(filename), { recursive: true });
+  fs.writeFileSync(filename, contents);
+}
+
+function managedCodexAssetsFixture() {
+  const root = temporaryRoot("formaspec-macos-codex-assets-");
+  const skill = "---\nname: formaspec\ndescription: Fixture.\n---\n";
+  const metadata = [
+    "interface:",
+    "  display_name: \"FormaSpec\"",
+    "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
+    "",
+  ].join("\n");
+  writeManagedCodexAsset(root, "skills/formaspec/SKILL.md", skill);
+  writeManagedCodexAsset(root, "skills/formaspec/agents/openai.yaml", metadata);
+  writeManagedCodexAsset(root, "codex-marketplace/.agents/plugins/marketplace.json", `${JSON.stringify({
+    name: "formaspec",
+    interface: { displayName: "FormaSpec" },
+    plugins: [{ name: "formaspec", source: { source: "local", path: "./plugins/formaspec" } }],
+  })}\n`);
+  writeManagedCodexAsset(root, "codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
+    name: "formaspec",
+    interface: { displayName: "FormaSpec" },
+  })}\n`);
+  writeManagedCodexAsset(root, "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", skill);
+  writeManagedCodexAsset(root, "codex-marketplace/plugins/formaspec/skills/formaspec/agents/openai.yaml", metadata);
+  return root;
+}
+
+test("packaged Codex assets expose only the canonical FormaSpec agent identity", () => {
+  const root = managedCodexAssetsFixture();
+  assert.deepEqual(inspectManagedCodexAssets(root), {
+    skillName: "formaspec",
+    pluginId: "formaspec@formaspec",
+    displayName: "FormaSpec",
+    mention: "[@FormaSpec](plugin://formaspec@formaspec)",
+  });
+
+  fs.mkdirSync(path.join(root, "skills/minimal-ui"), { recursive: true });
+  assert.throws(() => inspectManagedCodexAssets(root), /legacy managed Codex path/u);
+});
+
 test("nested containment accepts a canonicalized temporary root without allowing escapes", () => {
   const root = temporaryRoot("formaspec-macos-containment-");
   const child = path.join(root, "child");
@@ -215,4 +260,6 @@ test("source contract contains no shell execution or forbidden native lifecycle 
   assert.match(source, /keychainInvoked:\s*false/u);
   assert.match(source, /codexInvoked:\s*false/u);
   assert.match(source, /browserOpenerInvoked:\s*false/u);
+  assert.match(source, /formaspecWorkflowPresent:\s*true/u);
+  assert.doesNotMatch(source, /minimalUiWorkflowPresent/u);
 });

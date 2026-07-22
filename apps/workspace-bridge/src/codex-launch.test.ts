@@ -223,7 +223,7 @@ describe("implementation-authorized selected-workspace Codex launch", () => {
     expect(invocation!.executable).toBe(prepared.executable);
     expect(invocation!.arguments_).toEqual(prepared.arguments);
     expect(invocation!.arguments_).toHaveLength(1);
-    expect(invocation!.arguments_[0]).toContain(`Use Minimal UI`);
+    expect(invocation!.arguments_[0]).toContain(`[@FormaSpec](plugin://formaspec@formaspec) Use FormaSpec`);
     expect(invocation!.arguments_[0]).toContain(`formaspec://handoffs/${HANDOFF_ID}`);
     expect(invocation!.arguments_[0]).not.toContain(fixture.root);
     expect(invocation!.options.cwd).toBe(fixture.root);

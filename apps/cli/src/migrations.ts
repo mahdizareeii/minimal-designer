@@ -13,7 +13,7 @@ export interface MigrationStatus {
   migrations: Array<{ version: number; name: string; appliedAt: string }>;
 }
 
-export const CLI_SUPPORTED_DATABASE_VERSION = 14;
+export const CLI_SUPPORTED_DATABASE_VERSION = 16;
 
 export function defaultDatabasePath(
   projectRoot: string,

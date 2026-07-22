@@ -55,18 +55,20 @@ Archive the evidence directory even when the policy step fails so the exact
 failure is available to reviewers. A release pipeline should run generation as
 one step, retain the directory as a build artifact, and then run the gate.
 
-## Current verified result
+## Historical verified result
 
 On 2026-07-21, after replacing Sharp/libvips with the pinned Playwright
-Chromium raster worker, current schema-12 Darwin ARM64 source evidence produced
+Chromium raster worker, historical schema-12 Darwin ARM64 source evidence produced
 342 distinct third-party package/version components. The deterministic
 generator, its eight focused tests, and the strict permissive-only policy all
 pass with zero violations. The retained source SBOM SHA-256 is
 `571b39478f99c3ffdb3ff761c79e58c420f09296741961807cc13a06420c513a` and
 the retained license-evidence SHA-256 is
 `6ecc9a43fdd37beae32e9c6995503a71a175e40dffbf93672083eaf6de9c80bb`.
-`apps/server/package.json`, `pnpm-lock.yaml`, and the exact-current
+`apps/server/package.json`, `pnpm-lock.yaml`, and the retained
 `formaspec/server:local` image manifest contain no Sharp or libvips package.
+Current schema-15 source and target-artifact evidence must be regenerated before
+release qualification.
 
 Linux and Windows release targets must still generate and retain their own
 evidence because native optional dependencies and OS payloads are

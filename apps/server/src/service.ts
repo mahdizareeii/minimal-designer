@@ -53,6 +53,12 @@ import {
   storeSnapshot,
   type RuntimeVersions,
 } from "./persistence.js";
+import {
+  buildPreviewRenderMetadata,
+  parsePreviewRenderMetadata,
+  type PreviewRenderCapture,
+  type PreviewRenderMetadata,
+} from "./preview-render-metadata.js";
 
 interface DesignRow {
   id: string;
@@ -108,6 +114,7 @@ interface PreviewRow {
   kind: PreviewKind;
   committed_revision_id: string | null;
   committed_at: string | null;
+  render_metadata_json: string | null;
   committable: number;
   created_at: string;
   expires_at: string;
@@ -226,11 +233,17 @@ export interface PreviewResult {
   changedNodeIds: string[];
   versions: Pick<RuntimeVersions, "commandEngine" | "renderer" | "fontBundle">;
   committedRevisionId: string | null;
+  renderMetadata: PreviewRenderMetadata | null;
   diagnostics: Diagnostic[];
   createdIds: unknown;
   document: DesignDocument;
   canonicalDocument: AnyDesignDocument;
   schemaVersion: 1 | 2;
+}
+
+export interface ExactPreviewRenderResult {
+  preview: PreviewResult;
+  renderMetadata: PreviewRenderMetadata;
 }
 
 export interface HeadMigrationResult {
@@ -691,6 +704,7 @@ export class DesignerService {
         fontBundle: this.versions.fontBundle,
       },
       committedRevisionId: null,
+      renderMetadata: null,
       diagnostics,
       createdIds: {
         temporary: temporaryIdMap,
@@ -807,6 +821,7 @@ export class DesignerService {
         fontBundle: this.versions.fontBundle,
       },
       committedRevisionId: null,
+      renderMetadata: null,
       diagnostics,
       createdIds: { temporary: {}, created: createdIds },
       document: editorDocument(canonicalDocument),
@@ -826,6 +841,17 @@ export class DesignerService {
       throw new DomainError("INTERNAL_ERROR", "Preview snapshot metadata is missing.", 500);
     }
     const canonicalDocument = parseDocument(JSON.parse(readSnapshotJson(this.database.sqlite, row.result_snapshot_hash)));
+    const renderMetadata = row.render_metadata_json === null
+      ? null
+      : parsePreviewRenderMetadata(row.render_metadata_json);
+    if (renderMetadata?.options.pageId !== undefined
+      && !canonicalDocument.pages.some((page) => page.id === renderMetadata.options.pageId)) {
+      throw new DomainError("INTERNAL_ERROR", "Stored preview render metadata references a missing page.", 500);
+    }
+    if (renderMetadata?.options.nodeId !== undefined
+      && canonicalDocument.nodes[renderMetadata.options.nodeId] === undefined) {
+      throw new DomainError("INTERNAL_ERROR", "Stored preview render metadata references a missing node.", 500);
+    }
     return {
       id: row.id,
       designId: row.design_id,
@@ -847,6 +873,7 @@ export class DesignerService {
         fontBundle: row.font_bundle_version,
       },
       committedRevisionId: row.committed_revision_id,
+      renderMetadata,
       diagnostics: JSON.parse(row.diagnostics_json) as Diagnostic[],
       createdIds: {
         temporary: JSON.parse(row.temporary_id_map_json) as unknown,
@@ -856,6 +883,138 @@ export class DesignerService {
       canonicalDocument,
       schemaVersion: canonicalDocument.schema_version,
     };
+  }
+
+  recordPreviewRenderMetadata(
+    actorId: string,
+    designId: string,
+    previewId: string,
+    capture: PreviewRenderCapture,
+  ): PreviewRenderMetadata {
+    if (!this.database.sqlite.inTransaction) {
+      const transaction = this.database.sqlite.transaction(() => this.recordPreviewRenderMetadata(
+        actorId,
+        designId,
+        previewId,
+        capture,
+      ));
+      return transaction.immediate();
+    }
+
+    this.authorizePreviewCreation(actorId, designId);
+    const row = this.loadPreview(actorId, designId, previewId, undefined, "read");
+    if (row.actor_id !== actorId) throw new DomainError("NOT_FOUND", "Preview not found.", 404);
+    const now = new Date().toISOString();
+    if (row.status === "committed") {
+      throw new DomainError("PREVIEW_ALREADY_COMMITTED", "The preview was already committed.", 409);
+    }
+    if (row.status === "expired" || row.expires_at <= now) {
+      throw new DomainError("PREVIEW_EXPIRED", "The preview expired; create a new preview.", 410, { retryable: true });
+    }
+    if (row.status !== "ready" && row.status !== "blocked") {
+      throw new DomainError("PREVIEW_NOT_COMMITTABLE", "The preview is not available for render capture.", 409);
+    }
+    const preview = this.getPreview(actorId, designId, previewId);
+    const metadata = buildPreviewRenderMetadata(preview.canonicalDocument, capture);
+    const serialized = canonicalJson(metadata);
+    if (preview.renderMetadata !== null) {
+      if (canonicalJson(preview.renderMetadata) === serialized) return preview.renderMetadata;
+      throw new DomainError(
+        "IDEMPOTENCY_CONFLICT",
+        "This preview already has different immutable render metadata.",
+        409,
+        { details: { previewId, existingSha256: preview.renderMetadata.sha256 } },
+      );
+    }
+
+    const updated = this.database.sqlite.prepare(
+      `UPDATE previews SET render_metadata_json = ?
+       WHERE id = ? AND design_id = ? AND organization_id = ? AND actor_id = ?
+         AND status IN ('ready', 'blocked') AND expires_at > ? AND render_metadata_json IS NULL`,
+    ).run(serialized, previewId, designId, row.organization_id, actorId, now);
+    if (updated.changes === 1) return metadata;
+
+    const concurrent = this.database.sqlite.prepare(
+      `SELECT render_metadata_json, status, expires_at, actor_id, organization_id
+       FROM previews WHERE id = ? AND design_id = ?`,
+    ).get(previewId, designId) as {
+      render_metadata_json: string | null;
+      status: PreviewStatus;
+      expires_at: string;
+      actor_id: string;
+      organization_id: string;
+    } | undefined;
+    if (!concurrent
+      || concurrent.actor_id !== actorId
+      || concurrent.organization_id !== row.organization_id) {
+      throw new DomainError("NOT_FOUND", "Preview not found.", 404);
+    }
+    if (concurrent.status === "expired" || concurrent.expires_at <= now) {
+      throw new DomainError("PREVIEW_EXPIRED", "The preview expired; create a new preview.", 410, { retryable: true });
+    }
+    if (concurrent.status === "committed") {
+      throw new DomainError("PREVIEW_ALREADY_COMMITTED", "The preview was already committed.", 409);
+    }
+    if (!concurrent.render_metadata_json) {
+      throw new DomainError("INTERNAL_ERROR", "Preview render metadata could not be persisted.", 500, {
+        retryable: true,
+      });
+    }
+    const existing = parsePreviewRenderMetadata(concurrent.render_metadata_json);
+    if (canonicalJson(existing) === serialized) return existing;
+    throw new DomainError(
+      "IDEMPOTENCY_CONFLICT",
+      "This preview already has different immutable render metadata.",
+      409,
+      { details: { previewId, existingSha256: existing.sha256 } },
+    );
+  }
+
+  getExactPreviewForRender(
+    actorId: string,
+    designId: string,
+    previewId: string,
+    options: { taskId?: string } = {},
+  ): ExactPreviewRenderResult {
+    const preview = this.getPreview(actorId, designId, previewId, options);
+    const renderMetadata = this.requireCompatiblePreviewRenderMetadata(preview);
+    return { preview, renderMetadata };
+  }
+
+  verifyExactPreviewRender(
+    actorId: string,
+    designId: string,
+    previewId: string,
+    capture: Omit<PreviewRenderCapture, "options">,
+    options: { taskId?: string } = {},
+  ): PreviewRenderMetadata {
+    const { preview, renderMetadata } = this.getExactPreviewForRender(actorId, designId, previewId, options);
+    const observed = buildPreviewRenderMetadata(preview.canonicalDocument, {
+      ...capture,
+      options: renderMetadata.options,
+    });
+    if (observed.sha256 !== renderMetadata.sha256
+      || observed.width !== renderMetadata.width
+      || observed.height !== renderMetadata.height
+      || observed.renderer !== renderMetadata.renderer) {
+      throw new DomainError(
+        "PREVIEW_ENGINE_MISMATCH",
+        "The exact preview render no longer matches the persisted renderer output.",
+        409,
+        {
+          retryable: true,
+          details: {
+            previewId,
+            expectedSha256: renderMetadata.sha256,
+            actualSha256: observed.sha256,
+            expectedRenderer: renderMetadata.renderer,
+            actualRenderer: observed.renderer,
+            recovery: "Create a new preview with the current renderer before review or commit.",
+          },
+        },
+      );
+    }
+    return renderMetadata;
   }
 
   commitPreview(actorId: string, designId: string, input: {
@@ -1948,6 +2107,43 @@ export class DesignerService {
         },
       );
     }
+  }
+
+  private requireCompatiblePreviewRenderMetadata(preview: PreviewResult): PreviewRenderMetadata {
+    if (preview.renderMetadata === null) {
+      throw new DomainError(
+        "PREVIEW_ENGINE_MISMATCH",
+        "This preview has no persisted exact render output.",
+        409,
+        {
+          retryable: true,
+          details: {
+            previewId: preview.id,
+            recovery: "Create a new MCP preview before requesting its exact render.",
+          },
+        },
+      );
+    }
+    if (preview.versions.renderer !== this.versions.renderer
+      || preview.versions.fontBundle !== this.versions.fontBundle) {
+      throw new DomainError(
+        "PREVIEW_ENGINE_MISMATCH",
+        "The preview render was produced by an incompatible renderer or font bundle version.",
+        409,
+        {
+          retryable: true,
+          details: {
+            previewId: preview.id,
+            previewRendererVersion: preview.versions.renderer,
+            currentRendererVersion: this.versions.renderer,
+            previewFontBundleVersion: preview.versions.fontBundle,
+            currentFontBundleVersion: this.versions.fontBundle,
+            recovery: "Create a new preview with the current renderer before review or commit.",
+          },
+        },
+      );
+    }
+    return preview.renderMetadata;
   }
 
   private requireDesign(actorId: string, designId: string): DesignRow {

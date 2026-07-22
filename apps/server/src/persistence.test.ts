@@ -8,7 +8,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { applyOperations, createDocument } from "./core-adapter.js";
-import { DesignerDatabase } from "./db/database.js";
+import { applyDatabaseMigrationPrefixForTesting, DesignerDatabase } from "./db/database.js";
 import { EventHub } from "./events.js";
 import { canonicalSnapshot, DEFAULT_RUNTIME_VERSIONS, operationHash } from "./persistence.js";
 import { DesignerService } from "./service.js";
@@ -57,6 +57,19 @@ function thrown(callback: () => unknown): unknown {
   throw new Error("Expected callback to throw.");
 }
 
+const legacyBootstrapCredentialsConsumeOnceSql = `
+  CREATE TRIGGER bootstrap_credentials_consume_once
+  BEFORE UPDATE ON bootstrap_credentials
+  WHEN NEW.id IS NOT OLD.id
+    OR NEW.token_hash IS NOT OLD.token_hash
+    OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.consumed_at IS NOT NULL
+    OR OLD.consumed_by IS NOT NULL
+    OR NEW.consumed_at IS NULL
+    OR NEW.consumed_by IS NULL
+  BEGIN SELECT RAISE(ABORT, 'bootstrap credential can be consumed exactly once'); END
+`;
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -64,6 +77,57 @@ afterEach(() => {
 });
 
 describe("content-addressed persistence", () => {
+  it("upgrades exact legacy schema-14 and schema-15 bootstrap triggers without losing credential data", () => {
+    for (const historicalVersion of [14, 15]) {
+      const filename = databasePath();
+      const historical = new Database(filename);
+      historical.pragma("foreign_keys = ON");
+      applyDatabaseMigrationPrefixForTesting(historical, historicalVersion);
+      historical.prepare(
+        `INSERT INTO bootstrap_credentials (id, token_hash, created_at, consumed_at, consumed_by)
+         VALUES ('initial_admin', ?, '2026-07-01T00:00:00.000Z', NULL, NULL)`,
+      ).run("a".repeat(64));
+      historical.exec(`
+        DROP TRIGGER bootstrap_credentials_consume_once;
+        ${legacyBootstrapCredentialsConsumeOnceSql};
+      `);
+      historical.close();
+
+      const upgraded = new DesignerDatabase(filename);
+      try {
+        expect(upgraded.schemaVersion()).toBe(16);
+        expect(upgraded.sqlite.prepare(
+          "SELECT version, name FROM schema_migrations WHERE version >= 14 ORDER BY version",
+        ).all()).toEqual([
+          { version: 14, name: "browser_session_authentication" },
+          { version: 15, name: "preview_render_metadata" },
+          { version: 16, name: "bootstrap_credential_trigger_canonicalization" },
+        ]);
+        expect(upgraded.sqlite.prepare(
+          "SELECT id, token_hash, created_at, consumed_at, consumed_by FROM bootstrap_credentials",
+        ).get()).toEqual({
+          id: "initial_admin",
+          token_hash: "a".repeat(64),
+          created_at: "2026-07-01T00:00:00.000Z",
+          consumed_at: null,
+          consumed_by: null,
+        });
+        const trigger = upgraded.sqlite.prepare(
+          "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'bootstrap_credentials_consume_once'",
+        ).get() as { sql: string };
+        const normalizedTrigger = trigger.sql.replace(/\s+/g, " ").trim().toLowerCase();
+        expect(normalizedTrigger).toContain("(new.consumed_at is null) != (new.consumed_by is null)");
+        expect(normalizedTrigger).toContain("new.consumed_at is not null and new.token_hash is not old.token_hash");
+        expect(normalizedTrigger).not.toContain("or new.consumed_at is null or new.consumed_by is null");
+        expect(() => upgraded.sqlite.prepare(
+          "UPDATE bootstrap_credentials SET token_hash = ? WHERE id = 'initial_admin'",
+        ).run("b".repeat(64))).not.toThrow();
+      } finally {
+        upgraded.close();
+      }
+    }
+  });
+
   it("runs numbered migrations, records independent versions, and backfills a legacy V1 database", () => {
     const filename = databasePath();
     const legacy = new Database(filename);
@@ -116,7 +180,7 @@ describe("content-addressed persistence", () => {
 
     const opened = openService(filename);
     try {
-      expect(opened.database.schemaVersion()).toBe(14);
+      expect(opened.database.schemaVersion()).toBe(16);
       expect(opened.database.sqlite.prepare(
         "SELECT version, name FROM schema_migrations ORDER BY version",
       ).all()).toEqual([
@@ -134,8 +198,10 @@ describe("content-addressed persistence", () => {
         { version: 12, name: "handoff_execution_decisions" },
         { version: 13, name: "component_source_persistence" },
         { version: 14, name: "browser_session_authentication" },
+        { version: 15, name: "preview_render_metadata" },
+        { version: 16, name: "bootstrap_credential_trigger_canonicalization" },
       ]);
-      expect(opened.database.metadata("database_schema_version")).toBe("14");
+      expect(opened.database.metadata("database_schema_version")).toBe("16");
       expect(DEFAULT_RUNTIME_VERSIONS).toMatchObject({
         commandEngine: ENGINE_VERSIONS.commandEngine,
         renderer: ENGINE_VERSIONS.renderer,
@@ -166,13 +232,15 @@ describe("content-addressed persistence", () => {
       const migratedPreview = opened.service.getPreview("alice", document.id, "preview_legacy12345678");
       expect(migratedPreview.operationHash).toBe(operationHash(legacyOperations));
       expect(migratedPreview.resultSnapshotHash).toBe(canonicalSnapshot(previewDocument).hash);
+      expect(migratedPreview.renderMetadata).toBeNull();
       expect(opened.database.sqlite.prepare(
-        `SELECT command_engine_version, renderer_version, font_bundle_version
+        `SELECT command_engine_version, renderer_version, font_bundle_version, render_metadata_json
          FROM previews WHERE id = ?`,
       ).get(migratedPreview.id)).toEqual({
         command_engine_version: "1",
         renderer_version: "2",
         font_bundle_version: "1",
+        render_metadata_json: null,
       });
       expect(thrown(() => opened.service.commitPreview("alice", document.id, {
         previewId: migratedPreview.id,
@@ -224,6 +292,10 @@ describe("content-addressed persistence", () => {
         expected: /migration 12 is missing required trigger handoff_execution_decisions_insert_integrity/,
       },
       {
+        mutate: (sqlite) => sqlite.exec("DROP TRIGGER previews_render_metadata_immutable"),
+        expected: /migration 15 is missing required trigger previews_render_metadata_immutable/,
+      },
+      {
         mutate: (sqlite) => {
           const row = sqlite.prepare(
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'render_jobs'",
@@ -253,6 +325,13 @@ describe("content-addressed persistence", () => {
         },
         expected: /migration 11 trigger render_jobs_lifecycle_update has unexpected SQL digest/,
       },
+      {
+        mutate: (sqlite) => sqlite.exec(`
+          DROP TRIGGER bootstrap_credentials_consume_once;
+          ${legacyBootstrapCredentialsConsumeOnceSql};
+        `),
+        expected: /migration 16 trigger bootstrap_credentials_consume_once has unexpected SQL/,
+      },
     ];
 
     for (const fixture of cases) {
@@ -270,7 +349,7 @@ describe("content-addressed persistence", () => {
       const inspected = new Database(filename, { readonly: true });
       try {
         expect(inspected.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
-          .toEqual({ version: 14 });
+          .toEqual({ version: 16 });
       } finally {
         inspected.close();
       }

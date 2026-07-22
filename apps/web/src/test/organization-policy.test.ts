@@ -123,7 +123,8 @@ describe("organization policy administration contract", () => {
 
     await createCodexConnection();
     expect(fetch.mock.calls[1]?.[0]).toBe("/api/agent-connections");
-    const requestBody = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body)) as { scopes: string[] };
+    const requestBody = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body)) as { displayName: string; scopes: string[] };
+    expect(requestBody.displayName).toBe("Codex — FormaSpec");
     expect(requestBody.scopes).toContain("implementation_mapping:read");
     expect(requestBody.scopes).toContain("implementation_mapping:write");
     expect(requestBody.scopes).toContain("redesign:handoff");

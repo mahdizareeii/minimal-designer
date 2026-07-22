@@ -476,7 +476,7 @@ export async function prepareCodexLaunch(options: PrepareCodexLaunchOptions): Pr
   const executable = findCodexExecutable(options.environment);
   if (executable === null) throw new Error("Codex CLI was not found in a trusted absolute PATH entry.");
   const taskReference = `formaspec://handoffs/${options.handoffId}`;
-  const prompt = `[@Minimal UI](plugin://minimal-ui@formaspec) Use Minimal UI. Implement the approved FormaSpec engineering handoff ${taskReference} at immutable version ${central.handoff.currentVersion}, pinned to repository inventory ${central.inventory.id} with SHA-256 ${central.inventory.inventoryHash}. Read and verify those exact values through the configured formaspec MCP server before changing files; abort if they differ. Work only in the current selected repository. Follow the handoff isolation and validation plan. Do not commit without explicit approval and do not create a pull request unless explicitly requested.`;
+  const prompt = `[@FormaSpec](plugin://formaspec@formaspec) Use FormaSpec. Implement the approved FormaSpec engineering handoff ${taskReference} at immutable version ${central.handoff.currentVersion}, pinned to repository inventory ${central.inventory.id} with SHA-256 ${central.inventory.inventoryHash}. Read and verify those exact values through the configured formaspec MCP server before changing files; abort if they differ. Work only in the current selected repository. Follow the handoff isolation and validation plan. Do not commit without explicit approval and do not create a pull request unless explicitly requested.`;
   return {
     schemaVersion: 1,
     grantId: grant.id,

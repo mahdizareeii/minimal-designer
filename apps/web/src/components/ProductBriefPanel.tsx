@@ -42,9 +42,11 @@ import {
   AgentPreviewReviewDialog,
   PreviewDiagnosticsSummary,
   PreviewRevisionSummary,
+  FORMASPEC_AGENT_MENTION,
   agentTaskInstruction,
   codexTaskLaunchUrl,
   type AgentConnectionViewState,
+  type PreviewRenderStatus,
 } from "./AgentPreviewReview";
 import type { DesignDocument } from "../domain";
 
@@ -53,6 +55,42 @@ type SpecView = "brief" | "structured";
 export interface CodexConnectionSummary {
   state: AgentConnectionViewState;
   message: string;
+}
+
+export interface AgentPreviewReadFailureDisposition {
+  clearReview: true;
+  closeDialog: true;
+  message: string;
+}
+
+export function agentPreviewReadFailureDisposition(cause: unknown): AgentPreviewReadFailureDisposition {
+  if (cause instanceof ApiError && cause.code === "PREVIEW_EXPIRED") {
+    return {
+      clearReview: true,
+      closeDialog: true,
+      message: "This FormaSpec preview expired and can no longer be committed. Refresh the task, then ask Codex to create a new preview.",
+    };
+  }
+  if (cause instanceof ApiError && cause.code === "TASK_EXPIRED") {
+    return {
+      clearReview: true,
+      closeDialog: true,
+      message: "This FormaSpec task expired before approval. Start a new Codex task from the current project version.",
+    };
+  }
+  if (cause instanceof ApiError && cause.code === "NOT_FOUND") {
+    return {
+      clearReview: true,
+      closeDialog: true,
+      message: "The persisted FormaSpec preview is no longer available. Refresh agent activity or start a new Codex task.",
+    };
+  }
+  const detail = cause instanceof Error && cause.message.trim() ? ` ${cause.message.trim()}` : "";
+  return {
+    clearReview: true,
+    closeDialog: true,
+    message: `Could not safely refresh the agent preview.${detail} The stale approval controls were cleared; retry agent activity before approving anything.`,
+  };
 }
 
 export function summarizeCodexConnection(
@@ -158,11 +196,28 @@ export function ProductBriefPanel() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [previewRenderStatus, setPreviewRenderStatus] = useState<PreviewRenderStatus>("loading");
+  const [previewRenderRetryKey, setPreviewRenderRetryKey] = useState(0);
   const [planningOpen, setPlanningOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshSequence = useRef(0);
   const displayedPreviewId = useRef<string | null>(null);
   const previewCommitKeys = useRef(new Map<string, string>());
+
+  const clearAgentReview = useCallback(() => {
+    setReviewTask(null);
+    setReviewPreview(null);
+    setReviewBaseDocument(null);
+    setReviewOpen(false);
+    setPreviewRenderStatus("loading");
+    setPreviewRenderRetryKey((value) => value + 1);
+    displayedPreviewId.current = null;
+  }, []);
+
+  const retryPreviewRender = useCallback(() => {
+    setPreviewRenderStatus("loading");
+    setPreviewRenderRetryKey((value) => value + 1);
+  }, []);
 
   const designId = document?.id;
   const fallbackBrief = typeof document?.metadata.product_brief === "string" ? document.metadata.product_brief : "";
@@ -221,9 +276,8 @@ export function ProductBriefPanel() {
       if (!newestDesignTask
         || !previewId
         || (newestDesignTask.status !== "awaiting_approval" && newestDesignTask.status !== "completed")) {
-        setReviewTask(null);
-        setReviewPreview(null);
-        setReviewBaseDocument(null);
+        clearAgentReview();
+        setReviewError(null);
         return;
       }
       const [preview, baseDocument] = await Promise.all([
@@ -237,15 +291,21 @@ export function ProductBriefPanel() {
       setReviewError(null);
       if (displayedPreviewId.current !== preview.previewId) {
         displayedPreviewId.current = preview.previewId;
+        setPreviewRenderStatus("loading");
+        setPreviewRenderRetryKey((value) => value + 1);
         setCollapsed(false);
         setPanelTab("activity");
-        setNotice(`Minimal UI returned preview ${preview.previewId}. Review it below, then commit or discard it.`);
+        setNotice(`FormaSpec returned preview ${preview.previewId}. Review it below, then commit or discard it.`);
       }
     } catch (cause) {
       if (sequence !== refreshSequence.current) return;
-      setReviewError(cause instanceof Error ? cause.message : "Could not load the agent preview.");
+      const failure = agentPreviewReadFailureDisposition(cause);
+      setLatestTask((current) => current?.designId === designId ? current : null);
+      if (failure.clearReview) clearAgentReview();
+      if (failure.closeDialog) setReviewOpen(false);
+      setReviewError(failure.message);
     }
-  }, [designId]);
+  }, [clearAgentReview, designId]);
 
   useEffect(() => {
     if (!designId) return;
@@ -328,12 +388,9 @@ export function ProductBriefPanel() {
         expectedOutput: "design_preview",
       });
       setLatestTask(task);
-      setReviewTask(null);
-      setReviewPreview(null);
-      setReviewBaseDocument(null);
-      setReviewOpen(false);
+      clearAgentReview();
       setPanelTab("activity");
-      setNotice(`Agent task ${task.id} queued. Codex opened with the Minimal UI instruction prefilled; review it and press Send.${connectionSummary.state === "active" ? "" : " Codex may ask you to finish the connection first."}`);
+      setNotice(`Agent task ${task.id} queued. Codex opened with the FormaSpec instruction prefilled; review it and press Send.${connectionSummary.state === "active" ? "" : " Codex may ask you to finish the connection first."}`);
       openExternalAppLink(codexTaskLaunchUrl(task), "codex:", "new");
       await refreshAgentActivity();
     } catch (cause) {
@@ -354,7 +411,7 @@ export function ProductBriefPanel() {
       await navigator.clipboard.writeText(agentTaskInstruction(latestTask));
       setNotice(`Copied the Codex instruction for task ${latestTask.id}.`);
     } catch {
-      setReviewError("The browser could not copy the instruction. In Codex, say “Use Minimal UI” and include the task ID shown here.");
+      setReviewError("The browser could not copy the instruction. In Codex, say “Use FormaSpec” and include the task ID shown here.");
     }
   };
 
@@ -374,13 +431,17 @@ export function ProductBriefPanel() {
 
   const commitAgentPreview = async () => {
     if (!designId || !reviewTask || !reviewPreview) return;
+    if (previewRenderStatus !== "available") {
+      setReviewError("The rendered PNG must load successfully before the exact preview can be committed. Retry the PNG first.");
+      return;
+    }
     const current = useDesignerStore.getState();
     if (current.pendingOperations.length > 0 || current.saving || current.archiveReview) {
       setReviewError("Save or discard local editor changes before committing an agent preview.");
       return;
     }
     if (current.baseVersion !== reviewPreview.rootBaseVersion) {
-      setReviewError("The project head changed. Ask Minimal UI for a new preview; FormaSpec does not auto-merge.");
+      setReviewError("The project head changed. Ask FormaSpec for a new preview; FormaSpec does not auto-merge.");
       return;
     }
     setReviewBusy(true);
@@ -397,7 +458,7 @@ export function ProductBriefPanel() {
           taskId: reviewTask.id,
           expectedBaseVersion: reviewPreview.rootBaseVersion,
           idempotencyKey,
-          message: `Approve Minimal UI proposal from task ${reviewTask.id}`,
+          message: `Approve FormaSpec proposal from task ${reviewTask.id}`,
           kind: reviewPreview.kind,
         });
         committed = true;
@@ -426,7 +487,7 @@ export function ProductBriefPanel() {
       setReviewOpen(false);
       setNotice(transitionWarning
         ? `Committed version ${reviewPreview.proposedVersion}. Refresh the task status if needed.`
-        : `Committed Minimal UI preview as immutable version ${reviewPreview.proposedVersion}.`);
+        : `Committed FormaSpec preview as immutable version ${reviewPreview.proposedVersion}.`);
       if (transitionWarning) setReviewError(transitionWarning);
     } catch (cause) {
       setReviewError(cause instanceof Error ? cause.message : "The agent preview could not be committed.");
@@ -449,11 +510,8 @@ export function ProductBriefPanel() {
         data: { previewId: reviewPreview.previewId, discarded: true },
       });
       setLatestTask(cancelled);
-      setReviewTask(null);
-      setReviewPreview(null);
-      setReviewBaseDocument(null);
-      setReviewOpen(false);
-      setNotice("Discarded the Minimal UI proposal. No design revision was created.");
+      clearAgentReview();
+      setNotice("Discarded the FormaSpec proposal. No design revision was created.");
     } catch (cause) {
       setReviewError(cause instanceof Error ? cause.message : "The proposed preview could not be discarded.");
     } finally {
@@ -506,7 +564,7 @@ export function ProductBriefPanel() {
 
             <div className="product-brief-actions">
               <div>
-                {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Task {latestTask.id} · {latestTask.status}</span> : <span>Agent mention: <code>[@Minimal UI](plugin://minimal-ui@formaspec)</code></span>}
+                {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Task {latestTask.id} · {latestTask.status}</span> : <span>Agent mention: <code>{FORMASPEC_AGENT_MENTION}</code></span>}
               </div>
               <button className="button button-secondary" disabled={!briefChanged || savingSpec || startingAgent || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
               <button className="button button-primary" disabled={!brief.trim() || savingSpec || startingAgent || loading || Boolean(archiveReview)} onClick={() => void startWithCodex()}>{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} Start with Codex</button>
@@ -520,6 +578,8 @@ export function ProductBriefPanel() {
             preview={reviewPreview}
             busy={reviewBusy}
             actionError={reviewError}
+            previewRenderStatus={previewRenderStatus}
+            previewRenderRetryKey={previewRenderRetryKey}
             canCommit={Boolean(reviewTask && reviewPreview
               && reviewTask.status === "awaiting_approval"
               && reviewPreview.canCommit
@@ -527,15 +587,21 @@ export function ProductBriefPanel() {
               && baseVersion === reviewPreview.rootBaseVersion
               && pendingCount === 0
               && !savingDesign
-              && !archiveReview)}
+              && !archiveReview
+              && previewRenderStatus === "available")}
             canDiscard={Boolean(reviewTask && reviewPreview && reviewTask.status === "awaiting_approval")}
             onCopyInstruction={() => void copyAgentInstruction()}
             onOpenCodex={openTaskInCodex}
             onConnect={openAgentConnection}
-            onRetry={() => void refreshAgentActivity()}
+            onRetry={() => {
+              retryPreviewRender();
+              void refreshAgentActivity();
+            }}
             onOpenReview={() => setReviewOpen(true)}
             onCommit={() => void commitAgentPreview()}
             onDiscard={() => void discardAgentPreview()}
+            onPreviewRenderStatusChange={setPreviewRenderStatus}
+            onRetryPreviewRender={retryPreviewRender}
             onOpenPlanning={() => setPlanningOpen(true)}
           />
         </div>
@@ -548,7 +614,15 @@ export function ProductBriefPanel() {
       {!collapsed && panelTab === "diagnostics" && <PreviewDiagnosticsSummary preview={reviewPreview} />}
 
       {!collapsed && panelTab === "revision" && (
-        <PreviewRevisionSummary task={reviewTask} preview={reviewPreview} onOpen={() => setReviewOpen(true)} />
+        <PreviewRevisionSummary
+          task={reviewTask}
+          preview={reviewPreview}
+          previewRenderStatus={previewRenderStatus}
+          previewRenderRetryKey={previewRenderRetryKey}
+          onOpen={() => setReviewOpen(true)}
+          onPreviewRenderStatusChange={setPreviewRenderStatus}
+          onRetryPreviewRender={retryPreviewRender}
+        />
       )}
       <PlanningInterview designId={document.id} open={planningOpen} onClose={() => setPlanningOpen(false)} />
       {reviewTask && reviewPreview && reviewBaseDocument && (
@@ -561,9 +635,11 @@ export function ProductBriefPanel() {
           busy={reviewBusy}
           actionError={reviewError}
           baseMatchesHead={baseVersion === reviewPreview.rootBaseVersion && pendingCount === 0 && !savingDesign && !archiveReview}
+          previewRenderStatus={previewRenderStatus}
           onClose={() => setReviewOpen(false)}
           onCommit={() => void commitAgentPreview()}
           onDiscard={() => void discardAgentPreview()}
+          onRetryPreviewRender={retryPreviewRender}
         />
       )}
     </section>

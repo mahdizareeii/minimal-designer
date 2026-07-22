@@ -1,6 +1,6 @@
 # Backup and restore
 
-Last audited: 2026-07-21
+Last audited: 2026-07-22
 
 ## Current status
 
@@ -267,7 +267,7 @@ signed provenance, and disaster-recovery drills remain open.
 
 ### Same-machine copied-bundle recovery evidence
 
-The exact-current runtime image `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`
+The historical schema-12 runtime image `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`
 passed a second, isolated source-to-clean-target recovery simulation on
 2026-07-21. The hardened runner:
 

@@ -1,6 +1,6 @@
 # Unsigned macOS PKG evidence
 
-Last audited: 2026-07-21
+Last audited: 2026-07-22
 
 Release decision: **NO-GO**
 
@@ -220,9 +220,9 @@ reproducibility, and missing vulnerability scanning. Current workspace parity is
 an additional prerequisite before any new artifact can be evaluated. These
 checkpoint bytes must not be presented as a current-source candidate.
 
-## Separate exact-current Docker evidence
+## Separate historical Docker evidence
 
-Native PKG evidence and Docker evidence are independent. The exact-current
+Native PKG evidence and Docker evidence are independent. The historical
 Compose project `formaspeccischema118e2818fed6` passed the schema-12 Docker
 smoke with both services using image
 `sha256:39667c3304d926288ef9d73c59eee85164c435d46cf362b18ef1b22f0331fd7f`.

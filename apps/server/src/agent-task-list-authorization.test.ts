@@ -56,7 +56,9 @@ function taskListFixture(): TaskListFixture {
   openDatabases.push(database);
   const events = new EventHub();
   const designer = new DesignerService(database, events, 900);
-  let now = "2026-07-21T00:00:01.000Z";
+  // Keep the scoped grant valid regardless of the wall clock on the machine
+  // running this deterministic service-clock fixture.
+  let now = "2099-07-21T00:00:01.000Z";
   const enterprise = new EnterpriseService(database, events, {
     now: () => new Date(now),
   });
@@ -78,7 +80,7 @@ function taskListFixture(): TaskListFixture {
     idempotencyKey: "task-list-allowed-task-0001",
   });
   const deniedMarker = "FOREIGN_TASK_MARKER_7b01d4e2";
-  now = "2026-07-21T00:00:02.000Z";
+  now = "2099-07-21T00:00:02.000Z";
   const deniedTask = enterprise.createAgentTask("local", {
     designId: denied.document.id,
     brief: deniedMarker,
@@ -169,7 +171,7 @@ describe("EnterpriseService.listAgentTasks project authorization", () => {
 
   it("applies project and status predicates before the bounded task-list limit", () => {
     const fixture = taskListFixture();
-    fixture.setNow("2026-07-21T00:00:03.000Z");
+    fixture.setNow("2099-07-21T00:00:03.000Z");
     const cancelled = fixture.enterprise.createAgentTask("local", {
       designId: fixture.allowedDesignId,
       brief: "Newer cancelled allowed task",

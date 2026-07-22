@@ -266,7 +266,7 @@ test("product manager to verified backup restore completes through browser, MCP,
 
     await step("Start an isolated local FormaSpec workspace and pass readiness", async () => {
       const health = await api<{ ok: boolean; migrations: number; render: { ok: boolean } }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 14, render: { ok: true } });
+      expect(health).toMatchObject({ ok: true, migrations: 16, render: { ok: true } });
     });
 
     await step("Create the product from the dashboard in a real browser", async () => {
@@ -336,7 +336,7 @@ test("product manager to verified backup restore completes through browser, MCP,
       const parsedTaskLink = new URL(taskLink!);
       expect(parsedTaskLink.protocol).toBe("codex:");
       expect(parsedTaskLink.hostname).toBe("new");
-      expect(parsedTaskLink.searchParams.get("prompt")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+      expect(parsedTaskLink.searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
       expect(parsedTaskLink.searchParams.get("prompt")).toContain(task.id);
       const specification = await api<{ version: number; naturalLanguageBrief: string }>(
         baseURL,
@@ -414,7 +414,8 @@ test("product manager to verified backup restore completes through browser, MCP,
         capabilities: {},
         clientInfo: { name: "formaspec-release-e2e", version: "1.0.0" },
       });
-      expect(initialized.result?.instructions).toContain("also called Minimal UI");
+      expect(initialized.result?.instructions).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
+      expect(initialized.result?.instructions).toContain("Use FormaSpec");
       expect(initialized.result?.instructions).toContain("Preview, inspect, and lint");
       expect(initialized.result?.instructions?.length).toBeLessThanOrEqual(512);
     });
@@ -789,7 +790,7 @@ test("product manager to verified backup restore completes through browser, MCP,
       application = await startApplication(config);
 
       const health = await api<{ ok: boolean; migrations: number }>(baseURL, "/health/ready");
-      expect(health).toMatchObject({ ok: true, migrations: 14 });
+      expect(health).toMatchObject({ ok: true, migrations: 16 });
       const projects = await api<{ designs: Array<{ id: string; version: number }> }>(baseURL, "/api/designs?limit=100");
       expect(projects.designs.some((project) => project.id === sentinel.document.id)).toBe(false);
       expect(projects.designs).toEqual(expect.arrayContaining([expect.objectContaining({ id: designId, version: 6 })]));

@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "pnpm --filter @designer/core build && pnpm --parallel --filter @designer/core --filter @designer/server --filter @designer/web --filter @formaspec/local-bridge dev",
-    "formaspecctl": "pnpm --filter @formaspec/cli formaspecctl --",
+    "formaspecctl": "pnpm --filter @formaspec/cli formaspecctl",
     "mcp-config": "tsx apps/cli/src/generic-mcp-config-cli.ts",
     "workspace-bridge": "tsx apps/workspace-bridge/src/cli.ts",
     "install:local": "pnpm formaspecctl --yes install local",

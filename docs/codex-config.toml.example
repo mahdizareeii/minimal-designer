@@ -1,5 +1,5 @@
 # Preferred setup: let FormaSpec start and authorize the loopback bridge,
-# configure Codex, install the managed Minimal UI skill/plugin, and verify the
+# configure Codex, install the managed FormaSpec skill/plugin, and verify the
 # connection automatically:
 #
 #   pnpm formaspecctl --yes agent connect codex
@@ -13,4 +13,4 @@ default_tools_approval_mode = "writes"
 tool_timeout_sec = 60
 
 # After the managed plugin is installed, mention it in Codex with:
-# [@Minimal UI](plugin://minimal-ui@formaspec)
+# [@FormaSpec](plugin://formaspec@formaspec)

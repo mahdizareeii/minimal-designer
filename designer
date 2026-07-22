@@ -1523,6 +1523,10 @@ install_formaspec_source() {
   # Packaged PKG/MSI/DEB/RPM builds bundle this runtime instead.
   setup_local 1
   run_pnpm --filter @formaspec/local-bridge --filter @formaspec/cli build
+  if [ "$DRY_RUN" = "1" ]; then
+    pass "Dry run complete; formaspecctl was not executed."
+    return 0
+  fi
   [ -f "$PROJECT_ROOT/apps/cli/dist/index.js" ] || die "formaspecctl did not build successfully."
   exec env FORMASPEC_LEGACY_DELEGATE=1 node "$PROJECT_ROOT/apps/cli/dist/index.js" --yes install "$target"
 }

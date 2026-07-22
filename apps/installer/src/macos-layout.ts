@@ -193,14 +193,47 @@ export function protocolHandler(): string {
 set -eu
 URL="\${1:-}"
 LOG_ROOT="\${HOME}/Library/Logs/FormaSpec"
+FORMASPECCTL='/usr/local/bin/formaspecctl'
+OPEN='/usr/bin/open'
 mkdir -p "\${LOG_ROOT}"
 chmod 700 "\${LOG_ROOT}"
+reject_protocol_url() { echo 'Unsupported or malformed FormaSpec URL.' >>"\${LOG_ROOT}/protocol.log"; exit 2; }
+validate_pairing_nonce() {
+  [ "\${#1}" -eq 50 ] || reject_protocol_url
+  case "$1" in fspair_*) ;; *) reject_protocol_url ;; esac
+  case "$1" in *[!A-Za-z0-9_-]*) reject_protocol_url ;; esac
+}
+validate_connection_id() {
+  [ "\${#1}" -eq 43 ] || reject_protocol_url
+  case "$1" in connection_*) HEX="\${1#connection_}" ;; *) reject_protocol_url ;; esac
+  [ "\${#HEX}" -eq 32 ] || reject_protocol_url
+  case "\${HEX}" in *[!a-f0-9]*) reject_protocol_url ;; esac
+}
+[ "\${#URL}" -le 512 ] || reject_protocol_url
+case "\${URL}" in *[!A-Za-z0-9_:?\\&=/_-]*) reject_protocol_url ;; esac
 case "\${URL}" in
-  formaspec://connect-agent*)
-    /usr/local/bin/formaspecctl agent connect codex --yes >>"\${LOG_ROOT}/protocol.log" 2>&1 &
+  ''|formaspec://|formaspec://open)
     ;;
+  formaspec://connect-agent)
+    "\${FORMASPECCTL}" agent connect codex --yes >>"\${LOG_ROOT}/protocol.log" 2>&1 &
+    ;;
+  formaspec://connect-agent\?nonce=*)
+    PAIRING_NONCE="\${URL#formaspec://connect-agent?nonce=}"
+    validate_pairing_nonce "\${PAIRING_NONCE}"
+    "\${FORMASPECCTL}" agent connect codex --pairing-nonce "\${PAIRING_NONCE}" --yes >>"\${LOG_ROOT}/protocol.log" 2>&1 &
+    ;;
+  formaspec://connect-agent\?connection=*)
+    REST="\${URL#formaspec://connect-agent?connection=}"
+    CONNECTION_ID="\${REST%%&nonce=*}"
+    PAIRING_NONCE="\${REST#*&nonce=}"
+    [ "\${REST}" = "\${CONNECTION_ID}&nonce=\${PAIRING_NONCE}" ] || reject_protocol_url
+    validate_connection_id "\${CONNECTION_ID}"
+    validate_pairing_nonce "\${PAIRING_NONCE}"
+    "\${FORMASPECCTL}" agent connect codex --pairing-nonce "\${PAIRING_NONCE}" --connection-id "\${CONNECTION_ID}" --yes >>"\${LOG_ROOT}/protocol.log" 2>&1 &
+    ;;
+  *) reject_protocol_url ;;
 esac
-/usr/bin/open http://127.0.0.1:4310
+"\${OPEN}" http://127.0.0.1:4310
 `;
 }
 

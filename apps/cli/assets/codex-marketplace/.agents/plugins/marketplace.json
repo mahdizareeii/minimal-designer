@@ -5,10 +5,10 @@
   },
   "plugins": [
     {
-      "name": "minimal-ui",
+      "name": "formaspec",
       "source": {
         "source": "local",
-        "path": "./plugins/minimal-ui"
+        "path": "./plugins/formaspec"
       },
       "policy": {
         "installation": "AVAILABLE",

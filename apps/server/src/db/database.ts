@@ -1641,6 +1641,31 @@ function addComponentSourcePersistence(sqlite: Database.Database): void {
   `);
 }
 
+const LEGACY_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL = `
+  CREATE TRIGGER bootstrap_credentials_consume_once
+  BEFORE UPDATE ON bootstrap_credentials
+  WHEN NEW.id IS NOT OLD.id
+    OR NEW.token_hash IS NOT OLD.token_hash
+    OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.consumed_at IS NOT NULL
+    OR OLD.consumed_by IS NOT NULL
+    OR NEW.consumed_at IS NULL
+    OR NEW.consumed_by IS NULL
+  BEGIN SELECT RAISE(ABORT, 'bootstrap credential can be consumed exactly once'); END
+`;
+
+const CANONICAL_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL = `
+  CREATE TRIGGER bootstrap_credentials_consume_once
+  BEFORE UPDATE ON bootstrap_credentials
+  WHEN NEW.id IS NOT OLD.id
+    OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.consumed_at IS NOT NULL
+    OR OLD.consumed_by IS NOT NULL
+    OR (NEW.consumed_at IS NULL) != (NEW.consumed_by IS NULL)
+    OR (NEW.consumed_at IS NOT NULL AND NEW.token_hash IS NOT OLD.token_hash)
+  BEGIN SELECT RAISE(ABORT, 'bootstrap credential can be consumed exactly once'); END
+`;
+
 function addBrowserSessionAuthentication(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS password_accounts (
@@ -1774,6 +1799,32 @@ function addBrowserSessionAuthentication(sqlite: Database.Database): void {
   `);
 }
 
+function addPreviewRenderMetadata(sqlite: Database.Database): void {
+  addColumn(
+    sqlite,
+    "previews",
+    `render_metadata_json TEXT CHECK(
+      render_metadata_json IS NULL OR (
+        json_valid(render_metadata_json) = 1
+        AND length(CAST(render_metadata_json AS BLOB)) BETWEEN 2 AND 65536
+      )
+    )`,
+  );
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS previews_render_metadata_immutable
+    BEFORE UPDATE OF render_metadata_json ON previews
+    WHEN OLD.render_metadata_json IS NOT NULL OR NEW.render_metadata_json IS NULL
+    BEGIN SELECT RAISE(ABORT, 'preview render metadata is immutable once recorded'); END;
+  `);
+}
+
+function canonicalizeBootstrapCredentialTrigger(sqlite: Database.Database): void {
+  sqlite.exec(`
+    DROP TRIGGER bootstrap_credentials_consume_once;
+    ${CANONICAL_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL};
+  `);
+}
+
 const migrations: Migration[] = [
   { version: 1, name: "baseline_v1", up: (sqlite) => sqlite.exec(baselineSql) },
   { version: 2, name: "content_addressed_persistence", up: addPersistenceIntegrity },
@@ -1789,6 +1840,8 @@ const migrations: Migration[] = [
   { version: 12, name: "handoff_execution_decisions", up: addHandoffExecutionDecisions },
   { version: 13, name: "component_source_persistence", up: addComponentSourcePersistence },
   { version: 14, name: "browser_session_authentication", up: addBrowserSessionAuthentication },
+  { version: 15, name: "preview_render_metadata", up: addPreviewRenderMetadata },
+  { version: 16, name: "bootstrap_credential_trigger_canonicalization", up: canonicalizeBootstrapCredentialTrigger },
 ];
 
 const migrationNames = new Set<string>();
@@ -1852,6 +1905,7 @@ interface RequiredTriggerShape {
   readonly table: string;
   readonly sqlFragments: readonly string[];
   readonly sqlSha256?: string;
+  readonly sqlVariants?: readonly string[];
 }
 
 interface RequiredMigrationShape {
@@ -2299,15 +2353,62 @@ const requiredEnterpriseMigrationShapes: readonly RequiredMigrationShape[] = [
         sqlFragments: [
           "before update on bootstrap_credentials",
           "old.consumed_at is not null",
-          "new.consumed_at is null) != (new.consumed_by is null",
-          "new.consumed_at is not null and new.token_hash is not old.token_hash",
           "raise(abort",
+        ],
+        sqlVariants: [
+          LEGACY_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL,
+          CANONICAL_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL,
         ],
       },
       {
         name: "bootstrap_credentials_immutable_delete",
         table: "bootstrap_credentials",
         sqlFragments: ["before delete on bootstrap_credentials", "raise(abort"],
+      },
+    ],
+  },
+  {
+    version: 15,
+    tables: [
+      {
+        name: "previews",
+        columns: ["render_metadata_json"],
+        sqlFragments: [
+          "render_metadata_json text check",
+          "json_valid(render_metadata_json) = 1",
+          "length(cast(render_metadata_json as blob)) between 2 and 65536",
+        ],
+      },
+    ],
+    indexes: [],
+    triggers: [
+      {
+        name: "previews_render_metadata_immutable",
+        table: "previews",
+        sqlFragments: [
+          "before update of render_metadata_json on previews",
+          "old.render_metadata_json is not null",
+          "new.render_metadata_json is null",
+          "raise(abort",
+        ],
+      },
+    ],
+  },
+  {
+    version: 16,
+    tables: [],
+    indexes: [],
+    triggers: [
+      {
+        name: "bootstrap_credentials_consume_once",
+        table: "bootstrap_credentials",
+        sqlFragments: [
+          "before update on bootstrap_credentials",
+          "new.consumed_at is null) != (new.consumed_by is null",
+          "new.consumed_at is not null and new.token_hash is not old.token_hash",
+          "raise(abort",
+        ],
+        sqlVariants: [CANONICAL_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL],
       },
     ],
   },
@@ -2408,6 +2509,10 @@ export function validateDatabaseSchemaShape(sqlite: Database.Database, appliedVe
       const sql = normalizedSchemaSql(object.sql);
       const missing = trigger.sqlFragments.filter((fragment) => !sql.includes(normalizedSchemaSql(fragment)));
       if (missing.length > 0) {
+        throw new Error(`Database schema migration ${shape.version} trigger ${trigger.name} has unexpected SQL.`);
+      }
+      if (trigger.sqlVariants
+        && !trigger.sqlVariants.some((variant) => normalizedSchemaSql(variant) === sql)) {
         throw new Error(`Database schema migration ${shape.version} trigger ${trigger.name} has unexpected SQL.`);
       }
       if (trigger.sqlSha256

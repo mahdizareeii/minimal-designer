@@ -613,13 +613,13 @@ describe("core preview render, context, and asset HTTP authorization", () => {
 
     const ownerRender = await application.app.inject({
       method: "GET",
-      url: `/api/designs/${fixture.allowed.id}/previews/${fixture.ownerPreviewId}/render.png?maxSize=512`,
+      url: `/api/designs/${fixture.allowed.id}/previews/${fixture.ownerPreviewId}/render.png?mode=adhoc&maxSize=512`,
       headers: serverHeaders(PRODUCT_MANAGER_IDENTITY),
     });
     expect(ownerRender.statusCode, ownerRender.body).toBe(200);
     const taskRender = await application.app.inject({
       method: "GET",
-      url: `/api/designs/${fixture.agentProject.id}/previews/${fixture.taskPreviewId}/render.png?taskId=${fixture.taskId}&maxSize=512`,
+      url: `/api/designs/${fixture.agentProject.id}/previews/${fixture.taskPreviewId}/render.png?mode=adhoc&taskId=${fixture.taskId}&maxSize=512`,
       headers: serverHeaders(VIEWER_IDENTITY),
     });
     expect(taskRender.statusCode, taskRender.body).toBe(200);

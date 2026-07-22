@@ -1,6 +1,6 @@
 # FormaSpec release checklist
 
-Last updated: 2026-07-21
+Last updated: 2026-07-22
 
 Current decision: **NO-GO — enterprise-foundation checkpoint**
 
@@ -56,30 +56,30 @@ workspace trees. It is not reproducible, signed, notarized, scanned, installed,
 or lifecycle-qualified. The preserved schema-11 and schema-10 packages are
 historical.
 
-Current source is database schema 13, command engine 2, renderer 3, renderer
+Current source is database schema 15, command engine 2, renderer 3, renderer
 IPC protocol 2, with 52 MCP tools, 25 resources, and 108 protected non-MCP
-routes. Focused current gates include core build/typecheck, server/web
-typecheck, component-source/design-system/insertion tests, component-library/
-insertion server 16/16, browser component-library 6/6, CLI command 23/23, MCP
-contract 5/5, and route contract/coverage 12/12. The complete current
-application suite passes 678/678, launcher 212/212, and all seven workspaces
-pass typecheck/build. Schema-13 Playwright passes editor/admin/component
-insertion 4/4, selection 12/12, handoff 1/1, visual 7/7, revision inspect 1/1,
-the 20-step release scenario 1/1, and the 1,000-node budget 1/1. Current Docker
-restart/egress, Firefox/WebKit 12/12, and copied-bundle recovery pass locally.
-Temporary current-source SBOM/license generation/checking passes with 342
-components and zero violations against the final linked `drizzle-orm` 0.45.2
-tree. Installed/link verification, application 678/678, launcher 212/212, all
-seven typechecks/builds, Docker restart/egress, Firefox/WebKit 12/12, and
-copied-bundle recovery were rerun after the dependency update. Audit currently
-reports info 0, low 0, moderate 2, high 0, critical 0 across 416 dependencies;
-the remaining advisories are under remediation. The broad Chrome Playwright
-matrix still needs a post-update rerun. No current native macOS package, hosted
-provenance, image/OS scans, or real server-mode/off-site release evidence
-exists.
-Release remains `NO-GO`. The separate disposable recovery exercise below
-proves one local Docker recovery path but not the complete enterprise release
-matrix.
+routes. The complete seven-package suite passes 840/840: core 59, server 466,
+web 91, CLI 96, local bridge 20, Workspace Bridge 37, and installer 71.
+Launcher passes 225/225; all seven workspaces pass typecheck/build;
+editor/Administration E2E passes 5/5; release E2E passes 1/1; focused preview
+integration passes 2/2; and macOS runtime-smoke contracts pass 11/11.
+
+Live agent acceptance passed with exact preview
+`preview_dd4da6b79f5e4ddf8b3fd111094c5189`: 1440x900 PNG SHA-256
+`ad356b73d742c7852a86a022f86d68928dae021ab6710bd7b1d852f7e048e26c`,
+project version 1→2 commit, completed task, exact 76,099-byte preview/revision
+JSON equality, result snapshot SHA-256
+`b84512db8bde0e1acdb8c1e8dbc81f6361530a54d880675e301a665a101292a5`,
+and operation SHA-256
+`6ccf0226ccf0a59d6dbd3fd3ab62069c2a45fd522b5f5f9b5f842728428896be`.
+
+Historical schema-13 selection, visual, performance, complete 20-step, Docker restart/
+egress, Firefox/WebKit, copied-bundle recovery, and 342-component SBOM/license
+results remain historical and have not been repeated at schema 15. Audit at
+that checkpoint reported info 0, low 0, moderate 2, high 0, and critical 0;
+the remaining advisories are under remediation. No current native macOS
+package, hosted provenance, image/OS scans, or real server-mode/off-site release
+evidence exists. Release remains `NO-GO`.
 
 Recorded disposable evidence on 2026-07-20 used an isolated Compose project on
 port `4397`. It restored
@@ -117,22 +117,25 @@ Do not start a production rollout or V2 head migration until every item passes:
   wrapped, and grid reorder/insertion; cross-container reparent; and
   fill/hug-to-fixed resize commit one normalized command without writing x/y
   or losing fractional geometry/rotation.
-- [x] The deterministic 1,000-node service harness and 20-sample pinned-
-  Chromium browser gate exist; all specified local interaction and render
-  budgets pass without software fallback.
+- [ ] The deterministic 1,000-node service harness and 20-sample pinned-
+  Chromium browser gate pass at schema 15 without software fallback. The
+  harness exists and the historical schema-13 browser gate passed all budgets.
 - [ ] Numbered database migrations pass clean install and legacy upgrade.
 - [x] Deterministic source-built schema 1 and schema 7–11 fixtures apply the
   genuine migration prefix, lock reviewed schema/data digests, preserve V1
   revision/asset/hash and enterprise-row evidence through schema 12, and prove
   migration 12 creates decision integrity without fabricating decisions.
   Focused schema-13 tests also upgrade a genuine schema-12 fixture without
-  fabricating component sources or exact upgrade-preview metadata.
-- [x] `formaspecctl` source recognizes server database schema 13 for migration status,
+  fabricating component sources or exact upgrade-preview metadata. Current
+  schema-14/15 fixtures add authentication and immutable preview-render schema,
+  preserve enterprise rows, and leave historical render evidence null.
+- [x] `formaspecctl` source recognizes server database schema 15 for migration status,
   backup compatibility, restore compatibility, and support-bundle reporting.
 - [x] Startup, backup verification, restore preflight, and restore control source
-  checks fail closed when migration-9/10/11/12/13 ledger rows lack required tables, columns,
+  checks fail closed when migration-9/10/11/12/13/14/15 ledger rows lack required tables, columns,
   indexes, triggers, normalized schema SQL, or forbidden-trigger removal.
-  Full current backup/restore and operator-suite verification remains pending.
+  Focused migration/backup/restore/maintenance tests pass 59/59; release-
+  candidate Docker/server/off-site recovery remains pending.
 - [ ] Legacy data is backfilled into one organization without ID loss.
 - [ ] Role/scope/project/expiry/revocation authorization matrix passes for
   REST, SSE, MCP, assets, previews, revisions, and contexts. Focused
@@ -163,13 +166,18 @@ Do not start a production rollout or V2 head migration until every item passes:
   overwrite/strip, direct-peer denial, ambiguous append rejection, and restart-
   bound rotation. Real Nginx/TLS, identity-provider, firewall/routing, public-
   port, and compromise-response deployment evidence remains open.
-- [ ] Preview and committed canonical bytes and hashes are exactly equal.
+- [x] Preview and committed canonical bytes and hashes are exactly equal. Live
+  acceptance committed version 1→2 with byte-identical 76,099-byte JSON and
+  matching result snapshot/operation hashes.
 - [ ] Revision hash chain verification and corruption tests pass.
 - [ ] Two concurrent commits from one base produce one success and one
   `VERSION_CONFLICT` with no orphan revision/event/idempotency success.
 - [ ] Idempotent retries survive restart and never duplicate revisions.
-- [ ] Persisted previews survive restart until expiry and have complete state/
-  engine/hash/ID/change metadata.
+- [x] Persisted previews survive restart until expiry and have complete state,
+  engine, hash, ID/change, and immutable render evidence. Migration 15 stores
+  bounded write-once page/node/max-size options, dimensions, renderer backend,
+  warnings, and PNG SHA-256; exact resources reject overrides and verify the
+  current renderer/font versions, backend, dimensions, and SHA-256.
 - [ ] Transactional outbox publishes only committed events.
 - [ ] SSE replays from `Last-Event-ID` and reports retention gaps.
 - [x] Active SSE streams reauthorize every delivered event and heartbeat and
@@ -216,14 +224,14 @@ Do not start a production rollout or V2 head migration until every item passes:
   and legacy assets, design-system data, historical customer fixtures, failure
   injection, reconnect/revocation lifecycle, and cross-platform artifact
   comparison.
-- [x] The schema-13 pre-0.45.2 isolated 20-step Playwright scenario covers browser-created product
+- [x] The historical schema-13 pre-0.45.2 isolated 20-step Playwright scenario covers browser-created product
   context, backup-gated V1→V2 migration,
   all 22 planning sections, a scoped MCP
   task, multi-screen preview/lint/render/commit, human correction, selection
   refinement, immutable history restore, canonical/portable export, verified
   source-local backup, stopped-database restore, restart, exact hashes, product
-  specification, planning/task state, drift removal, and PNG smoke. Rerun
-  against linked 0.45.2.
+  specification, planning/task state, drift removal, and PNG smoke. Rerun the
+  complete scenario against schema 15.
 - [x] Managed restore opens the source with `O_NOFOLLOW`, copies/hashes it into
   private mode-`0700` staging on `/backups`, changes the pinned file to mode
   `0400`, validates expected managed size/SHA-256, and uses only those pinned
@@ -313,16 +321,17 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [x] All 22 interview sections persist, resume, edit, and version correctly in
   service/integration tests and in the integrated browser release E2E.
 - [x] Enterprise editor navigation, panels, administration, click-through
-  prototype behavior, and exact manual component insertion passed the schema-13
-  pre-0.45.2 4/4 browser gate for Pages/Layers/
+  prototype behavior, and exact manual component insertion have current targeted
+  editor/Administration coverage at 5/5. The broader historical schema-13
+  pre-0.45.2 gate passed 4/4 for Pages/Layers/
   Components/Assets,
   Canvas/Prototype/Before-After, Design/Content/Component/Logic/Prototype/
   Accessibility, activity/diagnostics/revision/handoff navigation, and
   click-to-frame navigation without document mutation. The insertion case
   verifies backup-gated V1→V2 migration, exact Foundation catalog loading,
   isolated rendered preview without head mutation, ordinary CAS commit,
-  version-3 reload, and an active projected instance. Rerun this gate against
-  linked 0.45.2.
+  version-3 reload, and an active projected instance. Rerun that complete gate
+  at schema 15.
 - [x] Revision-pinned inspect API/view remains on the requested immutable
   revision when the project head changes and exposes integrity hashes, resolved
   tokens, assets, components, rules, acceptance criteria, implementation
@@ -332,7 +341,8 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [x] Enterprise V2 lint rules cover raw values, missing states, hierarchy,
   accessibility, touch targets, prototypes, RTL, detached/deprecated
   components, typed property/slot/state contracts, and missing rule/entity
-  links; 7/7 representative visual snapshots including Persian RTL pass.
+  links. The 7/7 representative visual snapshots including Persian RTL are
+  historical schema-13 evidence and require a schema-15 rerun.
 - [ ] `.formaspec.zip` rejects traversal/symlinks/bombs and round-trips
   losslessly.
 - [x] Mutating portable import requires Organization Administrator access and an
@@ -355,7 +365,7 @@ Do not start a production rollout or V2 head migration until every item passes:
 
 ## Phase 3 gate
 
-- [x] MCP server ID is `formaspec`, display name is Minimal UI, resources use
+- [x] MCP server ID is `formaspec`, display name is FormaSpec, resources use
   `formaspec://`, and the safe workflow is self-contained in the first 512
   instruction characters.
 - [x] Every MCP tool has a strict schema, correct annotations, and scoped
@@ -379,18 +389,24 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [x] Dashboard and editor prompt boxes create tasks and never call an embedded
   AI API.
 - [x] One explicit Codex authorization configures, verifies, and installs the
-  managed `minimal-ui` integration without a token in generated TOML.
-- [x] Codex recognizes “Use FormaSpec” and “Use Minimal UI” through the managed
-  skill/plugin and `[@Minimal UI](plugin://minimal-ui@formaspec)` mention.
+  managed `formaspec` integration without a token in generated TOML.
+- [x] Codex recognizes “Use FormaSpec” through the managed skill/plugin and
+  `[@FormaSpec](plugin://formaspec@formaspec)` mention. Managed legacy
+  integration is removed only after canonical installation and only when its
+  FormaSpec ownership marker verifies; unmanaged content is preserved.
 - [x] Agent pairing nonce, scope, project restriction, expiry, reconnect, and
   immediate revocation tests pass.
 - [x] Unsupported MCP clients receive safe generic instructions; unknown
   configuration files are not modified.
 - [x] Task-scoped before/after review provides side-by-side/toggle modes,
-  changed-node highlighting, diagnostics, exact PNG access, base/proposed
-  versions and hashes, exact commit, and atomic discard/preview expiry.
-- [x] Product-manager-to-Codex preview/render/lint/commit/deep-link E2E passes
-  inside the complete 20-step isolated release scenario.
+  changed-node highlighting, diagnostics, immutable PNG dimensions/SHA-256,
+  base/proposed versions and hashes, exact commit, and atomic discard/preview
+  expiry. Expired/read-failed previews clear stale approval state, PNG failures
+  expose Retry, and commit is disabled until the persisted PNG loads.
+- [x] Current release E2E passes 1/1 and live acceptance proves the product-
+  manager-to-Codex preview/render/commit/task-completion path with exact document
+  and hash equality. The complete 20-step isolated scenario remains historical
+  schema-13 evidence and requires a schema-15 release-candidate rerun.
 
 ## Phase 4 and 5 gate
 
@@ -443,11 +459,12 @@ Do not start a production rollout or V2 head migration until every item passes:
 
 ## Phase 6 delivery gate
 
-- [ ] Complete the post-dependency-update rerun. Fresh installed/linked
-  `drizzle-orm` 0.45.2 passes application 678/678, launcher 212/212, all seven
-  typechecks/builds, Docker/egress, Firefox/WebKit, recovery, and exact SBOM/
-  license gates. Rerun the broad Chrome editor/selection/handoff/visual/inspect/
-  performance/20-step matrix and resolve remaining advisories.
+- [ ] Complete the schema-15 release-candidate rerun. The seven-package suite
+  passes, launcher passes, all seven typechecks/builds pass, and targeted editor/
+  Administration, release, preview, and macOS runtime-smoke contract gates pass.
+  Schema-13 Docker/egress, Firefox/WebKit, recovery, visual, performance,
+  complete 20-step, and exact SBOM/license results remain historical. Rerun
+  those broad gates at schema 15 and resolve remaining advisories.
 - [x] Strict versioned organization-policy read/update through the guided
   12-section Administration form and Expert JSON, MCP read/resource,
   secret-free YAML export, optimistic configuration-hash concurrency,
@@ -483,7 +500,7 @@ Do not start a production rollout or V2 head migration until every item passes:
   services and the profiled one-shot restore worker passes non-root,
   capability, filesystem, migration, readiness, restart, restore, and egress
   tests.
-- [x] Dependency-linked schema-13 project `formaspeccischema1369037dfc8a`
+- [x] Historical dependency-linked schema-13 project `formaspeccischema1369037dfc8a`
   used image
   `sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`,
   rendered deterministic PNG SHA-256
@@ -534,7 +551,7 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [x] Provider-neutral, offline, deterministic CycloneDX 1.6 source-workspace
   SBOM generation, approved-license reporting, notice hashes, checksum
   generation, stale-evidence checking, and focused tests exist.
-- [x] Current Darwin ARM64 source-workspace evidence passes the
+- [x] Historical schema-13 Darwin ARM64 source-workspace evidence passes the
   permissive-only gate: 342 third-party components, zero violations, and no
   Sharp/libvips dependency. Exact linked-0.45.2 evidence SHA-256 values are
   `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8`
@@ -542,7 +559,8 @@ Do not start a production rollout or V2 head migration until every item passes:
   `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a`
   (CDX), and
   `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0`
-  (licenses). This remains temporary local `NO-GO` evidence.
+  (licenses). This remains temporary local `NO-GO` evidence and is not current
+  schema-15 qualification.
 - [x] The earlier unsigned macOS ARM64 PKG candidate at
   `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
   has checkpoint offline evidence: SHA-256
@@ -592,8 +610,7 @@ Do not start a production rollout or V2 head migration until every item passes:
   but has no hosted result yet.
 - [x] Five repository-native least-privilege workflows cover frozen source gates,
   Chromium plus Firefox/WebKit alignment, Chromium visual/performance/release
-  suites, a Docker smoke workflow under the compatibility filename (current
-  source requires schema 13),
+  suites, and a Docker smoke workflow under the compatibility filename,
   dependency-audit JSON, deterministic source SBOM/license evidence, and
   unsigned Linux DEB/RPM evidence. The main/manual macOS workflow also builds the
   unsigned package and exercises privately expanded runtime bytes without
@@ -605,13 +622,13 @@ Do not start a production rollout or V2 head migration until every item passes:
   `NO-GO-offhost-restore-*`. Workflow contract tests pass 8/8,
   cross-browser runner tests pass 2/2, off-host simulation tests pass 7/7,
   release-evidence tests pass 8/8, macOS package-evidence tests pass 12/12,
-  and macOS runtime-smoke tests pass 10/10.
-- [ ] Retain the updated schema-13 Docker/off-host gates on hosted runners and
-  build a current macOS package for the extracted-runtime gate. Local Docker,
-  Firefox/WebKit, and off-host-simulation executions pass; current scripts
-  require schema 13, and the macOS smoke requires all 52 tools including
-  `design_system_component_insert_preview`, but no schema-13 native package has
-  satisfied it.
+  and macOS runtime-smoke contract tests pass 11/11. The retained runtime
+  executions are schema-13 evidence; the workflow runners must be advanced and
+  rerun for schema 15.
+- [ ] Retain updated schema-15 Docker/off-host gates on hosted runners and build
+  a current macOS package for the extracted-runtime gate. Historical local
+  schema-13 Docker, Firefox/WebKit, and off-host simulations pass, but no
+  schema-15 native package or hosted runtime matrix has satisfied the gate.
 - [ ] Retain successful GitHub-hosted runs and real Ubuntu DEB/RPM artifacts;
   current workflow presence and local contracts are not hosted release evidence.
 - [ ] Signing/notarization uses real operator credentials or artifacts are
@@ -626,7 +643,7 @@ The measurements below are from the schema-13 Chrome performance run before
 the lock-only `drizzle-orm` 0.45.2 update. They pass the budgets but must be
 repeated after a fresh frozen install.
 
-| Measurement | Required p95 / hard limit | Current evidence |
+| Measurement | Required p95 / hard limit | Historical schema-13 evidence |
 | --- | --- | --- |
 | Initial interactive load | at most 2.5 seconds p95 | **Pass:** 230.70 ms p95, 20 cold samples |
 | Selection response | at most 50 ms p95 | **Pass:** 20.50 ms p95, 20 samples |
@@ -657,7 +674,7 @@ pass a budget.
   repository-inventory text remains bounded data and cannot create task/archive
   side effects or expand authority. Real connected-agent semantic-resistance
   and approval-flow evidence remains open.
-- [x] The current schema-13 renderer egress canary cannot resolve or connect
+- [x] The historical schema-13 renderer egress canary cannot resolve or connect
   externally: DNS returns `EAI_AGAIN`, direct TCP returns `ENETUNREACH`, and no
   external interfaces are visible. Hosted and native-package evidence remains
   open.
@@ -671,7 +688,7 @@ pass a budget.
 - [x] The isolated port-4397 local-Docker exercise proves A-only restore followed
   by A+B safety restore with original design/revision IDs, credential revocation,
   and disposable resource cleanup.
-- [x] The isolated 20-step source-local scenario restores canonical V2 project
+- [x] The historical schema-13 isolated 20-step source-local scenario restores canonical V2 project
   hashes, product specification, completed 22-section planning state, completed
   agent task, immutable history, and a representative PNG after proving
   post-backup drift and a sentinel project disappear.
@@ -684,17 +701,19 @@ pass a budget.
 - [ ] Non-developer install requires neither Node.js nor pnpm.
 - [ ] Application starts automatically.
 - [ ] Supported agent connects after one explicit authorization.
-- [ ] Agent understands “Use Minimal UI.”
+- [ ] Agent understands “Use FormaSpec.”
 - [ ] Unsupported MCP clients have a safe generic flow.
 - [ ] Agent connections are scoped, auditable, expiring, and revocable.
 - [x] Product managers create structured product/business specifications in UI.
 - [x] Product managers complete the step-by-step interview.
 - [ ] AI screens use organization tokens/components by default.
 - [ ] Linked components and instances are versioned/manageable.
-- [x] Selection controls remained within 0.75 CSS px in the preceding Chrome DPR 1/2 matrix; a schema-13 rerun remains required for release.
+- [ ] Selection controls remain within 0.75 CSS px in a schema-15 release-
+  candidate matrix. The historical schema-13 Chrome DPR 1/2 matrix passed.
 - [x] Concurrent same-base writes yield one success/one conflict.
 - [x] Retried commits create no duplicate revision.
-- [x] Persisted previews survive restart until expiry.
+- [x] Persisted previews survive restart until expiry with immutable render
+  target, dimensions, backend, warnings, and PNG SHA-256 evidence.
 - [ ] Backup restore reproduces all required data.
 - [ ] Repository analysis occurs before redesign proposals.
 - [ ] Repository files are unchanged without an approved plan.
@@ -702,16 +721,20 @@ pass a budget.
 - [x] Engineer can inspect exact pinned tokens/components/assets/rules/mappings
   in the focused revision-pinned inspect path; broader role/browser coverage
   remains part of the release authorization matrix.
-- [x] Renderer cannot access external network in the verified Docker topology (`network_mode: none`).
-- [x] Production application and renderer do not run as root in the verified Docker image.
-- [x] Representative 1,000-node budgets pass.
+- [ ] Renderer cannot access external network in a schema-15 release-candidate
+  Docker topology. The historical schema-13 topology denied egress.
+- [ ] Production application and renderer do not run as root in a schema-15
+  release-candidate image. The historical schema-13 image passed this check.
+- [ ] Representative 1,000-node budgets pass in a schema-15 release candidate.
+  The historical schema-13 measurements passed.
 - [ ] No critical/high security defects remain.
-- [x] Source-workspace production dependencies comply with the approved
-  license policy in the exact linked-0.45.2 schema-13 evidence. The
+- [ ] Source-workspace production dependencies comply with the approved license
+  policy for the schema-15 release candidate. The historical exact linked-0.45.2
+  schema-13 evidence passed. The
   schema-12 macOS PKG matches
   its frozen packaged workspace outputs and passes private extracted-runtime
-  checks, but it predates schema 13 and the 52-tool/108-route interface. The
-  installed tree uses `drizzle-orm` 0.45.2; the current 342-component report
+  checks, but it predates schemas 13–15 and the 52-tool/108-route interface. The
+  installed tree uses `drizzle-orm` 0.45.2; the historical 342-component report
   has zero policy violations. Chromium legal
   approval, reproducibility, signing/notarization, vulnerability scans, and
   privileged lifecycle evidence remain required; container/Windows/Linux

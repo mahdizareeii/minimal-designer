@@ -453,7 +453,7 @@ test("website design commands expose connection and claim state, then show the e
   const parsedCodexLink = new URL(codexLink!);
   expect(parsedCodexLink.protocol).toBe("codex:");
   expect(parsedCodexLink.hostname).toBe("new");
-  expect(parsedCodexLink.searchParams.get("prompt")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
+  expect(parsedCodexLink.searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
   expect(parsedCodexLink.searchParams.get("prompt")).toContain(task.id);
   await expect(workflow.getByRole("button", { name: "Open in Codex" })).toBeVisible();
   await expect(workflow.getByRole("button", { name: "Copy Codex instruction" })).toBeVisible();
@@ -489,7 +489,7 @@ test("website design commands expose connection and claim state, then show the e
   });
   expect(approval.task.status).toBe("awaiting_approval");
 
-  const renderedPreview = workflow.getByRole("img", { name: "Minimal UI rendered preview" });
+  const renderedPreview = workflow.getByRole("img", { name: "FormaSpec rendered preview" });
   await expect(renderedPreview).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => renderedPreview.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
   const approvalActions = workflow.getByRole("group", { name: "Agent preview approval actions" });

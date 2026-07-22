@@ -49,6 +49,7 @@ export const previews = sqliteTable("previews", {
   kind: text("kind").notNull(),
   committedRevisionId: text("committed_revision_id"),
   committedAt: text("committed_at"),
+  renderMetadataJson: text("render_metadata_json"),
   committable: integer("committable", { mode: "boolean" }).notNull(),
   createdAt: text("created_at").notNull(),
   expiresAt: text("expires_at").notNull(),

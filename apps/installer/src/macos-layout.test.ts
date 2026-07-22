@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -15,6 +20,18 @@ import {
   protocolHandler,
   rendererWrapper,
 } from "./macos-layout.js";
+
+function writeExecutable(filename: string, contents: string): void {
+  fs.writeFileSync(filename, contents, { mode: 0o700 });
+}
+
+async function waitForFile(filename: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fs.existsSync(filename)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for protocol capture: ${filename}`);
+}
 
 describe("unsigned macOS installer layout", () => {
   it("uses loopback services, a networkless renderer contract, and user-owned data paths", () => {
@@ -47,7 +64,13 @@ describe("unsigned macOS installer layout", () => {
     expect(launcher).toContain("/health/ready");
     expect(launcher).toContain("echo 'FormaSpec 1.2.3'");
     expect(applicationInfoPlist("0.2.0")).toContain("<string>formaspec</string>");
-    expect(protocolHandler()).toContain("agent connect codex --yes");
+    const handler = protocolHandler();
+    expect(handler).toContain("agent connect codex --yes");
+    expect(handler).toContain("--pairing-nonce");
+    expect(handler).toContain("--connection-id");
+    expect(handler).toContain('[ "${#URL}" -le 512 ]');
+    expect(handler).toContain('[ "${#1}" -eq 50 ]');
+    expect(handler).toContain('[ "${#1}" -eq 43 ]');
     expect(preinstallScript()).toContain("Refusing to replace an unmanaged");
     expect(postinstallScript()).toContain("launchctl bootstrap");
   });
@@ -56,5 +79,81 @@ describe("unsigned macOS installer layout", () => {
     expect(assertPackageVersion("1.2.3")).toBe("1.2.3");
     expect(() => assertPackageVersion("1.2.3; touch /tmp/x")).toThrow();
     expect(() => launchAgentPlist("com.attacker.service", "/tmp/service")).toThrow();
+  });
+
+  it("executes only canonical pairing URLs and forwards exact CLI arguments", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-macos-protocol-"));
+    try {
+      const cli = path.join(root, "formaspecctl");
+      const opener = path.join(root, "open");
+      const script = path.join(root, "formaspec-open");
+      const capture = path.join(root, "cli-arguments.txt");
+      const openCapture = path.join(root, "open-arguments.txt");
+      writeExecutable(cli, '#!/bin/sh\nprintf "%s\\n" "$@" >"${FORMASPEC_PROTOCOL_CAPTURE}"\n');
+      writeExecutable(opener, '#!/bin/sh\nprintf "%s\\n" "$@" >"${FORMASPEC_OPEN_CAPTURE}"\n');
+      writeExecutable(script, protocolHandler()
+        .replace("FORMASPECCTL='/usr/local/bin/formaspecctl'", `FORMASPECCTL='${cli}'`)
+        .replace("OPEN='/usr/bin/open'", `OPEN='${opener}'`));
+      const nonce = `fspair_${"n".repeat(43)}`;
+      const connectionId = `connection_${"a".repeat(32)}`;
+      const environment = {
+        ...process.env,
+        HOME: root,
+        FORMASPEC_PROTOCOL_CAPTURE: capture,
+        FORMASPEC_OPEN_CAPTURE: openCapture,
+      };
+      const accepted = spawnSync("/bin/sh", [
+        script,
+        `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}`,
+      ], { env: environment, encoding: "utf8" });
+      expect(accepted.status, accepted.stderr).toBe(0);
+      await waitForFile(capture);
+      expect(fs.readFileSync(capture, "utf8").trim().split("\n")).toEqual([
+        "agent", "connect", "codex",
+        "--pairing-nonce", nonce,
+        "--connection-id", connectionId,
+        "--yes",
+      ]);
+      expect(fs.readFileSync(openCapture, "utf8").trim()).toBe("http://127.0.0.1:4310");
+
+      fs.rmSync(capture, { force: true });
+      fs.rmSync(openCapture, { force: true });
+      const nonceOnly = spawnSync("/bin/sh", [script, `formaspec://connect-agent?nonce=${nonce}`], {
+        env: environment,
+        encoding: "utf8",
+      });
+      expect(nonceOnly.status, nonceOnly.stderr).toBe(0);
+      await waitForFile(capture);
+      expect(fs.readFileSync(capture, "utf8").trim().split("\n")).toEqual([
+        "agent", "connect", "codex", "--pairing-nonce", nonce, "--yes",
+      ]);
+
+      fs.rmSync(capture, { force: true });
+      const queryless = spawnSync("/bin/sh", [script, "formaspec://connect-agent"], {
+        env: environment,
+        encoding: "utf8",
+      });
+      expect(queryless.status, queryless.stderr).toBe(0);
+      await waitForFile(capture);
+      expect(fs.readFileSync(capture, "utf8").trim().split("\n")).toEqual([
+        "agent", "connect", "codex", "--yes",
+      ]);
+
+      for (const candidate of [
+        `formaspec://connect-agent?nonce=${nonce}&connection=${connectionId}`,
+        `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}&extra=1`,
+        `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}&nonce=${nonce}`,
+        `formaspec://connect-agent?connection=connection_${"A".repeat(32)}&nonce=${nonce}`,
+        "formaspec://connect-agent?nonce=fspair_short",
+        `formaspec://connect-agent?nonce=${nonce}%3Bopen`,
+        `formaspec://connect-agent?nonce=${nonce}\ncontrol`,
+        `formaspec://connect-agent?nonce=${"n".repeat(600)}`,
+      ]) {
+        const rejected = spawnSync("/bin/sh", [script, candidate], { env: environment, encoding: "utf8" });
+        expect(rejected.status, candidate).toBe(2);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -476,9 +476,30 @@ export function renderUrl(id: string, options: { version?: number; pageId?: stri
   return `${API_ROOT}/designs/${encodeURIComponent(id)}/render.png${query ? `?${query}` : ""}`;
 }
 
-export function previewRenderUrl(id: string, previewId: string, maxSize = 2048, taskId?: string): string {
-  const params = new URLSearchParams({ maxSize: String(maxSize) });
-  if (taskId) params.set("taskId", taskId);
+export interface PreviewRenderUrlOptions {
+  maxSize?: number;
+  pageId?: string;
+  nodeId?: string;
+  taskId?: string;
+  retryKey?: number;
+}
+
+export function previewRenderUrl(
+  id: string,
+  previewId: string,
+  maxSizeOrOptions: number | PreviewRenderUrlOptions = 2048,
+  legacyTaskId?: string,
+): string {
+  const options = typeof maxSizeOrOptions === "number"
+    ? { maxSize: maxSizeOrOptions, taskId: legacyTaskId }
+    : maxSizeOrOptions;
+  const params = new URLSearchParams();
+  params.set("mode", "adhoc");
+  if (options.maxSize !== undefined) params.set("maxSize", String(options.maxSize));
+  if (options.pageId) params.set("pageId", options.pageId);
+  if (options.nodeId) params.set("nodeId", options.nodeId);
+  if (options.taskId) params.set("taskId", options.taskId);
+  if (options.retryKey !== undefined) params.set("_retry", String(Math.max(0, Math.trunc(options.retryKey))));
   return `${API_ROOT}/designs/${encodeURIComponent(id)}/previews/${encodeURIComponent(previewId)}/render.png?${params}`;
 }
 
@@ -735,7 +756,7 @@ export async function createCodexConnection(): Promise<AgentPairingChallenge> {
     method: "POST",
     body: JSON.stringify({
       adapter: "codex",
-      displayName: "Codex — Minimal UI",
+      displayName: "Codex — FormaSpec",
       scopes,
       ...(projectIds ? { projectIds } : {}),
       expiresInSeconds: Math.max(300, Math.min(86_400, maximumExpirySeconds)),
@@ -997,6 +1018,21 @@ export interface DesignPreviewDiagnostic {
   path?: string;
 }
 
+export interface DesignPreviewRenderOptions {
+  pageId?: string;
+  nodeId?: string;
+  maxSize: number;
+}
+
+export interface DesignPreviewRenderMetadata {
+  options: DesignPreviewRenderOptions;
+  width: number;
+  height: number;
+  renderer: "playwright" | "software";
+  warnings: string[];
+  sha256: string;
+}
+
 export interface DesignPreviewRecord {
   previewId: string;
   designId: string;
@@ -1014,8 +1050,83 @@ export interface DesignPreviewRecord {
   committedRevisionId: string | null;
   changedNodeIds: string[];
   versions: { commandEngine: string; renderer: string; fontBundle: string };
+  renderMetadata?: DesignPreviewRenderMetadata;
   diagnostics: DesignPreviewDiagnostic[];
   document: DesignDocument;
+}
+
+function invalidPreviewRenderMetadata(): never {
+  throw new ApiError("Preview render metadata is invalid; exact PNG review is unavailable.", {
+    code: "VALIDATION_FAILED",
+  });
+}
+
+function asOptionalDesignPreviewRenderMetadata(input: unknown): DesignPreviewRenderMetadata | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) return invalidPreviewRenderMetadata();
+  const value = input as Record<string, unknown>;
+  if (!value.options || typeof value.options !== "object" || Array.isArray(value.options)) {
+    return invalidPreviewRenderMetadata();
+  }
+  const optionsValue = value.options as Record<string, unknown>;
+  const maxSize = optionsValue.maxSize ?? optionsValue.max_size;
+  const width = value.width;
+  const height = value.height;
+  const pageId = optionsValue.pageId ?? optionsValue.page_id;
+  const nodeId = optionsValue.nodeId ?? optionsValue.node_id;
+  const renderer = value.renderer;
+  const warnings = value.warnings;
+  const sha256 = value.sha256;
+  if (!Number.isInteger(maxSize) || Number(maxSize) < 64 || Number(maxSize) > 4_096
+    || !Number.isInteger(width) || Number(width) < 1 || Number(width) > 4_096
+    || !Number.isInteger(height) || Number(height) < 1 || Number(height) > 4_096
+    || Number(width) > Number(maxSize) || Number(height) > Number(maxSize)
+    || (pageId !== undefined && (typeof pageId !== "string" || !pageId))
+    || (nodeId !== undefined && (typeof nodeId !== "string" || !nodeId))
+    || (renderer !== "playwright" && renderer !== "software")
+    || !Array.isArray(warnings) || warnings.length > 100 || !warnings.every((warning) => typeof warning === "string" && warning.length <= 4_000)
+    || typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) {
+    return invalidPreviewRenderMetadata();
+  }
+  return {
+    options: {
+      ...(pageId === undefined ? {} : { pageId }),
+      ...(nodeId === undefined ? {} : { nodeId }),
+      maxSize: Number(maxSize),
+    },
+    width: Number(width),
+    height: Number(height),
+    renderer,
+    warnings: [...warnings],
+    sha256,
+  };
+}
+
+export function previewRenderContractOptions(
+  preview: Pick<DesignPreviewRecord, "renderMetadata">,
+  fallbackMaxSize: number,
+): DesignPreviewRenderOptions {
+  return preview.renderMetadata?.options ?? { maxSize: fallbackMaxSize };
+}
+
+export function persistedPreviewRenderUrl(
+  preview: Pick<DesignPreviewRecord, "designId" | "previewId" | "renderMetadata">,
+  fallbackMaxSize: number,
+  taskId?: string,
+  retryKey?: number,
+): string {
+  if (preview.renderMetadata) {
+    const params = new URLSearchParams();
+    if (taskId) params.set("taskId", taskId);
+    if (retryKey !== undefined) params.set("_retry", String(Math.max(0, Math.trunc(retryKey))));
+    const query = params.toString();
+    return `${API_ROOT}/designs/${encodeURIComponent(preview.designId)}/previews/${encodeURIComponent(preview.previewId)}/render.png${query ? `?${query}` : ""}`;
+  }
+  return previewRenderUrl(preview.designId, preview.previewId, {
+    maxSize: fallbackMaxSize,
+    ...(taskId ? { taskId } : {}),
+    ...(retryKey === undefined ? {} : { retryKey }),
+  });
 }
 
 function asDesignPreviewRecord(input: unknown): DesignPreviewRecord {
@@ -1035,6 +1146,7 @@ function asDesignPreviewRecord(input: unknown): DesignPreviewRecord {
   const versions = value.versions && typeof value.versions === "object"
     ? value.versions as Record<string, unknown>
     : {};
+  const renderMetadata = asOptionalDesignPreviewRenderMetadata(value.renderMetadata ?? value.render_metadata);
   return {
     previewId: String(value.previewId ?? value.id),
     designId: String(value.designId ?? value.design_id ?? ""),
@@ -1061,6 +1173,7 @@ function asDesignPreviewRecord(input: unknown): DesignPreviewRecord {
       renderer: String(versions.renderer ?? ""),
       fontBundle: String(versions.fontBundle ?? versions.font_bundle ?? ""),
     },
+    ...(renderMetadata ? { renderMetadata } : {}),
     diagnostics,
     document: normalizeDocument(value.document),
   };

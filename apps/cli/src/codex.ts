@@ -9,6 +9,11 @@ import { findExecutable, type CommandRunner } from "./process.js";
 const MANAGED_MARKER = ".formaspec-managed.json";
 const MANAGER_ID = "formaspecctl";
 const MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024;
+const FORMASPEC_PLUGIN_VERSION = "0.2.0";
+const LEGACY_CODEX_PLUGIN_ID = "minimal-ui@formaspec";
+
+export const FORMASPEC_CODEX_PLUGIN_ID = "formaspec@formaspec";
+export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";
 
 interface CodexMcpConfiguration {
   transport?: {
@@ -51,9 +56,14 @@ function resolveCodexHome(environment: NodeJS.ProcessEnv): string {
   return path.join(path.normalize(home), ".codex");
 }
 
-function isManagedSkill(target: string): boolean {
-  if (!fs.existsSync(target)) return true;
+function hasManagedMarker(target: string): boolean {
+  if (!fs.existsSync(target)) return false;
   try {
+    const targetStat = fs.lstatSync(target);
+    if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) return false;
+    const markerPath = path.join(target, MANAGED_MARKER);
+    const markerStat = fs.lstatSync(markerPath);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) return false;
     const marker = JSON.parse(fs.readFileSync(path.join(target, MANAGED_MARKER), "utf8")) as {
       manager?: unknown;
       schemaVersion?: unknown;
@@ -64,16 +74,28 @@ function isManagedSkill(target: string): boolean {
   }
 }
 
+function isManagedInstallTarget(target: string): boolean {
+  return !fs.existsSync(target) || hasManagedMarker(target);
+}
+
+function removeLegacyManagedSkill(target: string, wasManaged: boolean): void {
+  if (!wasManaged || !fs.existsSync(target)) return;
+  if (!hasManagedMarker(target)) {
+    throw new Error(`Refusing to remove the legacy Codex skill at ${target} because its FormaSpec ownership marker changed.`);
+  }
+  fs.rmSync(target, { recursive: true, force: true });
+}
+
 function installManagedSkill(target: string): void {
-  const source = fileURLToPath(new URL("../assets/skills/minimal-ui", import.meta.url));
-  if (!fs.existsSync(path.join(source, "SKILL.md"))) throw new Error("Bundled minimal-ui skill is missing.");
-  if (!isManagedSkill(target)) {
+  const source = fileURLToPath(new URL("../assets/skills/formaspec", import.meta.url));
+  if (!fs.existsSync(path.join(source, "SKILL.md"))) throw new Error("Bundled FormaSpec skill is missing.");
+  if (!isManagedInstallTarget(target)) {
     throw new Error(`Refusing to overwrite the unmanaged Codex skill at ${target}. Move or rename it first.`);
   }
   const parent = path.dirname(target);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const stage = path.join(parent, `.minimal-ui.stage-${process.pid}`);
-  const previous = path.join(parent, `.minimal-ui.previous-${process.pid}`);
+  const stage = path.join(parent, `.formaspec.stage-${process.pid}`);
+  const previous = path.join(parent, `.formaspec.previous-${process.pid}`);
   fs.rmSync(stage, { recursive: true, force: true });
   fs.rmSync(previous, { recursive: true, force: true });
   fs.cpSync(source, stage, { recursive: true, errorOnExist: true });
@@ -97,10 +119,10 @@ function installManagedSkill(target: string): void {
 function installManagedMarketplace(target: string): void {
   const source = fileURLToPath(new URL("../assets/codex-marketplace", import.meta.url));
   if (!fs.existsSync(path.join(source, ".agents", "plugins", "marketplace.json"))
-    || !fs.existsSync(path.join(source, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"))) {
-    throw new Error("Bundled Minimal UI Codex plugin marketplace is missing.");
+    || !fs.existsSync(path.join(source, "plugins", "formaspec", ".codex-plugin", "plugin.json"))) {
+    throw new Error("Bundled FormaSpec Codex plugin marketplace is missing.");
   }
-  if (!isManagedSkill(target)) {
+  if (!isManagedInstallTarget(target)) {
     throw new Error(`Refusing to overwrite the unmanaged Codex marketplace at ${target}. Move or rename it first.`);
   }
   const parent = path.dirname(target);
@@ -139,11 +161,23 @@ function parseMarketplaceRoot(stdout: string, marketplaceName: string): string |
 
 function installedPluginVersion(stdout: string, pluginId: string): string | undefined {
   try {
-    const value = JSON.parse(stdout) as { installed?: Array<{ pluginId?: unknown; version?: unknown; installed?: unknown }> };
-    const plugin = value.installed?.find((candidate) => candidate.pluginId === pluginId && candidate.installed === true);
+    const value = JSON.parse(stdout) as {
+      installed?: Array<{ pluginId?: unknown; version?: unknown; installed?: unknown; enabled?: unknown }>;
+    };
+    const plugin = value.installed?.find((candidate) => candidate.pluginId === pluginId
+      && candidate.installed === true && candidate.enabled === true);
     return typeof plugin?.version === "string" ? plugin.version : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function isPluginInstalled(stdout: string, pluginId: string): boolean {
+  try {
+    const value = JSON.parse(stdout) as { installed?: Array<{ pluginId?: unknown; installed?: unknown }> };
+    return value.installed?.some((candidate) => candidate.pluginId === pluginId && candidate.installed === true) === true;
+  } catch {
+    return false;
   }
 }
 
@@ -160,7 +194,14 @@ function isDesiredConfiguration(stdout: string, mcpUrl: string): boolean {
   }
 }
 
-function ensureManagedMcpApprovalPolicy(codexHome: string): boolean {
+interface CodexConfigText {
+  configPath: string;
+  stat: fs.Stats;
+  newline: "\n" | "\r\n";
+  lines: string[];
+}
+
+function readCodexConfigText(codexHome: string): CodexConfigText {
   const configPath = path.join(codexHome, "config.toml");
   let stat: fs.Stats;
   try {
@@ -175,52 +216,250 @@ function ensureManagedMcpApprovalPolicy(codexHome: string): boolean {
     throw new Error("Codex configuration is not a safe bounded regular file.");
   }
   const original = fs.readFileSync(configPath, "utf8");
-  const newline = original.includes("\r\n") ? "\r\n" : "\n";
-  const lines = original.split(/\r?\n/);
-  const tableIndexes = lines.flatMap((line, index) => line.trim() === "[mcp_servers.formaspec]" ? [index] : []);
-  if (tableIndexes.length !== 1) {
-    throw new Error("Codex configuration must contain exactly one managed [mcp_servers.formaspec] table.");
-  }
-  const tableStart = tableIndexes[0]!;
-  let tableEnd = lines.length;
-  for (let index = tableStart + 1; index < lines.length; index += 1) {
-    if (/^\s*\[/.test(lines[index]!)) {
-      tableEnd = index;
-      break;
-    }
-  }
-  const policyIndexes: number[] = [];
-  for (let index = tableStart + 1; index < tableEnd; index += 1) {
-    if (/^\s*default_tools_approval_mode\s*=/.test(lines[index]!)) policyIndexes.push(index);
-  }
-  if (policyIndexes.length > 1) throw new Error("Codex FormaSpec MCP approval policy is duplicated.");
-  const desired = 'default_tools_approval_mode = "writes"';
-  if (policyIndexes.length === 1 && lines[policyIndexes[0]!]!.trim() === desired) return false;
-  if (policyIndexes.length === 1) {
-    lines[policyIndexes[0]!] = desired;
-  } else {
-    let insertionIndex = tableStart + 1;
-    for (let index = tableStart + 1; index < tableEnd; index += 1) {
-      if (/^\s*url\s*=/.test(lines[index]!)) insertionIndex = index + 1;
-    }
-    lines.splice(insertionIndex, 0, desired);
-  }
-  const updated = lines.join(newline);
+  return {
+    configPath,
+    stat,
+    newline: original.includes("\r\n") ? "\r\n" : "\n",
+    lines: original.split(/\r?\n/),
+  };
+}
+
+function codexConfigTableRange(lines: string[], header: string): { start: number; end: number } | undefined {
+  const expected = parseTomlTableHeader(header);
+  if (expected === undefined) throw new Error(`Invalid internal Codex configuration table header: ${header}`);
+  const headers = scanTomlTableHeaders(lines);
+  const tableIndexes = headers.flatMap((candidate, index) => candidate.array === expected.array
+    && candidate.path.length === expected.path.length
+    && candidate.path.every((segment, segmentIndex) => segment === expected.path[segmentIndex])
+    ? [index]
+    : []);
+  if (tableIndexes.length > 1) throw new Error(`Codex configuration contains a duplicate ${header} table.`);
+  const tableIndex = tableIndexes[0];
+  if (tableIndex === undefined) return undefined;
+  return { start: headers[tableIndex]!.line, end: headers[tableIndex + 1]?.line ?? lines.length };
+}
+
+function writeCodexConfigText(codexHome: string, config: CodexConfigText, lines: string[]): void {
+  const updated = lines.join(config.newline);
   const temporary = path.join(codexHome, `.config.toml.formaspec-${randomUUID()}.tmp`);
   let descriptor: number | undefined;
   try {
-    const fileMode = stat.mode & 0o777;
+    const fileMode = config.stat.mode & 0o777;
     descriptor = fs.openSync(temporary, "wx", fileMode === 0 ? 0o600 : fileMode);
     fs.writeFileSync(descriptor, updated, "utf8");
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = undefined;
-    fs.renameSync(temporary, configPath);
+    fs.renameSync(temporary, config.configPath);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     fs.rmSync(temporary, { force: true });
   }
+}
+
+function ensureManagedMcpApprovalPolicy(codexHome: string): boolean {
+  const config = readCodexConfigText(codexHome);
+  const table = codexConfigTableRange(config.lines, "[mcp_servers.formaspec]");
+  if (!table) {
+    throw new Error("Codex configuration must contain exactly one managed [mcp_servers.formaspec] table.");
+  }
+  const { start: tableStart, end: tableEnd } = table;
+  const policyIndexes: number[] = [];
+  for (let index = tableStart + 1; index < tableEnd; index += 1) {
+    if (/^\s*default_tools_approval_mode\s*=/.test(config.lines[index]!)) policyIndexes.push(index);
+  }
+  if (policyIndexes.length > 1) throw new Error("Codex FormaSpec MCP approval policy is duplicated.");
+  const desired = 'default_tools_approval_mode = "writes"';
+  if (policyIndexes.length === 1 && config.lines[policyIndexes[0]!]!.trim() === desired) return false;
+  if (policyIndexes.length === 1) {
+    config.lines[policyIndexes[0]!] = desired;
+  } else {
+    let insertionIndex = tableStart + 1;
+    for (let index = tableStart + 1; index < tableEnd; index += 1) {
+      if (/^\s*url\s*=/.test(config.lines[index]!)) insertionIndex = index + 1;
+    }
+    config.lines.splice(insertionIndex, 0, desired);
+  }
+  writeCodexConfigText(codexHome, config, config.lines);
   return true;
+}
+
+function hasConfiguredPlugin(codexHome: string, pluginId: string): boolean {
+  const config = readCodexConfigText(codexHome);
+  return codexPluginTableRanges(config.lines, pluginId).length > 0;
+}
+
+function removeConfiguredPlugin(codexHome: string, pluginId: string): boolean {
+  const config = readCodexConfigText(codexHome);
+  const tables = codexPluginTableRanges(config.lines, pluginId);
+  if (tables.length === 0) return false;
+  for (const table of [...tables].reverse()) {
+    config.lines.splice(table.start, table.end - table.start);
+  }
+  writeCodexConfigText(codexHome, config, config.lines);
+  return true;
+}
+
+type TomlMultilineString = "basic" | "literal" | undefined;
+
+interface TomlTableHeader {
+  line: number;
+  path: string[];
+  array: boolean;
+}
+
+function isTomlWhitespace(character: string | undefined): boolean {
+  return character === " " || character === "\t";
+}
+
+function parseTomlBasicKey(line: string, start: number): { value: string; end: number } | undefined {
+  let value = "";
+  for (let index = start + 1; index < line.length; index += 1) {
+    const character = line[index]!;
+    if (character === '"') return { value, end: index + 1 };
+    if (character !== "\\") {
+      value += character;
+      continue;
+    }
+    const escape = line[index + 1];
+    const simpleEscapes: Record<string, string> = {
+      b: "\b",
+      t: "\t",
+      n: "\n",
+      f: "\f",
+      r: "\r",
+      '"': '"',
+      "\\": "\\",
+    };
+    if (escape !== undefined && simpleEscapes[escape] !== undefined) {
+      value += simpleEscapes[escape];
+      index += 1;
+      continue;
+    }
+    const digits = escape === "u" ? 4 : escape === "U" ? 8 : 0;
+    if (digits === 0) return undefined;
+    const hexadecimal = line.slice(index + 2, index + 2 + digits);
+    if (hexadecimal.length !== digits || !/^[0-9A-Fa-f]+$/.test(hexadecimal)) return undefined;
+    const codePoint = Number.parseInt(hexadecimal, 16);
+    if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return undefined;
+    value += String.fromCodePoint(codePoint);
+    index += digits + 1;
+  }
+  return undefined;
+}
+
+function parseTomlLiteralKey(line: string, start: number): { value: string; end: number } | undefined {
+  const end = line.indexOf("'", start + 1);
+  return end === -1 ? undefined : { value: line.slice(start + 1, end), end: end + 1 };
+}
+
+function parseTomlTableHeader(line: string): { path: string[]; array: boolean } | undefined {
+  let index = 0;
+  while (isTomlWhitespace(line[index])) index += 1;
+  if (line[index] !== "[") return undefined;
+  const isArrayTable = line[index + 1] === "[";
+  index += isArrayTable ? 2 : 1;
+
+  const path: string[] = [];
+  while (index < line.length) {
+    while (isTomlWhitespace(line[index])) index += 1;
+    let key: { value: string; end: number } | undefined;
+    if (line[index] === '"') {
+      key = parseTomlBasicKey(line, index);
+    } else if (line[index] === "'") {
+      key = parseTomlLiteralKey(line, index);
+    } else {
+      const match = /^[A-Za-z0-9_-]+/.exec(line.slice(index));
+      if (match !== null) key = { value: match[0], end: index + match[0].length };
+    }
+    if (key === undefined) return undefined;
+    path.push(key.value);
+    index = key.end;
+    while (isTomlWhitespace(line[index])) index += 1;
+
+    if (line[index] === ".") {
+      index += 1;
+      continue;
+    }
+    if (isArrayTable ? line.slice(index, index + 2) !== "]]" : line[index] !== "]") return undefined;
+    index += isArrayTable ? 2 : 1;
+    while (isTomlWhitespace(line[index])) index += 1;
+    return index === line.length || line[index] === "#" ? { path, array: isArrayTable } : undefined;
+  }
+  return undefined;
+}
+
+function tomlMultilineStringAfterLine(line: string, initial: TomlMultilineString): TomlMultilineString {
+  let multiline = initial;
+  for (let index = 0; index < line.length;) {
+    if (multiline === "basic") {
+      if (line.startsWith('"""', index)) {
+        multiline = undefined;
+        index += 3;
+      } else if (line[index] === "\\") {
+        index += 2;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (multiline === "literal") {
+      if (line.startsWith("'''", index)) {
+        multiline = undefined;
+        index += 3;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (line[index] === "#") break;
+    if (line.startsWith('"""', index)) {
+      multiline = "basic";
+      index += 3;
+      continue;
+    }
+    if (line.startsWith("'''", index)) {
+      multiline = "literal";
+      index += 3;
+      continue;
+    }
+    if (line[index] === '"') {
+      index += 1;
+      while (index < line.length && line[index] !== '"') {
+        index += line[index] === "\\" ? 2 : 1;
+      }
+      index += line[index] === '"' ? 1 : 0;
+      continue;
+    }
+    if (line[index] === "'") {
+      const end = line.indexOf("'", index + 1);
+      index = end === -1 ? line.length : end + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return multiline;
+}
+
+function scanTomlTableHeaders(lines: string[]): TomlTableHeader[] {
+  const headers: TomlTableHeader[] = [];
+  let multiline: TomlMultilineString;
+  for (let line = 0; line < lines.length; line += 1) {
+    if (multiline === undefined) {
+      const table = parseTomlTableHeader(lines[line]!);
+      if (table !== undefined) headers.push({ line, ...table });
+    }
+    multiline = tomlMultilineStringAfterLine(lines[line]!, multiline);
+  }
+  return headers;
+}
+
+function codexPluginTableRanges(lines: string[], pluginId: string): Array<{ start: number; end: number }> {
+  const headers = scanTomlTableHeaders(lines);
+  return headers.flatMap((header, index) => header.path[0] === "plugins" && header.path[1] === pluginId
+    ? [{ start: header.line, end: headers[index + 1]?.line ?? lines.length }]
+    : []);
 }
 
 export async function connectCodex(options: ConnectCodexOptions): Promise<ConnectCodexResult> {
@@ -233,17 +472,20 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   if (version.exitCode !== 0) throw new Error("Codex CLI was found but could not run.");
 
   const codexHome = resolveCodexHome(options.environment);
-  const skillPath = path.join(codexHome, "skills", "minimal-ui");
+  const skillPath = path.join(codexHome, "skills", "formaspec");
+  const legacySkillPath = path.join(codexHome, "skills", "minimal-ui");
   const marketplacePath = path.join(codexHome, "formaspec-marketplace");
-  const pluginPath = path.join(marketplacePath, "plugins", "minimal-ui");
-  if (!isManagedSkill(skillPath)) {
+  const pluginPath = path.join(marketplacePath, "plugins", "formaspec");
+  if (!isManagedInstallTarget(skillPath)) {
     throw new Error(`Refusing to overwrite the unmanaged Codex skill at ${skillPath}. Move or rename it first.`);
   }
-  if (!isManagedSkill(marketplacePath)) {
+  if (!isManagedInstallTarget(marketplacePath)) {
     throw new Error(`Refusing to overwrite the unmanaged Codex marketplace at ${marketplacePath}. Move or rename it first.`);
   }
+  const legacySkillWasManaged = hasManagedMarker(legacySkillPath);
+  const legacyMarketplaceWasManaged = hasManagedMarker(marketplacePath);
   if (!options.assumeYes && !await options.confirm(
-    `Allow FormaSpec to configure the 'formaspec' MCP server and install the managed Minimal UI skill/plugin in ${codexHome}?`,
+    `Allow FormaSpec to configure the 'formaspec' MCP server and install the managed FormaSpec skill/plugin in ${codexHome}?`,
   )) {
     throw new Error("Codex connection was cancelled; no Codex files were changed.");
   }
@@ -276,6 +518,23 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   if (verifiedJson.exitCode !== 0 || !isDesiredConfiguration(verifiedJson.stdout, mcpUrl)) {
     throw new Error("Codex verification returned an unexpected or credential-bearing MCP configuration.");
   }
+  const pluginsBeforeMarketplaceRefresh = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  if (pluginsBeforeMarketplaceRefresh.exitCode !== 0) {
+    throw new Error("Codex could not inspect installed plugins before refreshing the managed marketplace.");
+  }
+  const needsPluginInstall = installedPluginVersion(
+    pluginsBeforeMarketplaceRefresh.stdout,
+    FORMASPEC_CODEX_PLUGIN_ID,
+  ) !== FORMASPEC_PLUGIN_VERSION;
+  const legacyPluginListed = isPluginInstalled(pluginsBeforeMarketplaceRefresh.stdout, LEGACY_CODEX_PLUGIN_ID);
+  const legacyPluginConfigured = legacyMarketplaceWasManaged
+    && hasConfiguredPlugin(codexHome, LEGACY_CODEX_PLUGIN_ID);
+  const needsLegacyPluginRemoval = legacyMarketplaceWasManaged
+    && (legacyPluginListed || legacyPluginConfigured);
+  const changedPlugin = needsPluginInstall || needsLegacyPluginRemoval;
   installManagedMarketplace(marketplacePath);
   const marketplaceList = await options.commandRunner(codexPath, ["plugin", "marketplace", "list", "--json"], {
     env: options.environment,
@@ -294,19 +553,40 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
     );
     if (marketplaceAdded.exitCode !== 0) throw new Error("Codex could not register the managed FormaSpec plugin marketplace.");
   }
-  const plugins = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
-    env: options.environment,
-    timeoutMs: 15_000,
-  });
-  if (plugins.exitCode !== 0) throw new Error("Codex could not inspect installed plugins.");
-  const changedPlugin = installedPluginVersion(plugins.stdout, "minimal-ui@formaspec") !== "0.2.0";
-  if (changedPlugin) {
-    const pluginAdded = await options.commandRunner(codexPath, ["plugin", "add", "minimal-ui@formaspec", "--json"], {
+  if (needsPluginInstall) {
+    const pluginAdded = await options.commandRunner(codexPath, ["plugin", "add", FORMASPEC_CODEX_PLUGIN_ID, "--json"], {
       env: options.environment,
       timeoutMs: 20_000,
     });
-    if (pluginAdded.exitCode !== 0) throw new Error("Codex could not install the managed Minimal UI plugin.");
+    if (pluginAdded.exitCode !== 0) throw new Error("Codex could not install the managed FormaSpec plugin.");
   }
   installManagedSkill(skillPath);
+  if (needsLegacyPluginRemoval) {
+    if (!hasManagedMarker(marketplacePath)) {
+      throw new Error("Refusing to remove the legacy Minimal UI plugin because the FormaSpec marketplace ownership marker changed.");
+    }
+    if (legacyPluginListed) {
+      const pluginRemoved = await options.commandRunner(codexPath, ["plugin", "remove", LEGACY_CODEX_PLUGIN_ID, "--json"], {
+        env: options.environment,
+        timeoutMs: 20_000,
+      });
+      if (pluginRemoved.exitCode !== 0) throw new Error("Codex could not remove the legacy managed Minimal UI plugin.");
+    }
+    removeConfiguredPlugin(codexHome, LEGACY_CODEX_PLUGIN_ID);
+  }
+  const verifiedPlugins = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  if (verifiedPlugins.exitCode !== 0
+    || installedPluginVersion(verifiedPlugins.stdout, FORMASPEC_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION) {
+    throw new Error("Codex could not verify the managed FormaSpec plugin installation.");
+  }
+  if (needsLegacyPluginRemoval
+    && (isPluginInstalled(verifiedPlugins.stdout, LEGACY_CODEX_PLUGIN_ID)
+      || hasConfiguredPlugin(codexHome, LEGACY_CODEX_PLUGIN_ID))) {
+    throw new Error("Codex still reports the legacy managed Minimal UI plugin after removal.");
+  }
+  removeLegacyManagedSkill(legacySkillPath, legacySkillWasManaged);
   return { codexPath, mcpUrl, skillPath, pluginPath, marketplacePath, changedMcp, changedPlugin, changedApprovalPolicy };
 }

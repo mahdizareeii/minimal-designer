@@ -353,6 +353,35 @@ run_dry_run_tests() {
   expect_absent "$mutation_log" "dry-run native setup does not invoke pnpm mutations"
   expect_absent "$runtime" "dry-run native setup creates no runtime state"
 
+  runtime="$TMP_ROOT/dry-install-local-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-install-local-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run --yes --no-open install local
+  expect_status 0 "dry-run local installer exits without executing formaspecctl"
+  expect_contains "formaspecctl was not executed" "dry-run local installer reports the CLI boundary"
+  expect_absent "$mutation_log" "dry-run local installer invokes no package or CLI process"
+  expect_absent "$runtime" "dry-run local installer creates no runtime state"
+
+  runtime="$TMP_ROOT/dry-install-docker-runtime-must-not-exist"
+  mutation_log="$TMP_ROOT/dry-install-docker-mutations.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$runtime" \
+    DESIGNER_TEST_MUTATION_LOG="$mutation_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --dry-run --yes --no-open install docker
+  expect_status 0 "dry-run Docker installer exits without executing formaspecctl"
+  expect_contains "Would start Docker" "dry-run Docker installer reports the stopped-daemon action"
+  expect_contains "formaspecctl was not executed" "dry-run Docker installer reports the CLI boundary"
+  expect_absent "$mutation_log" "dry-run Docker installer invokes no package, CLI, or Compose process"
+  expect_absent "$runtime" "dry-run Docker installer creates no runtime state"
+
   runtime="$TMP_ROOT/dry-dev-runtime-must-not-exist"
   mutation_log="$TMP_ROOT/dry-dev-mutations.log"
   capture env \

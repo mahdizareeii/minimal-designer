@@ -22,7 +22,7 @@ notarize, publish a release, or fabricate service hosts or credentials.
 | --- | --- | --- |
 | `.github/workflows/source-ci.yml` | `NO-GO-source-sbom-license-*`, `NO-GO-dependency-audit-*` | Frozen install, fail-closed high-severity pnpm advisory audit with retained JSON, workflow contract tests, every package's typecheck/test/build, compatibility launcher, Compose configuration, deterministic CycloneDX/license/checksum evidence, and permissive-license gate |
 | `.github/workflows/browser-release-gates.yml` | `NO-GO-browser-*` | Selection alignment on pinned Chromium DPR 1/2 plus Firefox and WebKit DPR 1, editor/prototype behavior, deterministic Chromium visual baselines, 1,000-node performance budgets, and the product-manager-to-MCP-to-backup/restore release scenario |
-| `.github/workflows/docker-schema11-smoke.yml` | `NO-GO-docker-schema11-*`, `NO-GO-cross-browser-docker-*`, `NO-GO-offhost-restore-*` | Fresh schema 13 (the workflow filename is retained for compatibility), external Playwright worker with no fallback, real PNG, deterministic rerender and design persistence after API restart, non-root/read-only/capability/resource/network constraints, local distinct volumes, logs, full disposable cleanup, Firefox/WebKit alignment against the exact image produced by that job, and copied-bundle restore into an independently mounted clean project |
+| `.github/workflows/docker-schema11-smoke.yml` | `NO-GO-docker-schema11-*`, `NO-GO-cross-browser-docker-*`, `NO-GO-offhost-restore-*` | Historical schema-13 contract (the workflow filename is retained for compatibility), external Playwright worker with no fallback, real PNG, deterministic rerender and design persistence after API restart, non-root/read-only/capability/resource/network constraints, local distinct volumes, logs, full disposable cleanup, Firefox/WebKit alignment against the exact image produced by that job, and copied-bundle restore into an independently mounted clean project. Advance and rerun it at schema 15 before release qualification. |
 | `.github/workflows/linux-native-packaging.yml` | `NO-GO-unsigned-linux-foundation-*` | Deterministic unsigned DEB/RPM builds on Ubuntu 24.04 x64, exact toolchain capture, adjacent checksum validation, non-installing metadata inspection, and linkage to exact passing source SBOM/license evidence |
 | `.github/workflows/macos-native-packaging.yml` | `NO-GO-unsigned-macos-foundation-*` | Main/manual-only macOS build of the exact unsigned PKG, source/artifact evidence, exact known blocker enforcement, and a private extracted-byte API/renderer/MCP/CLI smoke without package installation, LaunchAgents, Keychain, Codex configuration, or browser opening |
 
@@ -58,6 +58,9 @@ The macOS runtime-smoke unit contract is platform-neutral:
 pnpm test:macos-pkg-runtime-smoke
 ```
 
+The current contract suite passes 11/11. It validates frozen historical package
+expectations; it is not a schema-15 installed-package lifecycle result.
+
 After a fresh unsigned PKG is built on macOS, the real smoke runs with explicit
 artifact and output paths:
 
@@ -65,7 +68,8 @@ artifact and output paths:
 node scripts/ci-macos-pkg-runtime-smoke.mjs --pkg <unsigned.pkg> --output <new-evidence-directory>
 ```
 
-It validates exact Node, Chromium, schema 13, the 52-tool MCP inventory
+For the retained historical package, it validates exact Node, Chromium, schema
+13, the 52-tool MCP inventory
 including `design_system_component_insert_preview`, resource names, rendering,
 backup, migration, and support-path contracts. It writes a checksum-bound,
 deterministically ordered `NO-GO-SUMMARY.json`, terminates extracted process
@@ -73,7 +77,7 @@ groups, removes private temporary state, and proves known system installation
 targets and the package receipt did not change. It does not prove privileged
 install/upgrade/uninstall behavior or process-level renderer egress denial.
 
-The schema-13 source checkpoint passed 678/678 application tests, launcher
+The historical schema-13 source checkpoint passed 678/678 application tests, launcher
 212/212, and typecheck/build for all seven workspaces. Direct protected-route
 authorization is 108/108 with zero uncovered; the MCP inventory is 52 tools and
 25 resources. Installed/link verification confirms `drizzle-orm` 0.45.2;
@@ -82,8 +86,15 @@ egress, Firefox/WebKit, recovery, and exact SBOM/license gates pass against it.
 Audit currently reports zero high/critical findings; remaining advisories are
 under remediation. Chrome editor/admin/component insertion 4/4, selection
 12/12, handoff 1/1, visual 7/7, revision inspect 1/1, the 20-step release
-scenario 1/1, and the 1,000-node budget 1/1 passed immediately before the
-dependency update and require an exact-current rerun.
+  scenario 1/1, and the 1,000-node budget 1/1 passed immediately before the
+dependency update and require a schema-15 release-candidate rerun.
+
+Current schema-15 local source verification passes the seven-package suite
+840/840, launcher 225/225, all workspace typechecks/builds, installer 71/71 plus
+typecheck/build, editor/Administration 5/5, release E2E 1/1, preview integration
+2/2, and macOS runtime-smoke contracts 11/11. These results have not yet been
+retained as one hosted release-candidate run and do not refresh the historical
+Docker/cross-browser/visual/performance/recovery/SBOM evidence.
 
 The Docker smoke can be run separately on a disposable local Docker daemon:
 
@@ -122,7 +133,7 @@ or pulls, and requires exact image IDs plus non-root runtime UIDs for every
 service/helper container. It is intentionally a same-machine simulation and
 always writes `releaseStatus: NO-GO`.
 
-## Current local schema-13 checkpoint (`NO-GO`)
+## Historical local schema-13 checkpoint (`NO-GO`)
 
 Disposable Compose project `formaspeccischema1369037dfc8a` used image
 `sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`,
@@ -157,7 +168,7 @@ for `formaspec.cdx.json`, and
 `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0`
 for `licenses.json`.
 
-All current results are temporary local `NO-GO` evidence, not retained hosted
+All schema-13 results are temporary local `NO-GO` evidence, not retained hosted
 artifacts, provenance, scanning, or an independently reproducible candidate.
 
 ## Historical schema-12 local checkpoint
@@ -213,7 +224,7 @@ revision `revision_3b6cbf1a84f5421b9f57c370d4541db2`.
 It explicitly does not prove a real remote host, network transfer, TLS, object
 storage, remote credentials, or production recovery objectives.
 
-The current schema-13 Docker result and this historical schema-12 result are
+The historical schema-13 Docker result and this historical schema-12 result are
 independent of native installer evidence. The
 retained pre-current-SSE-authorization unsigned PKG under
 `artifacts/candidates/schema12-current/` has passing frozen package-integrity

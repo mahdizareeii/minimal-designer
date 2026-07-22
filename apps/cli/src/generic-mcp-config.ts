@@ -1,5 +1,5 @@
 export const FORMASPEC_MCP_SERVER_ID = "formaspec";
-export const FORMASPEC_MCP_DISPLAY_NAME = "Minimal UI";
+export const FORMASPEC_MCP_DISPLAY_NAME = "FormaSpec";
 export const DEFAULT_FORMASPEC_BRIDGE_MCP_URL = "http://127.0.0.1:4312/mcp";
 
 export type GenericMcpConfigurationFormat = "all" | "json" | "toml";
