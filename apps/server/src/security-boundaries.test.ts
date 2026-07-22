@@ -7,13 +7,14 @@ import path from "node:path";
 import { createSequentialIdFactory, createStarterDocument } from "@designer/core";
 import type { FastifyReply } from "fastify";
 import { zipSync } from "fflate";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DomainError } from "./errors.js";
 import { sendSse } from "./http-routes.js";
 import { createPortableProjectBundle, readPortableProjectBundle } from "./portable-export.js";
+import { encodeRgbaPng } from "./render.js";
 
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
@@ -528,6 +529,14 @@ describe("public security boundaries", () => {
 
   it("enforces the human role matrix on public read, revision, restore, and archive routes", async () => {
     const application = await serverApplication("human-role-matrix");
+    const renderPng = encodeRgbaPng(24, 16, Buffer.alloc(24 * 16 * 4, 255));
+    vi.spyOn(application.renderer, "render").mockResolvedValue({
+      png: renderPng,
+      width: 24,
+      height: 16,
+      renderer: "software",
+      warnings: ["Deterministic role-matrix preview renderer."],
+    });
     const adminIdentity = "admin@roles.example";
     const createdResponse = await application.app.inject({
       method: "POST",

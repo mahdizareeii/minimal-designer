@@ -743,7 +743,7 @@ export class EnterpriseService {
     }
     const current = this.currentTaskTransition(task.id);
     const data = jsonObject(current.data_json, "task transition");
-    if ((current.to_status !== "awaiting_approval" && current.to_status !== "completed") || data.previewId !== previewId) {
+    if (!["awaiting_approval", "completed", "expired"].includes(current.to_status) || data.previewId !== previewId) {
       throw new DomainError("NOT_FOUND", "Agent task not found.", 404);
     }
   }
@@ -893,6 +893,11 @@ export class EnterpriseService {
         expired = true;
         return this.agentTaskResult(row);
       }
+      if (input.toStatus === "expired" && row.expires_at > now) {
+        throw new DomainError("VALIDATION_FAILED", "An agent task cannot expire before its configured expiry time.", 422, {
+          details: { expiresAt: row.expires_at },
+        });
+      }
       if (!taskTransitionGraph[current.to_status].includes(input.toStatus)) {
         throw new DomainError("VALIDATION_FAILED", `Cannot move an agent task from ${current.to_status} to ${input.toStatus}.`, 422);
       }
@@ -965,6 +970,12 @@ export class EnterpriseService {
     if (task.expected_output !== "design_preview") {
       throw new DomainError("VALIDATION_FAILED", "Only a design-preview task can use exact preview approval.", 422);
     }
+    const approvalNow = this.nowIso();
+    if (this.expireAwaitingTaskPreviewApproval(access, task, previewId, approvalNow)) {
+      throw new DomainError("TASK_EXPIRED", "The agent task expired before its preview could be approved.", 410, {
+        retryable: true,
+      });
+    }
 
     return this.withIdempotency(access, `task:${task.id}:approve-design-preview`, key, {
       designId: input.designId,
@@ -977,12 +988,6 @@ export class EnterpriseService {
       const current = this.currentTaskTransition(currentTask.id);
       if (current.to_status !== "awaiting_approval") {
         throw this.taskStateConflict("awaiting_approval", current.to_status);
-      }
-      const now = this.nowIso();
-      if (currentTask.expires_at <= now) {
-        throw new DomainError("TASK_EXPIRED", "The agent task expired before its preview could be approved.", 410, {
-          retryable: true,
-        });
       }
       const proposal = jsonObject(current.data_json, "task transition");
       if (proposal.previewId !== previewId) {
@@ -1003,7 +1008,7 @@ export class EnterpriseService {
         "completed",
         "The product manager approved and committed the exact design preview.",
         { previewId },
-        now,
+        approvalNow,
       );
       appendAuditEvent(this.database.sqlite, access, "agent_task.transition", "agent_task", currentTask.id, {
         fromStatus: "awaiting_approval",
@@ -1715,6 +1720,40 @@ export class EnterpriseService {
       throw new DomainError("VERSION_CONFLICT", "The proposed preview changed before it could be discarded.", 409);
     }
     return preview.id;
+  }
+
+  private expireAwaitingTaskPreviewApproval(
+    access: AccessContext,
+    task: AgentTaskRow,
+    previewId: string,
+    now: string,
+  ): boolean {
+    const transaction = this.database.sqlite.transaction(() => {
+      const current = this.currentTaskTransition(task.id);
+      const currentData = jsonObject(current.data_json, "task transition");
+      if (current.to_status === "expired") return currentData.previewId === previewId;
+      if (current.to_status !== "awaiting_approval" || task.expires_at > now) return false;
+      if (currentData.previewId !== previewId) {
+        throw new DomainError("VALIDATION_FAILED", "The preview does not match the expired task proposal.", 422);
+      }
+      this.appendTaskTransition(
+        access,
+        task.id,
+        "awaiting_approval",
+        "expired",
+        "Task expired before its exact preview was approved.",
+        { previewId },
+        now,
+      );
+      appendAuditEvent(this.database.sqlite, access, "agent_task.expire", "agent_task", task.id, {
+        fromStatus: "awaiting_approval",
+        expectedOutput: task.expected_output,
+      });
+      return true;
+    });
+    const expired = transaction.immediate();
+    if (expired) this.flushPendingEventsSafely();
+    return expired;
   }
 
   private assertTaskSelection(designId: string, version: number, selection: string[]): void {

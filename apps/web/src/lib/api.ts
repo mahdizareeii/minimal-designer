@@ -1463,11 +1463,32 @@ export async function commitDesignPreview(input: {
       }),
     },
   );
+  const version = requiredPositiveInteger(result.version, "Task preview commit version");
+  if (version !== input.expectedBaseVersion + 1) {
+    throw new ApiError("Task preview commit version is invalid.", { code: "INVALID_RESPONSE" });
+  }
+  const revisionId = requiredOpaqueId(result.revisionId ?? result.revision_id, "Task preview commit revision ID");
+  let document: DesignDocument;
+  try {
+    document = normalizeDocument(result.document);
+  } catch (cause) {
+    throw new ApiError("Task preview commit document is invalid.", { code: "INVALID_RESPONSE", details: cause });
+  }
+  if (document.id !== input.designId || document.revision !== version) {
+    throw new ApiError("Task preview commit document does not match the requested design and version.", { code: "INVALID_RESPONSE" });
+  }
+  if (!result.task || typeof result.task !== "object" || Array.isArray(result.task)) {
+    throw new ApiError("Task preview commit task is missing.", { code: "INVALID_RESPONSE" });
+  }
+  const task = asAgentTaskRecord(result.task);
+  if (task.id !== input.taskId || task.designId !== input.designId || task.status !== "completed") {
+    throw new ApiError("Task preview commit task does not match the completed requested task.", { code: "INVALID_RESPONSE" });
+  }
   return {
-    version: Number(result.version ?? result.revision ?? input.expectedBaseVersion + 1),
-    ...(result.revisionId || result.revision_id ? { revisionId: String(result.revisionId ?? result.revision_id) } : {}),
-    ...(result.document ? { document: normalizeDocument(result.document) } : {}),
-    ...(result.task && typeof result.task === "object" ? { task: asAgentTaskRecord(result.task) } : {}),
+    version,
+    revisionId,
+    document,
+    task,
   };
 }
 

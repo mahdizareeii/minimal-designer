@@ -3,10 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
+import { encodeRgbaPng } from "./render.js";
 
 const PROXY_SECRET = "core-preview-http-proxy-secret-0123456789abcdef";
 const ADMIN = "core-preview-admin@example.test";
@@ -57,6 +58,14 @@ async function serverApplication(label: string): Promise<DesignerApplication> {
     DESIGNER_CORS_ORIGINS: "https://design.example.test",
     DESIGNER_LOG_LEVEL: "silent",
   }));
+  const renderPng = encodeRgbaPng(24, 16, Buffer.alloc(24 * 16 * 4, 255));
+  vi.spyOn(application.renderer, "render").mockResolvedValue({
+    png: renderPng,
+    width: 24,
+    height: 16,
+    renderer: "software",
+    warnings: ["Deterministic preview authorization test renderer."],
+  });
   applications.push(application);
   await application.app.ready();
   return application;

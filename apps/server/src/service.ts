@@ -378,6 +378,7 @@ export class DesignerService {
     const access = resolveAccess(this.database.sqlite, actorId);
     assertDesignWrite(access);
     this.requireDesign(actorId, designId);
+    if (access.role === "agent") this.assertAgentDesignMutationNotReserved(access, designId);
   }
 
   authorizeDesignMigration(actorId: string, designId: string): void {
@@ -2214,15 +2215,24 @@ export class DesignerService {
     }
     const access = resolveAccess(this.database.sqlite, actorId);
     if (accessMode === "commit" && access.role === "agent") {
-      this.assertAgentPreviewIsNotTaskBound(access, preview);
+      this.assertAgentDesignMutationNotReserved(access, preview.design_id, preview.id);
     }
     return preview;
   }
 
-  private assertAgentPreviewIsNotTaskBound(
+  private assertAgentDesignMutationNotReserved(
     access: ReturnType<typeof resolveAccess>,
-    preview: PreviewRow,
+    designId: string,
+    previewId?: string,
   ): void {
+    const explicitPreviewClause = previewId === undefined
+      ? ""
+      : ` OR EXISTS (
+          SELECT 1 FROM agent_task_transitions artifact
+          WHERE artifact.task_id = task.id
+            AND json_valid(artifact.data_json)
+            AND json_extract(artifact.data_json, '$.previewId') = ?
+        )`;
     const task = this.database.sqlite.prepare(
       `SELECT task.id
        FROM agent_tasks task
@@ -2232,38 +2242,23 @@ export class DesignerService {
            WHERE first_claim.task_id = task.id AND first_claim.to_status = 'claimed'
            ORDER BY first_claim.rowid LIMIT 1
          )
-       JOIN agent_task_transitions current
-         ON current.rowid = (
-           SELECT latest.rowid FROM agent_task_transitions latest
-           WHERE latest.task_id = task.id ORDER BY latest.rowid DESC LIMIT 1
-         )
        WHERE task.organization_id = ?
          AND task.design_id = ?
-         AND task.base_version = ?
          AND task.expected_output = 'design_preview'
          AND claimed.actor_id = ?
-         AND (
-           (current.to_status IN ('claimed', 'in_progress', 'awaiting_approval') AND task.expires_at > ?)
-           OR EXISTS (
-             SELECT 1 FROM agent_task_transitions artifact
-             WHERE artifact.task_id = task.id
-               AND json_valid(artifact.data_json)
-               AND json_extract(artifact.data_json, '$.previewId') = ?
-           )
-         )
+         AND (task.expires_at > ?${explicitPreviewClause})
        LIMIT 1`,
     ).get(
       access.organizationId,
-      preview.design_id,
-      preview.root_base_version,
+      designId,
       access.principalId,
       new Date().toISOString(),
-      preview.id,
+      ...(previewId === undefined ? [] : [previewId]),
     ) as { id: string } | undefined;
     if (!task) return;
     throw new DomainError(
       "FORBIDDEN",
-      "An agent cannot commit a preview created for a human-approved design task.",
+      "An agent cannot mutate a design reserved by a human-approved design task.",
       403,
       { details: { taskId: task.id, requiredAction: "human_approval" } },
     );

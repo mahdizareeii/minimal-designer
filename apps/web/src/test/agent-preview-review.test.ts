@@ -501,7 +501,7 @@ describe("agent before/after review", () => {
         version: document.revision + 1,
         revisionId: "revision_committed",
         document: { ...document, revision: document.revision + 1 },
-        task: task({ status: "completed" }),
+        task: task({ status: "completed", designId: document.id }),
       }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -555,6 +555,38 @@ describe("agent before/after review", () => {
       taskId: "task_review_0001",
       idempotencyKey: "agent-preview-commit-0001",
     });
+  });
+
+  it("rejects malformed, foreign, or incomplete task-preview commit responses", async () => {
+    const document = createStarterDocument({ preset: "phone", name: "Strict task commit" });
+    const input = {
+      designId: document.id,
+      previewId: "preview_review_strict0001",
+      taskId: "task_review_0001",
+      expectedBaseVersion: document.revision,
+      idempotencyKey: "agent-preview-strict-commit-0001",
+      message: "Approve exact preview",
+      kind: "ordinary" as const,
+    };
+    const valid = {
+      version: document.revision + 1,
+      revisionId: "revision_strictcommit0001",
+      document: { ...document, revision: document.revision + 1 },
+      task: task({ status: "completed", designId: document.id }),
+    };
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const responses = [
+      { ...valid, version: "not-a-number", revisionId: undefined, document: undefined },
+      { ...valid, task: task({ id: "task_foreign_0001", status: "completed", designId: "document_foreign_0001" }) },
+      { ...valid, task: task({ status: "awaiting_approval", designId: document.id }) },
+    ];
+    for (const response of responses) {
+      fetch.mockResolvedValueOnce(new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      await expect(commitDesignPreview(input)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    }
   });
 
   it("rejects malformed persisted render evidence instead of showing a non-exact fallback", async () => {

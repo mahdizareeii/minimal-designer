@@ -22,8 +22,7 @@ function testConfig() {
   });
 }
 
-function installAgent(application: DesignerApplication, designId: string) {
-  const id = "task_preview_agent";
+function installAgent(application: DesignerApplication, designId: string, id = "task_preview_agent") {
   const principalId = `principal_${id}`;
   const token = `fsg_${id}_token_0000000000000001`;
   const actorId = `grant_${id}`;
@@ -355,6 +354,165 @@ describe("task-scoped agent preview review", () => {
     expect(retried.json()).toMatchObject({ version: 2, task: { id: task.id, status: "completed" } });
   });
 
+  it("rolls back revision, preview, task, audit, outbox, and idempotency when completion insertion fails after the design write", async () => {
+    const created = application.service.createDesign("local", {
+      name: "Post-write atomic rollback",
+      preset: "phone",
+      idempotencyKey: "task-preview-postwrite-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId);
+    const task = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Prove approval rollback after the design write",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "task-preview-postwrite-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(agent.actorId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Must roll back" } }],
+    });
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.id },
+    });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+    const before = {
+      audits: (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM audit_events").get() as { count: number }).count,
+      outbox: (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count,
+    };
+    application.database.sqlite.exec(`
+      CREATE TRIGGER force_task_approval_completion_failure
+      BEFORE INSERT ON agent_task_transitions
+      WHEN NEW.to_status = 'completed'
+      BEGIN SELECT RAISE(ABORT, 'forced task approval completion failure'); END;
+    `);
+    const payload = {
+      expectedBaseVersion: 1,
+      idempotencyKey: "task-preview-postwrite-approval-0001",
+      message: "Approval must be all-or-nothing",
+      taskId: task.id,
+    };
+    const rejected = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
+      payload,
+    });
+    expect(rejected.statusCode, rejected.body).toBe(500);
+    expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM revisions WHERE design_id = ?",
+    ).get(designId)).toEqual({ count: 1 });
+    expect(application.database.sqlite.prepare(
+      "SELECT status, committed_revision_id FROM previews WHERE id = ?",
+    ).get(preview.id)).toEqual({ status: "ready", committed_revision_id: null });
+    expect(application.enterprise.readAgentTask("local", task.id).status).toBe("awaiting_approval");
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM agent_task_transitions WHERE task_id = ? AND to_status = 'completed'",
+    ).get(task.id)).toEqual({ count: 0 });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM audit_events").get()).toEqual({ count: before.audits });
+    expect(application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get()).toEqual({ count: before.outbox });
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM idempotency WHERE scope = ? AND key = ?",
+    ).get(`task:${task.id}:approve-design-preview`, payload.idempotencyKey)).toEqual({ count: 0 });
+
+    application.database.sqlite.exec("DROP TRIGGER force_task_approval_completion_failure");
+    const retried = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
+      payload,
+    });
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(retried.json()).toMatchObject({ version: 2, task: { status: "completed" } });
+  });
+
+  it("durably expires an awaiting task when human approval arrives after its deadline", async () => {
+    const created = application.service.createDesign("local", {
+      name: "Expired human approval",
+      preset: "phone",
+      idempotencyKey: "expired-human-approval-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId);
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Too late to approve" } }],
+    });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+    const taskId = "task_expired_human_approval_0001";
+    const local = resolveAccess(application.database.sqlite, "local");
+    const createdAt = "2000-01-01T00:00:00.000Z";
+    application.database.sqlite.prepare(
+      `INSERT INTO agent_tasks
+       (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
+        expected_output, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, '2000-01-01T01:00:00.000Z')`,
+    ).run(taskId, local.organizationId, designId, local.principalId, "Expired exact preview approval", JSON.stringify([frameId]), createdAt);
+    const insertTransition = application.database.sqlite.prepare(
+      `INSERT INTO agent_task_transitions
+       (id, task_id, from_status, to_status, actor_id, message, data_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertTransition.run("transition_expired_human_queued_0001", taskId, null, "queued", local.principalId, "Task created", "{}", createdAt);
+    insertTransition.run("transition_expired_human_claimed_0001", taskId, "queued", "claimed", agent.principalId, "Task claimed", "{}", createdAt);
+    insertTransition.run("transition_expired_human_progress_0001", taskId, "claimed", "in_progress", agent.principalId, "Task started", "{}", createdAt);
+    insertTransition.run(
+      "transition_expired_human_approval_0001",
+      taskId,
+      "in_progress",
+      "awaiting_approval",
+      agent.principalId,
+      "Ready too late",
+      JSON.stringify({ previewId: preview.id }),
+      createdAt,
+    );
+    const beforeOutbox = (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count;
+    const rejected = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${designId}/previews/${preview.id}/commit`,
+      payload: {
+        expectedBaseVersion: 1,
+        idempotencyKey: "expired-human-approval-commit-0001",
+        message: "Late human approval",
+        taskId,
+      },
+    });
+    expect(rejected.statusCode, rejected.body).toBe(410);
+    expect(rejected.json()).toMatchObject({ error: { code: "TASK_EXPIRED" } });
+    expect(application.service.getDesign("local", designId).revision.version).toBe(1);
+    expect(application.database.sqlite.prepare(
+      "SELECT status, committed_revision_id FROM previews WHERE id = ?",
+    ).get(preview.id)).toEqual({ status: "ready", committed_revision_id: null });
+    const expiredTask = application.enterprise.readAgentTask("local", taskId);
+    expect(expiredTask.status).toBe("expired");
+    expect(expiredTask.transitions.at(-1)).toMatchObject({
+      fromStatus: "awaiting_approval",
+      toStatus: "expired",
+      data: { previewId: preview.id },
+    });
+    expect((application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM event_outbox").get() as { count: number }).count)
+      .toBe(beforeOutbox + 1);
+    expect(application.database.sqlite.prepare(
+      "SELECT action, target_id FROM audit_events WHERE target_id = ? ORDER BY rowid DESC LIMIT 1",
+    ).get(taskId)).toEqual({ action: "agent_task.expire", target_id: taskId });
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM idempotency WHERE scope = ? AND key = ?",
+    ).get(`task:${taskId}:approve-design-preview`, "expired-human-approval-commit-0001")).toEqual({ count: 0 });
+  });
+
   it("requires compatible persisted render evidence for ordinary and archive REST commits", async () => {
     const cases = [
       { kind: "ordinary" as const, incompatible: false },
@@ -442,6 +600,107 @@ describe("task-scoped agent preview review", () => {
       requireRenderEvidence: true,
     });
     expect(committed.revision.version).toBe(2);
+  });
+
+  it("reserves every unexpired claimed design task against agent commits, revisions, restores, and early expiry", () => {
+    const direct = application.service.createDesign("local", {
+      name: "Unreserved direct restore",
+      preset: "phone",
+      idempotencyKey: "unreserved-direct-restore-create-0001",
+    });
+    const directFrameId = direct.document.pages[0]!.children[0]!;
+    const directAgent = installAgent(application, direct.document.id, "task_preview_direct_restore_agent");
+    application.service.applyRevision(directAgent.actorId, direct.document.id, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: directFrameId, patch: { name: "Direct version two" } }],
+      idempotencyKey: "unreserved-direct-revision-0001",
+    });
+    const restored = application.service.restoreRevision(directAgent.actorId, direct.document.id, {
+      targetVersion: 1,
+      expectedBaseVersion: 2,
+      idempotencyKey: "unreserved-direct-restore-0001",
+    });
+    expect(restored.revision.version).toBe(3);
+
+    for (const [index, terminal] of (["failed", "cancelled"] as const).entries()) {
+      const created = application.service.createDesign("local", {
+        name: `Reserved ${terminal}`,
+        preset: "phone",
+        idempotencyKey: `reserved-${terminal}-create-${index}-0001`,
+      });
+      const designId = created.document.id;
+      const pageId = created.document.pages[0]!.id;
+      const frameId = created.document.pages[0]!.children[0]!;
+      const agent = installAgent(application, designId, `task_preview_reserved_${terminal}_${index}`);
+      const task = application.enterprise.createAgentTask("local", {
+        designId,
+        brief: `Attempt terminal ${terminal} bypass`,
+        selection: [frameId],
+        baseVersion: 1,
+        expectedOutput: "design_preview",
+        idempotencyKey: `reserved-${terminal}-task-${index}-0001`,
+        expiresInSeconds: 3_600,
+      });
+      application.enterprise.claimAgentTask(agent.actorId, task.id);
+      application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+        expectedStatus: "claimed",
+        toStatus: "in_progress",
+      });
+      const preview = application.service.createPreview(agent.actorId, designId, {
+        baseVersion: 1,
+        operations: [{ type: "update_node", node_id: frameId, patch: { name: `Reserved ${terminal} preview` } }],
+      });
+      persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId);
+      application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+        expectedStatus: "in_progress",
+        toStatus: terminal,
+        data: {},
+      });
+      expect(captureThrown(() => application.service.commitPreview(agent.actorId, designId, {
+        previewId: preview.id,
+        expectedBaseVersion: 1,
+        idempotencyKey: `reserved-${terminal}-commit-${index}-0001`,
+        requireRenderEvidence: true,
+      }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+      expect(captureThrown(() => application.service.applyRevision(agent.actorId, designId, {
+        baseVersion: 1,
+        operations: [{ type: "update_node", node_id: frameId, patch: { name: "Bypass revision" } }],
+        idempotencyKey: `reserved-${terminal}-revision-${index}-0001`,
+      }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+      expect(captureThrown(() => application.service.restoreRevision(agent.actorId, designId, {
+        targetVersion: 1,
+        expectedBaseVersion: 1,
+        idempotencyKey: `reserved-${terminal}-restore-${index}-0001`,
+      }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+    }
+
+    const early = application.service.createDesign("local", {
+      name: "Early expiry reservation",
+      preset: "phone",
+      idempotencyKey: "reserved-early-expiry-create-0001",
+    });
+    const earlyFrameId = early.document.pages[0]!.children[0]!;
+    const earlyAgent = installAgent(application, early.document.id, "task_preview_early_expiry_agent");
+    const earlyTask = application.enterprise.createAgentTask("local", {
+      designId: early.document.id,
+      brief: "Attempt to expire before the deadline",
+      selection: [earlyFrameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "reserved-early-expiry-task-0001",
+      expiresInSeconds: 3_600,
+    });
+    application.enterprise.claimAgentTask(earlyAgent.actorId, earlyTask.id);
+    application.enterprise.transitionAgentTask(earlyAgent.actorId, earlyTask.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    expect(captureThrown(() => application.enterprise.transitionAgentTask(earlyAgent.actorId, earlyTask.id, {
+      expectedStatus: "in_progress",
+      toStatus: "expired",
+      data: {},
+    }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
+    expect(application.enterprise.readAgentTask("local", earlyTask.id).status).toBe("in_progress");
   });
 
   it("atomically expires a discarded task preview so its creating agent cannot commit it later", () => {
