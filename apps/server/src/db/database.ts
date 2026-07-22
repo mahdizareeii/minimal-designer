@@ -293,7 +293,11 @@ function addPersistenceIntegrity(sqlite: Database.Database): void {
       `preview ${row.id} base snapshot`,
     );
     const kind = Array.isArray(operations)
-      && operations.some((value) => typeof value === "object" && value !== null && (value as { type?: unknown }).type === "archive_nodes")
+      && operations.some((value) => {
+        if (typeof value !== "object" || value === null) return false;
+        const type = (value as { type?: unknown }).type;
+        return type === "archive_nodes" || type === "archive_page";
+      })
       ? "archive"
       : "ordinary";
     const status = row.expires_at <= now ? "expired" : row.committable === 1 ? "ready" : "blocked";

@@ -165,6 +165,7 @@ export const PROTECTED_NON_MCP_ROUTE_CONTRACTS = defineProtectedNonMcpRouteContr
   organization("core_design", "GET", "/api/designs"),
   organization("core_design", "POST", "/api/designs"),
   project("core_design", "GET", "/api/designs/:id"),
+  project("core_design", "POST", "/api/designs/:id/archive"),
   project("core_design", "POST", "/api/designs/:id/previews"),
   project("core_design", "GET", "/api/designs/:id/previews/:previewId"),
   project("core_design", "POST", "/api/designs/:id/previews/:previewId/commit"),

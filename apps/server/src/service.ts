@@ -158,6 +158,10 @@ function contextRefForActor(actorId: string): string {
   return `context_${createHash("sha256").update(actorId).digest("hex").slice(0, 24)}`;
 }
 
+function designArchiveMetadataKey(designId: string): string {
+  return `design_archive:${designId}`;
+}
+
 export interface DesignSummary {
   id: string;
   name: string;
@@ -165,6 +169,10 @@ export interface DesignSummary {
   revisionId: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ArchivedDesignResult extends DesignSummary {
+  archivedAt: string;
 }
 
 export interface RevisionResult {
@@ -289,7 +297,7 @@ function forceDocumentRevision(document: AnyDesignDocument, version: number, now
 }
 
 function hasArchiveOperations(operations: DesignOperation[]): boolean {
-  return operations.some((operation) => operation.type === "archive_nodes");
+  return operations.some((operation) => ["archive_nodes", "archive_page"].includes(operation.type));
 }
 
 function mergeCreatedIds(left: unknown, right: unknown): unknown {
@@ -342,11 +350,19 @@ export class DesignerService {
       ? this.database.sqlite.prepare(
         `SELECT * FROM designs
          WHERE organization_id = ? AND updated_at < ?${projectClause}
+           AND NOT EXISTS (
+             SELECT 1 FROM system_metadata archive
+             WHERE archive.key = 'design_archive:' || designs.id
+           )
          ORDER BY updated_at DESC LIMIT ?`,
       ).all(access.organizationId, cursor, ...access.projectIds, boundedLimit + 1) as DesignRow[]
       : this.database.sqlite.prepare(
         `SELECT * FROM designs
          WHERE organization_id = ?${projectClause}
+           AND NOT EXISTS (
+             SELECT 1 FROM system_metadata archive
+             WHERE archive.key = 'design_archive:' || designs.id
+           )
          ORDER BY updated_at DESC LIMIT ?`,
       ).all(access.organizationId, ...access.projectIds, boundedLimit + 1) as DesignRow[];
     const hasMore = rows.length > boundedLimit;
@@ -368,6 +384,14 @@ export class DesignerService {
     if (access.projectIds.length > 0) {
       throw new DomainError("FORBIDDEN", "A project-restricted agent grant cannot create projects.", 403);
     }
+  }
+
+  authorizeDesignArchive(actorId: string, designId: string): void {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role !== "organization_admin" && access.role !== "product_manager") {
+      throw new DomainError("FORBIDDEN", "Organization Administrator or Product Manager permission is required to delete a project.", 403);
+    }
+    this.requireDesignIncludingArchived(access, designId);
   }
 
   authorizeDesignRead(actorId: string, designId: string): void {
@@ -396,6 +420,62 @@ export class DesignerService {
   authorizeContextRead(actorId: string): void {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "design:read");
+  }
+
+  archiveDesign(actorId: string, designId: string, input: {
+    expectedVersion: number;
+    idempotencyKey: string;
+    confirmationName: string;
+  }): ArchivedDesignResult {
+    this.authorizeDesignArchive(actorId, designId);
+    const scope = `design:${designId}:archive`;
+    return this.withIdempotency(actorId, scope, input.idempotencyKey, input, () => {
+      const access = resolveAccess(this.database.sqlite, actorId);
+      const design = this.requireDesignIncludingArchived(access, designId);
+      if (this.isDesignArchived(design.id)) {
+        throw new DomainError("NOT_FOUND", "Design not found.", 404);
+      }
+      if (input.confirmationName !== design.name) {
+        throw new DomainError(
+          "VALIDATION_FAILED",
+          "Type the exact project name to confirm deletion.",
+          422,
+          { details: { field: "confirmationName" } },
+        );
+      }
+      if (design.current_version !== input.expectedVersion) {
+        throw this.versionConflict(input.expectedVersion, design.current_version, design.current_revision_id);
+      }
+
+      const archivedAt = new Date().toISOString();
+      const tombstone = {
+        schema_version: 1,
+        design_id: design.id,
+        organization_id: design.organization_id,
+        archived_by: access.principalId,
+        archived_at: archivedAt,
+        version: design.current_version,
+        revision_id: design.current_revision_id,
+      };
+      this.database.sqlite.prepare(
+        "INSERT INTO system_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+      ).run(designArchiveMetadataKey(design.id), canonicalJson(tombstone), archivedAt);
+      appendAuditEvent(this.database.sqlite, access, "design.archive", "design", design.id, {
+        version: design.current_version,
+        revisionId: design.current_revision_id,
+        archivedAt,
+      });
+      this.enqueueEvent(actorId, "design.updated", {
+        designId: design.id,
+        version: design.current_version,
+        revisionId: design.current_revision_id,
+        archived: true,
+      }, true, archivedAt);
+      return {
+        ...designSummary(design),
+        archivedAt,
+      };
+    });
   }
 
   createDesign(actorId: string, input: {
@@ -624,12 +704,16 @@ export class DesignerService {
     assertOperationPayloadLimit(cumulativeOperations, "preview");
     const archiveOperations = hasArchiveOperations(cumulativeOperations);
     if (requestedKind === "ordinary" && archiveOperations) {
-      throw new DomainError("VALIDATION_FAILED", "archive_nodes requires an archive preview.", 422, {
-        details: { requiredPreviewKind: "archive", requiredTool: "design_preview_archive_nodes" },
+      throw new DomainError("VALIDATION_FAILED", "Archive operations require an archive preview.", 422, {
+        details: {
+          requiredPreviewKind: "archive",
+          requiredPreviewEndpoint: `/api/designs/${designId}/archive-previews`,
+          requiredTool: "design_preview_archive_nodes",
+        },
       });
     }
     if (requestedKind === "archive" && !archiveOperations) {
-      throw new DomainError("VALIDATION_FAILED", "An archive preview must contain archive_nodes.", 422);
+      throw new DomainError("VALIDATION_FAILED", "An archive preview must contain an archive operation.", 422);
     }
     const now = new Date().toISOString();
     const applied = applyOperations(baseDocument, operations, {
@@ -1098,7 +1182,7 @@ export class DesignerService {
     assertOperationPayloadLimit(input.operations, "revision");
     const operations = parseOperations(input.operations);
     if (hasArchiveOperations(operations)) {
-      throw new DomainError("VALIDATION_FAILED", "archive_nodes is not allowed in an ordinary revision.", 422, {
+      throw new DomainError("VALIDATION_FAILED", "Archive operations are not allowed in an ordinary revision.", 422, {
         details: {
           requiredPreviewEndpoint: `/api/designs/${designId}/archive-previews`,
           requiredCommitEndpoint: `/api/designs/${designId}/archive-previews/:previewId/commit`,
@@ -1847,7 +1931,15 @@ export class DesignerService {
       ? ` AND design_id IN (${access.projectIds.map(() => "?").join(", ")})`
       : "";
     const row = this.database.sqlite.prepare(
-      `SELECT id FROM assets WHERE id = ? AND organization_id = ?${projectClause}`,
+      `SELECT id FROM assets
+       WHERE id = ? AND organization_id = ?${projectClause}
+         AND (
+           design_id IS NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM system_metadata archive
+             WHERE archive.key = 'design_archive:' || assets.design_id
+           )
+         )`,
     ).get(assetId, access.organizationId, ...access.projectIds) as { id: string } | undefined;
     if (!row) throw new DomainError("NOT_FOUND", "Asset not found.", 404);
   }
@@ -2187,14 +2279,29 @@ export class DesignerService {
     return preview.renderMetadata;
   }
 
-  private requireDesign(actorId: string, designId: string): DesignRow {
-    const access = resolveAccess(this.database.sqlite, actorId);
-    if (access.role === "agent") assertScope(access, "design:read");
+  private isDesignArchived(designId: string): boolean {
+    return this.database.sqlite.prepare(
+      "SELECT 1 FROM system_metadata WHERE key = ?",
+    ).get(designArchiveMetadataKey(designId)) !== undefined;
+  }
+
+  private requireDesignIncludingArchived(
+    access: ReturnType<typeof resolveAccess>,
+    designId: string,
+  ): DesignRow {
     const design = this.database.sqlite.prepare(
       "SELECT * FROM designs WHERE id = ?",
     ).get(designId) as DesignRow | undefined;
     if (!design) throw new DomainError("NOT_FOUND", "Design not found.", 404);
     assertProjectAccess(access, design.organization_id, design.id);
+    return design;
+  }
+
+  private requireDesign(actorId: string, designId: string): DesignRow {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    if (access.role === "agent") assertScope(access, "design:read");
+    const design = this.requireDesignIncludingArchived(access, designId);
+    if (this.isDesignArchived(design.id)) throw new DomainError("NOT_FOUND", "Design not found.", 404);
     return design;
   }
 

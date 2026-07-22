@@ -107,6 +107,9 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["GET", "/api/designs/:id"],
     ["GET", "/api/context"],
   ]),
+  ...evidence("apps/server/src/design-archive-http.test.ts", [
+    ["POST", "/api/designs/:id/archive"],
+  ]),
   ...evidence("apps/server/src/core-preview-http-authorization.test.ts", [
     ["POST", "/api/designs/:id/previews"],
     ["GET", "/api/designs/:id/previews/:previewId"],

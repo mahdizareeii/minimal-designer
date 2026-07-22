@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { Dashboard } from "./components/Dashboard";
 import { Administration } from "./components/Administration";
@@ -6,7 +6,7 @@ import { Editor } from "./components/Editor";
 import { InspectView } from "./components/InspectView";
 import { RedesignStudio } from "./components/RedesignStudio";
 import { SessionAuthentication } from "./components/SessionAuthentication";
-import { useDesignerStore } from "./store/designer-store";
+import { hasUnsavedDesignerChanges, useDesignerStore } from "./store/designer-store";
 
 interface ApplicationRoute {
   kind: "dashboard" | "design" | "inspect" | "administration" | "redesign";
@@ -32,30 +32,49 @@ export function navigate(path: string): void {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
+function locationPath(): string {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
+function editorLocation(designId: string): string {
+  const state = useDesignerStore.getState();
+  const url = new URL(`/design/${encodeURIComponent(designId)}`, window.location.origin);
+  if (state.activePageId) url.searchParams.set("page", state.activePageId);
+  if (state.selectedIds[0]) url.searchParams.set("node", state.selectedIds[0]);
+  return `${url.pathname}${url.search}`;
+}
+
+interface PendingNavigation {
+  destination: string;
+}
+
 function AuthenticatedApplication() {
   const [route, setRoute] = useState(routeFromLocation);
+  const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation | null>(null);
+  const [navigationBusy, setNavigationBusy] = useState(false);
+  const [navigationError, setNavigationError] = useState<string | null>(null);
+  const bypassNavigationGuard = useRef(false);
+  const navigationDialogRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const sync = () => {
       const nextRoute = routeFromLocation();
+      if (bypassNavigationGuard.current) {
+        bypassNavigationGuard.current = false;
+        setPendingNavigation(null);
+        setNavigationError(null);
+        setRoute(nextRoute);
+        return;
+      }
       const nextDesignId = nextRoute.designId ?? null;
       const designId = route.kind === "design" ? route.designId ?? null : null;
       const state = useDesignerStore.getState();
-      const unresolved = Boolean(state.document)
-        && (state.saving
-          || state.pendingOperations.length > 0
-          || state.saveState === "dirty"
-          || state.saveState === "error"
-          || state.saveState === "conflict");
       const leavingEditor = Boolean(designId) && (nextRoute.kind !== "design" || nextDesignId !== designId);
-      if (leavingEditor && designId && unresolved
-        && !window.confirm("These edits are not saved. Leave the designer and discard the local draft?")) {
-        const url = new URL(window.location.href);
-        url.pathname = `/design/${encodeURIComponent(designId)}`;
-        url.search = "";
-        if (state.activePageId) url.searchParams.set("page", state.activePageId);
-        if (state.selectedIds[0]) url.searchParams.set("node", state.selectedIds[0]);
-        window.history.pushState({}, "", `${url.pathname}${url.search}`);
+      if (leavingEditor && designId && state.document && hasUnsavedDesignerChanges(state)) {
+        const destination = locationPath();
+        window.history.pushState({}, "", editorLocation(designId));
+        setPendingNavigation({ destination });
+        setNavigationError(null);
         return;
       }
       setRoute(nextRoute);
@@ -64,13 +83,101 @@ function AuthenticatedApplication() {
     return () => window.removeEventListener("popstate", sync);
   }, [route]);
 
-  if (route.kind === "inspect" && route.designId && route.revisionId) {
-    return <InspectView projectId={route.designId} revisionId={route.revisionId} />;
-  }
-  if (route.kind === "administration") return <Administration />;
-  if (route.kind === "redesign" && route.assessmentId) return <RedesignStudio assessmentId={route.assessmentId} />;
-  if (route.kind === "design" && route.designId) return <Editor designId={route.designId} />;
-  return <Dashboard />;
+  useEffect(() => {
+    if (!pendingNavigation) return;
+    window.requestAnimationFrame(() => navigationDialogRef.current?.focus());
+  }, [pendingNavigation]);
+
+  const continueNavigation = (destination: string) => {
+    bypassNavigationGuard.current = true;
+    setPendingNavigation(null);
+    setNavigationError(null);
+    navigate(destination);
+  };
+
+  const saveAndLeave = async () => {
+    if (!pendingNavigation || navigationBusy) return;
+    setNavigationBusy(true);
+    setNavigationError(null);
+    try {
+      await useDesignerStore.getState().save();
+      const latest = useDesignerStore.getState();
+      if (!hasUnsavedDesignerChanges(latest)) {
+        continueNavigation(pendingNavigation.destination);
+        return;
+      }
+      if (latest.archiveReview || latest.saveState === "review") {
+        setNavigationError("Review and commit or discard the destructive archive preview before leaving.");
+      } else if (latest.saveState === "conflict") {
+        setNavigationError("Resolve or explicitly discard the protected version conflict before leaving.");
+      } else {
+        setNavigationError(latest.error ?? "The changes could not be saved. Your local draft is still open.");
+      }
+    } catch (cause) {
+      setNavigationError(cause instanceof Error ? cause.message : "The changes could not be saved.");
+    } finally {
+      setNavigationBusy(false);
+    }
+  };
+
+  const handleNavigationDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape" && !navigationBusy) {
+      event.preventDefault();
+      setPendingNavigation(null);
+      setNavigationError(null);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const buttons = [...(navigationDialogRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? [])];
+    if (buttons.length === 0) return;
+    const index = buttons.indexOf(window.document.activeElement as HTMLButtonElement);
+    const nextIndex = event.shiftKey
+      ? index <= 0 ? buttons.length - 1 : index - 1
+      : index < 0 || index === buttons.length - 1 ? 0 : index + 1;
+    event.preventDefault();
+    buttons[nextIndex]?.focus();
+  };
+
+  const content = route.kind === "inspect" && route.designId && route.revisionId
+    ? <InspectView projectId={route.designId} revisionId={route.revisionId} />
+    : route.kind === "administration"
+      ? <Administration />
+      : route.kind === "redesign" && route.assessmentId
+        ? <RedesignStudio assessmentId={route.assessmentId} />
+        : route.kind === "design" && route.designId
+          ? <Editor designId={route.designId} />
+          : <Dashboard />;
+
+  return (
+    <>
+      {content}
+      {pendingNavigation && (
+        <div className="modal-backdrop navigation-warning-backdrop" role="presentation">
+          <section
+            className="navigation-warning-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="navigation-warning-title"
+            aria-describedby="navigation-warning-description"
+            tabIndex={-1}
+            ref={navigationDialogRef}
+            onKeyDown={handleNavigationDialogKeyDown}
+          >
+            <header>
+              <h2 id="navigation-warning-title">Save changes before leaving?</h2>
+              <p id="navigation-warning-description">This project has local changes that are not in immutable history yet.</p>
+            </header>
+            {navigationError && <div className="navigation-warning-error" role="alert">{navigationError}</div>}
+            <div className="navigation-warning-actions">
+              <button className="button button-primary" disabled={navigationBusy} onClick={() => void saveAndLeave()}>{navigationBusy ? "Saving…" : "Save & leave"}</button>
+              <button className="button button-danger" disabled={navigationBusy} onClick={() => continueNavigation(pendingNavigation.destination)}>Discard</button>
+              <button className="button button-secondary" disabled={navigationBusy} onClick={() => { setPendingNavigation(null); setNavigationError(null); }}>Cancel</button>
+            </div>
+          </section>
+        </div>
+      )}
+    </>
+  );
 }
 
 export function App() {

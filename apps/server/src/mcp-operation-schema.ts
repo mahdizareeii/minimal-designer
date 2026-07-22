@@ -94,7 +94,7 @@ function withTemporaryEntityIds(
 }
 
 const publicOperationOptions = DesignOperationSchema.options.filter(
-  (option) => option.shape.type.value !== "insert_component_instance",
+  (option) => !["insert_component_instance", "archive_page"].includes(String(option.shape.type.value)),
 ) as unknown as [
   z.ZodDiscriminatedUnionOption<"type">,
   z.ZodDiscriminatedUnionOption<"type">,

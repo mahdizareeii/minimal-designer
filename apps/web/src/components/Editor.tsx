@@ -35,7 +35,7 @@ import { DEVICE_PRESETS, type DevicePreset } from "../domain";
 import { exactPreviewRenderUrl, exportUrl, portableExportUrl, renderUrl, updateContext } from "../lib/api";
 import { createConflictPatchArtifact } from "../lib/conflict-recovery";
 import { CENTER_WORKSPACE_TABS, type CenterWorkspaceTab } from "../lib/editor-information-architecture";
-import { useDesignerStore } from "../store/designer-store";
+import { hasUnsavedDesignerChanges, useDesignerStore } from "../store/designer-store";
 import { Canvas, PrototypeCanvas } from "./Canvas";
 import { ConflictRecoveryPanel } from "./ConflictRecoveryPanel";
 import { InspectorPanel } from "./InspectorPanel";
@@ -151,12 +151,6 @@ export function Editor({ designId }: { designId: string }) {
   }, [designId]);
 
   useEffect(() => {
-    if (pendingCount === 0 || saving || archiveReview || saveState === "review" || saveState === "error" || saveState === "conflict") return;
-    const timer = window.setTimeout(() => void save(), 950);
-    return () => window.clearTimeout(timer);
-  }, [pendingCount, saving, save, saveState, archiveReview]);
-
-  useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 4200);
     return () => window.clearTimeout(timer);
@@ -199,9 +193,7 @@ export function Editor({ designId }: { designId: string }) {
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       const current = useDesignerStore.getState();
-      if (!current.saving
-        && current.pendingOperations.length === 0
-        && (current.saveState === "saved" || current.saveState === "idle")) return;
+      if (!hasUnsavedDesignerChanges(current)) return;
       event.preventDefault();
       event.returnValue = "";
     };
@@ -350,18 +342,7 @@ export function Editor({ designId }: { designId: string }) {
     }
   };
 
-  const leaveEditor = async () => {
-    const initial = useDesignerStore.getState();
-    if (initial.saving || initial.pendingOperations.length > 0) await initial.save();
-    const latest = useDesignerStore.getState();
-    const unresolved = latest.saving
-      || latest.pendingOperations.length > 0
-      || latest.saveState === "dirty"
-      || latest.saveState === "error"
-      || latest.saveState === "conflict";
-    if (unresolved && !window.confirm("These edits are not saved. Leave the designer and discard the local draft?")) return;
-    navigate("/");
-  };
+  const leaveEditor = () => navigate("/");
 
   if (loading) return <div className="loading-screen"><div><div className="loading-orbit" />Opening structured canvas…</div></div>;
 
@@ -387,16 +368,21 @@ export function Editor({ designId }: { designId: string }) {
       ? <Eye size={12} />
       : saveState === "error" || saveState === "conflict"
         ? <CloudOff size={12} />
-        : <Check size={12} />;
+        : saveState === "dirty"
+          ? <Save size={12} />
+          : <Check size={12} />;
   const page = document.pages.find((item) => item.id === prototypePageId);
   const inlinePrototypePageId = prototypePageId
     ?? activePageId
     ?? document.pages.find((item) => !item.archived)?.id
     ?? null;
+  const archivedPageId = archiveReview?.operations.find((operation) => operation.type === "archive_page")?.page_id ?? null;
   const comparisonBasePageId = archiveReview
-    ? (activePageId && archiveReview.baseDocument.pages.some((item) => item.id === activePageId)
-      ? activePageId
-      : archiveReview.baseDocument.pages.find((item) => !item.archived)?.id ?? null)
+    ? (archivedPageId && archiveReview.baseDocument.pages.some((item) => item.id === archivedPageId)
+      ? archivedPageId
+      : activePageId && archiveReview.baseDocument.pages.some((item) => item.id === activePageId)
+        ? activePageId
+        : archiveReview.baseDocument.pages.find((item) => !item.archived)?.id ?? null)
     : null;
   const comparisonPreviewPageId = archiveReview
     ? (comparisonBasePageId && archiveReview.previewDocument.pages.some((item) => item.id === comparisonBasePageId)
@@ -408,8 +394,8 @@ export function Editor({ designId }: { designId: string }) {
     <div className={`editor-shell ${conflictRecovery ? "has-conflict-recovery" : ""}`}>
       <header className="editor-topbar">
         <div className="editor-topbar-left">
-          <button className="topbar-home" onClick={() => void leaveEditor()} aria-label="Back to projects"><Sparkles size={14} /></button>
-          <div className="document-title"><strong>{document.name}</strong><span className={offline ? "is-offline" : ""}><i />{offline ? "Connection issue" : `Version ${useDesignerStore.getState().baseVersion}`}</span></div>
+          <button className="topbar-home" onClick={leaveEditor} aria-label="Back to projects"><Sparkles size={14} /></button>
+          <div className="document-title"><strong title={document.name}>{document.name}</strong><span className={offline ? "is-offline" : ""}><i /><span>{offline ? "Connection issue" : `Version ${useDesignerStore.getState().baseVersion}`}</span></span></div>
           <button className="icon-button" onClick={() => setSidebarsHidden(!sidebarsHidden)} aria-label="Toggle panels">{sidebarsHidden ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}</button>
         </div>
         <div className="editor-topbar-center">
@@ -435,7 +421,7 @@ export function Editor({ designId }: { designId: string }) {
         </div>
         <div className="editor-topbar-right">
           <div className={`save-status is-${saveState}`}>{saveIcon}{saveState === "saving" ? "Saving" : saveState === "dirty" ? "Unsaved" : saveState === "review" ? "Review archive" : saveState === "error" ? "Retry save" : saveState === "conflict" ? "Conflict" : "Saved"}</div>
-          <button className="tool-button" onClick={() => void save()} disabled={saving || pendingCount === 0 || saveState === "conflict"} title="Save now"><Save size={13} /></button>
+          <button className="button editor-save-button" onClick={() => void save()} disabled={saving || pendingCount === 0 || saveState === "conflict" || saveState === "review"} title="Save now"><Save size={13} /><span>Save / Commit</span></button>
           <button className="tool-button" onClick={() => void performExport("json")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export JSON">{exporting === "json" ? <LoaderCircle size={13} /> : <FileJson size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("png")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export PNG">{exporting === "png" ? <LoaderCircle size={13} /> : <ImageDown size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("bundle")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export portable FormaSpec bundle">{exporting === "bundle" ? <LoaderCircle size={13} /> : <Download size={13} />}</button>

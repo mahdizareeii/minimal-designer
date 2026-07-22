@@ -187,7 +187,6 @@ export function ComponentLibraryPanel() {
 
   const commitPreview = async () => {
     if (!designId || !preview || !preview.canCommit || preview.status !== "ready" || !cleanHead) return;
-    if (!window.confirm("Commit this exact component insertion preview as a new immutable revision?")) return;
     setBusy("commit");
     setError(null);
     const insertedInstanceId = preview.component.instanceId as NodeId;

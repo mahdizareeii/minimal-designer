@@ -32,6 +32,12 @@ const createDesignSchema = z.object({
   idempotencyKey: idempotencyKeySchema,
 }).strict();
 
+const archiveDesignSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: idempotencyKeySchema,
+  confirmationName: z.string().min(1).max(255),
+}).strict();
+
 const previewSchema = z.object({
   baseVersion: z.number().int().positive().optional(),
   basePreviewId: z.string().min(1).optional(),
@@ -309,6 +315,13 @@ export function registerHttpRoutes(
     const { id } = designIdParams.parse(request.params);
     const query = request.query as Record<string, unknown>;
     return revisionResponse(service.getDesign(request.actorId, id, parseInteger(query.version)));
+  });
+
+  app.post("/api/designs/:id/archive", async (request) => {
+    service.authorizeDesignArchive(request.actorId, rawRequestField(request.params, "id"));
+    const { id } = designIdParams.parse(request.params);
+    const input = archiveDesignSchema.parse(request.body);
+    return service.archiveDesign(request.actorId, id, input);
   });
 
   app.post("/api/designs/:id/previews", async (request, reply) => {

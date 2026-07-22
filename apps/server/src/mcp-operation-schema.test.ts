@@ -223,6 +223,13 @@ describe("temporary-ID MCP operation schema", () => {
     }
   });
 
+  it("keeps the editor-only page archive operation out of the generic MCP write contract", () => {
+    const operation = { type: "archive_page", page_id: "page_editor_archive_0001" };
+
+    expect(DesignOperationListSchema.safeParse([operation]).success).toBe(true);
+    expect(McpDesignOperationListSchema.safeParse([operation]).success).toBe(false);
+  });
+
   it("allows only bounded temporary entity IDs and keeps operation IDs permanent", () => {
     const [createPage] = temporaryIdOperations();
     expect(McpDesignOperationListSchema.safeParse([{

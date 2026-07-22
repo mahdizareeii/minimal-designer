@@ -4,7 +4,7 @@ export const DOCUMENT_SCHEMA_VERSION_V2 = 2 as const;
 // These versions are intentionally independent. A renderer or command-engine
 // upgrade must not silently change the meaning of a stored document schema.
 export const DATABASE_SCHEMA_VERSION = 16 as const;
-export const COMMAND_ENGINE_VERSION = "2" as const;
+export const COMMAND_ENGINE_VERSION = "3" as const;
 export const RENDERER_VERSION = "3" as const;
 export const RASTER_NORMALIZER_VERSION = "1" as const;
 export const RENDERER_IPC_PROTOCOL_VERSION = 2 as const;

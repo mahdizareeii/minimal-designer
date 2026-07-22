@@ -1,8 +1,8 @@
-import { createGroupNode, createRectangleNode, createStarterDocument, validateDesignDocument } from "@designer/core";
+import { createDesignPage, createGroupNode, createRectangleNode, createStarterDocument, validateDesignDocument } from "@designer/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { normalizeDocument, resolvedDirection, serializeDocument } from "../domain";
-import { useDesignerStore } from "../store/designer-store";
+import { hasUnsavedDesignerChanges, useDesignerStore } from "../store/designer-store";
 
 describe("canonical web editor contract", () => {
   beforeEach(() => {
@@ -19,6 +19,7 @@ describe("canonical web editor contract", () => {
       error: null,
       saveState: "saved",
       saving: false,
+      archiveReview: null,
       conflictRecovery: null,
     });
   });
@@ -65,6 +66,56 @@ describe("canonical web editor contract", () => {
     expect(operation.root_ids).toHaveLength(1);
     expect(updated.document!.nodes[operation.root_ids[0]!]!.type).toBe("text");
     expect(validateDesignDocument(updated.document!).success).toBe(true);
+  });
+
+  it("queues page deletion as an unsaved archive operation and switches to another active page", () => {
+    const document = useDesignerStore.getState().document!;
+    const firstPage = document.pages[0]!;
+    const secondPage = createDesignPage({ name: "A very long secondary page title for overflow coverage" });
+    document.pages.push(secondPage);
+    useDesignerStore.setState({
+      document,
+      activePageId: firstPage.id,
+      selectedIds: [firstPage.children[0]!],
+      pendingOperations: [],
+      saveState: "saved",
+    });
+
+    useDesignerStore.getState().deletePage(firstPage.id);
+    const updated = useDesignerStore.getState();
+
+    expect(updated.document?.pages).toHaveLength(2);
+    expect(updated.document?.pages.find((page) => page.id === firstPage.id)?.archived).toBe(true);
+    expect(updated.document?.pages.find((page) => page.id === secondPage.id)?.archived).toBe(false);
+    expect(updated.activePageId).toBe(secondPage.id);
+    expect(updated.selectedIds).toEqual([]);
+    expect(updated.pendingOperations).toEqual([{ type: "archive_page", page_id: firstPage.id }]);
+    expect(updated.saveState).toBe("dirty");
+    expect(hasUnsavedDesignerChanges(updated)).toBe(true);
+  });
+
+  it("treats destructive review and failed or pending edits as unsaved until explicitly resolved", () => {
+    expect(hasUnsavedDesignerChanges(useDesignerStore.getState())).toBe(false);
+
+    useDesignerStore.setState({ saveState: "dirty" });
+    expect(hasUnsavedDesignerChanges(useDesignerStore.getState())).toBe(true);
+
+    const document = useDesignerStore.getState().document!;
+    useDesignerStore.setState({
+      saveState: "review",
+      archiveReview: {
+        previewId: "preview_unsaved_archive_01",
+        baseVersion: document.revision,
+        changedNodeIds: [document.pages[0]!.children[0]!],
+        operations: [{ type: "archive_nodes", node_ids: [document.pages[0]!.children[0]!] }],
+        baseDocument: structuredClone(document),
+        previewDocument: structuredClone(document),
+      },
+    });
+    expect(hasUnsavedDesignerChanges(useDesignerStore.getState())).toBe(true);
+
+    useDesignerStore.setState({ archiveReview: null, saveState: "error" });
+    expect(hasUnsavedDesignerChanges(useDesignerStore.getState())).toBe(true);
   });
 
   it("batches fractional multi-node gesture geometry into one undo command", () => {

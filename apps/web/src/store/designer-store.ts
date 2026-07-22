@@ -46,6 +46,7 @@ import type { InspectorPanelTab } from "../lib/editor-information-architecture";
 import { clampCanvasZoom, type ViewportState } from "../lib/viewport-transform";
 import {
   ApiError,
+  archiveDesign as archiveRemoteDesign,
   commitArchivePreview,
   commitRevision,
   createArchivePreview,
@@ -69,13 +70,34 @@ interface CommandBatch {
   redoable: boolean;
 }
 
-interface ArchiveReview {
+export interface ArchiveReview {
   previewId: string;
   baseVersion: number;
   changedNodeIds: string[];
   operations: DesignOperation[];
   baseDocument: DesignDocument;
   previewDocument: DesignDocument;
+}
+
+export type DesignerSaveState = "idle" | "dirty" | "saving" | "saved" | "review" | "error" | "conflict";
+
+export interface UnsavedDesignerChangesState {
+  saving: boolean;
+  pendingOperations: readonly DesignOperation[];
+  saveState: DesignerSaveState;
+  archiveReview: ArchiveReview | null;
+  conflictRecovery?: ConflictRecovery | null;
+}
+
+export function hasUnsavedDesignerChanges(state: UnsavedDesignerChangesState): boolean {
+  return state.saving
+    || state.pendingOperations.length > 0
+    || state.archiveReview !== null
+    || state.conflictRecovery != null
+    || state.saveState === "dirty"
+    || state.saveState === "review"
+    || state.saveState === "error"
+    || state.saveState === "conflict";
 }
 
 interface DesignerState {
@@ -91,8 +113,9 @@ interface DesignerState {
   dashboardLoading: boolean;
   editorLoading: boolean;
   creating: boolean;
+  archivingProjectId: string | null;
   saving: boolean;
-  saveState: "idle" | "dirty" | "saving" | "saved" | "review" | "error" | "conflict";
+  saveState: DesignerSaveState;
   offline: boolean;
   error: string | null;
   notice: string | null;
@@ -109,6 +132,7 @@ interface DesignerState {
   conflictRecoveryDurable: boolean;
   loadProjects: () => Promise<void>;
   createProject: (name: string, preset: DevicePreset) => Promise<string>;
+  archiveProject: (projectId: string, confirmationName: string) => Promise<void>;
   openDesign: (id: string) => Promise<void>;
   closeDesign: () => void;
   setActivePage: (pageId: PageId) => void;
@@ -126,6 +150,7 @@ interface DesignerState {
   addNode: (type: NodeType) => void;
   insertTemplate: (template: "button" | "card" | "stack") => void;
   addPage: () => void;
+  deletePage: (pageId: PageId) => void;
   addFrame: (preset: DevicePreset) => void;
   duplicateSelection: () => void;
   deleteSelection: () => void;
@@ -331,6 +356,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   dashboardLoading: false,
   editorLoading: false,
   creating: false,
+  archivingProjectId: null,
   saving: false,
   saveState: "idle",
   offline: false,
@@ -380,6 +406,50 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         creating: false,
         offline: true,
         error: error instanceof Error ? error.message : "Could not create the design.",
+      });
+      throw error;
+    }
+  },
+
+  archiveProject: async (projectId, confirmationName) => {
+    const current = get();
+    const project = current.projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      const error = new ApiError("The project is no longer available in the active workspace.", {
+        code: "NOT_FOUND",
+        status: 404,
+      });
+      set({ error: error.message });
+      throw error;
+    }
+    if (current.archivingProjectId !== null) {
+      const error = new ApiError("Another project deletion is already in progress.", {
+        code: "ARCHIVE_IN_PROGRESS",
+      });
+      set({ error: error.message });
+      throw error;
+    }
+
+    set({ archivingProjectId: projectId, error: null });
+    try {
+      await archiveRemoteDesign(
+        project.id,
+        project.version,
+        confirmationName,
+        createClientKey("archive-project"),
+      );
+      set((state) => ({
+        projects: state.projects.filter((candidate) => candidate.id !== projectId),
+        archivingProjectId: state.archivingProjectId === projectId ? null : state.archivingProjectId,
+        offline: false,
+        error: null,
+        notice: `Deleted “${project.name}” from the active workspace. Immutable history and assets remain retained.`,
+      }));
+    } catch (error) {
+      set((state) => state.archivingProjectId !== projectId ? {} : {
+        archivingProjectId: null,
+        offline: error instanceof ApiError && error.code === "NETWORK_ERROR",
+        error: error instanceof Error ? error.message : "Could not delete the project.",
       });
       throw error;
     }
@@ -570,6 +640,45 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       selectedIds: [],
     };
   }),
+
+  deletePage: (pageId) => {
+    let nextActivePageId: PageId | null = null;
+    set((state) => {
+      if (!state.document) return state;
+      const activePages = state.document.pages.filter((page) => !page.archived);
+      const pageIndex = activePages.findIndex((page) => page.id === pageId);
+      if (pageIndex === -1) return { error: "The page is no longer available." };
+      if (activePages.length <= 1) return { error: "A design must keep at least one active page." };
+      const fallback = activePages[pageIndex + 1] ?? activePages[pageIndex - 1];
+      const targetPageId = state.activePageId === pageId
+        ? fallback?.id ?? null
+        : state.activePageId ?? fallback?.id ?? null;
+      const next = executeBatch(
+        state,
+        [{ type: "archive_page", page_id: pageId }],
+        [],
+        { trackUndo: false },
+      );
+      if (next.error) return next;
+      nextActivePageId = targetPageId;
+      return {
+        ...next,
+        activePageId: targetPageId,
+        selectedIds: [],
+        notice: "Page archival is queued. Use Save / Commit to create the immutable revision.",
+      };
+    });
+    if (!nextActivePageId) return;
+    syncDeepLink(nextActivePageId);
+    const current = get();
+    if (current.document) {
+      void updateContext({
+        designId: current.document.id,
+        pageId: nextActivePageId,
+        selectedNodeIds: [],
+      }).catch(() => undefined);
+    }
+  },
 
   addFrame: (preset) => set((state) => {
     const document = state.document;
@@ -921,7 +1030,9 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     const designId = state.document.id;
     const baseVersion = state.baseVersion;
     const operations = state.pendingOperations;
-    const destructive = operations.some((operation) => operation.type === "archive_nodes");
+    const destructive = operations.some(
+      (operation) => operation.type === "archive_nodes" || operation.type === "archive_page",
+    );
     set({ saving: true, saveState: "saving", pendingOperations: [] });
 
     const run = async () => {

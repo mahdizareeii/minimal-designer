@@ -18,6 +18,7 @@ import {
   Smartphone,
   Sparkles,
   Tablet,
+  Trash2,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -228,14 +229,141 @@ export function RedesignSetupDialog({
   );
 }
 
+interface DashboardProjectCardProps {
+  project: DesignProjectSummary;
+  thumbnailIndex: number;
+  offline: boolean;
+  archiveDisabled: boolean;
+  onOpen: () => void;
+  onArchive: () => void;
+}
+
+export function DashboardProjectCard({
+  project,
+  thumbnailIndex,
+  offline,
+  archiveDisabled,
+  onOpen,
+  onArchive,
+}: DashboardProjectCardProps) {
+  return (
+    <article className="project-card">
+      <button
+        type="button"
+        className="project-card-open"
+        aria-label={`Open ${project.name}`}
+        onClick={onOpen}
+      >
+        <div className={`project-thumbnail thumbnail-${thumbnailIndex % 4}`}>
+          {!offline && (
+            <img
+              src={project.thumbnailUrl ?? renderUrl(project.id, { maxSize: 520 })}
+              alt=""
+              onError={(event) => { event.currentTarget.style.display = "none"; }}
+            />
+          )}
+          <div className="thumbnail-wireframe" aria-hidden="true">
+            <i /><i /><i /><b /><b />
+          </div>
+          <span className="project-version">v{project.version}</span>
+        </div>
+        <div className="project-card-meta">
+          <div><strong>{project.name}</strong><small><Clock3 size={12} /> Updated {relativeTime(project.updatedAt)}</small></div>
+          <span className="open-project"><ArrowRight size={16} /></span>
+        </div>
+      </button>
+      <button
+        type="button"
+        className="project-archive-action"
+        aria-label={`Delete ${project.name}`}
+        title="Delete project"
+        disabled={archiveDisabled}
+        onClick={onArchive}
+      >
+        <Trash2 size={14} />
+      </button>
+    </article>
+  );
+}
+
+interface ArchiveProjectDialogProps {
+  project: DesignProjectSummary;
+  confirmationName: string;
+  archiving: boolean;
+  error: string | null;
+  onConfirmationNameChange: (value: string) => void;
+  onClose: () => void;
+  onConfirm: () => void;
+}
+
+export function ArchiveProjectDialog({
+  project,
+  confirmationName,
+  archiving,
+  error,
+  onConfirmationNameChange,
+  onClose,
+  onConfirm,
+}: ArchiveProjectDialogProps) {
+  const confirmed = confirmationName === project.name;
+  return (
+    <section className="create-modal archive-project-modal" role="dialog" aria-modal="true" aria-labelledby="archive-project-title" aria-describedby="archive-project-description">
+      <div className="modal-heading">
+        <div>
+          <span className="modal-icon is-danger"><Trash2 size={18} /></span>
+          <div>
+            <h2 id="archive-project-title">Delete project</h2>
+            <p id="archive-project-description">Remove “{project.name}” from the active workspace.</p>
+          </div>
+        </div>
+        <button className="icon-button" type="button" disabled={archiving} onClick={onClose} aria-label="Close"><X size={18} /></button>
+      </div>
+
+      <div className="archive-retention-note">
+        <ShieldCheck size={17} />
+        <div>
+          <strong>Immutable records remain retained</strong>
+          <span>The project disappears from the active workspace, but its revision history and stored assets remain on your server for audit and recovery.</span>
+        </div>
+      </div>
+
+      <label className="field-label" htmlFor="archive-project-confirmation">
+        Type <code>{project.name}</code> to confirm
+        <input
+          id="archive-project-confirmation"
+          className="text-input"
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+          value={confirmationName}
+          disabled={archiving}
+          onChange={(event) => onConfirmationNameChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && confirmed && !archiving) onConfirm();
+          }}
+        />
+      </label>
+      {error && <div className="modal-note is-error" role="alert"><CloudOff size={14} /> {error}</div>}
+      <div className="modal-actions">
+        <button className="button button-secondary" type="button" disabled={archiving} onClick={onClose}>Cancel</button>
+        <button className="button button-danger" type="button" disabled={!confirmed || archiving} onClick={onConfirm}>
+          {archiving ? <><LoaderCircle size={15} className="spin" /> Deleting…</> : <><Trash2 size={15} /> Delete project</>}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export function Dashboard() {
   const projects = useDesignerStore((state) => state.projects);
   const loading = useDesignerStore((state) => state.dashboardLoading);
   const creating = useDesignerStore((state) => state.creating);
+  const archivingProjectId = useDesignerStore((state) => state.archivingProjectId);
   const offline = useDesignerStore((state) => state.offline);
   const error = useDesignerStore((state) => state.error);
   const loadProjects = useDesignerStore((state) => state.loadProjects);
   const createProject = useDesignerStore((state) => state.createProject);
+  const archiveProject = useDesignerStore((state) => state.archiveProject);
   const [query, setQuery] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [redesignOpen, setRedesignOpen] = useState(false);
@@ -249,6 +377,9 @@ export function Dashboard() {
   const [redesignError, setRedesignError] = useState<string | null>(null);
   const [name, setName] = useState("Untitled product flow");
   const [preset, setPreset] = useState<DevicePreset>("web");
+  const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null);
+  const [archiveConfirmationName, setArchiveConfirmationName] = useState("");
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const projectsRef = useRef<HTMLDivElement>(null);
 
@@ -292,6 +423,7 @@ export function Dashboard() {
     const needle = query.trim().toLocaleLowerCase();
     return needle ? projects.filter((project) => project.name.toLocaleLowerCase().includes(needle)) : projects;
   }, [projects, query]);
+  const archiveTarget = projects.find((project) => project.id === archiveTargetId) ?? null;
 
   const submit = async () => {
     const cleanName = name.trim() || "Untitled design";
@@ -301,6 +433,32 @@ export function Dashboard() {
       navigate(`/design/${encodeURIComponent(id)}`);
     } catch {
       // The store surfaces the domain/network error in the modal and dashboard.
+    }
+  };
+
+  const openArchiveDialog = (projectId: string) => {
+    setArchiveTargetId(projectId);
+    setArchiveConfirmationName("");
+    setArchiveError(null);
+  };
+
+  const closeArchiveDialog = () => {
+    if (archivingProjectId !== null) return;
+    setArchiveTargetId(null);
+    setArchiveConfirmationName("");
+    setArchiveError(null);
+  };
+
+  const confirmArchive = async () => {
+    if (!archiveTarget || archiveConfirmationName !== archiveTarget.name || archivingProjectId !== null) return;
+    try {
+      await archiveProject(archiveTarget.id, archiveConfirmationName);
+      if (selectedRedesignProjectId === archiveTarget.id) setSelectedRedesignProjectId(null);
+      setArchiveTargetId(null);
+      setArchiveConfirmationName("");
+      setArchiveError(null);
+    } catch (cause) {
+      setArchiveError(cause instanceof Error ? cause.message : "Could not delete the project.");
     }
   };
 
@@ -402,29 +560,15 @@ export function Dashboard() {
         ) : filtered.length > 0 ? (
           <div className="project-grid">
             {filtered.map((project, index) => (
-              <button
-                className="project-card"
+              <DashboardProjectCard
                 key={project.id}
-                onClick={() => navigate(`/design/${encodeURIComponent(project.id)}`)}
-              >
-                <div className={`project-thumbnail thumbnail-${index % 4}`}>
-                  {!offline && (
-                    <img
-                      src={project.thumbnailUrl ?? renderUrl(project.id, { maxSize: 520 })}
-                      alt=""
-                      onError={(event) => { event.currentTarget.style.display = "none"; }}
-                    />
-                  )}
-                  <div className="thumbnail-wireframe" aria-hidden="true">
-                    <i /><i /><i /><b /><b />
-                  </div>
-                  <span className="project-version">v{project.version}</span>
-                </div>
-                <div className="project-card-meta">
-                  <div><strong>{project.name}</strong><small><Clock3 size={12} /> Updated {relativeTime(project.updatedAt)}</small></div>
-                  <span className="open-project"><ArrowRight size={16} /></span>
-                </div>
-              </button>
+                project={project}
+                thumbnailIndex={index}
+                offline={offline}
+                archiveDisabled={archivingProjectId !== null}
+                onOpen={() => navigate(`/design/${encodeURIComponent(project.id)}`)}
+                onArchive={() => openArchiveDialog(project.id)}
+              />
             ))}
             <button className="project-card new-project-card" onClick={() => setModalOpen(true)}>
               <span><Plus size={22} /></span>
@@ -486,6 +630,22 @@ export function Dashboard() {
               <button className="button button-primary" disabled={creating} onClick={() => void submit()}>{creating ? "Creating…" : "Create design"}<ArrowRight size={16} /></button>
             </div>
           </div>
+        </div>
+      )}
+
+      {archiveTarget && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.currentTarget === event.target) closeArchiveDialog();
+        }}>
+          <ArchiveProjectDialog
+            project={archiveTarget}
+            confirmationName={archiveConfirmationName}
+            archiving={archivingProjectId === archiveTarget.id}
+            error={archiveError}
+            onConfirmationNameChange={(value) => { setArchiveConfirmationName(value); setArchiveError(null); }}
+            onClose={closeArchiveDialog}
+            onConfirm={() => void confirmArchive()}
+          />
         </div>
       )}
 

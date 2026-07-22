@@ -53,7 +53,7 @@ describe("protected non-MCP public route contract", () => {
       const actual = [...application.registeredProtectedNonMcpRoutes].sort();
       const expected = [...PROTECTED_NON_MCP_ROUTE_CONTRACTS.keys()].sort();
       expect(actual).toEqual(expected);
-      expect(actual).toHaveLength(110);
+      expect(actual).toHaveLength(111);
     } finally {
       await application.app.close();
       fs.rmSync(rootDir, { recursive: true, force: true });
@@ -66,9 +66,9 @@ describe("protected non-MCP public route contract", () => {
       familyCounts[contract.family] = (familyCounts[contract.family] ?? 0) + 1;
     }
 
-    expect(PROTECTED_NON_MCP_ROUTE_CONTRACTS.size).toBe(110);
+    expect(PROTECTED_NON_MCP_ROUTE_CONTRACTS.size).toBe(111);
     expect(familyCounts).toEqual({
-      core_design: 22,
+      core_design: 23,
       product_spec_and_agents: 20,
       enterprise_domain: 45,
       portable_and_backup: 16,
@@ -98,7 +98,7 @@ describe("protected non-MCP public route contract", () => {
       authorizationCounts[contract.authorization] = (authorizationCounts[contract.authorization] ?? 0) + 1;
     }
     expect(authorizationCounts).toEqual({
-      authenticated_project: 54,
+      authenticated_project: 55,
       authenticated_organization: 50,
       pairing_nonce: 1,
       self_authorization_context: 1,

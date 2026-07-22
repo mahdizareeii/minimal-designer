@@ -481,6 +481,47 @@ function applyOperation(document: DesignDocument, operation: DesignOperation, co
       }
       return;
     }
+    case "archive_page": {
+      const page = document.pages.find((candidate) => candidate.id === operation.page_id);
+      if (page === undefined || page.archived) {
+        fail("not_found", `Active page not found: ${operation.page_id}`, context);
+      }
+      if (document.pages.filter((candidate) => !candidate.archived).length <= 1) {
+        fail("operation_failed", "A design must keep at least one active page", context);
+      }
+
+      const archived = new Set<NodeId>();
+      for (const rootId of page.children) {
+        const root = document.nodes[rootId];
+        if (root === undefined) continue;
+        archived.add(rootId);
+        for (const descendantId of getDescendantIds(document, rootId, { includeArchived: true })) {
+          archived.add(descendantId);
+        }
+      }
+      page.archived = true;
+      for (const nodeId of archived) {
+        const node = document.nodes[nodeId];
+        if (node !== undefined) node.archived = true;
+      }
+      for (const [linkId, link] of Object.entries(document.prototype_links)) {
+        const targetsArchivedPage =
+          (link.action.type === "navigate" || link.action.type === "open_overlay")
+          && link.action.page_id === page.id;
+        const targetNodeId =
+          link.action.type === "navigate" || link.action.type === "open_overlay"
+            ? link.action.node_id
+            : undefined;
+        if (
+          archived.has(link.source_node_id)
+          || targetsArchivedPage
+          || (targetNodeId !== undefined && archived.has(targetNodeId))
+        ) {
+          delete document.prototype_links[linkId];
+        }
+      }
+      return;
+    }
     case "upsert_token": {
       if (document.tokens[operation.token.id] === undefined) context.created.tokens.push(operation.token.id);
       document.tokens[operation.token.id] = structuredClone(operation.token);

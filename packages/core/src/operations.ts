@@ -146,6 +146,14 @@ export const ArchiveNodesOperationSchema = z
   })
   .strict();
 
+export const ArchivePageOperationSchema = z
+  .object({
+    ...operationIdShape,
+    type: z.literal("archive_page"),
+    page_id: PageIdSchema,
+  })
+  .strict();
+
 export const UpsertTokenOperationSchema = z
   .object({
     ...operationIdShape,
@@ -238,6 +246,7 @@ export const DesignOperationSchema = z.discriminatedUnion("type", [
   UpdateNodeOperationSchema,
   MoveNodeOperationSchema,
   ArchiveNodesOperationSchema,
+  ArchivePageOperationSchema,
   UpsertTokenOperationSchema,
   UpsertAssetOperationSchema,
   InsertTemplateOperationSchema,
@@ -253,6 +262,7 @@ export type CreateTreeOperation = z.infer<typeof CreateTreeOperationSchema>;
 export type UpdateNodeOperation = z.infer<typeof UpdateNodeOperationSchema>;
 export type MoveNodeOperation = z.infer<typeof MoveNodeOperationSchema>;
 export type ArchiveNodesOperation = z.infer<typeof ArchiveNodesOperationSchema>;
+export type ArchivePageOperation = z.infer<typeof ArchivePageOperationSchema>;
 export type UpsertTokenOperation = z.infer<typeof UpsertTokenOperationSchema>;
 export type UpsertAssetOperation = z.infer<typeof UpsertAssetOperationSchema>;
 export type InsertTemplateOperation = z.infer<typeof InsertTemplateOperationSchema>;

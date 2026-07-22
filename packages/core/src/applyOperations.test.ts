@@ -11,6 +11,7 @@ import {
   createSequentialIdFactory,
   createStarterDocument,
   createTextNode,
+  validateDesignDocument,
   type DesignOperation,
 } from "./index.js";
 
@@ -162,6 +163,67 @@ describe("applyOperations", () => {
     expect(result.document.nodes[button.id]?.archived).toBe(true);
     expect(result.document.nodes[labelId]?.archived).toBe(true);
     expect(result.document.prototype_links[linkId]).toBeUndefined();
+  });
+
+  it("soft-archives a page, its descendants, and invalid prototype links while keeping records", () => {
+    const ids = createSequentialIdFactory("archivepage");
+    const document = createStarterDocument({ idFactory: ids });
+    const firstPage = document.pages[0]!;
+    const firstRootId = firstPage.children[0]!;
+    const firstRoot = document.nodes[firstRootId]!;
+    const descendantId = firstRoot.type === "frame" ? firstRoot.children[0]! : undefined;
+    const secondPageId = ids("page");
+    const secondRoot = createFrameNode({ name: "Second root" }, ids);
+    const sourceLinkId = ids("link");
+    const targetLinkId = ids("link");
+
+    const prepared = applyOperations(document, [
+      { type: "create_page", page: { id: secondPageId, name: "Second" } },
+      { type: "create_tree", parent: { page_id: secondPageId }, root_ids: [secondRoot.id], nodes: [secondRoot] },
+      {
+        type: "set_prototype_link",
+        link: {
+          id: sourceLinkId,
+          source_node_id: firstRootId,
+          trigger: { type: "click" },
+          action: { type: "navigate", page_id: secondPageId },
+          metadata: {},
+        },
+      },
+      {
+        type: "set_prototype_link",
+        link: {
+          id: targetLinkId,
+          source_node_id: secondRoot.id,
+          trigger: { type: "click" },
+          action: { type: "navigate", page_id: firstPage.id, node_id: firstRootId },
+          metadata: {},
+        },
+      },
+    ]).document;
+
+    const result = applyOperations(prepared, [{ type: "archive_page", page_id: firstPage.id }]);
+    const archivedPage = result.document.pages.find((page) => page.id === firstPage.id);
+
+    expect(archivedPage).toMatchObject({ id: firstPage.id, archived: true, children: [firstRootId] });
+    expect(result.document.nodes[firstRootId]).toMatchObject({ id: firstRootId, archived: true });
+    if (descendantId) expect(result.document.nodes[descendantId]).toMatchObject({ id: descendantId, archived: true });
+    expect(result.document.pages.find((page) => page.id === secondPageId)?.archived).toBe(false);
+    expect(result.document.nodes[secondRoot.id]?.archived).toBe(false);
+    expect(result.document.prototype_links[sourceLinkId]).toBeUndefined();
+    expect(result.document.prototype_links[targetLinkId]).toBeUndefined();
+    expect(validateDesignDocument(result.document).success).toBe(true);
+  });
+
+  it("refuses to archive the final active page or an unavailable page", () => {
+    const document = createStarterDocument({ idFactory: createSequentialIdFactory("archivefinalpage") });
+    const pageId = document.pages[0]!.id;
+
+    expect(() => applyOperations(document, [{ type: "archive_page", page_id: pageId }]))
+      .toThrowError(expect.objectContaining({ code: "operation_failed" }));
+    expect(() => applyOperations(document, [{ type: "archive_page", page_id: "page_missing_archive_01" }]))
+      .toThrowError(expect.objectContaining({ code: "not_found" }));
+    expect(document.pages[0]?.archived).toBe(false);
   });
 
   it("upserts tokens and assets and reports their created ids", () => {

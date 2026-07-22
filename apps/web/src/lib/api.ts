@@ -175,6 +175,47 @@ export async function createDesign(
   return normalizeDocument(result);
 }
 
+export interface ArchivedProjectResult {
+  id: string;
+  name: string;
+  version: number;
+  revisionId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string;
+}
+
+export async function archiveDesign(
+  id: string,
+  expectedVersion: number,
+  confirmationName: string,
+  idempotencyKey: string,
+): Promise<ArchivedProjectResult> {
+  const result = requiredExactRecord(
+    await request<unknown>(`/designs/${encodeURIComponent(id)}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion, idempotencyKey, confirmationName }),
+    }),
+    ["id", "name", "version", "revisionId", "createdAt", "updatedAt", "archivedAt"],
+    "Project archive response",
+  );
+  const archivedId = requiredOpaqueId(result.id, "Archived project ID");
+  const archivedName = requiredString(result.name, "Archived project name");
+  const archivedVersion = requiredPositiveInteger(result.version, "Archived project version");
+  if (archivedId !== id || archivedName !== confirmationName || archivedVersion !== expectedVersion) {
+    throw new ApiError("Project archive response does not match the requested project.", { code: "INVALID_RESPONSE" });
+  }
+  return {
+    id: archivedId,
+    name: archivedName,
+    version: archivedVersion,
+    revisionId: requiredOpaqueId(result.revisionId, "Archived project revision ID"),
+    createdAt: requiredIsoTimestamp(result.createdAt, "Archived project creation time"),
+    updatedAt: requiredIsoTimestamp(result.updatedAt, "Archived project update time"),
+    archivedAt: requiredIsoTimestamp(result.archivedAt, "Archived project archive time"),
+  };
+}
+
 export async function readDesign(id: string, version?: number): Promise<DesignDocument> {
   const suffix = version === undefined ? "" : `?version=${encodeURIComponent(version)}`;
   return normalizeDocument(await request<unknown>(`/designs/${encodeURIComponent(id)}${suffix}`));
@@ -253,6 +294,15 @@ function requiredExactRecord(value: unknown, keys: readonly string[], label: str
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
   return value;
+}
+
+function requiredIsoTimestamp(value: unknown, label: string): string {
+  const parsed = requiredString(value, label);
+  const timestamp = Date.parse(parsed);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== parsed) {
+    throw new ApiError(`${label} is invalid.`, { code: "INVALID_RESPONSE" });
+  }
+  return parsed;
 }
 
 function requiredNonnegativeInteger(value: unknown, label: string): number {

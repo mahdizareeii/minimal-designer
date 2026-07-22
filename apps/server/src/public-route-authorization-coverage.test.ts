@@ -17,8 +17,8 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 describe("direct protected-route authorization evidence", () => {
   it("keeps the executable covered/remaining count synchronized with the protected route contract", () => {
     expect(DIRECT_AUTHORIZATION_COVERAGE_SUMMARY).toEqual({
-      total: 110,
-      covered: 110,
+      total: 111,
+      covered: 111,
       remaining: 0,
     });
     expect(DIRECT_AUTHORIZATION_ROUTE_KEYS.length).toBe(DIRECT_AUTHORIZATION_ROUTE_EVIDENCE.length);

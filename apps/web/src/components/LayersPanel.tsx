@@ -18,6 +18,7 @@ import {
   Plus,
   Sparkles,
   Square,
+  Trash2,
   Type,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -124,6 +125,7 @@ export function LayersPanel() {
   const setActivePage = useDesignerStore((state) => state.setActivePage);
   const select = useDesignerStore((state) => state.select);
   const addPage = useDesignerStore((state) => state.addPage);
+  const deletePage = useDesignerStore((state) => state.deletePage);
   const addNode = useDesignerStore((state) => state.addNode);
   const insertTemplate = useDesignerStore((state) => state.insertTemplate);
   const [tab, setTab] = useState<LeftPanelTab>("layers");
@@ -161,11 +163,25 @@ export function LayersPanel() {
             {pages.map((item) => {
               const activeChildren = item.children.filter((id) => !document?.nodes[id]?.archived);
               return (
-                <button className={`page-row page-row-detailed ${item.id === page?.id ? "is-active" : ""}`} key={item.id} onClick={() => setActivePage(item.id)}>
-                  <File size={12} />
-                  <span><strong>{item.name}</strong><small>{activeChildren.length} root {activeChildren.length === 1 ? "frame" : "frames"}</small></span>
-                  {item.id === page?.id && <Minus size={9} />}
-                </button>
+                <div className="page-row-shell" key={item.id} data-page-id={item.id}>
+                  <button className={`page-row page-row-detailed ${item.id === page?.id ? "is-active" : ""}`} title={item.name} onClick={() => setActivePage(item.id)}>
+                    <File size={12} />
+                    <span><strong>{item.name}</strong><small>{activeChildren.length} root {activeChildren.length === 1 ? "frame" : "frames"}</small></span>
+                    {item.id === page?.id && <Minus size={9} />}
+                  </button>
+                  <button
+                    className="page-row-delete"
+                    disabled={pages.length <= 1}
+                    aria-label={`Delete page ${item.name}`}
+                    title={pages.length <= 1 ? "A design must keep at least one page" : `Delete ${item.name}`}
+                    onClick={() => {
+                      if (!window.confirm(`Archive page “${item.name}”? Its layers will remain recoverable in immutable history.`)) return;
+                      deletePage(item.id);
+                    }}
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
               );
             })}
           </div>

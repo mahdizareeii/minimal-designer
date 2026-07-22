@@ -13,7 +13,12 @@ import {
   codexTaskLaunchUrl,
   exactPreviewCommitAllowed,
 } from "../components/AgentPreviewReview";
-import { agentPreviewReadFailureDisposition, summarizeCodexConnection } from "../components/ProductBriefPanel";
+import {
+  AgentSubmissionStatus,
+  agentPreviewReadFailureDisposition,
+  productSpecificationRequiresCommit,
+  summarizeCodexConnection,
+} from "../components/ProductBriefPanel";
 import {
   ApiError,
   commitDesignPreview,
@@ -79,6 +84,57 @@ afterEach(() => {
 });
 
 describe("agent before/after review", () => {
+  it("persists a missing version-zero specification before queuing an agent task", () => {
+    const missing = { version: 0, naturalLanguageBrief: "Existing document metadata brief", specification: null };
+    const committed = { version: 1, naturalLanguageBrief: "Saved brief", specification: { goals: [] } };
+
+    expect(productSpecificationRequiresCommit(null, false)).toBe(true);
+    expect(productSpecificationRequiresCommit(missing, false)).toBe(true);
+    expect(productSpecificationRequiresCommit(committed, false)).toBe(false);
+    expect(productSpecificationRequiresCommit(committed, true)).toBe(true);
+  });
+
+  it("renders durable progress, success with direct Codex launch, and fail-visible errors", () => {
+    const progress = renderToStaticMarkup(createElement(AgentSubmissionStatus, {
+      feedback: {
+        phase: "saving_specification",
+        message: "Creating or updating the versioned product specification…",
+        task: null,
+      },
+      onOpenCodex: () => undefined,
+    }));
+    expect(progress).toContain('role="status"');
+    expect(progress).toContain("Submitting to @FormaSpec");
+    expect(progress).toContain("Creating or updating the versioned product specification");
+    expect(progress).not.toContain("Open task in Codex");
+
+    const queuedTask = task({ status: "queued" });
+    const success = renderToStaticMarkup(createElement(AgentSubmissionStatus, {
+      feedback: {
+        phase: "success",
+        message: `Task ${queuedTask.id} is queued.`,
+        task: queuedTask,
+      },
+      onOpenCodex: () => undefined,
+    }));
+    expect(success).toContain('role="status"');
+    expect(success).toContain("Task ready for Codex");
+    expect(success).toContain(queuedTask.id);
+    expect(success).toContain("Open task in Codex");
+
+    const failure = renderToStaticMarkup(createElement(AgentSubmissionStatus, {
+      feedback: {
+        phase: "error",
+        message: "The latest design revision could not be saved.",
+        task: null,
+      },
+      onOpenCodex: () => undefined,
+    }));
+    expect(failure).toContain('role="alert"');
+    expect(failure).toContain("Submission failed");
+    expect(failure).toContain("The latest design revision could not be saved.");
+  });
+
   it("turns connection and task lifecycle state into actionable website guidance", () => {
     const activeConnection = {
       id: "connection_codex_0001",

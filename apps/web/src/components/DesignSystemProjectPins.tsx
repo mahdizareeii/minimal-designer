@@ -190,7 +190,6 @@ export function DesignSystemProjectPins({
 
   const commitPreview = async () => {
     if (!preview || !preview.canCommit) return;
-    if (!window.confirm("Commit this exact design-system release upgrade? The project pin will change atomically after the preview is revalidated.")) return;
     setBusy("commit");
     try {
       const committed = await commitProjectDesignSystemUpgrade({
