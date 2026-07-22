@@ -194,7 +194,7 @@ describe("agent before/after review", () => {
     }));
     expect(markup).toContain("Open task in Codex");
     expect(markup).toContain("Click Open task in Codex below");
-    expect(markup).toContain("Connect or repair Codex");
+    expect(markup).toContain("Connect or repair @FormaSpec");
     expect(markup).toContain("Copy Codex instruction");
   });
 

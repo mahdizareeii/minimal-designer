@@ -318,7 +318,7 @@ export function AgentTaskWorkflowCard({
           <strong>Ready for a design command</strong>
           <span>Submitting creates a durable task. FormaSpec never calls an AI API itself; an authorized Codex connection claims the task through MCP.</span>
           <div>
-            {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect Codex</button>}
+            {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect Codex to @FormaSpec</button>}
             <button className="button button-secondary" onClick={onOpenPlanning}>Open PM interview</button>
           </div>
         </div>
@@ -371,7 +371,7 @@ export function AgentTaskWorkflowCard({
           {!preview && (
             <div className="agent-task-current-actions">
               <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open task in Codex</button>
-              {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect or repair Codex</button>}
+              {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect or repair @FormaSpec</button>}
               <button className="button button-secondary" onClick={onCopyInstruction}><Copy size={12} /> Copy Codex instruction</button>
               <button className="button button-secondary" onClick={onRetry}><RefreshCcw size={12} /> Refresh status</button>
             </div>

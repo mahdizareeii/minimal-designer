@@ -702,6 +702,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-install-command { margin: 12px 14px 0; min-height: 36px; padding: 5px 6px 5px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid #303746; border-radius: 8px; background: #0e1218; }
 .agent-install-command code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; color: #aaa3ee; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .pairing-link { margin: 7px 14px 0; padding: 7px 9px; display: flex; align-items: center; gap: 7px; border-radius: 7px; background: #1a2030; color: #929ac3; font-size: 8px; }
+.pairing-link > span { min-width: 0; flex: 1; }
+.pairing-link > .button { flex: 0 0 auto; min-height: 30px; padding: 0 10px; text-decoration: none; white-space: nowrap; }
 .backup-recovery-note, .safe-import-boundary { margin: 12px 14px 0; padding: 10px 11px; display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 9px; border: 1px solid #334a55; border-radius: 8px; background: #111e25; color: #7fc6b0; }
 .backup-recovery-note > svg, .safe-import-boundary > svg { margin-top: 1px; }
 .backup-recovery-note strong, .backup-recovery-note span, .safe-import-boundary strong, .safe-import-boundary span { display: block; }

@@ -76,12 +76,24 @@ export function managedBackupRestoreCommand(backupId: string): string {
   return `pnpm formaspecctl backup restore --backup-id ${backupId} --yes`;
 }
 
-export function codexPairingCommand(challenge: AgentPairingChallenge): string {
+function assertSafePairingChallenge(challenge: AgentPairingChallenge): void {
   if (!/^fspair_[A-Za-z0-9_-]{43}$/.test(challenge.nonce)
     || !/^connection_[a-f0-9]{32}$/.test(challenge.connection.id)) {
     throw new Error("The Codex pairing challenge is not safe to place in a command.");
   }
+}
+
+export function codexPairingCommand(challenge: AgentPairingChallenge): string {
+  assertSafePairingChallenge(challenge);
   return `./designer --yes agent connect codex --pairing-nonce ${challenge.nonce} --connection-id ${challenge.connection.id}`;
+}
+
+export function codexPairingLink(challenge: AgentPairingChallenge): string {
+  assertSafePairingChallenge(challenge);
+  const url = new URL("formaspec://connect-agent");
+  url.searchParams.set("connection", challenge.connection.id);
+  url.searchParams.set("nonce", challenge.nonce);
+  return url.toString();
 }
 
 export function agentConnectionDisplayName(connection: Pick<AgentConnectionRecord, "adapter" | "displayName">): string {
@@ -109,14 +121,6 @@ export function groupAgentConnections(connections: readonly AgentConnectionRecor
     current: ordered.filter((connection) => connection.status !== "expired" && connection.status !== "revoked"),
     history: ordered.filter((connection) => connection.status === "expired" || connection.status === "revoked"),
   };
-}
-
-function openPairingChallenge(challenge: AgentPairingChallenge): string {
-  const url = new URL("formaspec://connect-agent");
-  url.searchParams.set("connection", challenge.connection.id);
-  url.searchParams.set("nonce", challenge.nonce);
-  window.location.href = url.toString();
-  return url.toString();
 }
 
 export function Administration() {
@@ -200,8 +204,8 @@ export function Administration() {
     await run("connect-codex", async () => {
       const challenge = await createCodexConnection();
       setPairingCommand(codexPairingCommand(challenge));
-      setPairingLink(openPairingChallenge(challenge));
-      setNotice("The one-time Codex pairing request was opened. If no handler opens, use the installer command shown below.");
+      setPairingLink(codexPairingLink(challenge));
+      setNotice("The one-time FormaSpec pairing request is ready. Click Finish FormaSpec connection below; if the protocol handler is unavailable, use the installer command.");
       await refresh();
     });
   };
@@ -221,8 +225,8 @@ export function Administration() {
           {connection.status !== "revoked" && <button className="icon-button" title="Reconnect" disabled={busy !== null} onClick={() => void run(`reconnect-${connection.id}`, async () => {
             const challenge = await reconnectAgentConnection(connection.id);
             setPairingCommand(codexPairingCommand(challenge));
-            setPairingLink(openPairingChallenge(challenge));
-            setNotice("A new one-time FormaSpec pairing request was opened.");
+            setPairingLink(codexPairingLink(challenge));
+            setNotice("A new one-time FormaSpec pairing request is ready. Click Finish FormaSpec connection.");
             await refresh();
           })}><RefreshCcw size={14} /></button>}
           {connection.status !== "revoked" && <button className="icon-button is-danger" title="Revoke immediately" disabled={busy !== null} onClick={() => {
@@ -327,13 +331,13 @@ export function Administration() {
           {canAdministerOrganization !== false && <section className="administration-card">
             <div className="administration-card-heading">
               <div><span><Bot size={18} /></span><div><h2>Agent Connections</h2><p>Scoped, expiring, revocable machine identities.</p></div></div>
-              <button className="button button-primary" disabled={busy !== null} onClick={() => void connectCodex()}>{busy === "connect-codex" ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />} Connect Codex</button>
+              <button className="button button-primary" disabled={busy !== null} onClick={() => void connectCodex()}>{busy === "connect-codex" ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />} Connect Codex to FormaSpec</button>
             </div>
             {pairingCommand ? <div className="agent-install-command">
               <code>{pairingCommand}</code>
               <button className="icon-button" title="Copy one-time pairing command" aria-label="Copy one-time Codex pairing command" onClick={() => void copyText(pairingCommand).then(() => setNotice("One-time Codex pairing command copied."))}><Copy size={14} /></button>
-            </div> : <div className="pairing-link"><KeyRound size={13} /><span>Choose Connect Codex to issue the short-lived pairing command required by authenticated FormaSpec.</span></div>}
-            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>One-time pairing link issued. The fallback command above expires with it and contains no bearer grant.</span></div>}
+            </div> : <div className="pairing-link"><KeyRound size={13} /><span>Choose Connect Codex to FormaSpec to issue the short-lived pairing command required by authenticated FormaSpec.</span></div>}
+            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>Pairing is ready. Use this direct click so the browser can open the installed FormaSpec handler; the fallback command expires with it and contains no bearer grant.</span><a className="button button-primary" href={pairingLink}>Finish FormaSpec connection</a></div>}
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading agent connections…</div> : connections.length === 0 ? (
                 <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@FormaSpec](plugin://formaspec@formaspec).</span></div>

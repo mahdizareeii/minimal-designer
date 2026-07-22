@@ -7,6 +7,7 @@ import {
   Administration,
   agentConnectionDisplayName,
   codexPairingCommand,
+  codexPairingLink,
   groupAgentConnections,
   managedBackupRestoreCommand,
 } from "../components/Administration";
@@ -51,6 +52,11 @@ describe("FormaSpec browser usability", () => {
     expect(codexPairingCommand(challenge)).toBe(
       `./designer --yes agent connect codex --pairing-nonce ${nonce} --connection-id ${connectionId}`,
     );
+    const pairingLink = new URL(codexPairingLink(challenge));
+    expect(pairingLink.protocol).toBe("formaspec:");
+    expect(pairingLink.hostname).toBe("connect-agent");
+    expect(Object.fromEntries(pairingLink.searchParams)).toEqual({ connection: connectionId, nonce });
+    expect(codexPairingLink(challenge)).not.toMatch(/bearer|token/i);
     expect(() => codexPairingCommand({ ...challenge, nonce: "fspair_short" })).toThrow(/not safe/i);
     expect(() => codexPairingCommand({
       ...challenge,
