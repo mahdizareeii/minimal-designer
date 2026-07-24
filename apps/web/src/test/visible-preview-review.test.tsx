@@ -68,6 +68,15 @@ describe("visible exact preview review", () => {
     });
   });
 
+  it("keeps the exact review route available as safe committed-head agent context", () => {
+    const reviewSource = readFileSync(new URL("../components/PreviewReviewPage.tsx", import.meta.url), "utf8");
+
+    expect(reviewSource).toContain("committedReviewProjectContext");
+    expect(reviewSource).toContain("useProjectContextPresence(committedHeadContext)");
+    expect(reviewSource).toContain('data-testid="preview-project-context-presence"');
+    expect(reviewSource).toContain("state.headDocument");
+  });
+
   it("rejects a task that silently switches projects or previews", () => {
     const task = reviewTask("document_review_0001", "preview_review_0001");
     expect(() => validatePreviewReviewTarget("document_review_0001", "preview_review_0001", task)).not.toThrow();

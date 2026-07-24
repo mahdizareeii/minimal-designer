@@ -61,7 +61,6 @@ import {
   readDesign,
   restoreRevision as restoreRemoteRevision,
   subscribeToEvents,
-  updateContext,
   uploadAsset,
   type DuplicateConflictDraftResult,
 } from "../lib/api";
@@ -549,11 +548,6 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
           ? { notice: `Recovered ${conflictRecovery.operations.length} protected local operation${conflictRecovery.operations.length === 1 ? "" : "s"}.` }
           : {}),
       });
-      void updateContext({
-        designId: document.id,
-        ...(activePageId ? { pageId: activePageId } : {}),
-        selectedNodeIds: selectedIds,
-      }).catch(() => undefined);
     } catch (error) {
       set({
         document: null,
@@ -587,8 +581,6 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
   setActivePage: (activePageId) => {
     set({ activePageId, selectedIds: [] });
     syncDeepLink(activePageId);
-    const document = get().document;
-    if (document) void updateContext({ designId: document.id, pageId: activePageId, selectedNodeIds: [] }).catch(() => undefined);
   },
 
   select: (ids, additive = false) => {
@@ -601,11 +593,6 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     const selectedIds = canonicalizeNodeSelection(document, requested, activePageId);
     set({ selectedIds });
     syncDeepLink(activePageId, selectedIds[0]);
-    void updateContext({
-      designId: document.id,
-      ...(activePageId ? { pageId: activePageId } : {}),
-      selectedNodeIds: selectedIds,
-    }).catch(() => undefined);
   },
 
   setZoom: (zoom) => set({ zoom: clampCanvasZoom(zoom) }),
@@ -726,16 +713,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         notice: "Page archival is queued. Use Save / Commit to create the immutable revision.",
       };
     });
-    if (!nextActivePageId) return;
-    syncDeepLink(nextActivePageId);
-    const current = get();
-    if (current.document) {
-      void updateContext({
-        designId: current.document.id,
-        pageId: nextActivePageId,
-        selectedNodeIds: [],
-      }).catch(() => undefined);
-    }
+    if (nextActivePageId) syncDeepLink(nextActivePageId);
   },
 
   addFrame: (preset) => set((state) => {
@@ -1436,7 +1414,6 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
           ? "This project was deleted elsewhere. Download the protected local recovery before leaving."
           : "This project was deleted elsewhere and removed from the active workspace.",
       });
-      void updateContext({ designId: null, selectedNodeIds: [] }).catch(() => undefined);
       return;
     }
     if (!event.version) return;
@@ -1459,11 +1436,6 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         notice: "The canvas was refreshed with a new Codex revision.",
       });
       syncDeepLink(activePageId, selectedIds[0]);
-      void updateContext({
-        designId: document.id,
-        ...(activePageId ? { pageId: activePageId } : {}),
-        selectedNodeIds: selectedIds,
-      }).catch(() => undefined);
     }).catch(() => undefined);
   }),
 }));

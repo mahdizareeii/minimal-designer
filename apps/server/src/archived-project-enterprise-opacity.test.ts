@@ -129,4 +129,54 @@ describe("archived project enterprise opacity", () => {
 
     expect(enterprise.listAgentTasks("local", { limit: 1 }).map((task) => task.id)).toEqual([retainedTask.id]);
   });
+
+  it("filters stale archived editor leases before resolving workspace context", () => {
+    const { database, designer } = fixture();
+    const active = designer.createDesign("local", {
+      name: "Active editor context",
+      preset: "web",
+      idempotencyKey: "archived-context-active-design-0001",
+    });
+    const archived = designer.createDesign("local", {
+      name: "Archived editor context",
+      preset: "phone",
+      idempotencyKey: "archived-context-hidden-design-0001",
+    });
+    designer.archiveDesign("local", archived.design.id, {
+      expectedVersion: archived.design.version,
+      idempotencyKey: "archived-context-delete-0001",
+      confirmationName: archived.design.name,
+    });
+    const now = new Date().toISOString();
+    database.sqlite.prepare(
+      `INSERT INTO contexts (actor_id, design_id, page_id, selection_json, updated_at, organization_id)
+       VALUES (?, ?, ?, ?, ?, 'organization_legacy')`,
+    ).run(
+      "stale_active_editor_context",
+      active.design.id,
+      active.document.pages[0]!.id,
+      JSON.stringify([active.document.pages[0]!.children[0]!]),
+      now,
+    );
+    database.sqlite.prepare(
+      `INSERT INTO contexts (actor_id, design_id, page_id, selection_json, updated_at, organization_id)
+       VALUES (?, ?, ?, ?, ?, 'organization_legacy')`,
+    ).run(
+      "stale_archived_editor_context",
+      archived.design.id,
+      archived.document.pages[0]!.id,
+      JSON.stringify([archived.document.pages[0]!.children[0]!]),
+      now,
+    );
+
+    const context = designer.getContext("local", { workspaceFallback: true });
+    expect(context).toMatchObject({
+      designId: active.design.id,
+      pageId: active.document.pages[0]!.id,
+      selection: [active.document.pages[0]!.children[0]!],
+      contextSource: "workspace",
+    });
+    expect(JSON.stringify(context)).not.toContain(archived.design.id);
+    expect(JSON.stringify(context)).not.toContain(archived.document.pages[0]!.id);
+  });
 });

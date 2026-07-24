@@ -31,8 +31,19 @@ afterEach(async () => {
   })));
 });
 
-async function startUpstream(handler: http.RequestListener): Promise<{ url: string }> {
-  const server = http.createServer(handler);
+async function startUpstream(
+  handler: http.RequestListener,
+  dataStoreId = `store_${"a".repeat(32)}`,
+  readinessStatus = 200,
+): Promise<{ url: string }> {
+  const server = http.createServer((request, response) => {
+    if (request.url === "/health/ready" && request.method === "GET") {
+      response.writeHead(readinessStatus, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: readinessStatus >= 200 && readinessStatus < 300, dataStoreId }));
+      return;
+    }
+    handler(request, response);
+  });
   upstreams.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -90,6 +101,11 @@ describe("FormaSpec local bridge", () => {
 
     const issued = await fetch(`${bridge.url}/pairing-nonces`, { method: "POST" }).then((response) => response.json()) as { nonce: string };
     const health = await fetch(`${bridge.url}/health`).then((response) => response.json()) as Record<string, unknown>;
+    expect(health).toMatchObject({
+      upstreamOrigin: new URL(upstream.url).origin,
+      upstreamReady: true,
+      dataStoreId: `store_${"a".repeat(32)}`,
+    });
     expect(JSON.stringify(health)).not.toContain(issued.nonce);
     expect(pairingStore.publicState()).toEqual({ pendingCount: 1 });
 
@@ -134,6 +150,63 @@ describe("FormaSpec local bridge", () => {
     expect(observedHeaders.cookie).toBeUndefined();
     expect(observedHeaders["mcp-protocol-version"]).toBe("2025-06-18");
     expect(response.headers.get("mcp-session-id")).toBe("session-1");
+  });
+
+  it("pins the exact data store and proves bridge instance ownership before exposing credentials", async () => {
+    let upstreamMcpRequests = 0;
+    let credentialReads = 0;
+    const upstream = await startUpstream((_request, response) => {
+      upstreamMcpRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" }).end('{"jsonrpc":"2.0","result":{}}');
+    }, `store_${"b".repeat(32)}`);
+    const instanceId = "bridge-instance-pin-0001";
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId,
+      expectedDataStoreId: `store_${"a".repeat(32)}`,
+      credentialProvider: {
+        headers: async () => {
+          credentialReads += 1;
+          return { authorization: "Bearer fsg_must-not-be-read" };
+        },
+      },
+    });
+    bridges.push(bridge);
+
+    const health = await fetch(`${bridge.url}/health`).then((response) => response.json()) as Record<string, unknown>;
+    expect(health).toMatchObject({
+      upstreamReady: false,
+      dataStoreId: `store_${"b".repeat(32)}`,
+      expectedDataStoreId: `store_${"a".repeat(32)}`,
+      identityMatches: false,
+    });
+    const rejectedIdentity = await fetch(`${bridge.url}/_control/identity`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "wrong-instance" }),
+    });
+    expect(rejectedIdentity.status).toBe(403);
+    const identity = await fetch(`${bridge.url}/_control/identity`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId }),
+    }).then((response) => response.json()) as Record<string, unknown>;
+    expect(identity).toMatchObject({
+      owned: true,
+      expectedDataStoreId: `store_${"a".repeat(32)}`,
+      dataStoreId: `store_${"b".repeat(32)}`,
+      identityMatches: false,
+    });
+    const proxied = await fetch(`${bridge.url}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"jsonrpc":"2.0","id":1,"method":"initialize"}',
+    });
+    expect(proxied.status).toBe(409);
+    expect(await proxied.json()).toEqual({ error: "UPSTREAM_DATA_STORE_MISMATCH" });
+    expect(credentialReads).toBe(0);
+    expect(upstreamMcpRequests).toBe(0);
   });
 
   it("fails closed without a stored scoped grant even when the caller supplies Authorization", async () => {
@@ -287,6 +360,8 @@ describe("FormaSpec local bridge", () => {
       checks: ["initialize", "tools/list"],
       serverName: "formaspec",
       essentialTools: essentialTools.map(({ name }) => name),
+      upstreamOrigin: new URL(upstream.url).origin,
+      dataStoreId: `store_${"a".repeat(32)}`,
     });
 
     const reused = await fetch(`${bridge.url}/_control/authorize-agent`, {
@@ -350,6 +425,65 @@ describe("FormaSpec local bridge", () => {
     expect((await verify()).status).toBe(502);
     mode = "missing-tools";
     expect((await verify()).status).toBe(502);
+  });
+
+  it("reports and rejects an upstream that cannot prove its stable data-store identity", async () => {
+    const upstream = await startUpstream((request, response) => {
+      if (respondToValidMcpProbe(request, response)) return;
+      response.writeHead(404).end();
+    }, "invalid-store-id");
+    const credentialStore = new MemoryCredentialStore();
+    await credentialStore.write("fsg_missing-runtime-identity");
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "runtime-identity-bridge",
+      credentialStore,
+    });
+    bridges.push(bridge);
+
+    await expect(fetch(`${bridge.url}/health`).then((response) => response.json())).resolves.toMatchObject({
+      upstreamOrigin: new URL(upstream.url).origin,
+      upstreamReady: false,
+      dataStoreId: null,
+    });
+    const verification = await fetch(`${bridge.url}/_control/verify-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "runtime-identity-bridge" }),
+    });
+    expect(verification.status).toBe(502);
+    expect(await verification.json()).toEqual({ error: "UPSTREAM_IDENTITY_UNAVAILABLE" });
+  });
+
+  it("retains a valid upstream data-store identity while readiness returns maintenance 503", async () => {
+    const dataStoreId = `store_${"b".repeat(32)}`;
+    const upstream = await startUpstream((request, response) => {
+      if (respondToValidMcpProbe(request, response)) return;
+      response.writeHead(404).end();
+    }, dataStoreId, 503);
+    const credentialStore = new MemoryCredentialStore();
+    await credentialStore.write("fsg_maintenance-runtime-identity");
+    const bridge = await startBridgeServer({
+      port: 0,
+      upstreamMcpUrl: upstream.url,
+      instanceId: "maintenance-runtime-bridge",
+      credentialStore,
+    });
+    bridges.push(bridge);
+
+    await expect(fetch(`${bridge.url}/health`).then((response) => response.json())).resolves.toMatchObject({
+      upstreamOrigin: new URL(upstream.url).origin,
+      upstreamReady: false,
+      dataStoreId,
+    });
+    const verification = await fetch(`${bridge.url}/_control/verify-agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: "maintenance-runtime-bridge" }),
+    });
+    expect(verification.status).toBe(502);
+    expect(await verification.json()).toEqual({ error: "UPSTREAM_IDENTITY_UNAVAILABLE" });
   });
 
   it("accepts a bounded enterprise tools list above 64 KiB and rejects one above 1 MiB", async () => {

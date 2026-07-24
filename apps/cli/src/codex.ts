@@ -13,7 +13,7 @@ import { findExecutable, type CommandRunner } from "./process.js";
 const MANAGED_MARKER = ".formaspec-managed.json";
 const MANAGER_ID = "formaspecctl";
 const MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024;
-const FORMASPEC_PLUGIN_VERSION = "0.2.1";
+const FORMASPEC_PLUGIN_VERSION = "0.2.2";
 
 export const FORMASPEC_CODEX_PLUGIN_ID = "formaspec@formaspec";
 export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";

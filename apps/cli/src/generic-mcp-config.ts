@@ -10,6 +10,7 @@ export interface GenericMcpConfiguration {
   displayName: typeof FORMASPEC_MCP_DISPLAY_NAME;
   displayAliases: typeof FORMASPEC_MCP_DISPLAY_ALIASES;
   transport: "streamable_http";
+  connectionMode: "loopback_bridge" | "public_server";
   url: string;
   healthUrl: string;
   jsonSnippet: string;
@@ -37,12 +38,13 @@ function usage(): string {
   return `FormaSpec generic MCP configuration generator
 
 Usage:
-  formaspec-mcp-config [--format all|json|toml] [--url LOOPBACK_MCP_URL]
+  formaspec-mcp-config [--format all|json|toml] [--url MCP_URL]
                        [--snippet-only]
 
 This command prints client-neutral Streamable HTTP snippets and verification
 instructions. It never reads or changes an MCP client's configuration files.
-The endpoint must be a credential-free HTTP loopback URL whose path is /mcp.`;
+The endpoint must be either a credential-free HTTP loopback bridge or a
+credential-free public HTTPS URL whose path is exactly /mcp.`;
 }
 
 function loopbackHostname(hostname: string): boolean {
@@ -58,10 +60,12 @@ export function normalizeGenericMcpUrl(value: string): string {
   try {
     url = new URL(value);
   } catch {
-    throw new Error("MCP URL must be a valid credential-free HTTP loopback URL.");
+    throw new Error("MCP URL must be a valid credential-free loopback HTTP or public HTTPS URL.");
   }
-  if (url.protocol !== "http:" || !loopbackHostname(url.hostname)) {
-    throw new Error("MCP URL must use HTTP on 127.0.0.1, localhost, or ::1.");
+  const loopbackBridge = url.protocol === "http:" && loopbackHostname(url.hostname);
+  const publicServer = url.protocol === "https:" && !loopbackHostname(url.hostname);
+  if (!loopbackBridge && !publicServer) {
+    throw new Error("MCP URL must use HTTP on loopback or HTTPS on a public server host.");
   }
   if (url.pathname !== "/mcp" || url.username || url.password || url.search || url.hash) {
     throw new Error("MCP URL must use the exact /mcp path and contain no credentials, query, or fragment.");
@@ -73,7 +77,9 @@ export function createGenericMcpConfiguration(
   mcpUrl = DEFAULT_FORMASPEC_BRIDGE_MCP_URL,
 ): GenericMcpConfiguration {
   const url = normalizeGenericMcpUrl(mcpUrl);
-  const origin = new URL(url).origin;
+  const parsedUrl = new URL(url);
+  const origin = parsedUrl.origin;
+  const connectionMode = parsedUrl.protocol === "http:" ? "loopback_bridge" : "public_server";
   const jsonSnippet = JSON.stringify({
     mcpServers: {
       [FORMASPEC_MCP_SERVER_ID]: {
@@ -90,18 +96,25 @@ url = ${JSON.stringify(url)}`;
     displayName: FORMASPEC_MCP_DISPLAY_NAME,
     displayAliases: FORMASPEC_MCP_DISPLAY_ALIASES,
     transport: "streamable_http",
+    connectionMode,
     url,
-    healthUrl: `${origin}/health`,
+    healthUrl: connectionMode === "loopback_bridge" ? `${origin}/health` : `${origin}/health/live`,
     jsonSnippet,
     tomlSnippet,
     verificationInstructions: [
-      `Check that the authorized local bridge is healthy: curl --fail --silent --show-error ${origin}/health`,
+      connectionMode === "loopback_bridge"
+        ? `Check that the authorized local bridge is healthy: curl --fail --silent --show-error ${origin}/health`
+        : `Check that the public FormaSpec endpoint is live: curl --fail --silent --show-error ${origin}/health/live`,
       "Copy the appropriate snippet into the client's documented MCP settings manually. FormaSpec does not edit unsupported client files.",
-      "If the client uses different field names, map only the server ID, Streamable HTTP transport, and URL; do not invent authentication fields.",
+      connectionMode === "loopback_bridge"
+        ? "If the client uses different field names, map only the server ID, Streamable HTTP transport, and URL; do not invent authentication fields."
+        : "Authorize the client through FormaSpec Agent Connections using the client's supported OAuth or bearer flow; never paste a grant into this generated snippet.",
       `Run the client's MCP connection test and confirm server '${FORMASPEC_MCP_SERVER_ID}' is available as ${FORMASPEC_MCP_DISPLAY_NAME}.`,
       "Confirm the primary natural-language identity is recognized: 'Use FormaSpec'. The 'Use Minimal UI' alias is compatibility-only for existing prompts.",
       "List MCP resources and confirm formaspec://schema/v1 and formaspec://schema/v2 are readable.",
-      "Keep write-tool approval enabled. Do not add a bearer token or Authorization header; the loopback bridge holds the scoped upstream grant.",
+      connectionMode === "loopback_bridge"
+        ? "Keep write-tool approval enabled. Do not add a bearer token or Authorization header; the loopback bridge holds the scoped upstream grant."
+        : "Keep write-tool approval enabled and store any public-server authorization only in the client's supported secret store.",
     ],
   };
 }
@@ -144,7 +157,7 @@ function parseArguments(rawArguments: readonly string[]): ParsedArguments | "hel
     if (argument === "--url") {
       if (urlSeen) throw new Error("--url may be supplied only once.");
       const value = rawArguments[index + 1];
-      if (value === undefined || value.startsWith("--")) throw new Error("--url requires a loopback MCP URL.");
+      if (value === undefined || value.startsWith("--")) throw new Error("--url requires an MCP URL.");
       url = value;
       urlSeen = true;
       index += 1;

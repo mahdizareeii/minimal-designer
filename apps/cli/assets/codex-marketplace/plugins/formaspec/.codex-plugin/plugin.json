@@ -1,6 +1,6 @@
 {
   "name": "formaspec",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Design, inspect, refine, and hand off structured FormaSpec projects through the local FormaSpec MCP connection.",
   "author": {
     "name": "FormaSpec"

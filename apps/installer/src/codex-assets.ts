@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_MANAGED_ASSET_BYTES = 256 * 1024;
-const MANAGED_PLUGIN_VERSION = "0.2.1";
+const MANAGED_PLUGIN_VERSION = "0.2.2";
 
 export interface ManagedCodexAssetIdentity {
   skillName: string;

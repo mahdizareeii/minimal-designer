@@ -955,6 +955,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .editor-statusbar > div { display: flex; align-items: center; gap: 12px; }
 .editor-statusbar span { display: flex; align-items: center; gap: 5px; }
 .editor-statusbar kbd { padding: 1px 4px; border: 1px solid #292f3b; border-radius: 3px; background: #13171e; font: inherit; }
+.project-context-presence { min-width: 0; padding: 0; border: 0; display: inline-flex; align-items: center; gap: 5px; background: transparent; color: #8b94a2; font: inherit; cursor: pointer; }
+.project-context-presence:hover { color: #c9ced7; }
+.project-context-presence:disabled { cursor: wait; opacity: 1; }
+.project-context-presence.is-synced { color: #69bd95; }
+.project-context-presence.is-syncing, .project-context-presence.is-idle { color: #9d94eb; }
+.project-context-presence.is-standby { color: #c0a463; }
+.project-context-presence.is-error { color: #e58795; }
 .toast { position: fixed; z-index: 120; left: 50%; bottom: 46px; transform: translateX(-50%); max-width: min(460px, calc(100% - 32px)); padding: 9px 13px; border: 1px solid #363d4b; border-radius: 9px; display: flex; align-items: center; gap: 8px; background: rgba(20,24,32,.96); box-shadow: var(--shadow); color: #c8cdd6; font-size: 10px; animation: toast-in .2s ease; }
 .toast svg { flex: 0 0 auto; color: #9f96ff; }
 @keyframes toast-in { from { transform: translate(-50%, 8px); opacity: 0; } }
@@ -1055,6 +1062,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .preview-review-status small { margin-top: 3px; overflow: hidden; color: #7f8896; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
 .preview-review-status.is-completed { border-color: #2d5847; background: #14251e; color: #76c69f; }
 .preview-review-status.is-cancelled, .preview-review-status.is-failed, .preview-review-status.is-expired { border-color: #653640; background: #28181e; color: #e58896; }
+.preview-context-presence { width: 100%; padding: 9px 10px; border: 1px solid #2d5847; border-radius: 8px; justify-content: flex-start; background: #14251e; text-align: left; }
+.preview-context-presence.is-syncing, .preview-context-presence.is-idle { border-color: #3a3658; background: #1c1a2b; }
+.preview-context-presence.is-standby { border-color: #5d5030; background: #211d14; }
+.preview-context-presence.is-error { border-color: #653640; background: #28181e; }
+.preview-context-presence > svg { flex: 0 0 auto; }
+.preview-context-presence > span { min-width: 0; display: block; }
+.preview-context-presence strong, .preview-context-presence small { display: block; }
+.preview-context-presence strong { font-size: 11px; }
+.preview-context-presence small { margin-top: 3px; overflow: hidden; color: #7f8896; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
 .preview-review-exact dl { margin: 0; display: grid; gap: 1px; overflow: hidden; border: 1px solid #29313c; border-radius: 8px; background: #29313c; }
 .preview-review-exact dl > div { min-width: 0; padding: 7px 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #141a22; }
 .preview-review-exact dt { color: #727c8b; font-size: 10px; }

@@ -12,7 +12,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { navigate } from "../App";
-import { createClientKey, type DesignDocument, type PageId } from "../domain";
+import { createClientKey, type DesignDocument, type NodeId, type PageId } from "../domain";
 import {
   commitDesignPreview,
   designPreviewReviewPath,
@@ -25,6 +25,11 @@ import {
   type AgentTaskRecord,
   type DesignPreviewRecord,
 } from "../lib/api";
+import { canonicalizeNodeSelection } from "../lib/canvas-geometry";
+import {
+  useProjectContextPresence,
+  type ProjectContextPresenceInput,
+} from "../lib/project-context-presence";
 import {
   AgentPreviewPng,
   AgentPreviewReviewDialog,
@@ -36,7 +41,7 @@ interface PreviewReviewState {
   task: AgentTaskRecord;
   preview: DesignPreviewRecord;
   baseDocument: DesignDocument;
-  headVersion: number;
+  headDocument: DesignDocument;
 }
 
 export function validatePreviewReviewTarget(
@@ -51,6 +56,26 @@ export function validatePreviewReviewTarget(
   if (!linkedPreviewId || linkedPreviewId !== previewId) {
     throw new Error("This task does not reference the requested persisted preview.");
   }
+}
+
+export function committedReviewProjectContext(
+  headDocument: DesignDocument,
+  preferredPageIds: readonly PageId[],
+  requestedSelection: readonly string[],
+): ProjectContextPresenceInput {
+  const activePages = headDocument.pages.filter((page) => !page.archived);
+  const pageId = preferredPageIds.find((candidate) => activePages.some((page) => page.id === candidate))
+    ?? activePages[0]?.id
+    ?? null;
+  const requestedNodeIds = requestedSelection.filter((nodeId): nodeId is NodeId => nodeId in headDocument.nodes);
+  const selectedNodeIds = pageId
+    ? canonicalizeNodeSelection(headDocument, requestedNodeIds, pageId)
+    : [];
+  return {
+    designId: headDocument.id,
+    ...(pageId ? { pageId } : {}),
+    selectedNodeIds,
+  };
 }
 
 export function PreviewReviewPage({
@@ -98,7 +123,7 @@ export function PreviewReviewPage({
       if (preview.designId !== designId || preview.previewId !== previewId || preview.rootBaseVersion !== task.baseVersion) {
         throw new Error("The persisted preview does not match this task and immutable base version.");
       }
-      setState({ task, preview, baseDocument, headVersion: headDocument.revision });
+      setState({ task, preview, baseDocument, headDocument });
       stateAvailable.current = true;
       const nextRenderIdentity = `${preview.previewId}:${preview.renderMetadata?.sha256 ?? "missing"}`;
       if (renderIdentity.current !== nextRenderIdentity) {
@@ -158,6 +183,11 @@ export function PreviewReviewPage({
     return fallback === null ? [] : [fallback];
   }, [state]);
   const activePageId = activePageIds[0] ?? null;
+  const committedHeadContext = useMemo(() => state
+    ? committedReviewProjectContext(state.headDocument, activePageIds, state.task.selection)
+    : null, [activePageIds, state]);
+  const headContextSelection = committedHeadContext?.selectedNodeIds ?? [];
+  const projectContextPresence = useProjectContextPresence(committedHeadContext);
 
   const retryRender = () => {
     setRenderStatus("loading");
@@ -171,7 +201,7 @@ export function PreviewReviewPage({
       task.status === "awaiting_approval"
         && preview.status === "ready"
         && preview.canCommit
-        && state.headVersion === preview.rootBaseVersion,
+        && state.headDocument.revision === preview.rootBaseVersion,
       renderStatus,
       Boolean(preview.renderMetadata),
     )) {
@@ -194,7 +224,7 @@ export function PreviewReviewPage({
       setState((current) => current ? {
         ...current,
         task: committed.task ?? current.task,
-        headVersion: committed.version,
+        headDocument: committed.document ?? current.headDocument,
         preview: {
           ...current.preview,
           status: "committed",
@@ -248,7 +278,8 @@ export function PreviewReviewPage({
     );
   }
 
-  const { task, preview, baseDocument, headVersion } = state;
+  const { task, preview, baseDocument, headDocument } = state;
+  const headVersion = headDocument.revision;
   const canDiscard = task.status === "awaiting_approval";
   const canCommit = exactPreviewCommitAllowed(
     canDiscard && preview.status === "ready" && preview.canCommit && headVersion === preview.rootBaseVersion,
@@ -289,6 +320,40 @@ export function PreviewReviewPage({
         </figure>
         <aside>
           <div className={`preview-review-status is-${task.status}`}><Clock3 size={14} /><span><strong>{task.status.replaceAll("_", " ")}</strong><small>Expires {new Date(preview.expiresAt).toLocaleString()}</small></span></div>
+          <button
+            type="button"
+            className={`project-context-presence preview-context-presence is-${projectContextPresence.status}`}
+            disabled={projectContextPresence.status === "syncing"}
+            onClick={projectContextPresence.retry}
+            title={projectContextPresence.error
+              ?? (projectContextPresence.status === "standby"
+                ? "Another FormaSpec tab owns agent context. Click to make this review the active project."
+                : "This exact committed-head project context is available to @FormaSpec while you review the proposal. Click to refresh.")}
+            aria-live="polite"
+            data-testid="preview-project-context-presence"
+          >
+            {projectContextPresence.status === "syncing"
+              ? <LoaderCircle size={13} className="spin" />
+              : projectContextPresence.status === "error"
+                ? <AlertTriangle size={13} />
+                : <CheckCircle2 size={13} />}
+            <span>
+              <strong>{projectContextPresence.status === "error"
+                ? "Agent context failed"
+                : projectContextPresence.status === "standby"
+                  ? "Another FormaSpec tab is active"
+                  : "Active for @FormaSpec"}</strong>
+              <small>{projectContextPresence.status === "error"
+                ? "Retry project context sync"
+                : projectContextPresence.status === "standby"
+                  ? "Click to use this review as agent context"
+                  : projectContextPresence.status === "syncing" || projectContextPresence.status === "idle"
+                    ? "Publishing committed project context…"
+                    : headContextSelection.length > 0
+                      ? `${headContextSelection.length} saved ${headContextSelection.length === 1 ? "layer" : "layers"} available`
+                      : "Committed project and page available"}</small>
+            </span>
+          </button>
           <dl>
             <div><dt>Base</dt><dd>Version {preview.rootBaseVersion}</dd></div>
             <div><dt>Proposed</dt><dd>Version {preview.proposedVersion}</dd></div>

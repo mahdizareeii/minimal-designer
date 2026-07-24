@@ -12,7 +12,13 @@ import {
   isManagedCodexInstall,
   MINIMAL_UI_CODEX_MENTION,
 } from "./codex.js";
-import { captureDockerRuntimeBinding, persistDockerRuntimeBinding } from "./docker-runtime-binding.js";
+import {
+  captureDockerRuntimeBinding,
+  dockerRuntimeBindingPath,
+  persistDockerRuntimeBinding,
+  readDockerRuntimeBinding,
+  sanitizedPublicDockerBinding,
+} from "./docker-runtime-binding.js";
 import {
   abortDockerRestore,
   assertBackupId,
@@ -178,6 +184,32 @@ function recordedRuntimeMode(projectRoot: string, environment: NodeJS.ProcessEnv
   throw new Error(`Recorded FormaSpec runtime mode is unknown: ${value}. Run 'formaspecctl stop' and inspect the configured runtime run directory before restoring.`);
 }
 
+function recordedProxyServerUrl(projectRoot: string, environment: NodeJS.ProcessEnv): string | null {
+  if (recordedRuntimeMode(projectRoot, environment) !== "server") return null;
+  const environmentFile = optionalRuntimeFile(projectRoot, "env-file", environment);
+  const recordedUrl = optionalRuntimeFile(projectRoot, "url", environment);
+  if (!environmentFile || !path.isAbsolute(environmentFile) || !recordedUrl?.startsWith("https://")) return null;
+  try {
+    const stat = fs.lstatSync(environmentFile);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return null;
+    const accessValues = fs.readFileSync(environmentFile, "utf8").split(/\r?\n/).flatMap((line) => {
+      const match = /^DESIGNER_SERVER_ACCESS=(ssh|proxy)$/.exec(line.trim());
+      return match ? [match[1]!] : [];
+    });
+    if (accessValues.length !== 1 || accessValues[0] !== "proxy") return null;
+    const publicUrl = new URL(recordedUrl);
+    if (publicUrl.protocol !== "https:" || publicUrl.username || publicUrl.password
+      || publicUrl.pathname !== "/" || publicUrl.search || publicUrl.hash) return null;
+    return publicUrl.origin;
+  } catch {
+    return null;
+  }
+}
+
+function proxyServerBridgeMessage(publicUrl: string): string {
+  return `FormaSpec proxy-server mode uses the public MCP endpoint at ${publicUrl}/mcp; the workstation loopback bridge is intentionally disabled. Connect Codex from Agent Connections or generate an explicit public client configuration.`;
+}
+
 function runtimeHealthTarget(
   projectRoot: string,
   environment: NodeJS.ProcessEnv,
@@ -203,16 +235,12 @@ async function verifyHealthEndpoint(
   origin: string,
   pathname: "/health/ready" | "/health/render",
   hostHeader?: string,
-): Promise<void> {
+): Promise<{ dataStoreId: string | null; ready: boolean; status: number }> {
   const response = await fetch(`${origin}${pathname}`, {
     headers: { accept: "application/json", ...(hostHeader === undefined ? {} : { host: hostHeader }) },
     redirect: "error",
     signal: AbortSignal.timeout(5_000),
   });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`HTTP ${response.status}`);
-  }
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > 65_536) {
     await response.body?.cancel();
@@ -220,8 +248,44 @@ async function verifyHealthEndpoint(
   }
   const text = await response.text();
   if (Buffer.byteLength(text, "utf8") > 65_536) throw new Error("response was too large");
-  const body = JSON.parse(text) as { ok?: unknown };
-  if (body === null || typeof body !== "object" || body.ok !== true) throw new Error("response did not report ok=true");
+  const body = JSON.parse(text) as { ok?: unknown; dataStoreId?: unknown };
+  if (body === null || typeof body !== "object") throw new Error("response was not a JSON object");
+  if (pathname === "/health/ready") {
+    if (typeof body.dataStoreId !== "string" || !/^store_[a-f0-9]{32}$/.test(body.dataStoreId)) {
+      throw new Error("response did not report a valid dataStoreId");
+    }
+    return {
+      dataStoreId: body.dataStoreId,
+      ready: response.ok && body.ok === true,
+      status: response.status,
+    };
+  }
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (body.ok !== true) throw new Error("response did not report ok=true");
+  return { dataStoreId: null, ready: true, status: response.status };
+}
+
+async function concurrentDockerDataStore(
+  projectRoot: string,
+  primaryOrigin: string,
+  primaryDataStoreId: string | null,
+): Promise<{ origin: string; dataStoreId: string } | null> {
+  if (primaryDataStoreId === null) return null;
+  const bindingPath = dockerRuntimeBindingPath(projectRoot);
+  if (!fs.existsSync(bindingPath)) return null;
+  const docker = sanitizedPublicDockerBinding(readDockerRuntimeBinding(projectRoot));
+  if (docker.origin === primaryOrigin) return null;
+  try {
+    const identity = await verifyHealthEndpoint(
+      docker.origin,
+      "/health/ready",
+      docker.healthHostHeader || undefined,
+    );
+    if (identity.dataStoreId === null || identity.dataStoreId === primaryDataStoreId) return null;
+    return { origin: docker.origin, dataStoreId: identity.dataStoreId };
+  } catch {
+    return null;
+  }
 }
 
 function managedPidIsAlive(projectRoot: string, environment: NodeJS.ProcessEnv): boolean {
@@ -459,29 +523,75 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (arguments_.length > 0) throw new Error(`Unexpected doctor option: ${arguments_[0]}`);
       const exitCode = await delegate(["doctor", target, ...(strict === undefined ? [] : [strict])]);
       let runtimeUnavailable = false;
+      let runtimeReady = false;
+      let runtimeDataStoreId: string | null = null;
       const healthTarget = runtimeHealthTarget(projectRoot(), environment);
       for (const [pathname, label] of [
         ["/health/ready", "Server readiness"],
         ["/health/render", "Renderer health"],
       ] as const) {
         try {
-          await verifyHealthEndpoint(healthTarget.origin, pathname, healthTarget.hostHeader);
-          io.stdout(`${label}: verified (${healthTarget.origin}${pathname})`);
+          const health = await verifyHealthEndpoint(healthTarget.origin, pathname, healthTarget.hostHeader);
+          if (pathname === "/health/ready") {
+            runtimeDataStoreId = health.dataStoreId;
+            runtimeReady = health.ready;
+          }
+          if (health.ready) {
+            io.stdout(`${label}: verified (${healthTarget.origin}${pathname})`);
+          } else {
+            runtimeUnavailable = true;
+            io.stdout(`${label}: unavailable (HTTP ${health.status}; retained data-store identity ${health.dataStoreId})`);
+          }
         } catch (error) {
           runtimeUnavailable = true;
           io.stdout(`${label}: unavailable (${error instanceof Error ? error.message : String(error)})`);
         }
       }
+      const competingDocker = await concurrentDockerDataStore(
+        projectRoot(),
+        healthTarget.origin,
+        runtimeDataStoreId,
+      );
+      if (competingDocker !== null) {
+        io.stdout(`Multiple active FormaSpec data stores: the recorded UI/API is ${healthTarget.origin} (${runtimeDataStoreId}), while the known Docker runtime identifies itself at ${competingDocker.origin} (${competingDocker.dataStoreId}). Stop the unintended runtime before using Codex.`);
+        return 1;
+      }
       const codex = findExecutable("codex", environment);
       io.stdout(codex === null ? "Codex: not detected" : `Codex: detected at ${codex}`);
+      const proxyServerUrl = recordedProxyServerUrl(projectRoot(), environment);
+      if (proxyServerUrl !== null) {
+        io.stdout(proxyServerBridgeMessage(proxyServerUrl));
+        return exitCode === 0 && !runtimeUnavailable ? 0 : 1;
+      }
       const bridgeStatus = await bridge().status();
       io.stdout(`Local bridge: ${bridgeStatus.running ? "running" : "stopped"} (${bridgeStatus.url})`);
       if (!bridgeStatus.running) {
-        io.stdout("Codex MCP authorization: not checked because the bridge is stopped. Run './designer start local', then rerun doctor.");
+        const recordedMode = recordedRuntimeMode(projectRoot(), environment);
+        const recoveryMode = recordedMode === "docker" || recordedMode === "server"
+          ? recordedMode
+          : target === "docker" || target === "server"
+            ? target
+            : "local";
+        io.stdout(`Codex MCP authorization: not checked because the bridge is stopped. Run './designer start ${recoveryMode}', then rerun doctor.`);
+        return 1;
+      }
+      io.stdout(`Bridge upstream: ${bridgeStatus.upstreamOrigin ?? "unavailable"}; data store: ${bridgeStatus.dataStoreId ?? "unavailable"}`);
+      if (bridgeStatus.upstreamOrigin !== healthTarget.origin
+        || runtimeDataStoreId === null
+        || bridgeStatus.dataStoreId !== runtimeDataStoreId) {
+        io.stdout(`Codex runtime mismatch: the UI/API is ${healthTarget.origin} (${runtimeDataStoreId ?? "unknown data store"}), but the bridge targets ${bridgeStatus.upstreamOrigin ?? "an unavailable upstream"} (${bridgeStatus.dataStoreId ?? "unknown data store"}). Run './designer restart' or start the intended mode again to realign Codex.`);
+        return 1;
+      }
+      if (!runtimeReady || !bridgeStatus.upstreamReady) {
+        io.stdout(`Codex runtime identity is aligned at ${healthTarget.origin} (${runtimeDataStoreId}), but the UI/API or bridge upstream is temporarily not ready. Keep this mode running and retry doctor after maintenance or renderer recovery.`);
         return 1;
       }
       try {
         const verification = await bridge().verifyAgent();
+        if (verification.upstreamOrigin !== healthTarget.origin || verification.dataStoreId !== runtimeDataStoreId) {
+          io.stdout("Codex MCP authorization: unavailable (the verified MCP upstream changed during diagnostics; restart FormaSpec and retry)");
+          return 1;
+        }
         io.stdout(`Codex MCP authorization: verified as ${verification.serverName} (${verification.checks.join(" + ")}; ${verification.essentialTools.length} essential tools)`);
       } catch (error) {
         io.stdout(`Codex MCP authorization: unavailable (${error instanceof Error ? error.message : String(error)})`);
@@ -493,8 +603,52 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
     if (command === "status") {
       if (arguments_.length > 0) throw new Error(`Unexpected status option: ${arguments_[0]}`);
       const exitCode = await delegate(["status"]);
+      const healthTarget = runtimeHealthTarget(projectRoot(), environment);
+      let runtimeDataStoreId: string | null = null;
+      let runtimeReady = false;
+      try {
+        const health = await verifyHealthEndpoint(
+          healthTarget.origin,
+          "/health/ready",
+          healthTarget.hostHeader,
+        );
+        runtimeDataStoreId = health.dataStoreId;
+        runtimeReady = health.ready;
+        io.stdout(health.ready
+          ? `FormaSpec UI/API is ready at ${healthTarget.origin} (data store ${runtimeDataStoreId}).`
+          : `FormaSpec UI/API identity is available at ${healthTarget.origin} (data store ${runtimeDataStoreId}), but readiness returned HTTP ${health.status}.`);
+      } catch (error) {
+        io.stdout(`FormaSpec UI/API identity is unavailable at ${healthTarget.origin} (${error instanceof Error ? error.message : String(error)}).`);
+      }
+      const competingDocker = await concurrentDockerDataStore(
+        projectRoot(),
+        healthTarget.origin,
+        runtimeDataStoreId,
+      );
+      if (competingDocker !== null) {
+        io.stdout(`FormaSpec status: multiple active data stores. Recorded UI/API ${healthTarget.origin} uses ${runtimeDataStoreId}; Docker ${competingDocker.origin} uses ${competingDocker.dataStoreId}. Stop the unintended runtime.`);
+        return 1;
+      }
+      const proxyServerUrl = recordedProxyServerUrl(projectRoot(), environment);
+      if (proxyServerUrl !== null) {
+        io.stdout(proxyServerBridgeMessage(proxyServerUrl));
+        return runtimeReady ? exitCode : 1;
+      }
       const bridgeStatus = await bridge().status();
       io.stdout(`FormaSpec bridge is ${bridgeStatus.running ? "running" : "stopped"} at ${bridgeStatus.url}.`);
+      if (bridgeStatus.running) {
+        io.stdout(`FormaSpec bridge upstream is ${bridgeStatus.upstreamOrigin ?? "unavailable"} (data store ${bridgeStatus.dataStoreId ?? "unavailable"}).`);
+      }
+      if (bridgeStatus.running && (bridgeStatus.upstreamOrigin !== healthTarget.origin
+        || runtimeDataStoreId === null
+        || bridgeStatus.dataStoreId !== runtimeDataStoreId)) {
+        io.stdout("FormaSpec status: runtime mismatch. Start the intended runtime again or run './designer restart' before using Codex.");
+        return 1;
+      }
+      if (bridgeStatus.running && (!runtimeReady || !bridgeStatus.upstreamReady)) {
+        io.stdout("FormaSpec status: UI/API and bridge data-store identity match, but the runtime is temporarily not ready.");
+        return 1;
+      }
       return exitCode;
     }
 
@@ -503,6 +657,11 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       const exitCode = await delegate([...(assumeYes ? ["--yes"] : []), "start", ...startArguments]);
       if (exitCode !== 0) return exitCode;
       if (startArguments[0] === "docker" || startArguments[0] === "server") await recordDockerBinding();
+      const proxyServerUrl = recordedProxyServerUrl(projectRoot(), environment);
+      if (proxyServerUrl !== null) {
+        io.stdout(proxyServerBridgeMessage(proxyServerUrl));
+        return 0;
+      }
       const bridgeStatus = await bridge().ensureStarted();
       io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
       await offerCodexConnection();
@@ -521,6 +680,11 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       const exitCode = await delegate(["restart"]);
       if (exitCode !== 0) return exitCode;
       if (["docker", "server"].includes(recordedRuntimeMode(projectRoot(), environment) ?? "")) await recordDockerBinding();
+      const proxyServerUrl = recordedProxyServerUrl(projectRoot(), environment);
+      if (proxyServerUrl !== null) {
+        io.stdout(proxyServerBridgeMessage(proxyServerUrl));
+        return 0;
+      }
       const bridgeStatus = await bridge().ensureStarted();
       io.stdout(`FormaSpec bridge is ready at ${bridgeStatus.url}.`);
       await offerCodexConnection();
@@ -1147,10 +1311,11 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       const agentCommand = arguments_.shift();
       if (agentCommand === "config" && arguments_.shift() === "generic") {
         const hasExplicitUrl = arguments_.some((argument) => argument === "--url" || argument.startsWith("--url="));
-        const status = await bridge().status();
+        const proxyServerUrl = recordedProxyServerUrl(projectRoot(), environment);
+        const status = proxyServerUrl === null ? await bridge().status() : null;
         return runGenericMcpConfigCli([
           ...arguments_,
-          ...(hasExplicitUrl ? [] : ["--url", `${status.url}/mcp`]),
+          ...(hasExplicitUrl ? [] : ["--url", proxyServerUrl === null ? `${status!.url}/mcp` : `${proxyServerUrl}/mcp`]),
         ], io);
       }
       if (agentCommand !== "connect" || arguments_.shift() !== "codex") {
@@ -1178,6 +1343,10 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       }
       if (connectionId !== undefined && pairingNonce === undefined) {
         throw new Error("--connection-id may be used only with --pairing-nonce.");
+      }
+      const proxyServerUrl = recordedProxyServerUrl(projectRoot(), environment);
+      if (proxyServerUrl !== null) {
+        throw new Error(proxyServerBridgeMessage(proxyServerUrl));
       }
       const result = await connectCodex({
         environment,

@@ -282,11 +282,18 @@ export function createSystemCredentialStore(
   options: {
     platform?: NodeJS.Platform;
     commandRunner?: CredentialCommandRunner;
+    dataStoreId?: string;
   } = {},
 ): CredentialStore {
   const platform = options.platform ?? process.platform;
   const commandRunner = options.commandRunner ?? run;
-  const account = `upstream-${createHash("sha256").update(upstreamMcpUrl).digest("hex").slice(0, 24)}`;
+  if (options.dataStoreId !== undefined && !/^store_[a-f0-9]{32}$/.test(options.dataStoreId)) {
+    throw new Error("The FormaSpec data-store identity is invalid.");
+  }
+  const credentialIdentity = options.dataStoreId === undefined
+    ? upstreamMcpUrl
+    : `${upstreamMcpUrl}\0${options.dataStoreId}`;
+  const account = `upstream-${createHash("sha256").update(credentialIdentity).digest("hex").slice(0, 24)}`;
   if (platform === "darwin") {
     const security = fs.existsSync("/usr/bin/security") ? "/usr/bin/security" : null;
     const expect = fs.existsSync("/usr/bin/expect") ? "/usr/bin/expect" : null;

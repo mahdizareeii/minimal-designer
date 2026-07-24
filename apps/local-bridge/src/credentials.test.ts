@@ -77,4 +77,50 @@ describe("system credential storage", () => {
     await expect(store.write("secret")).rejects.toThrow(/PowerShell\/DPAPI/);
     await expect(store.read()).resolves.toBeNull();
   });
+
+  it("scopes persisted grants to the exact upstream data store", async () => {
+    const root = await temporaryRoot();
+    const bin = path.join(root, "bin");
+    const credentialDirectory = path.join(root, "credentials");
+    await fs.promises.mkdir(bin, { recursive: true });
+    await fs.promises.writeFile(path.join(bin, "powershell.exe"), "test executable");
+    const runner: CredentialCommandRunner = async (_executable, args, options = {}) => {
+      const script = args.at(-1) ?? "";
+      const input = options.input ?? "";
+      if (script.includes("::Protect")) {
+        return { exitCode: 0, stdout: Buffer.from(`dpapi:${input}`, "utf8").toString("base64"), stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: Buffer.from(input.trim(), "base64").toString("utf8").slice("dpapi:".length),
+        stderr: "",
+      };
+    };
+    const environment = { PATH: bin, FORMASPEC_CREDENTIALS_DIR: credentialDirectory };
+    const first = createSystemCredentialStore("http://127.0.0.1:4310/mcp", environment, {
+      platform: "win32",
+      commandRunner: runner,
+      dataStoreId: `store_${"a".repeat(32)}`,
+    });
+    const second = createSystemCredentialStore("http://127.0.0.1:4310/mcp", environment, {
+      platform: "win32",
+      commandRunner: runner,
+      dataStoreId: `store_${"b".repeat(32)}`,
+    });
+
+    await first.write("scoped-upstream-grant-00000001");
+    await expect(first.read()).resolves.toBe("scoped-upstream-grant-00000001");
+    await expect(second.read()).resolves.toBeNull();
+    await second.write("scoped-upstream-grant-00000002");
+    await expect(second.read()).resolves.toBe("scoped-upstream-grant-00000002");
+    await expect(first.read()).resolves.toBe("scoped-upstream-grant-00000001");
+    expect(await fs.promises.readdir(credentialDirectory)).toHaveLength(2);
+  });
+
+  it("rejects malformed data-store identities before opening a credential store", () => {
+    expect(() => createSystemCredentialStore("http://127.0.0.1:4310/mcp", {}, {
+      platform: "linux",
+      dataStoreId: "store_not-valid",
+    })).toThrow(/data-store identity/);
+  });
 });

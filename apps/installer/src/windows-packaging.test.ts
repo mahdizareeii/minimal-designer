@@ -146,7 +146,7 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
     name: "formaspec",
-    version: "0.2.1",
+    version: "0.2.2",
     interface: { displayName: "FormaSpec" },
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", [
@@ -168,7 +168,7 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
   );
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/.codex-plugin/plugin.json", `${JSON.stringify({
     name: "minimal-ui",
-    version: "0.2.1",
+    version: "0.2.2",
     interface: { displayName: "Minimal UI" },
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/skills/minimal-ui/SKILL.md", [

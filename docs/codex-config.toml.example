@@ -1,5 +1,5 @@
 # Preferred setup: let FormaSpec start and authorize the loopback bridge,
-# configure Codex, install the primary managed FormaSpec version-0.2.1
+# configure Codex, install the primary managed FormaSpec version-0.2.2
 # skills/plugins plus the Minimal UI legacy compatibility assets, and verify
 # the connection automatically:
 #

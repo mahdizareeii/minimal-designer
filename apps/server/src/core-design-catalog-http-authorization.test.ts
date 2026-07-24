@@ -450,6 +450,20 @@ describe("core design catalog HTTP authorization", () => {
     expect(restrictedContext).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
     for (const value of restrictedHidden) expect(JSON.stringify(restrictedContext.toJSON())).not.toContain(value);
 
+    application.database.sqlite.prepare("DELETE FROM contexts WHERE actor_id = ?")
+      .run(fixture.restrictedGrant.actorId);
+    const clientContextActorId = `__client_context__${createHash("sha256")
+      .update(fixture.restrictedGrant.actorId).digest("hex").slice(0, 32)}_${createHash("sha256")
+      .update("restricted_context_lease_0001").digest("hex").slice(0, 32)}`;
+    putContext(application, clientContextActorId, "organization_legacy", fixture.denied);
+    const restrictedLeaseContext = captureDomainError(
+      () => application.service.getContext(fixture.restrictedGrant.actorId),
+    );
+    expect(restrictedLeaseContext).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+    for (const value of restrictedHidden) {
+      expect(JSON.stringify(restrictedLeaseContext.toJSON())).not.toContain(value);
+    }
+
     putContext(application, VIEWER_ACTOR, "organization_legacy", fixture.foreign);
     const foreignContext = await application.app.inject({
       method: "GET",

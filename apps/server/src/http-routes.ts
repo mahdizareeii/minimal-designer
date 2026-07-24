@@ -76,6 +76,7 @@ const contextSchema = z.object({
   designId: z.string().min(1).nullable().optional(),
   pageId: z.string().min(1).nullable().optional(),
   selectedNodeIds: z.array(z.string().min(1)).max(500).default([]),
+  clientContextId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/).optional(),
 }).strict();
 
 function revisionResponse(result: RevisionResult): Record<string, unknown> {
@@ -237,7 +238,11 @@ export function registerHttpRoutes(
   const { config, service, enterprise, events, renderer, backups, maintenance, operations } = dependencies;
 
   app.get("/health", async () => ({ ok: true }));
-  app.get("/health/live", async () => ({ ok: true, service: "formaspec-api" }));
+  app.get("/health/live", async () => ({
+    ok: true,
+    service: "formaspec-api",
+    dataStoreId: service.database.dataStoreId(),
+  }));
   app.get("/ready", async () => ({ ok: true, database: "ready" }));
   app.get("/health/ready", async (_request, reply) => {
     const maintenanceStatus = await maintenance.read();
@@ -248,6 +253,7 @@ export function registerHttpRoutes(
         return reply.code(503).send({
           ok: false,
           status: "maintenance",
+          dataStoreId: service.database.dataStoreId(),
           database: "ready",
           migrations: service.database.schemaVersion(),
           render,
@@ -261,6 +267,7 @@ export function registerHttpRoutes(
       }
       return {
         ok: true,
+        dataStoreId: service.database.dataStoreId(),
         database: "ready",
         migrations: service.database.schemaVersion(),
         render,
@@ -269,6 +276,7 @@ export function registerHttpRoutes(
     } catch {
       return reply.code(503).send({
         ok: false,
+        dataStoreId: service.database.dataStoreId(),
         ...(maintenanceStatus.active ? {
           status: "maintenance",
           maintenance: {
@@ -299,7 +307,10 @@ export function registerHttpRoutes(
 
   app.get("/api/designs", async (request) => {
     service.authorizeDesignList(request.actorId);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(100).optional(), cursor: z.string().optional() }).parse(request.query);
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().max(4_096).optional(),
+    }).parse(request.query);
     return service.listDesigns(request.actorId, query.limit, query.cursor);
   });
 
@@ -707,6 +718,7 @@ export function registerHttpRoutes(
       ...(input.designId !== undefined ? { designId: input.designId } : {}),
       ...(input.pageId !== undefined ? { pageId: input.pageId } : {}),
       selection: input.selectedNodeIds,
+      ...(input.clientContextId !== undefined ? { clientContextId: input.clientContextId } : {}),
     });
   });
 

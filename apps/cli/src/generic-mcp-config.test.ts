@@ -26,6 +26,7 @@ describe("generic MCP client configuration", () => {
       displayName: "FormaSpec",
       displayAliases: ["Minimal UI"],
       transport: "streamable_http",
+      connectionMode: "loopback_bridge",
       url: "http://127.0.0.1:4312/mcp",
       healthUrl: "http://127.0.0.1:4312/health",
     });
@@ -50,9 +51,16 @@ url = "http://127.0.0.1:4312/mcp"`);
     expect(configuration.verificationInstructions.join("\n")).toContain("compatibility-only");
   });
 
-  it("accepts only credential-free exact /mcp URLs on loopback", () => {
+  it("accepts credential-free exact /mcp URLs on loopback HTTP or public HTTPS", () => {
     expect(normalizeGenericMcpUrl("http://localhost:7654/mcp")).toBe("http://localhost:7654/mcp");
     expect(normalizeGenericMcpUrl("http://[::1]:7654/mcp")).toBe("http://[::1]:7654/mcp");
+    expect(normalizeGenericMcpUrl("https://design.company.example/mcp")).toBe("https://design.company.example/mcp");
+    expect(createGenericMcpConfiguration("https://design.company.example/mcp")).toMatchObject({
+      connectionMode: "public_server",
+      healthUrl: "https://design.company.example/health/live",
+    });
+    expect(createGenericMcpConfiguration("https://design.company.example/mcp").verificationInstructions.join("\n"))
+      .toContain("Agent Connections");
     const unsafe = [
       "https://127.0.0.1:4312/mcp",
       "http://192.168.1.5:4312/mcp",

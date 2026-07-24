@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  DocumentIdSchema,
   DesignDocumentV2Schema,
   FORMASPEC_FOUNDATION_RELEASE_ID,
   FORMASPEC_FOUNDATION_SYSTEM_ID,
@@ -28,6 +29,7 @@ import {
   assertProjectAccess,
   assertScope,
   resolveAccess,
+  type AccessContext,
 } from "./authorization.js";
 import type { DesignerDatabase } from "./db/database.js";
 import {
@@ -142,9 +144,111 @@ interface IdempotencyRow {
 
 const MAX_OPERATION_COUNT = 500;
 const MAX_OPERATION_JSON_BYTES = 1_048_576;
+const DESIGN_LIST_CURSOR_PREFIX = "design_cursor_";
 const ACTIVE_CONTEXT_WINDOW_MS = 5 * 60 * 1000;
+const CLIENT_CONTEXT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const CLIENT_CONTEXT_ROW_PREFIX = "__client_context__";
 const V2_MIGRATION_ACTOR_ID = "system_formaspec_v2_migration";
 const RESTORE_DESIGN_SYSTEM_PIN_PRESERVED = "RESTORE_DESIGN_SYSTEM_PIN_PRESERVED";
+
+interface DesignListCursorCore {
+  schemaVersion: 1;
+  accessHash: string;
+  updatedAt: string;
+  id: string;
+}
+
+interface DesignListCursorPayload extends DesignListCursorCore {
+  checksum: string;
+}
+
+type ParsedDesignListCursor =
+  | ({ kind: "opaque" } & DesignListCursorCore)
+  | { kind: "legacy"; updatedAt: string };
+
+function canonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function designListAccessHash(access: AccessContext): string {
+  return hashPayload({
+    organizationId: access.organizationId,
+    principalId: access.principalId,
+    role: access.role,
+    scopes: [...new Set(access.scopes)].sort(),
+    projectIds: [...new Set(access.projectIds)].sort(),
+  });
+}
+
+function createDesignListCursor(row: DesignRow, accessHash: string): string {
+  const core: DesignListCursorCore = {
+    schemaVersion: 1,
+    accessHash,
+    updatedAt: row.updated_at,
+    id: row.id,
+  };
+  const payload: DesignListCursorPayload = {
+    ...core,
+    checksum: hashPayload(core),
+  };
+  return `${DESIGN_LIST_CURSOR_PREFIX}${Buffer.from(canonicalJson(payload), "utf8").toString("base64url")}`;
+}
+
+function parseDesignListCursor(cursor: string, accessHash: string): ParsedDesignListCursor {
+  if (!cursor.startsWith(DESIGN_LIST_CURSOR_PREFIX)) {
+    if (canonicalTimestamp(cursor)) return { kind: "legacy", updatedAt: cursor };
+    throw new DomainError("VALIDATION_FAILED", "Design list cursor is malformed.", 422);
+  }
+  const encoded = cursor.slice(DESIGN_LIST_CURSOR_PREFIX.length);
+  let raw: unknown;
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.length === 0 || bytes.length > 2_048 || bytes.toString("base64url") !== encoded) {
+      throw new Error("non-canonical cursor encoding");
+    }
+    raw = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new DomainError("VALIDATION_FAILED", "Design list cursor is malformed.", 422, { cause: error });
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new DomainError("VALIDATION_FAILED", "Design list cursor payload is invalid.", 422);
+  }
+  const payload = raw as Partial<DesignListCursorPayload>;
+  const keys = Object.keys(payload).sort();
+  const expectedKeys = ["accessHash", "checksum", "id", "schemaVersion", "updatedAt"];
+  if (keys.length !== expectedKeys.length
+    || !keys.every((key, index) => key === expectedKeys[index])
+    || payload.schemaVersion !== 1
+    || typeof payload.accessHash !== "string"
+    || !/^[a-f0-9]{64}$/.test(payload.accessHash)
+    || !canonicalTimestamp(payload.updatedAt)
+    || !DocumentIdSchema.safeParse(payload.id).success
+    || typeof payload.checksum !== "string"
+    || !/^[a-f0-9]{64}$/.test(payload.checksum)) {
+    throw new DomainError("VALIDATION_FAILED", "Design list cursor payload is invalid.", 422);
+  }
+  const core: DesignListCursorCore = {
+    schemaVersion: 1,
+    accessHash: payload.accessHash,
+    updatedAt: payload.updatedAt,
+    id: payload.id!,
+  };
+  const canonicalCursor = `${DESIGN_LIST_CURSOR_PREFIX}${Buffer.from(canonicalJson({
+    ...core,
+    checksum: payload.checksum,
+  }), "utf8").toString("base64url")}`;
+  if (payload.checksum !== hashPayload(core) || canonicalCursor !== cursor) {
+    throw new DomainError("VALIDATION_FAILED", "Design list cursor integrity check failed.", 422);
+  }
+  if (core.accessHash !== accessHash) {
+    throw new DomainError("VERSION_CONFLICT", "Design list authorization changed; restart pagination.", 409, {
+      details: { reason: "cursor_authorization_changed" },
+    });
+  }
+  return { kind: "opaque", ...core };
+}
 
 interface ContextRow {
   actor_id: string;
@@ -157,6 +261,24 @@ interface ContextRow {
 
 function contextRefForActor(actorId: string): string {
   return `context_${createHash("sha256").update(actorId).digest("hex").slice(0, 24)}`;
+}
+
+function clientContextOwnerPrefix(actorId: string): string {
+  const actorHash = createHash("sha256").update(actorId).digest("hex").slice(0, 32);
+  return `${CLIENT_CONTEXT_ROW_PREFIX}${actorHash}_`;
+}
+
+function clientContextRowKey(actorId: string, clientContextId: string): string {
+  const clientHash = createHash("sha256").update(clientContextId).digest("hex").slice(0, 32);
+  return `${clientContextOwnerPrefix(actorId)}${clientHash}`;
+}
+
+function contextRowBelongsToActor(rowActorId: string, actorId: string): boolean {
+  return rowActorId === actorId || rowActorId.startsWith(clientContextOwnerPrefix(actorId));
+}
+
+function inactiveContextResult(): Record<string, unknown> {
+  return { designId: null, pageId: null, selection: [], updatedAt: null };
 }
 
 function designArchiveMetadataKey(designId: string): string {
@@ -344,34 +466,69 @@ export class DesignerService {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "design:read");
     const boundedLimit = Math.max(1, Math.min(limit, 100));
-    const projectClause = access.projectIds.length > 0
-      ? ` AND id IN (${access.projectIds.map(() => "?").join(", ")})`
-      : "";
-    const rows = cursor
-      ? this.database.sqlite.prepare(
-        `SELECT * FROM designs
-         WHERE organization_id = ? AND updated_at < ?${projectClause}
-           AND NOT EXISTS (
-             SELECT 1 FROM system_metadata archive
-             WHERE archive.key = 'design_archive:' || designs.id
-           )
-         ORDER BY updated_at DESC LIMIT ?`,
-      ).all(access.organizationId, cursor, ...access.projectIds, boundedLimit + 1) as DesignRow[]
-      : this.database.sqlite.prepare(
-        `SELECT * FROM designs
-         WHERE organization_id = ?${projectClause}
-           AND NOT EXISTS (
-             SELECT 1 FROM system_metadata archive
-             WHERE archive.key = 'design_archive:' || designs.id
-           )
-         ORDER BY updated_at DESC LIMIT ?`,
-      ).all(access.organizationId, ...access.projectIds, boundedLimit + 1) as DesignRow[];
+    const accessHash = designListAccessHash(access);
+    const parsedCursor = cursor === undefined ? null : parseDesignListCursor(cursor, accessHash);
+    if (parsedCursor?.kind === "opaque") this.assertDesignListCursorAnchor(access, parsedCursor);
+    const conditions = [
+      "organization_id = ?",
+      `NOT EXISTS (
+        SELECT 1 FROM system_metadata archive
+        WHERE archive.key = 'design_archive:' || designs.id
+      )`,
+    ];
+    const parameters: Array<string | number> = [access.organizationId];
+    if (access.projectIds.length > 0) {
+      conditions.push(`id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      parameters.push(...access.projectIds);
+    }
+    if (parsedCursor?.kind === "opaque") {
+      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
+      parameters.push(parsedCursor.updatedAt, parsedCursor.updatedAt, parsedCursor.id);
+    } else if (parsedCursor?.kind === "legacy") {
+      conditions.push("updated_at < ?");
+      parameters.push(parsedCursor.updatedAt);
+    }
+    parameters.push(boundedLimit + 1);
+    const rows = this.database.sqlite.prepare(
+      `SELECT * FROM designs
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY updated_at DESC, id DESC LIMIT ?`,
+    ).all(...parameters) as DesignRow[];
     const hasMore = rows.length > boundedLimit;
     const selected = rows.slice(0, boundedLimit);
     return {
       designs: selected.map(designSummary),
-      nextCursor: hasMore ? selected.at(-1)?.updated_at ?? null : null,
+      nextCursor: hasMore && selected.length > 0
+        ? createDesignListCursor(selected.at(-1)!, accessHash)
+        : null,
     };
+  }
+
+  private assertDesignListCursorAnchor(
+    access: AccessContext,
+    cursor: Extract<ParsedDesignListCursor, { kind: "opaque" }>,
+  ): void {
+    const conditions = [
+      "id = ?",
+      "organization_id = ?",
+      `NOT EXISTS (
+        SELECT 1 FROM system_metadata archive
+        WHERE archive.key = 'design_archive:' || designs.id
+      )`,
+    ];
+    const parameters: string[] = [cursor.id, access.organizationId];
+    if (access.projectIds.length > 0) {
+      conditions.push(`id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      parameters.push(...access.projectIds);
+    }
+    const anchor = this.database.sqlite.prepare(
+      `SELECT id, updated_at FROM designs WHERE ${conditions.join(" AND ")}`,
+    ).get(...parameters) as Pick<DesignRow, "id" | "updated_at"> | undefined;
+    if (!anchor || anchor.updated_at !== cursor.updatedAt) {
+      throw new DomainError("VERSION_CONFLICT", "Design list cursor is stale; restart pagination.", 409, {
+        details: { reason: "cursor_anchor_changed" },
+      });
+    }
   }
 
   authorizeDesignList(actorId: string): void {
@@ -1763,35 +1920,40 @@ export class DesignerService {
   getContext(actorId: string, options: { workspaceFallback?: boolean; contextRef?: string } = {}): Record<string, unknown> {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "design:read");
-    const toResult = (row: ContextRow, contextSource: "actor" | "workspace") => {
-      const head = row.design_id ? this.requireDesign(actorId, row.design_id) : null;
-      return {
-        designId: row.design_id,
-        pageId: row.page_id,
-        selection: JSON.parse(row.selection_json) as unknown,
-        updatedAt: row.updated_at,
-        contextRef: contextRefForActor(row.actor_id),
-        contextSource,
-        ...(head ? { version: head.current_version, revisionId: head.current_revision_id } : {}),
-      };
-    };
-
-    const exact = this.database.sqlite.prepare("SELECT * FROM contexts WHERE actor_id = ? AND organization_id = ?").get(actorId, access.organizationId) as ContextRow | undefined;
-    if (exact && (!options.contextRef || contextRefForActor(exact.actor_id) === options.contextRef)) {
-      return toResult(exact, "actor");
-    }
-    if (!options.workspaceFallback) return { designId: null, pageId: null, selection: [], updatedAt: null };
-
     const activeSince = new Date(Date.now() - ACTIVE_CONTEXT_WINDOW_MS).toISOString();
+    this.database.sqlite.prepare(
+      "DELETE FROM contexts WHERE organization_id = ? AND updated_at < ? AND actor_id GLOB ?",
+    ).run(access.organizationId, activeSince, `${CLIENT_CONTEXT_ROW_PREFIX}*`);
+    const ownedRows = this.database.sqlite.prepare(
+      `SELECT * FROM contexts
+       WHERE organization_id = ? AND design_id IS NOT NULL AND updated_at >= ?
+         AND (actor_id = ? OR actor_id GLOB ?)
+       ORDER BY updated_at DESC, actor_id ASC`,
+    ).all(
+      access.organizationId,
+      activeSince,
+      actorId,
+      `${clientContextOwnerPrefix(actorId)}*`,
+    ) as ContextRow[];
+    for (const row of ownedRows) {
+      this.requireDesign(actorId, row.design_id!);
+    }
     const projectClause = access.projectIds.length > 0
       ? ` AND design_id IN (${access.projectIds.map(() => "?").join(", ")})`
       : "";
-    const rows = this.database.sqlite.prepare(
+    const activeRows = this.database.sqlite.prepare(
       `SELECT * FROM contexts
        WHERE organization_id = ? AND design_id IS NOT NULL AND updated_at >= ? AND actor_id <> '__workspace_context__'
          ${projectClause}
-       ORDER BY updated_at DESC LIMIT 50`,
+         AND NOT EXISTS (
+           SELECT 1 FROM system_metadata archive
+           WHERE archive.key = 'design_archive:' || contexts.design_id
+         )
+       ORDER BY updated_at DESC, actor_id ASC`,
     ).all(access.organizationId, activeSince, ...access.projectIds) as ContextRow[];
+    const rows = options.workspaceFallback
+      ? activeRows
+      : ownedRows;
 
     if (options.contextRef) {
       const selected = rows.find((row) => contextRefForActor(row.actor_id) === options.contextRef);
@@ -1800,7 +1962,11 @@ export class DesignerService {
           details: { contextRef: options.contextRef },
         });
       }
-      return toResult(selected, "workspace");
+      return this.contextResult(
+        actorId,
+        selected,
+        contextRowBelongsToActor(selected.actor_id, actorId) ? "actor" : "workspace",
+      );
     }
 
     const distinct = new Map<string, ContextRow>();
@@ -1809,7 +1975,7 @@ export class DesignerService {
       if (!distinct.has(signature)) distinct.set(signature, row);
     }
     const candidates = [...distinct.values()];
-    if (candidates.length === 0) return { designId: null, pageId: null, selection: [], updatedAt: null };
+    if (candidates.length === 0) return inactiveContextResult();
     if (candidates.length > 1) {
       throw new DomainError("AMBIGUOUS_CONTEXT", "More than one editor context is active; retry with context_ref.", 409, {
         details: {
@@ -1827,7 +1993,29 @@ export class DesignerService {
         },
       });
     }
-    return toResult(candidates[0]!, "workspace");
+    const selected = candidates[0]!;
+    return this.contextResult(
+      actorId,
+      selected,
+      contextRowBelongsToActor(selected.actor_id, actorId) ? "actor" : "workspace",
+    );
+  }
+
+  private contextResult(
+    actorId: string,
+    row: ContextRow,
+    contextSource: "actor" | "workspace",
+  ): Record<string, unknown> {
+    const head = row.design_id ? this.requireDesign(actorId, row.design_id) : null;
+    return {
+      designId: row.design_id,
+      pageId: row.page_id,
+      selection: JSON.parse(row.selection_json) as unknown,
+      updatedAt: row.updated_at,
+      contextRef: contextRefForActor(row.actor_id),
+      contextSource,
+      ...(head ? { version: head.current_version, revisionId: head.current_revision_id } : {}),
+    };
   }
 
   authorizeContextWrite(actorId: string, designId?: string): void {
@@ -1836,9 +2024,22 @@ export class DesignerService {
     if (designId) this.requireDesign(actorId, designId);
   }
 
-  setContext(actorId: string, input: { designId?: string | null; pageId?: string | null; selection?: string[] }): Record<string, unknown> {
+  setContext(actorId: string, input: {
+    designId?: string | null;
+    pageId?: string | null;
+    selection?: string[];
+    clientContextId?: string;
+  }): Record<string, unknown> {
     this.authorizeContextWrite(actorId, input.designId ?? undefined);
     const access = resolveAccess(this.database.sqlite, actorId);
+    if (input.clientContextId !== undefined && !CLIENT_CONTEXT_ID_PATTERN.test(input.clientContextId)) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "clientContextId must be an opaque 8 to 128 character identifier.",
+        422,
+        { details: { field: "clientContextId" } },
+      );
+    }
     if (!input.designId && (input.pageId || (input.selection?.length ?? 0) > 0)) {
       throw new DomainError("VALIDATION_FAILED", "pageId and selection require a designId.", 422);
     }
@@ -1855,18 +2056,43 @@ export class DesignerService {
       }
     }
     const now = new Date().toISOString();
+    const rowActorId = input.clientContextId === undefined
+      ? actorId
+      : clientContextRowKey(actorId, input.clientContextId);
     const transaction = this.database.sqlite.transaction(() => {
-      this.database.sqlite.prepare(
-        `INSERT INTO contexts (actor_id, design_id, page_id, selection_json, updated_at, organization_id)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(actor_id) DO UPDATE SET
-           design_id = excluded.design_id,
-           page_id = excluded.page_id,
-           selection_json = excluded.selection_json,
-           updated_at = excluded.updated_at,
-           organization_id = excluded.organization_id`,
-      ).run(actorId, input.designId ?? null, input.pageId ?? null, JSON.stringify(input.selection ?? []), now, access.organizationId);
-      const value = this.getContext(actorId);
+      if (input.clientContextId !== undefined && !input.designId) {
+        this.database.sqlite.prepare(
+          "DELETE FROM contexts WHERE actor_id = ? AND organization_id = ?",
+        ).run(rowActorId, access.organizationId);
+      } else {
+        this.database.sqlite.prepare(
+          `INSERT INTO contexts (actor_id, design_id, page_id, selection_json, updated_at, organization_id)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(actor_id) DO UPDATE SET
+             design_id = excluded.design_id,
+             page_id = excluded.page_id,
+             selection_json = excluded.selection_json,
+             updated_at = excluded.updated_at,
+             organization_id = excluded.organization_id`,
+        ).run(
+          rowActorId,
+          input.designId ?? null,
+          input.pageId ?? null,
+          JSON.stringify(input.selection ?? []),
+          now,
+          access.organizationId,
+        );
+      }
+      const value = input.designId
+        ? this.contextResult(actorId, {
+          actor_id: rowActorId,
+          design_id: input.designId,
+          page_id: input.pageId ?? null,
+          selection_json: JSON.stringify(input.selection ?? []),
+          updated_at: now,
+          organization_id: access.organizationId,
+        }, "actor")
+        : inactiveContextResult();
       this.enqueueEvent(actorId, "context.updated", value, false, now);
       return value;
     });

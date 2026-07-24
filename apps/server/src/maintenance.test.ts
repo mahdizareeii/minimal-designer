@@ -301,6 +301,7 @@ describe("maintenance HTTP gate", () => {
 
     const live = await application.app.inject({ method: "GET", url: "/health/live" });
     expect(live.statusCode).toBe(200);
+    expect(live.json()).toMatchObject({ dataStoreId: application.database.dataStoreId() });
 
     const render = await application.app.inject({ method: "GET", url: "/health/render" });
     expect([200, 503]).toContain(render.statusCode);
@@ -311,6 +312,7 @@ describe("maintenance HTTP gate", () => {
     expect(fullReady.json()).toMatchObject({
       ok: false,
       status: "maintenance",
+      dataStoreId: application.database.dataStoreId(),
       database: "ready",
       migrations: 16,
       maintenance: { active: true, phase: "restore", operationId: restoreOperationId },

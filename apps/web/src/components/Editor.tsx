@@ -31,9 +31,10 @@ import { useEffect, useRef, useState } from "react";
 
 import { navigate } from "../App";
 import { DEVICE_PRESETS, type DevicePreset } from "../domain";
-import { exportUrl, portableExportUrl, renderUrl, updateContext } from "../lib/api";
+import { exportUrl, portableExportUrl, renderUrl } from "../lib/api";
 import { createConflictPatchArtifact } from "../lib/conflict-recovery";
 import { CENTER_WORKSPACE_TABS, type CenterWorkspaceTab } from "../lib/editor-information-architecture";
+import { useProjectContextPresence } from "../lib/project-context-presence";
 import { hasUnsavedDesignerChanges, saveAllDesignerChanges, useDesignerStore } from "../store/designer-store";
 import { Canvas, PrototypeCanvas } from "./Canvas";
 import { ConflictRecoveryPanel } from "./ConflictRecoveryPanel";
@@ -122,31 +123,23 @@ export function Editor({ designId }: { designId: string }) {
     const disconnect = connectEvents();
     return () => {
       disconnect();
-      void updateContext({ designId: null, selectedNodeIds: [] }).catch(() => undefined);
       closeDesign();
     };
   }, [designId, openDesign, connectEvents, closeDesign]);
 
-  useEffect(() => {
-    const publishContext = () => {
-      if (window.document.visibilityState !== "visible") return;
-      const current = useDesignerStore.getState();
-      if (!current.document || current.document.id !== designId) return;
-      void updateContext({
+  const contextCanSharePageAndSelection = saveState === "saved"
+    && pendingCount === 0
+    && !archiveReview
+    && !conflictRecovery;
+  const projectContextPresence = useProjectContextPresence(
+    document?.id === designId
+      ? {
         designId,
-        ...(current.activePageId ? { pageId: current.activePageId } : {}),
-        selectedNodeIds: current.selectedIds,
-      }).catch(() => undefined);
-    };
-    const timer = window.setInterval(publishContext, 60_000);
-    window.addEventListener("focus", publishContext);
-    window.document.addEventListener("visibilitychange", publishContext);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", publishContext);
-      window.document.removeEventListener("visibilitychange", publishContext);
-    };
-  }, [designId]);
+        ...(contextCanSharePageAndSelection && activePageId ? { pageId: activePageId } : {}),
+        selectedNodeIds: contextCanSharePageAndSelection ? selectedIds : [],
+      }
+      : null,
+  );
 
   useEffect(() => {
     if (!notice) return;
@@ -478,7 +471,38 @@ export function Editor({ designId }: { designId: string }) {
 
       <footer className="editor-statusbar">
         <div><span><MousePointer2 size={9} /> {selectedIds.length ? `${selectedIds.length} selected` : "Ready"}</span><span>Structured DOM canvas</span><span>Schema v{document.schema_version}</span></div>
-        <div><span><kbd>⌘S</kbd> Save</span><span><kbd>⌘Z</kbd> Undo</span><span><Eye size={9} /> Codex context synced</span></div>
+        <div>
+          <span><kbd>⌘S</kbd> Save</span><span><kbd>⌘Z</kbd> Undo</span>
+          <button
+            type="button"
+            className={`project-context-presence is-${projectContextPresence.status}`}
+            disabled={projectContextPresence.status === "syncing"}
+            onClick={projectContextPresence.retry}
+            title={projectContextPresence.error
+              ?? (projectContextPresence.status === "standby"
+                ? "Another FormaSpec tab owns agent context. Click to make this the active tab."
+                : contextCanSharePageAndSelection
+                  ? "The current saved project, page, and selection are available to @FormaSpec. Click to refresh."
+                  : "The saved project is available to @FormaSpec. Save / Commit to share the current page and selection.")}
+            aria-live="polite"
+            data-testid="project-context-presence"
+          >
+            {projectContextPresence.status === "syncing"
+              ? <LoaderCircle size={9} className="spin" />
+              : projectContextPresence.status === "error"
+                ? <CloudOff size={9} />
+                : <Eye size={9} />}
+            {projectContextPresence.status === "error"
+              ? "Agent context failed · Retry"
+              : projectContextPresence.status === "standby"
+                ? "Another FormaSpec tab is active"
+                : projectContextPresence.status === "syncing" || projectContextPresence.status === "idle"
+                  ? "Syncing agent context"
+                  : contextCanSharePageAndSelection
+                    ? "@FormaSpec context synced"
+                    : "Project synced · Save to share selection"}
+          </button>
+        </div>
       </footer>
 
       {notice && <div className="toast"><Sparkles size={13} />{notice}<button className="icon-button" onClick={() => setNotice(null)}><X size={11} /></button></div>}

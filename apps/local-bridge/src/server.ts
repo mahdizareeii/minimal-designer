@@ -7,6 +7,8 @@ import { MemoryCredentialStore, type CredentialStore } from "./credentials.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_MCP_PROBE_RESPONSE_BYTES = 1024 * 1024;
+const MAX_UPSTREAM_HEALTH_RESPONSE_BYTES = 64 * 1024;
+const DATA_STORE_ID_PATTERN = /^store_[a-f0-9]{32}$/;
 const CODEX_REQUESTED_EXPIRY_SECONDS = 2_592_000;
 const CODEX_REQUESTED_SCOPES = [
   "organization_policy:read",
@@ -75,6 +77,7 @@ export interface BridgeServerOptions {
   credentialStore?: CredentialStore;
   pairingStore?: PairingNonceStore;
   instanceId?: string;
+  expectedDataStoreId?: string;
   fetchImplementation?: typeof fetch;
   allowLegacySelfCreate?: boolean;
   controlErrorReporter?: (error: unknown) => void;
@@ -179,6 +182,12 @@ interface StoredGrantAuthorizationContext {
 interface McpGrantProbe {
   serverName: "formaspec";
   essentialTools: string[];
+}
+
+interface UpstreamRuntimeIdentity {
+  origin: string;
+  ready: boolean;
+  dataStoreId: string | null;
 }
 
 class BridgeControlError extends Error {
@@ -313,6 +322,52 @@ async function probeMcpGrant(
   }
 }
 
+async function probeUpstreamRuntimeIdentity(
+  upstream: URL,
+  fetchImplementation: typeof fetch,
+): Promise<UpstreamRuntimeIdentity> {
+  const unavailable = (): UpstreamRuntimeIdentity => ({
+    origin: upstream.origin,
+    ready: false,
+    dataStoreId: null,
+  });
+  try {
+    const response = await fetchImplementation(new URL("/health/ready", upstream.origin), {
+      method: "GET",
+      headers: { accept: "application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(2_000),
+    });
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_HEALTH_RESPONSE_BYTES) {
+      await response.body?.cancel();
+      return unavailable();
+    }
+    const bodyText = await response.text();
+    if (Buffer.byteLength(bodyText, "utf8") > MAX_UPSTREAM_HEALTH_RESPONSE_BYTES) return unavailable();
+    const body = recordValue(JSON.parse(bodyText));
+    const dataStoreId = body?.dataStoreId;
+    if (typeof dataStoreId !== "string" || !DATA_STORE_ID_PATTERN.test(dataStoreId)) {
+      return unavailable();
+    }
+    return {
+      origin: upstream.origin,
+      ready: response.ok && body?.ok === true,
+      dataStoreId,
+    };
+  } catch {
+    return unavailable();
+  }
+}
+
+function upstreamIdentityMatches(
+  identity: UpstreamRuntimeIdentity,
+  expectedDataStoreId: string | undefined,
+): boolean {
+  return identity.dataStoreId !== null
+    && (expectedDataStoreId === undefined || identity.dataStoreId === expectedDataStoreId);
+}
+
 async function readAutomaticCodexConnectionPolicy(
   apiOrigin: URL,
   fetchImplementation: typeof fetch,
@@ -386,9 +441,19 @@ async function proxyMcpRequest(
   upstream: URL,
   credentialProvider: UpstreamCredentialProvider,
   fetchImplementation: typeof fetch,
+  expectedDataStoreId?: string,
 ): Promise<void> {
   if (!methodAllowed(request.method)) {
     sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+  const upstreamIdentity = await probeUpstreamRuntimeIdentity(upstream, fetchImplementation);
+  if (!upstreamIdentity.ready) {
+    sendJson(response, 503, { error: "UPSTREAM_NOT_READY" });
+    return;
+  }
+  if (!upstreamIdentityMatches(upstreamIdentity, expectedDataStoreId)) {
+    sendJson(response, 409, { error: "UPSTREAM_DATA_STORE_MISMATCH" });
     return;
   }
   const headers = new Headers();
@@ -612,6 +677,10 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
   const credentialProvider = options.credentialProvider ?? new StoredUpstreamCredentials(credentialStore);
   const pairingStore = options.pairingStore ?? new PairingNonceStore();
   const instanceId = options.instanceId ?? randomUUID();
+  const expectedDataStoreId = options.expectedDataStoreId;
+  if (expectedDataStoreId !== undefined && !DATA_STORE_ID_PATTERN.test(expectedDataStoreId)) {
+    throw new Error("The expected FormaSpec data-store identity is invalid.");
+  }
   const fetchImplementation = options.fetchImplementation ?? fetch;
   const allowLegacySelfCreate = options.allowLegacySelfCreate === true;
   const serializeAgentAuthorization = createSerialExecutor();
@@ -643,11 +712,18 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
         }
       }
       if (request.method === "GET" && requestUrl.pathname === "/health") {
+        const upstreamIdentity = await probeUpstreamRuntimeIdentity(upstream, fetchImplementation);
+        const identityMatches = upstreamIdentityMatches(upstreamIdentity, expectedDataStoreId);
         sendJson(response, 200, {
           service: "formaspec-local-bridge",
           status: shuttingDown ? "stopping" : "ok",
           buildId,
           upstreamConfigured: true,
+          upstreamOrigin: upstreamIdentity.origin,
+          upstreamReady: upstreamIdentity.ready && identityMatches,
+          dataStoreId: upstreamIdentity.dataStoreId,
+          expectedDataStoreId: expectedDataStoreId ?? null,
+          identityMatches,
           pairing: pairingStore.publicState(),
         });
         return;
@@ -673,6 +749,26 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
         setImmediate(() => server.close());
         return;
       }
+      if (request.method === "POST" && requestUrl.pathname === "/_control/identity") {
+        const body = JSON.parse((await readBody(request, 4096)).toString("utf8")) as { instanceId?: unknown };
+        if (body.instanceId !== instanceId) {
+          sendJson(response, 403, { error: "CONTROL_AUTHORIZATION_FAILED" });
+          return;
+        }
+        const upstreamIdentity = await probeUpstreamRuntimeIdentity(upstream, fetchImplementation);
+        const identityMatches = upstreamIdentityMatches(upstreamIdentity, expectedDataStoreId);
+        sendJson(response, 200, {
+          owned: true,
+          status: shuttingDown ? "stopping" : "ok",
+          buildId,
+          upstreamOrigin: upstreamIdentity.origin,
+          upstreamReady: upstreamIdentity.ready && identityMatches,
+          dataStoreId: upstreamIdentity.dataStoreId,
+          expectedDataStoreId: expectedDataStoreId ?? null,
+          identityMatches,
+        });
+        return;
+      }
       if (request.method === "POST" && requestUrl.pathname === "/_control/authorize-agent") {
         const body = JSON.parse((await readBody(request, 4096)).toString("utf8")) as {
           instanceId?: unknown;
@@ -681,6 +777,13 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
         if (body.instanceId !== instanceId) {
           sendJson(response, 403, { error: "CONTROL_AUTHORIZATION_FAILED" });
           return;
+        }
+        const upstreamIdentity = await probeUpstreamRuntimeIdentity(upstream, fetchImplementation);
+        if (!upstreamIdentity.ready) {
+          throw new BridgeControlError(503, "UPSTREAM_NOT_READY", "The configured FormaSpec runtime is not ready.");
+        }
+        if (!upstreamIdentityMatches(upstreamIdentity, expectedDataStoreId)) {
+          throw new BridgeControlError(409, "UPSTREAM_DATA_STORE_MISMATCH", "The configured FormaSpec data store changed.");
         }
         const pairing = body.pairing === undefined ? undefined : validatePairingTicket(body.pairing);
         const result = await serializeAgentAuthorization(
@@ -714,9 +817,16 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
           sendJson(response, 409, { error: "AGENT_AUTHORIZATION_MISSING" });
           return;
         }
-        const probe = await probeMcpGrant(upstream, token, fetchImplementation);
+        const [probe, upstreamIdentity] = await Promise.all([
+          probeMcpGrant(upstream, token, fetchImplementation),
+          probeUpstreamRuntimeIdentity(upstream, fetchImplementation),
+        ]);
         if (probe === null) {
           sendJson(response, 502, { error: "AGENT_AUTHORIZATION_VERIFICATION_FAILED" });
+          return;
+        }
+        if (!upstreamIdentity.ready || !upstreamIdentityMatches(upstreamIdentity, expectedDataStoreId)) {
+          sendJson(response, 502, { error: "UPSTREAM_IDENTITY_UNAVAILABLE" });
           return;
         }
         sendJson(response, 200, {
@@ -724,11 +834,20 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
           checks: ["initialize", "tools/list"],
           serverName: probe.serverName,
           essentialTools: probe.essentialTools,
+          upstreamOrigin: upstreamIdentity.origin,
+          dataStoreId: upstreamIdentity.dataStoreId,
         });
         return;
       }
       if (requestUrl.pathname === "/mcp") {
-        await proxyMcpRequest(request, response, upstream, credentialProvider, fetchImplementation);
+        await proxyMcpRequest(
+          request,
+          response,
+          upstream,
+          credentialProvider,
+          fetchImplementation,
+          expectedDataStoreId,
+        );
         return;
       }
       sendJson(response, 404, { error: "NOT_FOUND" });

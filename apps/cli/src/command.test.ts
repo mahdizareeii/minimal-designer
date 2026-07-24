@@ -8,10 +8,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BackupVerification } from "./backup.js";
 import { FORMASPEC_ESSENTIAL_MCP_TOOLS, type BridgeController } from "./bridge-lifecycle.js";
 import { runCli, type CliIo } from "./command.js";
+import {
+  persistDockerRuntimeBinding,
+  type DockerComposeBindingLabels,
+  type DockerRuntimeBinding,
+} from "./docker-runtime-binding.js";
 import { CLI_SUPPORTED_DATABASE_VERSION } from "./migrations.js";
 import type { CommandOptions } from "./process.js";
 
 const temporaryDirectories: string[] = [];
+const TEST_DATA_STORE_ID = `store_${"a".repeat(32)}`;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -29,6 +35,9 @@ function fakeBridge(): BridgeController & {
   stops: number;
   authorizations: number;
   running: boolean;
+  upstreamOrigin: string;
+  upstreamReady: boolean;
+  dataStoreId: string;
   verificationError?: Error;
   pairingTickets: Array<{ nonce: string; connectionId?: string } | undefined>;
 } {
@@ -37,11 +46,21 @@ function fakeBridge(): BridgeController & {
     stops: 0,
     authorizations: 0,
     running: false,
+    upstreamOrigin: "http://127.0.0.1:4310",
+    upstreamReady: true,
+    dataStoreId: TEST_DATA_STORE_ID,
     pairingTickets: [],
     async ensureStarted() {
       this.starts += 1;
       this.running = true;
-      return { running: true, url: "http://127.0.0.1:4312", owned: true };
+      return {
+        running: true,
+        url: "http://127.0.0.1:4312",
+        owned: true,
+        upstreamOrigin: this.upstreamOrigin,
+        upstreamReady: this.upstreamReady,
+        dataStoreId: this.dataStoreId,
+      };
     },
     async authorizeAgent(pairing) {
       this.authorizations += 1;
@@ -55,11 +74,41 @@ function fakeBridge(): BridgeController & {
         checks: ["initialize", "tools/list"],
         serverName: "formaspec" as const,
         essentialTools: [...FORMASPEC_ESSENTIAL_MCP_TOOLS],
+        upstreamOrigin: this.upstreamOrigin,
+        dataStoreId: this.dataStoreId,
       };
     },
     async stop() { this.stops += 1; this.running = false; return true; },
-    async status() { return { running: this.running, url: "http://127.0.0.1:4312", owned: this.running }; },
+    async status() {
+      return {
+        running: this.running,
+        url: "http://127.0.0.1:4312",
+        owned: this.running,
+        upstreamOrigin: this.running ? this.upstreamOrigin : null,
+        upstreamReady: this.running && this.upstreamReady,
+        dataStoreId: this.running ? this.dataStoreId : null,
+      };
+    },
   };
+}
+
+function recordProxyServerRuntime(root: string, publicUrl = "https://design.company.example"): void {
+  const runtimeDirectory = path.join(root, ".designer");
+  const runDirectory = path.join(runtimeDirectory, "run");
+  const environmentDirectory = path.join(runtimeDirectory, "env");
+  const environmentFile = path.join(environmentDirectory, "server.env");
+  fs.mkdirSync(runDirectory, { recursive: true });
+  fs.mkdirSync(environmentDirectory, { recursive: true });
+  fs.writeFileSync(environmentFile, [
+    "DESIGNER_SERVER_ACCESS=proxy",
+    "APP_MODE=server",
+    `PUBLIC_BASE_URL=${publicUrl}`,
+    "",
+  ].join("\n"), { mode: 0o600 });
+  fs.writeFileSync(path.join(runDirectory, "mode"), "server\n");
+  fs.writeFileSync(path.join(runDirectory, "api-port"), "7443\n");
+  fs.writeFileSync(path.join(runDirectory, "url"), `${publicUrl}\n`);
+  fs.writeFileSync(path.join(runDirectory, "env-file"), `${environmentFile}\n`);
 }
 
 function backupVerification(migrationVersion = 10): BackupVerification {
@@ -110,6 +159,56 @@ function makeProject(root: string): string {
   return root;
 }
 
+function persistKnownDockerBinding(root: string, port: number): void {
+  const imageId = `sha256:${"c".repeat(64)}`;
+  const labels = <Service extends "designer" | "renderer">(
+    service: Service,
+    configHash: string,
+  ): DockerComposeBindingLabels & { service: Service } => ({
+    project: "minimalappdesigner",
+    service,
+    oneoff: "False",
+    containerNumber: "1",
+    configHash,
+    imageId,
+    workingDirectory: root,
+    configFile: path.join(root, "docker-compose.yml"),
+    composeVersion: "2.35.0",
+  });
+  persistDockerRuntimeBinding(root, {
+    format: "formaspec-docker-runtime-binding",
+    version: 2,
+    capturedAt: "2026-07-22T00:00:00.000Z",
+    context: "desktop-linux",
+    daemonId: "daemon-fixture-0123456789",
+    composeProject: "minimalappdesigner",
+    imageId,
+    containers: { designer: "a".repeat(64), renderer: "b".repeat(64) },
+    labels: {
+      designer: labels("designer", "d".repeat(64)),
+      renderer: labels("renderer", "e".repeat(64)),
+    },
+    volumes: {
+      data: "minimalappdesigner_designer-data",
+      backups: "minimalappdesigner_designer-backups",
+      rendererSocket: "minimalappdesigner_renderer-socket",
+    },
+    renderer: { networkMode: "none" },
+    publicBinding: {
+      host: "127.0.0.1",
+      port,
+      containerPort: 4310,
+      origin: `http://127.0.0.1:${port}`,
+    },
+    runtime: {
+      mode: "docker",
+      serverAccess: "none",
+      healthHostHeader: `127.0.0.1:${port}`,
+      environmentIdentitySha256: "f".repeat(64),
+    },
+  });
+}
+
 function writeFormaSpecManagedMarker(directory: string): void {
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, ".formaspec-managed.json"), JSON.stringify({
@@ -153,7 +252,7 @@ if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "add" ]; then
-  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.1","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.1","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.2","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.2","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then exit 9; fi
@@ -237,11 +336,20 @@ describe("formaspecctl", () => {
     expect(skill).toContain("Design this with FormaSpec");
     expect(skill).toContain("Refine this selection with FormaSpec");
     expect(skill).toContain("Redesign this with FormaSpec");
+    expect(skill).toContain("For one proven accessible project");
+    expect(skill).toContain("ask for confirmation");
+    expect(skill).toContain("`nextCursor` is null");
+    expect(skill).toContain("recommend `./designer doctor auto`");
+    expect(skill).toContain("Never choose by list order");
     const minimalUiSkill = fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", "SKILL.md"), "utf8");
     expect(minimalUiSkill).toContain("Use Minimal UI");
     expect(minimalUiSkill).toContain("Design this with Minimal UI");
     expect(minimalUiSkill).toContain("Refine this selection with Minimal UI");
     expect(minimalUiSkill).toContain("Redesign this with Minimal UI");
+    expect(minimalUiSkill).toContain("For one proven accessible project");
+    expect(minimalUiSkill).toContain("ask for confirmation");
+    expect(minimalUiSkill).toContain("`nextCursor` is null");
+    expect(minimalUiSkill).toContain("recommend `./designer doctor auto`");
     const marker = JSON.parse(fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", ".formaspec-managed.json"), "utf8"));
     expect(marker).toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
     const minimalUiMarker = JSON.parse(fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", ".formaspec-managed.json"), "utf8"));
@@ -256,18 +364,18 @@ describe("formaspecctl", () => {
     });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "formaspec",
-      version: "0.2.1",
+      version: "0.2.2",
       interface: { displayName: "FormaSpec" },
     });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "minimal-ui",
-      version: "0.2.1",
+      version: "0.2.2",
       interface: { displayName: "Minimal UI" },
     });
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
     });
     expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
@@ -431,8 +539,8 @@ describe("formaspecctl", () => {
     expect(calls).toContain("plugin add minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
     });
   });
@@ -506,8 +614,8 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
     });
   });
@@ -543,7 +651,7 @@ describe("formaspecctl", () => {
       .toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
     expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui", "legacy.txt"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8")))
-      .toMatchObject({ name: "minimal-ui", version: "0.2.1", interface: { displayName: "Minimal UI" } });
+      .toMatchObject({ name: "minimal-ui", version: "0.2.2", interface: { displayName: "Minimal UI" } });
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"))).toBe(true);
     const calls = fs.readFileSync(log, "utf8");
@@ -551,8 +659,8 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
     });
   });
@@ -586,8 +694,8 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
     });
   });
@@ -609,10 +717,39 @@ describe("formaspecctl", () => {
     expect(io.output.join("\n").toLowerCase()).not.toContain("bearer");
   });
 
+  it("uses the public MCP endpoint and never starts the loopback bridge for proxy-server mode", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordProxyServerRuntime(root);
+    const bridge = fakeBridge();
+    const configIo = collectingIo();
+
+    expect(await runCli(["agent", "config", "generic", "--format", "json", "--snippet-only"], {
+      projectRoot: root,
+      bridge,
+      io: configIo,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+    })).toBe(0);
+    expect(configIo.output.join("\n")).toContain("https://design.company.example/mcp");
+    expect(bridge.starts).toBe(0);
+
+    const connectIo = collectingIo();
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io: connectIo,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+    })).toBe(1);
+    expect(connectIo.errors.join("\n")).toContain("loopback bridge is intentionally disabled");
+    expect(bridge.starts).toBe(0);
+  });
+
   it("fails normal doctor when server health, bridge health, or authenticated MCP verification is unavailable", async () => {
     const root = makeProject(temporaryDirectory());
     const environment = { HOME: root, PATH: "/usr/bin:/bin" };
-    const healthyFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"ok":true}', {
+    const healthyFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}', {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
@@ -641,7 +778,9 @@ describe("formaspecctl", () => {
     const healthyBridge = fakeBridge();
     healthyBridge.running = true;
     healthyFetch.mockImplementation(async (input) => new Response(
-      String(input).endsWith("/health/render") ? '{"ok":false}' : '{"ok":true}',
+      String(input).endsWith("/health/render")
+        ? '{"ok":false}'
+        : JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
       { status: 200, headers: { "content-type": "application/json" } },
     ));
     expect(await runCli(["doctor", "local"], {
@@ -653,12 +792,41 @@ describe("formaspecctl", () => {
     })).toBe(1);
   });
 
+  it("keeps bridge recovery on the recorded Docker data store", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "docker\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4310\n");
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(await runCli(["doctor", "auto"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+    const output = io.output.join("\n");
+    expect(output).toContain("Run './designer start docker', then rerun doctor.");
+    expect(output).not.toContain("Run './designer start local'");
+  });
+
   it("passes normal doctor only after readiness, renderer, bridge, and essential MCP checks pass", async () => {
     const root = makeProject(temporaryDirectory());
     const bridge = fakeBridge();
     bridge.running = true;
     const io = collectingIo();
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"ok":true}', {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}', {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
@@ -678,6 +846,181 @@ describe("formaspecctl", () => {
     expect(io.output.join("\n")).toContain(`${FORMASPEC_ESSENTIAL_MCP_TOOLS.length} essential tools`);
   });
 
+  it("rejects healthy UI and bridge processes when their upstream origin or data store differs", async () => {
+    const root = makeProject(temporaryDirectory());
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const runner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    const wrongOrigin = fakeBridge();
+    wrongOrigin.running = true;
+    wrongOrigin.upstreamOrigin = "http://127.0.0.1:4320";
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge: wrongOrigin,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: runner,
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("Codex runtime mismatch");
+    expect(io.output.join("\n")).toContain("http://127.0.0.1:4320");
+
+    const wrongStore = fakeBridge();
+    wrongStore.running = true;
+    wrongStore.dataStoreId = `store_${"b".repeat(32)}`;
+    const secondIo = collectingIo();
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge: wrongStore,
+      io: secondIo,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: runner,
+    })).toBe(1);
+    expect(secondIo.output.join("\n")).toContain("Codex runtime mismatch");
+    expect(secondIo.output.join("\n")).toContain(wrongStore.dataStoreId);
+  });
+
+  it("retains a readiness-503 store identity and reports aligned maintenance without a false runtime mismatch", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "server\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "7443\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "https://design.company.example\n");
+    const bridge = fakeBridge();
+    bridge.running = true;
+    bridge.upstreamOrigin = "http://127.0.0.1:7443";
+    bridge.upstreamReady = false;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/health/ready")) {
+        return new Response(JSON.stringify({
+          ok: false,
+          status: "maintenance",
+          dataStoreId: TEST_DATA_STORE_ID,
+        }), { status: 503, headers: { "content-type": "application/json" } });
+      }
+      return new Response('{"ok":true}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    expect(await runCli(["doctor", "server"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+    })).toBe(1);
+    const output = io.output.join("\n");
+    expect(output).toContain(`retained data-store identity ${TEST_DATA_STORE_ID}`);
+    expect(output).toContain("runtime identity is aligned");
+    expect(output).toContain("Keep this mode running");
+    expect(output).not.toContain("runtime mismatch");
+  });
+
+  it("makes status fail visibly when the browser runtime and Codex bridge are split", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bridge = fakeBridge();
+    bridge.running = true;
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(await runCli(["status"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("runtime mismatch");
+    expect(io.output.join("\n")).toContain("http://127.0.0.1:4310");
+    expect(io.output.join("\n")).toContain("http://127.0.0.1:4320");
+  });
+
+  it("rejects a healthy recorded native store when a known Docker store is also active", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "local\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4320\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "http://127.0.0.1:4320\n");
+    persistKnownDockerBinding(root, 4310);
+    const nativeStoreId = TEST_DATA_STORE_ID;
+    const dockerStoreId = `store_${"b".repeat(32)}`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      const dataStoreId = url.startsWith("http://127.0.0.1:4310") ? dockerStoreId : nativeStoreId;
+      return new Response(
+        url.endsWith("/health/ready") ? JSON.stringify({ ok: true, dataStoreId }) : '{"ok":true}',
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const bridge = fakeBridge();
+    bridge.running = true;
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    bridge.dataStoreId = nativeStoreId;
+    const io = collectingIo();
+
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("Multiple active FormaSpec data stores");
+    expect(io.output.join("\n")).toContain(nativeStoreId);
+    expect(io.output.join("\n")).toContain(dockerStoreId);
+  });
+
+  it("checks a degraded known Docker binding even when the recorded primary runtime is server mode", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "server\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "7443\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "https://design.company.example\n");
+    persistKnownDockerBinding(root, 4310);
+    const serverStoreId = TEST_DATA_STORE_ID;
+    const dockerStoreId = `store_${"b".repeat(32)}`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      const isDockerReadiness = url.startsWith("http://127.0.0.1:4310") && url.endsWith("/health/ready");
+      const dataStoreId = isDockerReadiness ? dockerStoreId : serverStoreId;
+      return new Response(
+        url.endsWith("/health/ready") ? JSON.stringify({ ok: !isDockerReadiness, dataStoreId }) : '{"ok":true}',
+        { status: isDockerReadiness ? 503 : 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const bridge = fakeBridge();
+    bridge.running = true;
+    bridge.upstreamOrigin = "http://127.0.0.1:7443";
+    bridge.dataStoreId = serverStoreId;
+    const io = collectingIo();
+
+    expect(await runCli(["doctor", "server"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("Multiple active FormaSpec data stores");
+    expect(io.output.join("\n")).toContain(serverStoreId);
+    expect(io.output.join("\n")).toContain(dockerStoreId);
+  });
+
   it("uses the recorded public Host while probing a loopback server-mode runtime", async () => {
     const root = makeProject(temporaryDirectory());
     const runDirectory = path.join(root, ".designer", "run");
@@ -686,12 +1029,18 @@ describe("formaspecctl", () => {
     fs.writeFileSync(path.join(runDirectory, "api-port"), "7443\n");
     fs.writeFileSync(path.join(runDirectory, "url"), "https://design.company.example\n");
     const hosts: Array<string | null> = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       hosts.push(new Headers(init?.headers).get("host"));
-      return new Response('{"ok":true}', { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(
+        String(input).endsWith("/health/ready")
+          ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+          : '{"ok":true}',
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     });
     const bridge = fakeBridge();
     bridge.running = true;
+    bridge.upstreamOrigin = "http://127.0.0.1:7443";
 
     expect(await runCli(["doctor", "server"], {
       projectRoot: root,
@@ -701,6 +1050,34 @@ describe("formaspecctl", () => {
       commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
     })).toBe(0);
     expect(hosts).toEqual(["design.company.example", "design.company.example"]);
+  });
+
+  it("checks proxy-server health without requiring an incompatible loopback bridge", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordProxyServerRuntime(root);
+    const hosts: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      hosts.push(new Headers(init?.headers).get("host"));
+      return new Response(
+        String(input).endsWith("/health/ready")
+          ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+          : '{"ok":true}',
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const bridge = fakeBridge();
+    const io = collectingIo();
+
+    expect(await runCli(["doctor", "server"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(0);
+    expect(hosts).toEqual(["design.company.example", "design.company.example"]);
+    expect(bridge.starts).toBe(0);
+    expect(io.output.join("\n")).toContain("workstation loopback bridge is intentionally disabled");
   });
 
   it("refreshes an already-authorized managed Codex install on startup without prompting again", async () => {
@@ -754,8 +1131,8 @@ describe("formaspecctl", () => {
       .toContain("Minimal UI is a compatibility alias");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.1", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.1", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
     });
   });
@@ -840,6 +1217,27 @@ describe("formaspecctl", () => {
     expect(bridge.starts).toBe(1);
     expect([...io.output, ...io.errors].join("\n")).not.toContain(secret);
     expect(io.output.some((line) => line.includes("Compose project"))).toBe(true);
+  });
+
+  it("does not claim a workstation bridge is ready after proxy-server startup", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordProxyServerRuntime(root);
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    let bindings = 0;
+
+    expect(await runCli(["--yes", "start", "server", "--no-build"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      recordDockerRuntimeBinding: async () => { bindings += 1; },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(0);
+    expect(bindings).toBe(1);
+    expect(bridge.starts).toBe(0);
+    expect(io.output.join("\n")).toContain("https://design.company.example/mcp");
+    expect(io.output.join("\n")).toContain("loopback bridge is intentionally disabled");
   });
 
   it("uses one install authorization and automatically connects supported Codex", async () => {

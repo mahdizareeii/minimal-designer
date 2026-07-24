@@ -78,6 +78,156 @@ describe("designer server", () => {
     await application.app.close();
   });
 
+  it("exposes the stable data-store identity on live and ready health", async () => {
+    const expected = application.database.dataStoreId();
+    const live = await application.app.inject({ method: "GET", url: "/health/live" });
+    expect(live.statusCode).toBe(200);
+    expect(live.json()).toEqual({ ok: true, service: "formaspec-api", dataStoreId: expected });
+
+    const ready = await application.app.inject({ method: "GET", url: "/health/ready" });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toMatchObject({ ok: true, database: "ready", dataStoreId: expected });
+  });
+
+  it("returns a schema-valid inactive MCP context after the local editor clears its row", async () => {
+    const cleared = await application.app.inject({
+      method: "PUT",
+      url: "/api/context",
+      payload: { designId: null, selectedNodeIds: [] },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json()).toEqual({ designId: null, pageId: null, selection: [], updatedAt: null });
+
+    const response = await application.app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "context_get", arguments: {} },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{
+      result: { structuredContent: { ok: boolean; context: Record<string, unknown> } };
+    }>().result.structuredContent).toEqual({
+      ok: true,
+      context: { designId: null, pageId: null, selection: [], updatedAt: null },
+    });
+  });
+
+  it("keeps local editor client leases separate across HTTP and MCP until one client releases", async () => {
+    const firstDesign = await createDesign(application.app, "alice", "create-client-context-http-0001");
+    const secondDesign = await createDesign(application.app, "alice", "create-client-context-http-0002");
+    const firstClientContextId = "browser_tab_context_0001";
+    const secondClientContextId = "browser_tab_context_0002";
+
+    const firstUpdate = await application.app.inject({
+      method: "PUT",
+      url: "/api/context",
+      payload: {
+        designId: firstDesign.document.id,
+        pageId: firstDesign.document.pages[0]!.id,
+        selectedNodeIds: [],
+        clientContextId: firstClientContextId,
+      },
+    });
+    expect(firstUpdate.statusCode).toBe(200);
+    const firstContext = firstUpdate.json<{ contextRef: string }>();
+    expect(firstContext.contextRef).toMatch(/^context_[a-f0-9]{24}$/);
+
+    const secondNodeId = secondDesign.document.pages[0]!.children[0]!;
+    const secondUpdate = await application.app.inject({
+      method: "PUT",
+      url: "/api/context",
+      payload: {
+        designId: secondDesign.document.id,
+        pageId: secondDesign.document.pages[0]!.id,
+        selectedNodeIds: [secondNodeId],
+        clientContextId: secondClientContextId,
+      },
+    });
+    expect(secondUpdate.statusCode).toBe(200);
+
+    const callContextGet = (id: number, contextRef?: string) => application.app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "context_get",
+          arguments: contextRef === undefined ? {} : { context_ref: contextRef },
+        },
+      },
+    });
+
+    const ambiguousResponse = await callContextGet(2);
+    expect(ambiguousResponse.statusCode).toBe(200);
+    const ambiguous = ambiguousResponse.json<{
+      result: { structuredContent: { ok: boolean; error: { code: string; details: { candidates: unknown[] } } } };
+    }>().result.structuredContent;
+    expect(ambiguous).toMatchObject({ ok: false, error: { code: "AMBIGUOUS_CONTEXT" } });
+    expect(ambiguous.error.details.candidates).toHaveLength(2);
+
+    const released = await application.app.inject({
+      method: "PUT",
+      url: "/api/context",
+      payload: {
+        designId: null,
+        selectedNodeIds: [],
+        clientContextId: firstClientContextId,
+      },
+    });
+    expect(released.statusCode).toBe(200);
+    expect(released.json()).toEqual({ designId: null, pageId: null, selection: [], updatedAt: null });
+
+    const resolvedResponse = await callContextGet(3);
+    expect(resolvedResponse.statusCode).toBe(200);
+    expect(resolvedResponse.json<{
+      result: { structuredContent: { ok: boolean; context: Record<string, unknown> } };
+    }>().result.structuredContent).toMatchObject({
+      ok: true,
+      context: {
+        designId: secondDesign.document.id,
+        pageId: secondDesign.document.pages[0]!.id,
+        selection: [secondNodeId],
+        contextSource: "actor",
+      },
+    });
+
+    const releasedRefResponse = await callContextGet(4, firstContext.contextRef);
+    expect(releasedRefResponse.statusCode).toBe(200);
+    expect(releasedRefResponse.json<{
+      result: { structuredContent: { ok: boolean; error: { code: string } } };
+    }>().result.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: "NOT_FOUND" },
+    });
+
+    const malformed = await application.app.inject({
+      method: "PUT",
+      url: "/api/context",
+      payload: {
+        designId: secondDesign.document.id,
+        selectedNodeIds: [],
+        clientContextId: "bad/client",
+      },
+    });
+    expect(malformed.statusCode).toBe(422);
+    expect(malformed.json<{ error: { code: string } }>().error.code).toBe("VALIDATION_FAILED");
+  });
+
   it("creates a starter design and lets another workspace user edit it", async () => {
     const created = await createDesign(application.app);
     expect(created.document.id).toMatch(/^document_/);

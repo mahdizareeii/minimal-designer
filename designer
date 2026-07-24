@@ -447,6 +447,21 @@ pid_owned_by_designer() {
   case "$command_line" in *"$SCRIPT_PATH"*|*"@designer/server"*|*"pnpm"*"dev"*) return 0 ;; *) return 1 ;; esac
 }
 
+managed_native_runtime_running() {
+  pid_owned_by_designer || return 1
+  local mode=""
+  [ -f "$MODE_FILE" ] && mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  case "$mode" in local|dev) return 0 ;; *) return 1 ;; esac
+}
+
+owned_local_runtime_matches() {
+  local expected_port="$1" mode="" recorded_port=""
+  managed_native_runtime_running || return 1
+  mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  recorded_port="$(cat "$API_PORT_FILE" 2>/dev/null || true)"
+  [ "$mode" = "local" ] && [ "$recorded_port" = "$expected_port" ]
+}
+
 docker_cli_ready() { command -v docker >/dev/null 2>&1; }
 docker_compose_ready() { docker_cli_ready && docker compose version >/dev/null 2>&1; }
 docker_daemon_ready() { docker_cli_ready && docker info >/dev/null 2>&1; }
@@ -575,6 +590,16 @@ select_compose_env() {
 docker_project_present() {
   docker_daemon_ready || return 1
   [ -n "$(docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)" ]
+}
+
+docker_project_active() {
+  docker_daemon_ready || return 1
+  local states=""
+  states="$(docker ps -a --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.State}}' 2>/dev/null || true)"
+  case "$states" in
+    *running*|*restarting*|*paused*|*created*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 env_value() {
@@ -916,15 +941,56 @@ run_native_child() {
 start_native_background() {
   local api_port="$1" no_open="$2"
   validate_port "$api_port" || die "Invalid port: $api_port"
-  if [ "$DRY_RUN" != "1" ] && curl_ok "http://127.0.0.1:$api_port/health/ready"; then
-    pass "FormaSpec is already running on port $api_port."
-    [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
-    return 0
+  if [ "$DRY_RUN" != "1" ]; then
+    acquire_lock
+    if docker_project_active; then
+      release_lock
+      die "A Docker FormaSpec runtime for this workspace is already active. Starting local mode would open a separate data store. Keep Docker with '$SCRIPT_PATH start docker', or stop the existing runtime with '$SCRIPT_PATH stop' before starting local mode."
+    fi
+    if managed_native_runtime_running; then
+      if owned_local_runtime_matches "$api_port" && curl_ok "http://127.0.0.1:$api_port/health/ready"; then
+        release_lock
+        pass "FormaSpec's managed local runtime is already running on port $api_port."
+        [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
+        return 0
+      fi
+      local active_mode="" active_pid=""
+      active_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+      active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+      release_lock
+      die "A managed ${active_mode:-native} FormaSpec runtime is already active (PID ${active_pid:-unknown}). Stop it with '$SCRIPT_PATH stop' before starting another local runtime."
+    fi
+    if curl_ok "http://127.0.0.1:$api_port/health/ready"; then
+      release_lock
+      die "A healthy service is already responding on port $api_port, but it is not the owned managed local runtime recorded in $RUN_DIR. Refusing to adopt an arbitrary process. Stop that service or choose another --port, then retry."
+    fi
+    release_lock
   fi
   ensure_supported_os
-  ensure_ports_free "$api_port" 0
   setup_local 1
   acquire_lock
+  if [ "$DRY_RUN" != "1" ] && docker_project_active; then
+    release_lock
+    die "A Docker FormaSpec runtime for this workspace became active while local setup was running. Keep Docker with '$SCRIPT_PATH start docker', or stop it with '$SCRIPT_PATH stop' before starting local mode."
+  fi
+  if [ "$DRY_RUN" != "1" ] && managed_native_runtime_running; then
+    if owned_local_runtime_matches "$api_port" && curl_ok "http://127.0.0.1:$api_port/health/ready"; then
+      release_lock
+      pass "FormaSpec's managed local runtime is already running on port $api_port."
+      [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
+      return 0
+    fi
+    local active_mode="" active_pid=""
+    active_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+    active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    release_lock
+    die "A managed ${active_mode:-native} FormaSpec runtime became active while setup was running (PID ${active_pid:-unknown}). Stop it with '$SCRIPT_PATH stop' before starting another local runtime."
+  fi
+  if [ "$DRY_RUN" != "1" ] && curl_ok "http://127.0.0.1:$api_port/health/ready"; then
+    release_lock
+    die "A healthy service became available on port $api_port, but it is not the owned managed local runtime recorded in $RUN_DIR. Refusing to adopt an arbitrary process. Stop that service or choose another --port, then retry."
+  fi
+  ensure_ports_free "$api_port" 0
   ensure_runtime_dirs
   if [ "$DRY_RUN" = "1" ]; then
     print_command bash "$SCRIPT_PATH" _run-native prod "$api_port" "$DEFAULT_WEB_PORT"
@@ -936,15 +1002,16 @@ start_native_background() {
   local launcher_pid=$!
   printf '%s\n' "$launcher_pid" >"$PID_FILE"
   write_runtime_state "local" "$api_port" 0 "http://127.0.0.1:$api_port" ""
-  release_lock
   info "Waiting for the production server..."
   if ! wait_for_url "http://127.0.0.1:$api_port/health/ready" 90; then
     fail "Local server did not become ready. Recent log output:"
     tail -n 80 "$LOCAL_LOG" >&2 || true
     stop_native || true
     clear_runtime_state
+    release_lock
     exit 1
   fi
+  release_lock
   pass "FormaSpec is running at http://127.0.0.1:$api_port"
   [ "$no_open" = "1" ] || open_url "http://127.0.0.1:$api_port"
 }
@@ -954,6 +1021,21 @@ start_dev() {
   validate_port "$api_port" || die "Invalid API port: $api_port"
   validate_port "$web_port" || die "Invalid web port: $web_port"
   [ "$api_port" != "$web_port" ] || die "API and web ports must be different."
+  if [ "$DRY_RUN" != "1" ]; then
+    acquire_lock
+    if docker_project_active; then
+      release_lock
+      die "A Docker FormaSpec runtime for this workspace is already active. Development mode would open a separate data store. Keep Docker with '$SCRIPT_PATH start docker', or stop the existing runtime with '$SCRIPT_PATH stop' before running dev."
+    fi
+    if managed_native_runtime_running; then
+      local active_mode="" active_pid=""
+      active_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+      active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+      release_lock
+      die "A managed ${active_mode:-native} FormaSpec runtime is already active (PID ${active_pid:-unknown}). Stop it with '$SCRIPT_PATH stop' before starting development mode."
+    fi
+    release_lock
+  fi
   ensure_supported_os
   if [ "$skip_setup" != "1" ]; then
     setup_local 0
@@ -962,12 +1044,27 @@ start_dev() {
   else
     ensure_node && ensure_pnpm || exit 1
   fi
-  ensure_ports_free "$api_port" "$web_port"
   if [ "$DRY_RUN" = "1" ]; then
+    ensure_ports_free "$api_port" "$web_port"
     print_command bash "$SCRIPT_PATH" _run-native dev "$api_port" "$web_port"
     return 0
   fi
+  acquire_lock
+  if docker_project_active; then
+    release_lock
+    die "A Docker FormaSpec runtime for this workspace became active while development setup was running. Keep Docker with '$SCRIPT_PATH start docker', or stop it with '$SCRIPT_PATH stop' before running dev."
+  fi
+  if managed_native_runtime_running; then
+    local active_mode="" active_pid=""
+    active_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+    active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    release_lock
+    die "A managed ${active_mode:-native} FormaSpec runtime became active while development setup was running (PID ${active_pid:-unknown}). Stop it with '$SCRIPT_PATH stop' before starting development mode."
+  fi
+  ensure_ports_free "$api_port" "$web_port"
   write_runtime_state "dev" "$api_port" "$web_port" "http://127.0.0.1:$web_port" ""
+  printf '%s\n' "$$" >"$PID_FILE"
+  release_lock
   if [ "$no_open" != "1" ]; then (wait_for_url "http://127.0.0.1:$web_port" 90 && open_url "http://127.0.0.1:$web_port") & fi
   info "Starting development mode. Press Ctrl+C to stop."
   local exit_status=0
@@ -980,9 +1077,16 @@ start_docker_local() {
   local port="$1" no_open="$2" no_build="$3"
   validate_port "$port" || die "Invalid port: $port"
   ensure_docker
+  acquire_lock
+  if [ "$DRY_RUN" != "1" ] && managed_native_runtime_running; then
+    local native_mode="" native_pid=""
+    native_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+    native_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    release_lock
+    die "A managed $native_mode FormaSpec runtime is already running (PID $native_pid). Stop it with '$SCRIPT_PATH stop' before starting Docker mode so two data stores cannot become active."
+  fi
   ensure_ports_free "$port" 0
   write_docker_env "$port"
-  acquire_lock
   if [ "$no_build" = "1" ]; then
     if ! run_compose "$DOCKER_ENV" up -d; then release_lock; die "Docker Compose could not start FormaSpec."; fi
   else
@@ -1089,8 +1193,15 @@ start_server() {
     health_host="${health_host%/}"
   fi
   ensure_docker
-  ensure_ports_free "$port" 0
   acquire_lock
+  if [ "$DRY_RUN" != "1" ] && managed_native_runtime_running; then
+    local native_mode="" native_pid=""
+    native_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+    native_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    release_lock
+    die "A managed $native_mode FormaSpec runtime is already running (PID $native_pid). Stop it with '$SCRIPT_PATH stop' before starting server mode so two data stores cannot become active."
+  fi
+  ensure_ports_free "$port" 0
   if [ "$no_build" = "1" ]; then
     if ! run_compose "$SERVER_ENV" up -d; then release_lock; die "Docker Compose could not start the server."; fi
   else
@@ -1233,7 +1344,11 @@ show_status() {
     containers="$(docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" --format '{{.Names}} {{.Status}}' 2>/dev/null || true)"
     if [ -n "$containers" ]; then pass "Docker container: $containers"; found=1; fi
   elif docker_cli_ready; then
-    warn "Docker CLI is installed, but Docker Desktop/Engine is stopped. Start Docker Desktop or run '$SCRIPT_PATH start local'."
+    if [ "$mode" = "docker" ] || [ "$mode" = "server" ] || [ -f "$RUN_DIR/docker-runtime-binding.json" ]; then
+      warn "Docker CLI is installed, but Docker Desktop/Engine is stopped. Start Docker Desktop and resume the recorded ${mode:-Docker} mode; do not start local mode because it uses a separate data store."
+    else
+      warn "Docker CLI is installed, but Docker Desktop/Engine is stopped. Start Docker Desktop or run '$SCRIPT_PATH start local'."
+    fi
   fi
   if [ -n "$url" ]; then
     if curl_ok "http://127.0.0.1:$(cat "$API_PORT_FILE" 2>/dev/null || printf 4310)/health/ready" "$health_host"; then pass "Health check passed."; else warn "Saved service URL is not healthy."; fi
@@ -1374,15 +1489,45 @@ backup_data() {
 }
 
 doctor() {
-  local target="${1:-auto}" failures=0 local_ok=1 docker_ok=1 server_config_ok=1 runtime_ok=1 pnpm_path="" port=""
-  local recorded_mode="" health_host="" bridge_port="${FORMASPEC_BRIDGE_PORT:-4312}" bridge_state="" instance_id=""
+  local target="${1:-auto}" failures=0 local_ok=1 docker_ok=1 server_config_ok=1 runtime_ok=1 pnpm_path="" port="$DEFAULT_API_PORT"
+  local check_local_prerequisites=0 container_runtime_label=""
+  local recorded_mode="" recorded_env="" proxy_server=0 health_host="" bridge_port="${FORMASPEC_BRIDGE_PORT:-4312}" bridge_state="" instance_id="" bridge_upstream=""
   case "$target" in auto|local|docker|server) ;; *) usage_error "Unknown doctor target: $target" ;; esac
+  [ -f "$MODE_FILE" ] && recorded_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+  [ -f "$ENV_FILE_RECORD" ] && recorded_env="$(cat "$ENV_FILE_RECORD" 2>/dev/null || true)"
+  if [ "$recorded_mode" = "server" ]; then
+    local recorded_server_env="${recorded_env:-$SERVER_ENV}"
+    if [ -f "$recorded_server_env" ] && [ "$(env_value "$recorded_server_env" DESIGNER_SERVER_ACCESS || true)" = "proxy" ]; then
+      proxy_server=1
+    fi
+  fi
   detect_platform
   say "${C_BOLD}FormaSpec doctor${C_RESET}"
   say "OS: $OS_KIND  Architecture: $ARCH_KIND  Bash: ${BASH_VERSION:-unknown}"
   if [ "$OS_KIND" = "windows" ] || [ "$OS_KIND" = "unknown" ]; then fail "Use macOS, Linux, or WSL2."; return 1; fi
   [ -w "$PROJECT_ROOT" ] && pass "Workspace is writable: $PROJECT_ROOT" || { fail "Workspace is not writable: $PROJECT_ROOT"; failures=$((failures + 1)); }
-  if [ "$target" = "local" ] || [ "$target" = "auto" ]; then
+  case "$target" in
+    local) check_local_prerequisites=1 ;;
+    docker) container_runtime_label="Docker" ;;
+    auto)
+      case "$recorded_mode" in
+        docker) container_runtime_label="recorded Docker"; local_ok=0 ;;
+        server) container_runtime_label="recorded server"; local_ok=0 ;;
+        *)
+          if [ -f "$RUN_DIR/docker-runtime-binding.json" ]; then
+            container_runtime_label="recorded Docker/server"
+            local_ok=0
+          else
+            check_local_prerequisites=1
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  if [ -n "$container_runtime_label" ]; then
+    info "Host Node.js and pnpm are not required for $container_runtime_label mode; the pinned runtime is provided by the container image."
+  fi
+  if [ "$check_local_prerequisites" -eq 1 ]; then
     if node_ready; then pass "Node $(node --version) is ready."
     else local_ok=0; fail "Node.js $NODE_MIN_MAJOR+ is missing or too old."; print_node_help; fi
     pnpm_path="$(command_path pnpm)"
@@ -1405,7 +1550,14 @@ doctor() {
     if docker_cli_ready; then pass "Docker CLI is installed: $(docker --version 2>/dev/null | head -n 1)"; else docker_ok=0; fail "Docker CLI is missing."; fi
     if docker_compose_ready; then pass "Docker Compose is installed: $(docker compose version 2>/dev/null | head -n 1)"; else docker_ok=0; fail "Docker Compose v2 is missing."; fi
     if docker_daemon_ready; then pass "Docker daemon is running."
-    else docker_ok=0; warn "Docker Desktop/Engine is installed but not running. Start it or use '$SCRIPT_PATH start local'."; fi
+    else
+      docker_ok=0
+      if [ "$recorded_mode" = "docker" ] || [ "$recorded_mode" = "server" ] || [ -f "$RUN_DIR/docker-runtime-binding.json" ]; then
+        warn "Docker Desktop/Engine is installed but not running. Start it and resume the recorded Docker/server mode; do not start local mode because it uses a separate data store."
+      else
+        warn "Docker Desktop/Engine is installed but not running. Start it or use '$SCRIPT_PATH start local'."
+      fi
+    fi
   fi
   if [ "$target" = "server" ]; then
     if [ -f "$SERVER_ENV" ]; then
@@ -1420,6 +1572,7 @@ doctor() {
     for port in "$DEFAULT_API_PORT" "$DEFAULT_WEB_PORT"; do
       if port_busy "$port"; then warn "Port $port is already in use."; port_owner "$port"; else pass "Port $port is available."; fi
     done
+    port="$DEFAULT_API_PORT"
   else
     port="$DEFAULT_API_PORT"
     if [ "$target" = "server" ] && [ -f "$SERVER_ENV" ]; then
@@ -1430,7 +1583,6 @@ doctor() {
     if port_busy "$port"; then warn "Port $port is already in use."; port_owner "$port"; else pass "Port $port is available."; fi
   fi
   if [ "$OS_KIND" = "wsl" ]; then case "$PROJECT_ROOT" in /mnt/*) warn "The project is under /mnt; moving it into the Linux filesystem improves pnpm and file watching." ;; esac; fi
-  [ -f "$MODE_FILE" ] && recorded_mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
   [ -f "$API_PORT_FILE" ] && port="$(cat "$API_PORT_FILE" 2>/dev/null || true)"
   if ! validate_port "$port"; then port="$DEFAULT_API_PORT"; fi
   if [ "$recorded_mode" = "server" ] && [ -f "$URL_FILE" ]; then
@@ -1442,7 +1594,9 @@ doctor() {
   else runtime_ok=0; fail "FormaSpec server readiness is unavailable at http://127.0.0.1:$port/health/ready."; fi
   if curl_ok "http://127.0.0.1:$port/health/render" "$health_host"; then pass "Renderer health endpoint is healthy."
   else runtime_ok=0; fail "FormaSpec renderer health is unavailable at http://127.0.0.1:$port/health/render."; fi
-  if ! validate_port "$bridge_port"; then
+  if [ "$proxy_server" -eq 1 ]; then
+    info "Proxy-server mode uses the configured public HTTPS /mcp endpoint; the workstation loopback bridge is intentionally not required on this host."
+  elif ! validate_port "$bridge_port"; then
     runtime_ok=0
     fail "FORMASPEC_BRIDGE_PORT is invalid."
   elif ! curl_ok "http://127.0.0.1:$bridge_port/health"; then
@@ -1452,11 +1606,15 @@ doctor() {
     bridge_state="$RUN_DIR/formaspec-bridge.json"
     if [ -f "$bridge_state" ]; then
       instance_id="$(sed -n 's/^.*"instanceId":"\([A-Za-z0-9-]*\)".*$/\1/p' "$bridge_state" 2>/dev/null | head -n 1)"
+      bridge_upstream="$(sed -n 's/^.*"upstreamMcpUrl":"\([^"]*\)".*$/\1/p' "$bridge_state" 2>/dev/null | head -n 1)"
     fi
     case "$instance_id" in
       ''|*[!A-Za-z0-9-]*) runtime_ok=0; fail "The supervised bridge ownership state is missing or invalid." ;;
       *)
-        if curl -fsS --max-time 5 -X POST -H 'content-type: application/json' \
+        if [ "$bridge_upstream" != "http://127.0.0.1:$port/mcp" ]; then
+          runtime_ok=0
+          fail "Codex runtime mismatch: the UI/API uses http://127.0.0.1:$port, but the bridge targets ${bridge_upstream:-an unknown upstream}. Run '$SCRIPT_PATH restart' or start the intended mode again."
+        elif curl -fsS --max-time 5 -X POST -H 'content-type: application/json' \
           --data "{\"instanceId\":\"$instance_id\"}" \
           "http://127.0.0.1:$bridge_port/_control/verify-agent" >/dev/null 2>&1; then
           pass "Authenticated MCP initialize and tools/list verification passed."
@@ -1478,7 +1636,13 @@ doctor() {
   esac
   [ "$runtime_ok" -eq 1 ] || failures=$((failures + 1))
   if [ "$failures" -eq 0 ]; then pass "Selected mode can run."; return 0; fi
-  info "For the supported native fallback, run '$SCRIPT_PATH start local' and then rerun doctor."
+  if [ "$recorded_mode" = "server" ]; then
+    info "Start Docker Desktop/Engine, run '$SCRIPT_PATH start server', and then rerun doctor. Do not start local mode because it uses a separate data store."
+  elif [ "$recorded_mode" = "docker" ] || [ -f "$RUN_DIR/docker-runtime-binding.json" ]; then
+    info "Start Docker Desktop/Engine, run '$SCRIPT_PATH start docker', and then rerun doctor. Do not start local mode because it uses a separate data store."
+  else
+    info "For the supported native runtime, run '$SCRIPT_PATH start local' and then rerun doctor."
+  fi
   fail "Selected mode is not ready yet. Follow the remedies above."
   return 1
 }

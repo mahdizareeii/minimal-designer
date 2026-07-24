@@ -77,6 +77,204 @@ afterEach(() => {
 });
 
 describe("content-addressed persistence", () => {
+  it("persists one stable data-store identity and keeps separate databases distinct", () => {
+    const firstFilename = databasePath();
+    const secondFilename = databasePath();
+
+    const firstOpen = new DesignerDatabase(firstFilename);
+    const firstId = firstOpen.dataStoreId();
+    expect(firstId).toMatch(/^store_[a-f0-9]{32}$/);
+    expect(firstOpen.metadata("data_store_id")).toBe(firstId);
+    expect(firstOpen.schemaVersion()).toBe(16);
+    firstOpen.close();
+
+    const reopened = new DesignerDatabase(firstFilename);
+    expect(reopened.dataStoreId()).toBe(firstId);
+    expect(reopened.schemaVersion()).toBe(16);
+    reopened.close();
+
+    const second = new DesignerDatabase(secondFilename);
+    expect(second.dataStoreId()).toMatch(/^store_[a-f0-9]{32}$/);
+    expect(second.dataStoreId()).not.toBe(firstId);
+    expect(second.schemaVersion()).toBe(16);
+    second.close();
+  });
+
+  it("returns the strict inactive context shape for cleared and stale exact contexts", () => {
+    const opened = openService(databasePath());
+    try {
+      const { created } = starter(opened.service, "create-context-freshness-0001");
+      const pageId = created.document.pages[0]!.id;
+      const nodeId = created.document.pages[0]!.children[0]!;
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+      });
+      opened.database.sqlite.prepare(
+        "UPDATE contexts SET updated_at = '2000-01-01T00:00:00.000Z' WHERE actor_id = 'local'",
+      ).run();
+
+      const inactive = { designId: null, pageId: null, selection: [], updatedAt: null };
+      expect(opened.service.getContext("local")).toEqual(inactive);
+      expect(opened.service.getContext("local", { workspaceFallback: true })).toEqual(inactive);
+      expect(opened.service.setContext("local", { designId: null, selection: [] })).toEqual(inactive);
+      expect(opened.service.getContext("local", { workspaceFallback: true })).toEqual(inactive);
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("does not let a stale exact context hide a fresh workspace editor", () => {
+    const opened = openService(databasePath());
+    try {
+      const { created } = starter(opened.service, "create-context-fallback-0001");
+      const pageId = created.document.pages[0]!.id;
+      const nodeId = created.document.pages[0]!.children[0]!;
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [],
+      });
+      opened.database.sqlite.prepare(
+        "UPDATE contexts SET updated_at = '2000-01-01T00:00:00.000Z' WHERE actor_id = 'local'",
+      ).run();
+      opened.service.setContext("fresh-workspace-editor", {
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+      });
+
+      expect(opened.service.getContext("local", { workspaceFallback: true })).toMatchObject({
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+        contextSource: "workspace",
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("keeps actor-scoped client context leases isolated, collapses matches, and releases one tab only", () => {
+    const opened = openService(databasePath());
+    try {
+      const { created } = starter(opened.service, "create-client-context-leases-0001");
+      const pageId = created.document.pages[0]!.id;
+      const nodeId = created.document.pages[0]!.children[0]!;
+      const firstClient = "tab_context_first_0001";
+      const secondClient = "tab_context_second_0001";
+
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [],
+        clientContextId: firstClient,
+      });
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [],
+        clientContextId: secondClient,
+      });
+      expect(opened.service.getContext("local")).toMatchObject({
+        designId: created.document.id,
+        pageId,
+        selection: [],
+        contextSource: "actor",
+      });
+      expect(opened.database.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM contexts WHERE organization_id = 'organization_legacy'",
+      ).get()).toEqual({ count: 2 });
+
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+        clientContextId: secondClient,
+      });
+      expect(thrown(() => opened.service.getContext("local"))).toMatchObject({ code: "AMBIGUOUS_CONTEXT" });
+
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [],
+        clientContextId: firstClient,
+      });
+      expect(thrown(() => opened.service.getContext("local"))).toMatchObject({ code: "AMBIGUOUS_CONTEXT" });
+
+      expect(opened.service.setContext("local", {
+        designId: null,
+        selection: [],
+        clientContextId: firstClient,
+      })).toEqual({ designId: null, pageId: null, selection: [], updatedAt: null });
+      expect(opened.service.getContext("local")).toMatchObject({
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+        contextSource: "actor",
+      });
+      expect(opened.database.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM contexts WHERE organization_id = 'organization_legacy'",
+      ).get()).toEqual({ count: 1 });
+
+      expect(thrown(() => opened.service.setContext("local", {
+        designId: created.document.id,
+        selection: [],
+        clientContextId: "../not-an-opaque-client",
+      }))).toMatchObject({ code: "VALIDATION_FAILED" });
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("ignores and removes expired client leases without deleting stale legacy context rows", () => {
+    const opened = openService(databasePath());
+    try {
+      const { created } = starter(opened.service, "create-expired-client-context-0001");
+      const pageId = created.document.pages[0]!.id;
+      const nodeId = created.document.pages[0]!.children[0]!;
+
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [],
+        clientContextId: "expired_browser_tab_0001",
+      });
+      opened.service.setContext("local", {
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+        clientContextId: "fresh_browser_tab_0001",
+      });
+      opened.service.setContext("legacy-stale-actor", {
+        designId: created.document.id,
+        pageId,
+        selection: [],
+      });
+      opened.database.sqlite.prepare(
+        `UPDATE contexts
+         SET updated_at = '2000-01-01T00:00:00.000Z'
+         WHERE selection_json = '[]'`,
+      ).run();
+
+      expect(opened.service.getContext("local")).toMatchObject({
+        designId: created.document.id,
+        pageId,
+        selection: [nodeId],
+        contextSource: "actor",
+      });
+      expect(opened.database.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM contexts WHERE actor_id GLOB '__client_context__*'",
+      ).get()).toEqual({ count: 1 });
+      expect(opened.database.sqlite.prepare(
+        "SELECT updated_at FROM contexts WHERE actor_id = 'legacy-stale-actor'",
+      ).get()).toEqual({ updated_at: "2000-01-01T00:00:00.000Z" });
+    } finally {
+      opened.database.close();
+    }
+  });
+
   it("upgrades exact legacy schema-14 and schema-15 bootstrap triggers without losing credential data", () => {
     for (const historicalVersion of [14, 15]) {
       const filename = databasePath();

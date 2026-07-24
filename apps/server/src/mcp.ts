@@ -1066,10 +1066,10 @@ function createDesignerMcpServer(
 
   registerTool("design_list", {
     title: "List designs",
-    description: "List designs in the shared company workspace using cursor pagination.",
+    description: "List designs in stable updated-at/ID order. Follow the returned opaque nextCursor exactly until it is null.",
     inputSchema: {
       limit: z.number().int().min(1).max(100).default(50),
-      cursor: z.string().optional(),
+      cursor: z.string().max(4_096).optional(),
     },
     annotations: readAnnotations,
   }, async ({ limit, cursor }) => withDomainErrors(() => {

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -25,6 +25,9 @@ export interface DatabaseMigrationLedgerEntry {
 interface Migration extends DatabaseMigrationLedgerEntry {
   up: (sqlite: Database.Database) => void;
 }
+
+const DATA_STORE_ID_METADATA_KEY = "data_store_id";
+const DATA_STORE_ID_PATTERN = /^store_[a-f0-9]{32}$/;
 
 // Migration 2 is immutable historical DDL. Runtime version bumps must update
 // current metadata and newly written rows without rewriting the SQL bytes of
@@ -2615,6 +2618,7 @@ export class DesignerDatabase {
       if (filename !== ":memory:") this.sqlite.pragma("journal_mode = WAL");
       this.sqlite.pragma("synchronous = NORMAL");
       runMigrations(this.sqlite);
+      this.ensureDataStoreId();
       this.writeVersionMetadata();
       this.orm = drizzle(this.sqlite, { schema });
     } catch (error) {
@@ -2635,6 +2639,14 @@ export class DesignerDatabase {
   metadata(key: string): string | null {
     const row = this.sqlite.prepare("SELECT value FROM system_metadata WHERE key = ?").get(key) as { value: string } | undefined;
     return row?.value ?? null;
+  }
+
+  dataStoreId(): string {
+    const value = this.metadata(DATA_STORE_ID_METADATA_KEY);
+    if (value === null || !DATA_STORE_ID_PATTERN.test(value)) {
+      throw new Error("The FormaSpec data-store identity is missing or invalid.");
+    }
+    return value;
   }
 
   readSnapshot(snapshotHash: string): string {
@@ -2670,6 +2682,15 @@ export class DesignerDatabase {
 
   cleanupIdempotency(now = new Date().toISOString()): void {
     this.sqlite.prepare("DELETE FROM idempotency WHERE expires_at <= ?").run(now);
+  }
+
+  private ensureDataStoreId(): void {
+    const candidate = `store_${randomBytes(16).toString("hex")}`;
+    const now = new Date().toISOString();
+    this.sqlite.prepare(
+      "INSERT OR IGNORE INTO system_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+    ).run(DATA_STORE_ID_METADATA_KEY, candidate, now);
+    this.dataStoreId();
   }
 
   private writeVersionMetadata(): void {

@@ -42,6 +42,7 @@ describe("explicit editor save and page-management contract", () => {
 
   it("has no ordinary-edit autosave and exposes the three in-app leave choices", () => {
     const editorSource = readFileSync(new URL("../components/Editor.tsx", import.meta.url), "utf8");
+    const storeSource = readFileSync(new URL("../store/designer-store.ts", import.meta.url), "utf8");
     const appSource = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
     const componentLibrarySource = readFileSync(new URL("../components/ComponentLibraryPanel.tsx", import.meta.url), "utf8");
     const projectPinsSource = readFileSync(new URL("../components/DesignSystemProjectPins.tsx", import.meta.url), "utf8");
@@ -54,6 +55,10 @@ describe("explicit editor save and page-management contract", () => {
     expect(appSource).not.toContain("window.confirm");
     expect(componentLibrarySource).not.toContain("Commit this exact component insertion preview");
     expect(projectPinsSource).not.toContain("Commit this exact design-system release upgrade");
+    expect(editorSource).toContain("useProjectContextPresence");
+    expect(editorSource).not.toContain("updateContext({ designId: null");
+    expect(storeSource).not.toContain("updateContext(");
+    expect(editorSource).toContain('data-testid="project-context-presence"');
   });
 
   it("reserves page-row delete space and constrains long project and page titles", () => {

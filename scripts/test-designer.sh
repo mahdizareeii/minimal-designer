@@ -157,6 +157,9 @@ make_stub_toolchain() {
 
   cat >"$MOCK_BIN/node" <<'EOF'
 #!/usr/bin/env bash
+if [ "${DESIGNER_TEST_NODE_UNAVAILABLE:-0}" = "1" ]; then
+  exit 127
+fi
 if [ "${1:-}" = "--version" ]; then
   printf 'v24.1.0\n'
   exit 0
@@ -193,6 +196,14 @@ case "${1:-}" in
     fi
     exit 1
     ;;
+  ps)
+    if [ -n "${DESIGNER_TEST_DOCKER_PROJECT_STATE:-}" ]; then
+      printf '%s\n' "$DESIGNER_TEST_DOCKER_PROJECT_STATE"
+    elif [ "${DESIGNER_TEST_DOCKER_PROJECT_RUNNING:-0}" = "1" ]; then
+      printf '%s\n' 'running'
+    fi
+    exit 0
+    ;;
   compose)
     if [ "${2:-}" = "version" ]; then
       printf 'Docker Compose version v2.35.0\n'
@@ -210,6 +221,14 @@ case "${1:-}" in
     exit 0
     ;;
 esac
+exit 0
+EOF
+
+  cat >"$MOCK_BIN/ps" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${DESIGNER_TEST_PS_COMMAND:-}" ]; then
+  printf '%s\n' "$DESIGNER_TEST_PS_COMMAND"
+fi
 exit 0
 EOF
 
@@ -243,7 +262,7 @@ fi
 exit 1
 EOF
 
-  chmod +x "$MOCK_BIN/node" "$MOCK_BIN/pnpm" "$MOCK_BIN/docker" "$MOCK_BIN/lsof" "$MOCK_BIN/curl"
+  chmod +x "$MOCK_BIN/node" "$MOCK_BIN/pnpm" "$MOCK_BIN/docker" "$MOCK_BIN/ps" "$MOCK_BIN/lsof" "$MOCK_BIN/curl"
   MOCK_PATH="$MOCK_BIN:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
@@ -970,6 +989,252 @@ run_restart_regression_test() {
   expect_file_contains "$docker_env" "PUBLIC_BASE_URL=$custom_url" "restart rewrites Docker config with the recorded URL"
 }
 
+run_runtime_alignment_regression_tests() {
+  local fallback_runtime="$TMP_ROOT/doctor-api-port-runtime"
+  local fallback_curl_log="$TMP_ROOT/doctor-api-port-curl.log"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$fallback_runtime" \
+    DESIGNER_TEST_CURL_LOG="$fallback_curl_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor local
+  expect_status 1 "doctor without runtime state reports unavailable services"
+  expect_file_contains "$fallback_curl_log" "http://127.0.0.1:4310/health/ready" "doctor defaults readiness to the API port"
+  expect_file_not_contains "$fallback_curl_log" "http://127.0.0.1:4311/health/ready" "doctor never mistakes the web port for the API port"
+
+  local unowned_runtime="$TMP_ROOT/unowned-native-runtime"
+  local existing_port=55435
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$unowned_runtime" \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start local --port "$existing_port"
+  expect_status 1 "native startup rejects an arbitrary healthy process"
+  expect_contains "Refusing to adopt an arbitrary process" "native startup explains that a healthy port is not sufficient ownership proof"
+  expect_absent "$unowned_runtime/run/mode" "native startup does not record a mode for an arbitrary healthy process"
+  expect_absent "$unowned_runtime/run/pid" "native startup does not record a PID for an arbitrary healthy process"
+
+  local existing_runtime="$TMP_ROOT/existing-native-runtime"
+  mkdir -p "$existing_runtime/run"
+  printf 'local\n' >"$existing_runtime/run/mode"
+  printf '%s\n' "$existing_port" >"$existing_runtime/run/api-port"
+  printf '%s\n' "$$" >"$existing_runtime/run/pid"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$existing_runtime" \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_TEST_PS_COMMAND="bash $LAUNCHER _run-native prod $existing_port 4311" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start local --port "$existing_port"
+  expect_status 0 "already-healthy owned native startup exits successfully"
+  expect_contains "managed local runtime is already running" "native startup recognizes only its owned managed process"
+  expect_equal "local" "$(cat "$existing_runtime/run/mode" 2>/dev/null || true)" "owned native startup preserves local mode"
+  expect_equal "$existing_port" "$(cat "$existing_runtime/run/api-port" 2>/dev/null || true)" "owned native startup preserves its non-default API port"
+
+  local competing_dev_runtime="$TMP_ROOT/native-start-dev-guard"
+  mkdir -p "$competing_dev_runtime/run"
+  printf 'dev\n' >"$competing_dev_runtime/run/mode"
+  printf '55450\n' >"$competing_dev_runtime/run/api-port"
+  printf '%s\n' "$$" >"$competing_dev_runtime/run/pid"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$competing_dev_runtime" \
+    DESIGNER_TEST_PS_COMMAND="bash $LAUNCHER _run-native dev 55450 55451" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start local --port 55452
+  expect_status 1 "native startup refuses an already-active managed development process"
+  expect_contains "managed dev FormaSpec runtime is already active" "native startup reports the competing managed development process"
+  expect_equal "dev" "$(cat "$competing_dev_runtime/run/mode" 2>/dev/null || true)" "native startup preserves the competing development mode"
+
+  local locked_runtime="$TMP_ROOT/native-start-transition-lock"
+  mkdir -p "$locked_runtime/run/launcher.lock"
+  printf '%s\n' "$$" >"$locked_runtime/run/launcher.lock/pid"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$locked_runtime" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start local --port 55453
+  expect_status 1 "native startup refuses a concurrent runtime transition"
+  expect_contains "Another launcher command is running" "runtime transition lock prevents two starts from passing conflict checks"
+  expect_absent "$locked_runtime/run/mode" "concurrent native startup writes no runtime mode"
+
+  local guarded_runtime="$TMP_ROOT/native-start-docker-guard"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$guarded_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_DOCKER_PROJECT_RUNNING=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start local --port 55436
+  expect_status 1 "native startup refuses a running Docker workspace"
+  expect_contains "separate data store" "native startup explains why the running Docker workspace is unsafe"
+  expect_contains "start docker" "native startup gives the supported Docker continuation"
+  expect_absent "$guarded_runtime/run/mode" "native startup guard fails before writing runtime mode"
+
+  local paused_runtime="$TMP_ROOT/native-start-paused-docker-guard"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$paused_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_DOCKER_PROJECT_STATE=paused \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start local --port 55439
+  expect_status 1 "native startup refuses a paused Docker workspace"
+  expect_contains "already active" "paused Docker containers are treated as an active competing runtime"
+  expect_absent "$paused_runtime/run/mode" "paused Docker guard fails before writing runtime mode"
+
+  local guarded_dev_runtime="$TMP_ROOT/dev-start-docker-guard"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$guarded_dev_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_DOCKER_PROJECT_STATE=restarting \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open dev --api-port 55437 --web-port 55438 --skip-setup
+  expect_status 1 "development startup refuses a restarting Docker workspace"
+  expect_contains "separate data store" "development startup explains why the restarting Docker workspace is unsafe"
+  expect_absent "$guarded_dev_runtime/run/mode" "restarting Docker guard fails before writing development mode"
+
+  local docker_guard_runtime="$TMP_ROOT/docker-start-native-guard"
+  local docker_guard_log="$TMP_ROOT/docker-start-native-guard.log"
+  mkdir -p "$docker_guard_runtime/run"
+  printf 'dev\n' >"$docker_guard_runtime/run/mode"
+  printf '55440\n' >"$docker_guard_runtime/run/api-port"
+  printf '%s\n' "$$" >"$docker_guard_runtime/run/pid"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$docker_guard_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_PS_COMMAND="bash $LAUNCHER _run-native dev 55440 55441" \
+    DESIGNER_TEST_MUTATION_LOG="$docker_guard_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" --no-open start docker --port 55442 --no-build
+  expect_status 1 "Docker startup refuses an owned development runtime"
+  expect_contains "managed dev FormaSpec runtime" "Docker startup reports the competing managed native mode"
+  expect_file_not_contains "$docker_guard_log" "docker compose" "Docker startup refuses before mutating Compose"
+
+  local server_guard_runtime="$TMP_ROOT/server-start-native-guard"
+  local server_guard_log="$TMP_ROOT/server-start-native-guard.log"
+  mkdir -p "$server_guard_runtime/run" "$server_guard_runtime/env"
+  printf 'local\n' >"$server_guard_runtime/run/mode"
+  printf '55443\n' >"$server_guard_runtime/run/api-port"
+  printf '%s\n' "$$" >"$server_guard_runtime/run/pid"
+  {
+    printf 'DESIGNER_SERVER_ACCESS=ssh\n'
+    printf 'APP_MODE=local\n'
+    printf 'FORMASPEC_CONTAINER_LOCAL=true\n'
+    printf 'BIND_ADDRESS=127.0.0.1\n'
+    printf 'PORT=55444\n'
+    printf 'PUBLIC_BASE_URL=http://127.0.0.1:55444\n'
+    printf 'AUTH_MODE=none\n'
+    printf 'DESIGNER_TOKEN=\n'
+    printf 'TRUSTED_USER_HEADER=x-designer-user\n'
+    printf 'MAX_UPLOAD_BYTES=5242880\n'
+  } >"$server_guard_runtime/env/server.env"
+  chmod 600 "$server_guard_runtime/env/server.env"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$server_guard_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_PS_COMMAND="bash $LAUNCHER _run-native prod 55443 4311" \
+    DESIGNER_TEST_MUTATION_LOG="$server_guard_log" \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" start server --no-build
+  expect_status 1 "server startup refuses an owned local runtime"
+  expect_contains "managed local FormaSpec runtime" "server startup reports the competing managed native mode"
+  expect_file_not_contains "$server_guard_log" "docker compose" "server startup refuses before mutating Compose"
+
+  local mismatch_runtime="$TMP_ROOT/doctor-runtime-mismatch"
+  mkdir -p "$mismatch_runtime/run"
+  printf 'docker\n' >"$mismatch_runtime/run/mode"
+  printf '4310\n' >"$mismatch_runtime/run/api-port"
+  printf '%s\n' '{"schemaVersion":1,"pid":123,"url":"http://127.0.0.1:4312","instanceId":"bridge-runtime-mismatch","upstreamMcpUrl":"http://127.0.0.1:4320/mcp"}' >"$mismatch_runtime/run/formaspec-bridge.json"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$mismatch_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor docker
+  expect_status 1 "doctor rejects a healthy bridge targeting another runtime"
+  expect_contains "Codex runtime mismatch" "doctor explains the UI and bridge runtime mismatch"
+  expect_contains "http://127.0.0.1:4320/mcp" "doctor reports the mismatched bridge upstream"
+  expect_contains "start docker" "doctor keeps a recorded Docker workspace on its existing data store"
+  expect_not_contains "start local' and then rerun doctor" "doctor never recommends a separate local store for a recorded Docker runtime"
+
+  local healthy_docker_runtime="$TMP_ROOT/doctor-healthy-docker-without-host-node"
+  mkdir -p "$healthy_docker_runtime/run"
+  printf 'docker\n' >"$healthy_docker_runtime/run/mode"
+  printf '4310\n' >"$healthy_docker_runtime/run/api-port"
+  printf '%s\n' '{"schemaVersion":1,"pid":123,"url":"http://127.0.0.1:4312","instanceId":"bridge-healthy-docker","upstreamMcpUrl":"http://127.0.0.1:4310/mcp"}' >"$healthy_docker_runtime/run/formaspec-bridge.json"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$healthy_docker_runtime" \
+    DESIGNER_TEST_NODE_UNAVAILABLE=1 \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor auto
+  expect_status 0 "recorded Docker doctor succeeds without host Node.js"
+  expect_contains "Host Node.js and pnpm are not required for recorded Docker mode" "recorded Docker doctor explains its container runtime"
+  expect_not_contains "Node.js 24+ is missing or too old" "recorded Docker doctor does not report a false host-Node failure"
+
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$healthy_docker_runtime" \
+    DESIGNER_TEST_NODE_UNAVAILABLE=1 \
+    DESIGNER_TEST_DOCKER_DAEMON=ready \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor docker
+  expect_status 0 "explicit Docker doctor succeeds without host Node.js"
+  expect_contains "Host Node.js and pnpm are not required for Docker mode" "explicit Docker doctor reports host Node.js as unnecessary"
+  expect_not_contains "Node.js 24+ is missing or too old" "explicit Docker doctor keeps host Node.js non-blocking"
+
+  local native_without_node_runtime="$TMP_ROOT/doctor-native-without-host-node"
+  mkdir -p "$native_without_node_runtime/run"
+  printf '%s\n' '{"schemaVersion":1,"pid":123,"url":"http://127.0.0.1:4312","instanceId":"bridge-native-without-node","upstreamMcpUrl":"http://127.0.0.1:4310/mcp"}' >"$native_without_node_runtime/run/formaspec-bridge.json"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$native_without_node_runtime" \
+    DESIGNER_TEST_NODE_UNAVAILABLE=1 \
+    DESIGNER_TEST_CURL_OK=1 \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor local
+  expect_status 1 "native local doctor still requires host Node.js"
+  expect_contains "Node.js 24+ is missing or too old" "native local doctor retains the actionable Node.js failure"
+
+  local stopped_docker_runtime="$TMP_ROOT/doctor-stopped-docker-runtime"
+  mkdir -p "$stopped_docker_runtime/run"
+  printf 'docker\n' >"$stopped_docker_runtime/run/mode"
+  printf '4310\n' >"$stopped_docker_runtime/run/api-port"
+  capture env \
+    PATH="$MOCK_PATH" \
+    HOME="$TMP_ROOT/home" \
+    DESIGNER_RUNTIME_DIR="$stopped_docker_runtime" \
+    DESIGNER_TEST_DOCKER_DAEMON=stopped \
+    DESIGNER_NO_OPEN=1 \
+    bash "$LAUNCHER" doctor auto
+  expect_status 1 "doctor reports a stopped recorded Docker runtime"
+  expect_contains "do not start local mode" "doctor keeps stopped Docker projects on their recorded data store"
+  expect_not_contains "Start it or use '$LAUNCHER start local'" "doctor gives no contradictory local fallback for recorded Docker mode"
+}
+
 printf 'TAP version 13\n'
 
 if [ ! -f "$LAUNCHER" ]; then
@@ -986,6 +1251,7 @@ run_codex_config_state_tests
 run_log_selection_regression_test
 run_gnu_stat_permission_regression_test
 run_restart_regression_test
+run_runtime_alignment_regression_tests
 
 printf '# %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 if [ "$FAIL_COUNT" -ne 0 ]; then

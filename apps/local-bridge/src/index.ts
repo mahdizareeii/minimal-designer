@@ -14,6 +14,10 @@ const port = parsePort(process.env.FORMASPEC_BRIDGE_PORT, 4312);
 const upstreamMcpUrl = process.env.FORMASPEC_UPSTREAM_MCP_URL ?? "http://127.0.0.1:4310/mcp";
 validateLoopbackMcpUrl(upstreamMcpUrl);
 const buildId = process.env.FORMASPEC_BRIDGE_BUILD_ID ?? "development";
+const expectedDataStoreId = process.env.FORMASPEC_EXPECTED_DATA_STORE_ID;
+if (expectedDataStoreId !== undefined && !/^store_[a-f0-9]{32}$/.test(expectedDataStoreId)) {
+  throw new Error("The expected FormaSpec data-store identity is invalid.");
+}
 const upstreamAuthMode = process.env.FORMASPEC_UPSTREAM_AUTH_MODE ?? "unknown";
 if (!["none", "session", "trusted-header", "token", "unknown"].includes(upstreamAuthMode)) {
   throw new Error("The upstream authentication mode is invalid.");
@@ -24,8 +28,11 @@ const bridge = await startBridgeServer({
   port,
   upstreamMcpUrl,
   buildId,
+  ...(expectedDataStoreId === undefined ? {} : { expectedDataStoreId }),
   allowLegacySelfCreate: upstreamAuthMode === "none",
-  credentialStore: createSystemCredentialStore(upstreamMcpUrl),
+  credentialStore: createSystemCredentialStore(upstreamMcpUrl, process.env, {
+    ...(expectedDataStoreId === undefined ? {} : { dataStoreId: expectedDataStoreId }),
+  }),
   controlErrorReporter: (error) => {
     const message = (error instanceof Error ? error.message : String(error))
       .replace(/[\r\n\u0000-\u001f\u007f]+/g, " ")

@@ -38,10 +38,10 @@ describe("packaged FormaSpec Codex identity", () => {
     ]);
     expect(FORMASPEC_CODEX_IDENTITY.mention).toBe("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(MINIMAL_UI_CODEX_IDENTITY.mention).toBe("[@Minimal UI](plugin://minimal-ui@formaspec)");
-    expect(FORMASPEC_CODEX_ASSET_INVENTORY.pluginVersion).toBe("0.2.1");
+    expect(FORMASPEC_CODEX_ASSET_INVENTORY.pluginVersion).toBe("0.2.2");
     for (const skillName of ["formaspec", "minimal-ui"]) {
       const skill = fs.readFileSync(path.join(sourceAssets, "skills", skillName, "SKILL.md"), "utf8");
-      expect(skill).toContain("Start FormaSpec with ./designer start local, then retry this request.");
+      expect(skill).toContain("Run ./designer doctor auto, start the runtime it identifies, then retry this request.");
       expect(skill).not.toContain("Start FormaSpec with ./designer start, then retry this request.");
     }
   });
@@ -90,7 +90,7 @@ describe("packaged FormaSpec Codex identity", () => {
     const versionedAlias = JSON.parse(fs.readFileSync(staleAliasVersionManifest, "utf8")) as { version: string };
     versionedAlias.version = "0.1.0";
     fs.writeFileSync(staleAliasVersionManifest, `${JSON.stringify(versionedAlias, null, 2)}\n`);
-    expect(() => inspectManagedCodexAssets(staleAliasVersion)).toThrow(/minimal-ui at 0\.2\.1/u);
+    expect(() => inspectManagedCodexAssets(staleAliasVersion)).toThrow(/minimal-ui at 0\.2\.2/u);
 
     const divergentSkill = copiedAssets();
     fs.appendFileSync(path.join(divergentSkill, "skills/formaspec/SKILL.md"), "\nDivergent workflow.\n");

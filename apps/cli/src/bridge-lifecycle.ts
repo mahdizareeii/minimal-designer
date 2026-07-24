@@ -13,17 +13,37 @@ interface BridgeState {
   instanceId: string;
   buildId?: string;
   upstreamMcpUrl?: string;
+  expectedDataStoreId?: string;
 }
 
 interface BridgeHealthProbe {
   running: boolean;
+  status: "ok" | "stopping" | null;
   buildId: string | null;
+  upstreamOrigin: string | null;
+  upstreamReady: boolean;
+  dataStoreId: string | null;
+}
+
+interface BridgeIdentityProbe extends BridgeHealthProbe {
+  owned: boolean;
+  expectedDataStoreId: string | null;
+  identityMatches: boolean;
+}
+
+interface UpstreamRuntimeIdentity {
+  origin: string;
+  ready: boolean;
+  dataStoreId: string | null;
 }
 
 export interface BridgeStatus {
   running: boolean;
   url: string;
   owned: boolean;
+  upstreamOrigin: string | null;
+  upstreamReady: boolean;
+  dataStoreId: string | null;
 }
 
 export const FORMASPEC_ESSENTIAL_MCP_TOOLS = [
@@ -46,6 +66,8 @@ export interface AgentVerification {
   checks: string[];
   serverName: "formaspec";
   essentialTools: string[];
+  upstreamOrigin: string;
+  dataStoreId: string;
 }
 
 export interface BridgeController {
@@ -84,6 +106,28 @@ function readApiPort(runtimeDirectory: string): number {
     return parsePort(value, 4310);
   } catch (error) {
     throw new Error(`Recorded API port is invalid: ${portFile}`, { cause: error });
+  }
+}
+
+async function upstreamRuntimeIdentity(upstreamMcpUrl: string): Promise<UpstreamRuntimeIdentity> {
+  const origin = new URL(upstreamMcpUrl).origin;
+  try {
+    const response = await fetch(`${origin}/health/ready`, {
+      headers: { accept: "application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(3_000),
+    });
+    const body = await response.json() as { ok?: unknown; dataStoreId?: unknown };
+    const dataStoreId = typeof body.dataStoreId === "string" && /^store_[a-f0-9]{32}$/.test(body.dataStoreId)
+      ? body.dataStoreId
+      : null;
+    return {
+      origin,
+      ready: response.ok && body.ok === true && dataStoreId !== null,
+      dataStoreId,
+    };
+  } catch {
+    return { origin, ready: false, dataStoreId: null };
   }
 }
 
@@ -134,16 +178,105 @@ function recordedUpstreamAuthMode(runtimeDirectory: string, environment: NodeJS.
 
 async function bridgeHealth(url: string): Promise<BridgeHealthProbe> {
   try {
-    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(800) });
-    if (!response.ok) return { running: false, buildId: null };
-    const body = await response.json() as { service?: unknown; status?: unknown; buildId?: unknown };
-    const running = body.service === "formaspec-local-bridge" && (body.status === "ok" || body.status === "stopping");
+    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3_000) });
+    if (!response.ok) {
+      return { running: false, status: null, buildId: null, upstreamOrigin: null, upstreamReady: false, dataStoreId: null };
+    }
+    const body = await response.json() as {
+      service?: unknown;
+      status?: unknown;
+      buildId?: unknown;
+      upstreamOrigin?: unknown;
+      upstreamReady?: unknown;
+      dataStoreId?: unknown;
+    };
+    const status = body.status === "ok" || body.status === "stopping" ? body.status : null;
+    const running = body.service === "formaspec-local-bridge" && status !== null;
+    let upstreamOrigin: string | null = null;
+    if (typeof body.upstreamOrigin === "string") {
+      try {
+        const parsed = new URL(body.upstreamOrigin);
+        const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+        if (parsed.protocol === "http:" && ["127.0.0.1", "::1", "localhost"].includes(host)
+          && parsed.origin === body.upstreamOrigin && !parsed.username && !parsed.password) {
+          upstreamOrigin = parsed.origin;
+        }
+      } catch {
+        upstreamOrigin = null;
+      }
+    }
+    const dataStoreId = typeof body.dataStoreId === "string" && /^store_[a-f0-9]{32}$/.test(body.dataStoreId)
+      ? body.dataStoreId
+      : null;
+    const upstreamReady = body.upstreamReady === true && upstreamOrigin !== null && dataStoreId !== null;
     return {
       running,
+      status: running ? status : null,
       buildId: running && typeof body.buildId === "string" ? body.buildId : null,
+      upstreamOrigin: running ? upstreamOrigin : null,
+      upstreamReady: running && upstreamReady,
+      dataStoreId: running ? dataStoreId : null,
     };
   } catch {
-    return { running: false, buildId: null };
+    return { running: false, status: null, buildId: null, upstreamOrigin: null, upstreamReady: false, dataStoreId: null };
+  }
+}
+
+async function bridgeIdentity(url: string, state: BridgeState): Promise<BridgeIdentityProbe | null> {
+  try {
+    const response = await fetch(`${url}/_control/identity`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instanceId: state.instanceId }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!response.ok) return null;
+    const body = await response.json() as {
+      owned?: unknown;
+      status?: unknown;
+      buildId?: unknown;
+      upstreamOrigin?: unknown;
+      upstreamReady?: unknown;
+      dataStoreId?: unknown;
+      expectedDataStoreId?: unknown;
+      identityMatches?: unknown;
+    };
+    const status = body.status === "ok" || body.status === "stopping" ? body.status : null;
+    let upstreamOrigin: string | null = null;
+    if (typeof body.upstreamOrigin === "string") {
+      try {
+        const parsed = new URL(body.upstreamOrigin);
+        const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+        if (parsed.protocol === "http:" && ["127.0.0.1", "::1", "localhost"].includes(host)
+          && parsed.origin === body.upstreamOrigin && !parsed.username && !parsed.password) {
+          upstreamOrigin = parsed.origin;
+        }
+      } catch {
+        upstreamOrigin = null;
+      }
+    }
+    const dataStoreId = typeof body.dataStoreId === "string" && /^store_[a-f0-9]{32}$/.test(body.dataStoreId)
+      ? body.dataStoreId
+      : null;
+    const expectedDataStoreId = typeof body.expectedDataStoreId === "string"
+      && /^store_[a-f0-9]{32}$/.test(body.expectedDataStoreId)
+      ? body.expectedDataStoreId
+      : null;
+    if (body.owned !== true || status === null || typeof body.buildId !== "string"
+      || upstreamOrigin === null || typeof body.identityMatches !== "boolean") return null;
+    return {
+      running: true,
+      owned: true,
+      status,
+      buildId: body.buildId,
+      upstreamOrigin,
+      upstreamReady: body.upstreamReady === true,
+      dataStoreId,
+      expectedDataStoreId,
+      identityMatches: body.identityMatches,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -176,7 +309,10 @@ function readState(statePath: string): BridgeState | null {
     const value = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<BridgeState>;
     if (value.schemaVersion !== 1 || !Number.isSafeInteger(value.pid) || typeof value.url !== "string"
       || typeof value.instanceId !== "string" || value.instanceId.length < 16
-      || (value.upstreamMcpUrl !== undefined && typeof value.upstreamMcpUrl !== "string")) return null;
+      || (value.upstreamMcpUrl !== undefined && typeof value.upstreamMcpUrl !== "string")
+      || (value.expectedDataStoreId !== undefined
+        && (typeof value.expectedDataStoreId !== "string"
+          || !/^store_[a-f0-9]{32}$/.test(value.expectedDataStoreId)))) return null;
     validateBridgeMcpUrl(`${value.url}/mcp`);
     if (value.upstreamMcpUrl !== undefined) validateBridgeMcpUrl(value.upstreamMcpUrl);
     return value as BridgeState;
@@ -224,7 +360,26 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
     async status(): Promise<BridgeStatus> {
       const state = readState(statePath);
       const probe = await bridgeHealth(bridgeUrl);
-      return { running: probe.running, url: bridgeUrl, owned: probe.running && state?.url === bridgeUrl };
+      const configuredOrigin = state?.upstreamMcpUrl ? new URL(state.upstreamMcpUrl).origin : null;
+      const identity = probe.running && state?.url === bridgeUrl
+        ? await bridgeIdentity(bridgeUrl, state)
+        : null;
+      const details = identity ?? probe;
+      return {
+        running: probe.running,
+        url: bridgeUrl,
+        owned: identity?.owned === true
+          && identity.status === "ok"
+          && configuredOrigin !== null
+          && identity.upstreamOrigin === configuredOrigin
+          && state?.expectedDataStoreId !== undefined
+          && identity.expectedDataStoreId === state.expectedDataStoreId
+          && identity.dataStoreId === state.expectedDataStoreId
+          && identity.identityMatches,
+        upstreamOrigin: details.upstreamOrigin,
+        upstreamReady: details.upstreamReady,
+        dataStoreId: details.dataStoreId,
+      };
     },
 
     async ensureStarted(): Promise<BridgeStatus> {
@@ -232,11 +387,35 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
       const state = readState(statePath);
       const probe = await bridgeHealth(bridgeUrl);
       const upstreamMcpUrl = `http://127.0.0.1:${readApiPort(runtimeDirectory)}/mcp`;
+      const upstreamOrigin = new URL(upstreamMcpUrl).origin;
+      const upstreamIdentity = await upstreamRuntimeIdentity(upstreamMcpUrl);
+      if (!upstreamIdentity.ready || upstreamIdentity.dataStoreId === null) {
+        throw new Error(`The FormaSpec API at ${upstreamOrigin} is not ready with a valid data-store identity.`);
+      }
+      const expectedDataStoreId = upstreamIdentity.dataStoreId;
+      const identity = probe.running && state?.url === bridgeUrl
+        ? await bridgeIdentity(bridgeUrl, state)
+        : null;
       if (probe.running
-        && probe.buildId === runtime.buildId
-        && state?.url === bridgeUrl
-        && state.upstreamMcpUrl === upstreamMcpUrl) {
-        return { running: true, url: bridgeUrl, owned: true };
+        && probe.status === "ok"
+        && identity?.owned === true
+        && identity.status === "ok"
+        && identity.buildId === runtime.buildId
+        && state?.upstreamMcpUrl === upstreamMcpUrl
+        && state.expectedDataStoreId === expectedDataStoreId
+        && identity.upstreamOrigin === upstreamOrigin
+        && identity.upstreamReady
+        && identity.dataStoreId === expectedDataStoreId
+        && identity.expectedDataStoreId === expectedDataStoreId
+        && identity.identityMatches) {
+        return {
+          running: true,
+          url: bridgeUrl,
+          owned: true,
+          upstreamOrigin: identity.upstreamOrigin,
+          upstreamReady: true,
+          dataStoreId: expectedDataStoreId,
+        };
       }
       if (probe.running) {
         if (state?.url !== bridgeUrl) {
@@ -267,6 +446,7 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
           FORMASPEC_BRIDGE_INSTANCE_ID: instanceId,
           FORMASPEC_BRIDGE_BUILD_ID: runtime.buildId,
           FORMASPEC_UPSTREAM_MCP_URL: upstreamMcpUrl,
+          FORMASPEC_EXPECTED_DATA_STORE_ID: expectedDataStoreId,
           FORMASPEC_UPSTREAM_AUTH_MODE: recordedUpstreamAuthMode(runtimeDirectory, environment),
         },
       });
@@ -280,12 +460,27 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         instanceId,
         buildId: runtime.buildId,
         upstreamMcpUrl,
+        expectedDataStoreId,
       };
       writeState(statePath, nextState);
       for (let attempt = 0; attempt < 60; attempt += 1) {
-        const started = await bridgeHealth(bridgeUrl);
-        if (started.running && started.buildId === runtime.buildId) {
-          return { running: true, url: bridgeUrl, owned: true };
+        const started = await bridgeIdentity(bridgeUrl, nextState);
+        if (started?.owned === true
+          && started.status === "ok"
+          && started.buildId === runtime.buildId
+          && started.upstreamOrigin === upstreamOrigin
+          && started.upstreamReady
+          && started.dataStoreId === expectedDataStoreId
+          && started.expectedDataStoreId === expectedDataStoreId
+          && started.identityMatches) {
+          return {
+            running: true,
+            url: bridgeUrl,
+            owned: true,
+            upstreamOrigin: started.upstreamOrigin,
+            upstreamReady: true,
+            dataStoreId: expectedDataStoreId,
+          };
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -324,8 +519,10 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
 
     async verifyAgent(): Promise<AgentVerification> {
       const state = readState(statePath);
-      if (state === null || !(await bridgeHealth(state.url)).running) {
-        throw new Error("The local bridge is stopped; run './designer start local' before verifying the Codex MCP connection.");
+      const owned = state === null ? null : await bridgeIdentity(state.url, state);
+      if (state === null || state.expectedDataStoreId === undefined
+        || owned?.owned !== true || owned.status !== "ok") {
+        throw new Error("The managed local bridge is stopped or unowned; start the intended FormaSpec runtime before verifying Codex.");
       }
       const response = await fetch(`${state.url}/_control/verify-agent`, {
         method: "POST",
@@ -342,6 +539,8 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         checks?: unknown;
         serverName?: unknown;
         essentialTools?: unknown;
+        upstreamOrigin?: unknown;
+        dataStoreId?: unknown;
       };
       const essentialTools = Array.isArray(body.essentialTools)
         && body.essentialTools.every((tool) => typeof tool === "string")
@@ -351,6 +550,11 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         || !body.checks.every((check) => typeof check === "string")
         || body.serverName !== "formaspec"
         || essentialTools === null
+        || typeof body.upstreamOrigin !== "string"
+        || body.upstreamOrigin !== new URL(state.upstreamMcpUrl ?? "http://invalid.local/mcp").origin
+        || typeof body.dataStoreId !== "string"
+        || !/^store_[a-f0-9]{32}$/.test(body.dataStoreId)
+        || body.dataStoreId !== state.expectedDataStoreId
         || !FORMASPEC_ESSENTIAL_MCP_TOOLS.every((tool) => essentialTools.includes(tool))) {
         throw new Error("The local bridge returned invalid MCP verification metadata.");
       }
@@ -359,12 +563,17 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         checks: body.checks,
         serverName: "formaspec",
         essentialTools,
+        upstreamOrigin: body.upstreamOrigin,
+        dataStoreId: body.dataStoreId,
       };
     },
 
     async stop(): Promise<boolean> {
       const state = readState(statePath);
       if (state === null) return false;
+      if (state.url !== bridgeUrl) {
+        throw new Error("Bridge ownership state targets a different loopback URL; refusing to stop it.");
+      }
       if (!(await bridgeHealth(state.url)).running) {
         fs.rmSync(statePath, { force: true });
         return false;

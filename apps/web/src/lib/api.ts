@@ -514,8 +514,15 @@ export async function updateContext(input: {
   designId: string | null;
   pageId?: string;
   selectedNodeIds: string[];
+  clientContextId?: string;
 }): Promise<void> {
-  await request<void>("/context", { method: "PUT", body: JSON.stringify(input) });
+  await request<void>("/context", {
+    method: "PUT",
+    body: JSON.stringify(input),
+    // Context payloads are bounded and this lets a tab release its own lease
+    // during pagehide without clearing another tab's active context.
+    keepalive: true,
+  });
 }
 
 export function renderUrl(id: string, options: { version?: number; pageId?: string; nodeId?: string; maxSize?: number } = {}): string {
