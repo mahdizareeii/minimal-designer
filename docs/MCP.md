@@ -41,6 +41,21 @@ Use the managed version-0.3.0 mention:
 [@FormaSpec](plugin://formaspec@formaspec)
 ```
 
+The live macOS source-checkout upgrade on 2026-07-25 verified this exact
+identity: one `formaspec@formaspec` plugin at 0.3.0, one token-free `formaspec`
+MCP entry, no standalone skills, and no legacy compatibility marketplace or
+managed-configuration residue. The current Docker image reached schema-17
+readiness on the recorded data store; the isolated renderer and bridge
+origin/store identity matched; and strict `doctor` passed authenticated MCP
+`initialize` plus `tools/list` while confirming all 12 essential tool IDs. A
+new Codex task is required to load the refreshed plugin inventory. This is
+source-checkout operational evidence, not packaged installer or supported-OS
+lifecycle qualification.
+After the effective loopback Host-comparison fix, the exact live source command
+`./designer ensure-running --json` returns ready for recorded Docker `origin`
+and `webOrigin` `http://127.0.0.1:4310`, store
+`store_70354ab57f8b26194138df3e1c443e4b`, and `bridgeReady: true`.
+
 ## Required workflow
 
 ### Website-created task (`Submit to @FormaSpec`)
@@ -171,8 +186,10 @@ annotations contradict that inventory.
 
 The corresponding protected non-MCP source manifest contains 119 routes: 55
 project-scoped, 58 organization-scoped, and six explicit exceptions. Current
-schema-17 package tests pass 1,027/1,027: core 74, server 540/540, web 145, CLI
-129, local bridge 27, Workspace Bridge 37, and installer 75. Focused Product,
+schema-17 package tests pass 1,028/1,028: core 74, server 540/540, web 145, CLI
+130 (124 ordinary plus six bridge-lifecycle), local bridge 27, Workspace Bridge
+37, and installer 75. The current schema-17 launcher suite passes 280/280.
+Focused Product,
 readiness, preview, and MCP coverage passes 44/44. The passing local tests cover
 exact MCP/resource inventory, route
 closure, generated authentication rejection, direct behavioral authorization,
@@ -208,7 +225,7 @@ represented as opaque object/array fields beneath the strict per-tool envelope;
 promoting those domain payloads to shared schemas remains incremental hardening.
 These residuals and the broader public-interface matrix keep the release gate
 at **NO-GO**. Installed/link verification confirms `drizzle-orm` 0.45.2; the
-schema-17 package checkpoint passes 1,027/1,027. The 54-tool/26-resource/119-
+schema-17 package checkpoint passes 1,028/1,028. The 54-tool/26-resource/119-
 route source contracts pass locally. Current signed installers, hosted
 provenance, security/image/OS scans, real remote-host/TLS recovery, and
 supported-OS lifecycle evidence remain open.

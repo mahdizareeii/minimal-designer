@@ -28,16 +28,17 @@ adds linked responsive frame variants, typed property/slot/visual component
 materialization with nested dependencies and verified asset copying, and
 deterministic sanitized raster-backed SVG/PDF document export.
 
-Current schema-17 package suites pass 1,027/1,027: core 74, server 540/540, web
-145, CLI 129, local bridge 27, Workspace Bridge 37, and installer 75. Four real
+Current schema-17 package suites pass 1,028/1,028: core 74, server 540/540, web
+145, CLI 130 (124 ordinary plus six bridge-lifecycle), local bridge 27,
+Workspace Bridge 37, and installer 75. Four real
 Chromium render/raster tests use a scoped 20-second harness timeout while the
 application render remains hard-bounded at 15 seconds. Recursive
-typecheck and production build pass; launcher tests pass 276/276 and Compose
+typecheck and production build pass; launcher tests pass 280/280 and Compose
 configuration passes. Focused deterministic export passes 15/15,
 migration/backup/restore 59/59, Product/readiness/preview/MCP 44/44, and macOS
 packaged-runtime contracts 11/11. The launcher, full browser, Docker/recovery,
-scan, installed-plugin, hosted-provenance, and supported-OS release aggregates
-remain pending. Retained schema-16 evidence still covers editor/Administration
+scan, packaged Codex-plugin lifecycle, hosted-provenance, and supported-OS
+release aggregates remain pending. Retained schema-16 evidence still covers editor/Administration
 11/11, release scenario 1/1, preview integration 2/2, Chromium alignment 12/12,
 Firefox/WebKit alignment 12/12, visual regression 7/7, and the 1,000-node
 budgets, but those retained runtime results are not inferred to qualify schema
@@ -231,7 +232,7 @@ than current or hosted provenance.
   reject trigger-SQL tampering. Focused migration-17 fixtures cover deterministic
   Product backfill and Product/task integrity; the current focused migration/
   backup/restore cluster passes 59/59. The CLI recognizes schema 17 and its
-  current package passes 129/129. Packaged and real remote-host recovery remain
+  current package passes 130/130. Packaged and real remote-host recovery remain
   pending.
 - Added mutating portable project import behind an Organization Administrator
   boundary. Validation remains read-only; commit requires an idempotency key and
@@ -357,7 +358,14 @@ than current or hosted provenance.
   multiline-string lookalikes, similarly prefixed IDs, and unrelated config,
   and is failure-safe and idempotent. The only public identity is
   `[@FormaSpec](plugin://formaspec@formaspec)` over the token-free `formaspec`
-  MCP connection. A fresh schema-17 installed-plugin lifecycle run is pending.
+  MCP connection. A live macOS source-checkout upgrade built and started the
+  current Docker image against the recorded data store, reached schema-17
+  readiness, passed isolated rendering and bridge origin/store verification,
+  and passed strict MCP `initialize`/`tools/list` doctor verification for all
+  12 essential tools. Live Codex now contains exactly one
+  `formaspec@formaspec` plugin at 0.3.0 and one token-free `formaspec` MCP
+  entry, with no standalone skills or legacy compatibility marketplace/config
+  residue. A new Codex task is required to load the refreshed plugin inventory.
 - Direct requests now resolve exactly one Product and Design, create and claim
   an immutable `design_preview` task, read the bound context, preview/render/
   lint the proposal, return the readiness report, and transition to
@@ -385,6 +393,10 @@ than current or hosted provenance.
   Docker/server instance, checks the origin and persistent data-store identity,
   starts or validates the matching loopback bridge, and fails with actionable
   blockers instead of guessing another mode or silently switching storage.
+  After the effective loopback Host-comparison fix, the exact live source
+  command `./designer ensure-running --json` returns ready for recorded Docker
+  `origin` and `webOrigin` `http://127.0.0.1:4310`, store
+  `store_70354ab57f8b26194138df3e1c443e4b`, and `bridgeReady: true`.
 - Added bounded fail-closed framework-aware scanners for web, Android,
   iOS/Xcode, Flutter, React Native, and generic Git. Worktree pointer/back-
   reference validation, ancestor-swap defense, dual directory enumeration,
@@ -487,10 +499,13 @@ than current or hosted provenance.
   launch, fixed-purpose `ensure-running`, linked responsive frames, richer
   component materialization, deterministic SVG/PDF export, and one managed
   FormaSpec 0.3.0 plugin. The source inventory is 54 MCP tools, 26 resources,
-  and 119 protected non-MCP routes. Current package suites pass 1,027/1,027 and
-  recursive typecheck/build pass. Full browser, Docker/recovery, scans,
-  installed-plugin, hosted-provenance, and supported-OS release gates remain
-  pending.
+  and 119 protected non-MCP routes. Current package suites pass 1,028/1,028 and
+  recursive typecheck/build pass. The live macOS source-checkout upgrade also
+  passes current-image schema-17 readiness, isolated rendering, bridge
+  origin/store verification, strict MCP doctor, and single-plugin/token-free
+  configuration checks. Full browser, retained Docker/recovery release runs,
+  scans, packaged Codex-plugin lifecycle, hosted provenance, and
+  supported-OS release gates remain pending.
 - Last fully verified schema-16 checkpoint: the seven-package suite passed
   957/957 across 147 files, launcher passed 276/276, all seven workspaces passed
   typecheck/build, editor/Administration passed 11/11, the complete release
@@ -507,9 +522,12 @@ than current or hosted provenance.
   plugin, advertises only `[@FormaSpec](plugin://formaspec@formaspec)`, and then
   removes installer-owned legacy assets while preserving unmanaged files. A
   newly opened Codex task is required to load the refreshed plugin manifest.
-  Fresh installed lifecycle evidence is pending. Native installers, hosted provenance, current
-  SBOM/security/image scans, real remote-host/TLS recovery, and supported-OS
-  lifecycle evidence remain open.
+  The live macOS source-checkout upgrade verifies that inventory, the token-free
+  MCP entry, strict MCP doctor, current-image schema-17 readiness, isolated
+  rendering, and bridge origin/store identity. Packaged native installers,
+  custom-protocol lifecycle, hosted provenance, current SBOM/security/image
+  scans, real remote-host/TLS recovery, and supported-OS lifecycle evidence
+  remain open.
 - Historical live exact-preview acceptance rendered
   `preview_dd4da6b79f5e4ddf8b3fd111094c5189` at 1440x900 with PNG SHA-256
   `ad356b73d742c7852a86a022f86d68928dae021ab6710bd7b1d852f7e048e26c`,
@@ -546,15 +564,15 @@ than current or hosted provenance.
 
 | Gate | Result |
 | --- | --- |
-| Organization-Ready 0.3.0 source delta | **Implemented foundation; release gate open.** Source declares database schema 17, command engine 3, one FormaSpec 0.3.0 plugin, 54 MCP tools, 26 resources, and 119 protected non-MCP routes. Migration 17 adds Products, deterministic Design backfill, reviewed move previews, and immutable Product-bound task context. Source also contains readiness validation, content-addressed exact-preview PNG storage, secret-free review launch, `ensure-running`, linked responsive frames, richer component materialization, and deterministic SVG/PDF export. Package suites pass 1,027/1,027 and recursive typecheck/build pass; the remaining runtime/install/release evidence is pending. |
-| Current schema-17 package suites | 1,027/1,027 pass: core 74, server 540/540, web 145, CLI 129, local bridge 27, Workspace Bridge 37, installer 75. Launcher passes 276/276; deterministic document export 15/15; migration/backup/restore 59/59; Product/readiness/preview/MCP 44/44; macOS packaged-runtime contracts 11/11; release-evidence contracts 8/8; CI workflow contracts 8/8; off-host contracts 7/7; and cross-browser Docker contracts 2/2. |
+| Organization-Ready 0.3.0 source delta | **Implemented foundation; release gate open.** Source declares database schema 17, command engine 3, one FormaSpec 0.3.0 plugin, 54 MCP tools, 26 resources, and 119 protected non-MCP routes. Migration 17 adds Products, deterministic Design backfill, reviewed move previews, and immutable Product-bound task context. Source also contains readiness validation, content-addressed exact-preview PNG storage, secret-free review launch, `ensure-running`, linked responsive frames, richer component materialization, and deterministic SVG/PDF export. Package suites pass 1,028/1,028 and recursive typecheck/build pass; the remaining runtime/install/release evidence is pending. |
+| Current schema-17 package suites | 1,028/1,028 pass: core 74, server 540/540, web 145, CLI 130, local bridge 27, Workspace Bridge 37, installer 75. Launcher passes 280/280; deterministic document export 15/15; migration/backup/restore 59/59; Product/readiness/preview/MCP 44/44; macOS packaged-runtime contracts 11/11; release-evidence contracts 8/8; CI workflow contracts 8/8; off-host contracts 7/7; and cross-browser Docker contracts 2/2. |
 | Last fully verified schema-16 application/source gate | The seven-package suite passed 957/957 across 147 files: core 64, server 508, web 135, CLI 114, local bridge 27, Workspace Bridge 37, and installer 72. Launcher passed 276/276; all seven workspaces passed typecheck/build; editor/Administration passed 11/11; the complete release E2E passed 1/1; preview integration passed 2/2; macOS runtime-smoke contracts passed 11/11. This checkpoint covered the prior interface and does not verify schema 17. |
 | Historical schema-13 application/source gate | Installed/link verification confirmed `drizzle-orm` 0.45.2. Application suites passed 678/678, launcher 212/212, and all seven workspaces passed typecheck/build. Audit had zero high/critical findings. This is historical, not schema-17 qualification. |
 | Prior schema-12 package checkpoint | Core 47/47 across 8 files, server 437/437 across 78 files, web 69/69 across 17 files, CLI 89/89 across 9 files, local bridge 18/18 across 2 files, Workspace Bridge 37/37 across 4 files, and installer 62/62 across 5 files passed. Coverage included all 51 then-registered MCP tools and all 106 then-protected routes with zero uncovered. This remains regression evidence, not current-source qualification. |
 | Exhaustive event authorization | Retained schema-16 focused policy and real-HTTP tests passed 7/7 across exactly 18 event families, and those contracts pass in the current server run. The matrix proves per-family agent scopes, human-role allowlists, project/organization/optional/control boundaries, task-only access without design access, denial of task/handoff/Redesign/admin events to design-only agents, Organization-Administrator-only connection/backup/audit families, SQL replay filtering before limits/bounds/cursors, live/replay parity, and closure after policy removal or revocation. Retained hosted long-running stream evidence remains pending. |
 | Typecheck | Current recursive schema-17 typecheck passes across all seven workspaces. |
 | Production build | Current schema-17 production build passes across core, server, web, CLI, local bridge, Workspace Bridge, and installer. |
-| Launcher | Current schema-17 launcher suite passes 276/276. |
+| Launcher | Current schema-17 launcher suite passes 280/280, including effective loopback Host comparison and the verified recorded-Docker `ensure-running` result. |
 | Enterprise editor and administration | Retained schema-16 targeted E2E passed 11/11. |
 | Exact preview acceptance | Historical pre-boundary acceptance reviewed a 1440x900 persisted PNG and agent-committed version 1→2; the task completed; preview and revision JSON matched at 76,099 bytes; persisted PNG, snapshot, and operation hashes all matched. Current source requires website-only Commit/Discard and content-addressed PNG verification; fresh schema-17 acceptance is pending. |
 | Selection alignment | Retained schema-16 Chromium passed 12/12 within 0.75 CSS px across the required zoom/pan/scroll/layout/node/direction/selection/DPR matrix. The retained Docker image also passed Firefox/WebKit 12/12. |
@@ -625,6 +643,16 @@ identity payload in the bounded instructions. This rebuilt image is historical
 local operational evidence, not the retained provenance-bound CI image and not
 verification of the current single FormaSpec 0.3.0 plugin.
 
+The separate 2026-07-25 live macOS source-checkout upgrade supersedes that
+operational identity check. It resumed the recorded Docker data store, built
+the current image, reached schema-17 readiness, passed the isolated Playwright
+renderer, matched bridge origin/store identity, and passed strict authenticated
+MCP `initialize`/`tools/list` doctor verification for the 12 essential tools.
+Live Codex then contained exactly one `formaspec@formaspec` 0.3.0 plugin and
+one token-free `formaspec` MCP entry, with no standalone skills or legacy
+compatibility marketplace/configuration residue. This remains local
+source-checkout evidence, not retained packaged or hosted provenance.
+
 Earlier installed-volume evidence remains separately recorded: project
 `miare courier app` was version 31 at revision
 `revision_36dd0a2e4cdc4d35b1e1b4e50087ef59` through the schema-8 checkpoint.
@@ -635,9 +663,10 @@ The retained launcher also refreshed its exact mode-`0600` Docker runtime
 binding, started the local bridge, verified MCP `formaspec`, and installed the
 then-current superseded dual-identity payload without placing a bearer token in
 generated Codex configuration. Current source instead installs and verifies
-one FormaSpec 0.3.0 plugin before removing installer-owned legacy assets; a
-fresh installed lifecycle run is pending, and Codex must open a new task after
-refresh to load the new manifest.
+one FormaSpec 0.3.0 plugin before removing installer-owned legacy assets. The
+live source-checkout upgrade verifies that single-identity path; Codex must open
+a new task after refresh to load the new manifest. Frozen packaged
+install/upgrade/protocol lifecycle proof remains pending.
 
 ## macOS release blockers
 
@@ -667,7 +696,9 @@ failed. A frozen final candidate still requires:
 - Retain the passing schema-17 package/typecheck/build, Product/readiness/MCP,
   migration/backup, export, bridge, and installer-source results under release
   provenance, then run the remaining launcher, full browser, Docker/recovery,
-  live managed-plugin, scan, and supported-OS aggregates. Retained schema-16
+  packaged managed-plugin/protocol lifecycle, scan, and supported-OS
+  aggregates. The successful live macOS source-checkout upgrade is not a
+  packaged or supported-OS qualification. Retained schema-16
   runtime results cannot qualify the Organization-Ready 0.3.0 source delta.
 - Freeze and rebuild the final macOS candidate, resolve its outer-PKG
   nondeterminism, then prove clean install/autostart/protocol/upgrade/uninstall/
@@ -722,8 +753,9 @@ failed. A frozen final candidate still requires:
 
 **NO-GO for enterprise production.** Current schema-17 package suites and
 recursive typecheck/build pass, but the full browser/runtime/Docker/recovery,
-live managed-plugin, security-scan, installer-lifecycle, and hosted release
-aggregate is incomplete. Retained schema-16 browser, performance, Docker, and
+packaged managed-plugin/protocol, security-scan, installer-lifecycle, and hosted
+release aggregate is incomplete. The successful live source-checkout upgrade
+does not close those gates. Retained schema-16 browser, performance, Docker, and
 same-host recovery gates do not qualify the Organization-Ready 0.3.0 delta.
 Release approval is also blocked by unsigned/unqualified native installers,
 missing hosted provenance, missing current SBOM/security/image scans, no real

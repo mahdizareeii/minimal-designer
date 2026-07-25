@@ -787,9 +787,10 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           try {
             dockerBinding = readDockerRuntimeBinding(projectRoot());
             const publicBinding = sanitizedPublicDockerBinding(dockerBinding);
+            const effectiveHealthHostHeader = healthTarget.hostHeader ?? new URL(healthTarget.origin).host;
             if (publicBinding.runtimeMode !== mode
               || publicBinding.origin !== healthTarget.origin
-              || (healthTarget.hostHeader ?? "") !== publicBinding.healthHostHeader) {
+              || effectiveHealthHostHeader !== publicBinding.healthHostHeader) {
               throw new Error("The recorded runtime and pinned Docker binding identify different modes or endpoints.");
             }
             dockerEnvironment = { DOCKER_CONTEXT: dockerBinding.context };

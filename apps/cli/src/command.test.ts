@@ -1408,6 +1408,44 @@ describe("formaspecctl", () => {
     });
   });
 
+  it("accepts an already-ready recorded Docker runtime with its effective loopback Host pinned", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "docker", 4320, 0, "http://127.0.0.1:4320");
+    persistKnownDockerBinding(root, 4320);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const bridge = fakeBridge();
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    const io = collectingIo();
+    let launcherCalls = 0;
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => {
+        launcherCalls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    })).toBe(0);
+
+    expect(launcherCalls).toBe(0);
+    expect(bridge.starts).toBe(1);
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: true,
+      status: "ready",
+      mode: "docker",
+      started: false,
+      origin: "http://127.0.0.1:4320",
+      webOrigin: "http://127.0.0.1:4320",
+      dataStoreId: TEST_DATA_STORE_ID,
+      bridgeReady: true,
+    });
+  });
+
   it("resumes only the recorded local runtime on its exact API port", async () => {
     const root = makeProject(temporaryDirectory());
     recordRuntime(root, "local", 4320, 0, "http://127.0.0.1:4320");

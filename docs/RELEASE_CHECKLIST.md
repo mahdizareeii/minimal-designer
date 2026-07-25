@@ -68,20 +68,36 @@ property/slot/visual component materialization with nested dependencies and
 verified asset copying, and deterministic sanitized raster-backed SVG/PDF
 document export.
 
-Current schema-17 package suites pass 1,027/1,027: core 74, server 540/540, web
-145, CLI 129, local bridge 27, Workspace Bridge 37, and installer 75. Four real
+Current schema-17 package suites pass 1,028/1,028: core 74, server 540/540, web
+145, CLI 130 (124 ordinary plus six bridge-lifecycle), local bridge 27,
+Workspace Bridge 37, and installer 75. Four real
 Chromium render/raster tests use a scoped 20-second harness timeout while the
 application render remains hard-bounded at 15 seconds. Recursive
-typecheck and production build pass; launcher tests pass 276/276 and Compose
+typecheck and production build pass; launcher tests pass 280/280 and Compose
 configuration passes. Focused deterministic document export
 passes 15/15, migration/backup/restore 59/59, Product/readiness/preview/MCP
 44/44, and macOS packaged-runtime contracts 11/11. The launcher, full browser,
-Docker/recovery, scan, installed-plugin, hosted-provenance, and supported-OS
-release aggregates remain pending. Retained schema-16 editor/Administration
+Docker/recovery, scan, packaged Codex-plugin lifecycle, hosted-provenance,
+and supported-OS release aggregates remain pending. Retained schema-16 editor/Administration
 E2E 11/11, release E2E 1/1, preview integration 2/2, Chromium and
 Firefox/WebKit alignment 12/12 each, visual regression 7/7, and the 1,000-node
 budgets remain regression evidence rather than schema-17 release
 qualification.
+
+The live macOS source-checkout upgrade completed on 2026-07-25. It started the
+recorded Docker data store, built the current image, reached schema-17
+readiness, passed the isolated Playwright renderer and bridge origin/store
+checks, and passed strict authenticated MCP `initialize`/`tools/list` doctor
+verification for all 12 essential tools. Live Codex has exactly one
+`formaspec@formaspec` plugin at 0.3.0, exactly one token-free `formaspec` MCP
+entry, no standalone skills, and no legacy compatibility entry/text in its
+managed marketplace/configuration. A new Codex task is required to load the
+refreshed inventory. This does not qualify packaged installers, protocol
+registration, hosted provenance, signing, scans, or the supported-OS lifecycle.
+After the effective loopback Host-comparison fix, the exact live source command
+`./designer ensure-running --json` returns ready for recorded Docker `origin`
+and `webOrigin` `http://127.0.0.1:4310`, store
+`store_70354ab57f8b26194138df3e1c443e4b`, and `bridgeReady: true`.
 
 Historical live agent acceptance, before the website-only approval boundary,
 passed with exact preview
@@ -479,6 +495,13 @@ Do not start a production rollout or V2 head migration until every item passes:
   and reported. The exact Minimal UI TOML parent/descendant cleanup preserves
   multiline-string lookalikes, similarly prefixed IDs, and unrelated config,
   and is failure-safe and idempotent.
+- [x] A live macOS source-checkout upgrade starts the recorded Docker store,
+  builds the current image, reaches schema-17 readiness, verifies the isolated
+  renderer and bridge origin/store identity, passes strict MCP
+  `initialize`/`tools/list` doctor checks for the 12 essential tools, and leaves
+  live Codex with one 0.3.0 plugin, one token-free MCP entry, no standalone
+  skills, and no legacy compatibility marketplace/configuration residue. A new
+  Codex task is still required to load the refreshed plugin inventory.
 - [x] The only supported public identity is
   `[@FormaSpec](plugin://formaspec@formaspec)`, with the recommended “Use
   FormaSpec,” “Design this with FormaSpec,” and selection/refinement triggers.
@@ -553,11 +576,11 @@ Do not start a production rollout or V2 head migration until every item passes:
 
 ## Phase 6 delivery gate
 
-- [ ] Retain the passing schema-17 1,027-test package total and recursive
+- [ ] Retain the passing schema-17 1,028-test package total and recursive
   typecheck/build, 15/15 export, 59/59 migration/backup, 44/44 Product/readiness/
   preview/MCP, and 11/11 macOS packaged-runtime contracts on provenance-bound
-  hosted runners, then complete full browser, Docker/recovery, live
-  managed-plugin, scan, and supported-OS installer gates. Retained schema-16
+  hosted runners, then complete full browser, Docker/recovery, packaged
+  managed-plugin/protocol, scan, and supported-OS installer gates. Retained schema-16
   editor/Administration, release, preview, alignment, visual, performance,
   Docker/egress, Firefox/WebKit, and copied-bundle recovery results do not
   qualify schema 17. Current SBOM/security/image/OS scans, signed native
@@ -596,10 +619,11 @@ Do not start a production rollout or V2 head migration until every item passes:
   protocol registration tests pass on each supported OS.
 - [ ] Setup wizard completes agent authorization, backup destination, render
   verification, and health checks.
-- [ ] Native/source installers prove that FormaSpec 0.3.0 is installed and
+- [ ] Packaged native installers prove that FormaSpec 0.3.0 is installed and
   verified before installer-owned legacy assets are removed, unmanaged files
   are preserved, and only `[@FormaSpec](plugin://formaspec@formaspec)` is
-  advertised after upgrade.
+  advertised after upgrade on every supported OS. The passing macOS
+  source-checkout upgrade is not packaged lifecycle evidence.
 - [ ] The single `formaspec/server` image with two long-lived API/renderer
   services and the profiled one-shot restore worker passes non-root,
   capability, filesystem, migration, readiness, restart, restore, and egress

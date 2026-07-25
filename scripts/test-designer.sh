@@ -322,6 +322,39 @@ run_static_contract_tests() {
   esac
 }
 
+run_formaspecctl_delegation_regression_test() {
+  local delegated_root="$TMP_ROOT/delegated launcher project"
+  local delegated_launcher="$delegated_root/designer"
+  local delegated_cli="$delegated_root/apps/cli/dist/index.js"
+  local delegated_bin="$delegated_root/bin"
+  local delegated_node="$delegated_bin/node"
+
+  mkdir -p "$(dirname "$delegated_cli")" "$delegated_bin"
+  cp "$LAUNCHER" "$delegated_launcher"
+  chmod +x "$delegated_launcher"
+  printf '%s\n' '// Fake compiled CLI entry used only to satisfy the delegation boundary.' >"$delegated_cli"
+  cat >"$delegated_node" <<'EOF'
+#!/usr/bin/env bash
+printf 'guard=%s\n' "${FORMASPEC_LEGACY_DELEGATE:-}"
+printf 'entry=%s\n' "${1:-}"
+shift
+printf 'argc=%s\n' "$#"
+for argument in "$@"; do
+  printf 'arg=%s\n' "$argument"
+done
+EOF
+  chmod +x "$delegated_node"
+
+  capture env \
+    PATH="$delegated_bin:/usr/bin:/bin" \
+    FORMASPEC_LEGACY_DELEGATE=0 \
+    bash "$delegated_launcher" ensure-running --json
+  expect_status 0 "compatibility launcher delegates ensure-running to formaspecctl"
+  expect_contains "guard=1" "ensure-running delegation sets the recursion guard"
+  expect_contains "apps/cli/dist/index.js" "ensure-running delegation selects the compiled CLI entry"
+  expect_contains $'argc=2\narg=ensure-running\narg=--json' "ensure-running delegation preserves the exact argument vector"
+}
+
 run_location_and_read_only_tests() {
   local outside_dir="$TMP_ROOT/outside repository cwd with spaces"
   local outside_runtime="$TMP_ROOT/outside-runtime-must-not-exist"
@@ -1243,6 +1276,7 @@ if [ ! -f "$LAUNCHER" ]; then
 fi
 
 run_static_contract_tests
+run_formaspecctl_delegation_regression_test
 run_location_and_read_only_tests
 run_dry_run_tests
 run_cli_validation_tests

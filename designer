@@ -74,7 +74,7 @@ delegate_to_formaspecctl_if_available() {
     esac
   done
   case "$command" in
-    install|doctor|status|start|stop|restart|migrate|agent|audit|support-bundle) ;;
+    install|doctor|status|start|stop|restart|ensure-running|migrate|agent|audit|support-bundle) ;;
     backup)
       case "${1:-}" in create|list|verify|restore|schedule|prune) ;; *) return 0 ;; esac
       ;;

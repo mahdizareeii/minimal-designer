@@ -19,9 +19,9 @@ The repository is an incremental pnpm TypeScript workspace:
 | HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, password-session and trusted-header browser authentication, organization/Product/Design authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, deterministic sanitized raster-backed SVG/PDF export, backups, and render orchestration. |
 | Persistence | Better SQLite3 with a numbered version-17 migration ledger, WAL, first-class Products, Product-bound immutable task context, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, bounded write-once exact preview-render metadata, and a canonical consume-once bootstrap-credential trigger. |
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
-| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus exactly one managed FormaSpec 0.3.0 plugin. Managed cleanup removes only the exact legacy Minimal UI TOML tables and preserves unrelated or lookalike configuration. |
+| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus exactly one managed FormaSpec 0.3.0 plugin. Managed cleanup removes only the exact legacy Minimal UI TOML tables and preserves unrelated or lookalike configuration. A live macOS source-checkout upgrade verifies one 0.3.0 plugin, one token-free MCP entry, no standalone skills, no legacy compatibility marketplace/config residue, and strict authenticated MCP `initialize`/`tools/list` doctor checks; packaged supported-OS lifecycle remains open. |
 | Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
-| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. Current local schema-16 image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1` passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery; its compatibility evidence paths remain under `artifacts/ci/docker-schema11/`. It is local uncommitted-source evidence, not hosted/signed/scanned release provenance. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; native macOS/Linux/Windows lifecycle proof is missing. |
+| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. A live macOS source-checkout upgrade built and started the current image on the recorded data store, reached schema-17 readiness, passed isolated rendering, and matched bridge origin/store identity; it is operational evidence rather than a retained release artifact. Current retained schema-16 image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1` passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery; its compatibility evidence paths remain under `artifacts/ci/docker-schema11/`. It is local uncommitted-source evidence, not hosted/signed/scanned release provenance. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; packaged native macOS/Linux/Windows and custom-protocol lifecycle proof is missing. |
 
 ```mermaid
 flowchart LR
@@ -56,18 +56,32 @@ the retained schema-16 checkpoint, hosted provenance, or a release image.
 
 Installed/link verification confirms `drizzle-orm` 0.45.2. The current
 schema-17 source passes recursive typecheck and production build. Its package
-tests currently cover core 74/74, server 540/540, web 145/145, CLI 129/129,
-local bridge 27/27, Workspace Bridge 37/37, and installer 75/75: 1,027 tests in
+tests currently cover core 74/74, server 540/540, web 145/145, CLI 130/130
+(124 ordinary plus six bridge-lifecycle), local bridge 27/27, Workspace Bridge
+37/37, and installer 75/75: 1,028 tests in
 total. Four real Chromium render/raster cases use a scoped 20-second test-
 harness timeout while the application render remains hard-bounded at 15
 seconds. Deterministic document-export tests pass 15/15, migration/backup/restore
 tests pass 59/59, Product/readiness/preview/MCP tests pass 44/44, and macOS
-packaged-runtime contracts pass 11/11. Launcher tests pass 276/276 and
+packaged-runtime contracts pass 11/11. Launcher tests pass 280/280 and
 `docker compose config --quiet` passes. These are local source checks; the full
 schema-17 browser, Docker, recovery, security-scan, and supported-OS release
 matrix remains open. Retained local Docker restart/egress and copied-bundle
 recovery evidence uses the older schema-16 image
 `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`.
+Separately, the live macOS source-checkout upgrade built and started the current
+Docker image against the recorded store, reached schema-17 readiness, passed
+the isolated Playwright renderer and bridge origin/store checks, and passed
+strict MCP `initialize`/`tools/list` doctor verification for the 12 essential
+tools. Live Codex then contained exactly one 0.3.0 managed plugin and one
+token-free MCP entry, with no standalone skills or legacy compatibility
+marketplace/configuration residue. A new Codex task is required to load that
+refreshed inventory. This run is not packaged, hosted, signed, scanned, or
+supported-OS lifecycle evidence.
+After the effective loopback Host-comparison fix, the exact live source command
+`./designer ensure-running --json` returns ready for recorded Docker `origin`
+and `webOrigin` `http://127.0.0.1:4310`, store
+`store_70354ab57f8b26194138df3e1c443e4b`, and `bridgeReady: true`.
 The exact SBOM/license result remains historical schema-13 evidence; hosted,
 installed-native, current security/image/OS scan, and real remote-host/TLS
 matrices remain open.
