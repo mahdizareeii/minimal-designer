@@ -8,8 +8,12 @@ import {
   createInstanceNode,
   createSequentialIdFactory,
   createStarterDocument,
+  createTextNode,
   lintDesignDocumentV2,
   mergeV1CompatibilityDocument,
+  projectedComponentNode,
+  projectedComponentSlotChildren,
+  readComponentInstanceProjection,
   toV1CompatibleDesignDocument,
   validateDesignDocument,
   V2CompatibilityError,
@@ -163,6 +167,82 @@ describe("FormaSpec V2", () => {
     if (!invalidInstance || invalidInstance.type !== "component_instance") throw new Error("invalid fixture instance missing");
     invalidInstance.active_state = "pressed";
     expect(() => toV1CompatibleDesignDocument(invalid)).toThrowError(V2CompatibilityError);
+  });
+
+  it("projects typed component properties, slot anchors, and allowed visual overrides", () => {
+    const ids = createSequentialIdFactory("v2componentcontract");
+    const source = createStarterDocument({ now: "2026-01-01T00:00:00.000Z", idFactory: ids });
+    const frame = Object.values(source.nodes)[0]!;
+    if (frame.type !== "frame") throw new Error("fixture frame missing");
+    const label = createTextNode({ content: "Default label", layout: { width: 160, height: 24 } }, ids);
+    const component = createComponentNode({
+      name: "Contract button",
+      component_key: "button.contract",
+      children: [label.id],
+      layout: { width: 220, height: 64, mode: "vertical" },
+    }, ids);
+    const instance = createInstanceNode({ component_id: component.id }, ids);
+    frame.children.push(component.id, instance.id);
+    source.nodes[label.id] = label;
+    source.nodes[component.id] = component;
+    source.nodes[instance.id] = instance;
+
+    const migrated = migrateV1ToV2(DesignDocumentSchema.parse(source), {
+      migratedAt: "2026-02-01T00:00:00.000Z",
+    });
+    const migratedInstance = migrated.nodes[instance.id];
+    if (!migratedInstance || migratedInstance.type !== "component_instance") throw new Error("fixture instance missing");
+    const definition = migrated.component_definitions[migratedInstance.component_definition_id];
+    if (!definition) throw new Error("fixture definition missing");
+    const root = migrated.nodes[definition.root_node_id];
+    if (!root || root.type !== "container") throw new Error("fixture source root missing");
+    const slotLabel = createTextNode({
+      content: "Supporting slot",
+      archived: true,
+      layout: { width: 150, height: 20 },
+    }, ids);
+    const migratedSlotLabel = migrateV1ToV2(DesignDocumentSchema.parse({
+      ...source,
+      nodes: { ...source.nodes, [slotLabel.id]: slotLabel },
+    }), { migratedAt: "2026-02-01T00:00:00.000Z" }).nodes[slotLabel.id];
+    if (!migratedSlotLabel) throw new Error("fixture slot node missing");
+    migrated.nodes[slotLabel.id] = migratedSlotLabel;
+    definition.properties_schema = [{
+      key: "label",
+      label: "Label",
+      type: "text",
+      required: true,
+      default: "Default label",
+    }];
+    definition.property_bindings = [{
+      property_key: "label",
+      target_node_id: label.id,
+      target: "text_content",
+    }];
+    definition.slots = [{
+      key: "supporting",
+      name: "Supporting content",
+      required: false,
+      min_items: 0,
+      max_items: 1,
+      allowed_node_types: ["text"],
+    }];
+    definition.slot_anchors = [{ slot_key: "supporting", target_node_id: root.id }];
+    definition.allowed_overrides.allowed_style_paths = ["fill"];
+    migratedInstance.properties = { label: "Pay now" };
+    migratedInstance.slots = { supporting: [slotLabel.id] };
+    migratedInstance.visual_overrides = { [root.id]: { fill: "#2457ff" } };
+
+    const strict = DesignDocumentV2Schema.parse(migrated);
+    const projected = toV1CompatibleDesignDocument(strict);
+    const projectedInstance = projected.nodes[instance.id];
+    if (!projectedInstance || projectedInstance.type !== "instance") throw new Error("projected instance missing");
+    const projection = readComponentInstanceProjection(projectedInstance.overrides);
+    expect(projection).not.toBeNull();
+    expect(projectedComponentNode(projected.nodes[label.id]!, projection).type).toBe("text");
+    expect(projectedComponentNode(projected.nodes[label.id]!, projection)).toMatchObject({ content: "Pay now" });
+    expect(projectedComponentNode(projected.nodes[root.id]!, projection).style).toMatchObject({ fill: "#2457ff" });
+    expect(projectedComponentSlotChildren(projection, root.id)).toEqual([slotLabel.id]);
   });
 
   it("treats archived detached component masters as valid reusable source trees", () => {

@@ -99,11 +99,14 @@ configuration fails rather than silently leaving an unsupervised process.
 
 Privileged install scripts never open a browser or configure a user account.
 The desktop entry advertises the secret-free `formaspec` URL scheme. Its
-handler accepts only `formaspec://`, `formaspec://open`, and
-`formaspec://connect-agent`; malformed, parameterized, or unknown links are
-rejected. The connect link opens the local Administration page so the user can
-perform the existing explicit authorization flow. It never places a token in
-the URL or invokes a shell-interpolated command.
+handler accepts only `formaspec://`, `formaspec://open`, the strict
+`formaspec://connect-agent` forms, and an exact ordered
+`formaspec://open-review?design=…&preview=…&task=…&store=…` form. Malformed,
+duplicated, reordered, encoded, or unknown links are rejected. The review link
+runs `formaspecctl ensure-running --json`, verifies the recorded data-store ID,
+and opens the exact review on the returned web origin; it never switches to a
+different native/Docker store. The handler never places a token in the URL or
+invokes a shell-interpolated command.
 
 ## Upgrade and uninstall data policy
 

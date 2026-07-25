@@ -58,11 +58,10 @@ The macOS runtime-smoke unit contract is platform-neutral:
 pnpm test:macos-pkg-runtime-smoke
 ```
 
-The current contract suite passes 11/11. It validates frozen historical package
-expectations and requires a fresh current payload to include both version-0.2.0
-FormaSpec and Minimal UI identities over one token-free `formaspec` MCP entry
-at `http://127.0.0.1:4312/mcp`; it is not a schema-16 installed-package
-lifecycle result.
+The current contract suite validates frozen historical-package expectations.
+A fresh current payload must contain exactly one FormaSpec 0.3.0 identity over
+one token-free `formaspec` MCP entry at `http://127.0.0.1:4312/mcp`; this remains
+a non-installing contract check, not an installed-package lifecycle result.
 
 After a fresh unsigned PKG is built on macOS, the real smoke runs with explicit
 artifact and output paths:

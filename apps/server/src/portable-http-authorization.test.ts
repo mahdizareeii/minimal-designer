@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
+import { moveDesignFixtureToOrganization } from "../test-fixtures/product.js";
 
 const PROXY_SECRET = "portable-http-proxy-secret-0123456789abcdef";
 const ADMIN_IDENTITY = "portable-http-admin@example.test";
@@ -127,9 +128,11 @@ async function createFixture(label: string): Promise<Fixture> {
   application.database.sqlite.prepare(
     "INSERT INTO organizations (id, name, config_json, created_at, updated_at) VALUES (?, ?, '{}', ?, ?)",
   ).run(foreignOrganizationId, `Foreign ${PRIVATE_MARKER}`, now, now);
-  application.database.sqlite.prepare(
-    "UPDATE designs SET organization_id = ?, name = ? WHERE id = ?",
-  ).run(foreignOrganizationId, `Foreign project ${PRIVATE_MARKER}`, foreignProjectId);
+  moveDesignFixtureToOrganization(application.database.sqlite, {
+    designId: foreignProjectId,
+    organizationId: foreignOrganizationId,
+    name: `Foreign project ${PRIVATE_MARKER}`,
+  });
 
   const challenge = application.enterprise.createAgentConnection("local", {
     adapter: "codex",

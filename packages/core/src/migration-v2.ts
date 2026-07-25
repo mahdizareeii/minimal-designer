@@ -72,6 +72,9 @@ function migrateNode(node: DesignNode): DesignNodeV2 {
         text_direction: node.metadata.text_direction === "rtl" || node.metadata.text_direction === "ltr"
           ? node.metadata.text_direction
           : "auto",
+        ...(node.responsive_variant === undefined
+          ? {}
+          : { responsive_variant: structuredClone(node.responsive_variant) }),
       };
     case "group":
     case "component":
@@ -105,6 +108,7 @@ function migrateNode(node: DesignNode): DesignNodeV2 {
         component_version: 1,
         properties: {},
         slots: {},
+        visual_overrides: {},
         active_state: "default",
       };
   }

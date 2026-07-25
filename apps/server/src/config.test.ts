@@ -180,6 +180,47 @@ describe("FormaSpec application modes", () => {
     })).toThrow(/server-only/);
   });
 
+  it("separates the development browser origin from the API while requiring root-only safe URLs", () => {
+    const development = loadConfig({
+      APP_MODE: "local",
+      HOST: "127.0.0.1",
+      PORT: "4310",
+      PUBLIC_BASE_URL: "http://127.0.0.1:4310/",
+      FORMASPEC_WEB_BASE_URL: "http://127.0.0.1:4311/",
+    });
+    expect(development.publicBaseUrl).toBe("http://127.0.0.1:4310");
+    expect(development.webBaseUrl).toBe("http://127.0.0.1:4311");
+    expect(development.corsOrigins).toEqual(expect.arrayContaining([
+      "http://127.0.0.1:4310",
+      "http://127.0.0.1:4311",
+    ]));
+
+    for (const invalid of [
+      "http://user:password@127.0.0.1:4311",
+      "http://127.0.0.1:4311/formaspec",
+      "http://127.0.0.1:4311?workspace=other",
+      "http://127.0.0.1:4311#review",
+    ]) {
+      expect(() => loadConfig({
+        APP_MODE: "local",
+        HOST: "127.0.0.1",
+        PUBLIC_BASE_URL: "http://127.0.0.1:4310",
+        FORMASPEC_WEB_BASE_URL: invalid,
+      })).toThrow(/root HTTP\(S\) origin/);
+    }
+
+    expect(() => loadConfig({
+      APP_MODE: "server",
+      HOST: "0.0.0.0",
+      PUBLIC_BASE_URL: "https://api.example.test",
+      FORMASPEC_WEB_BASE_URL: "https://design.example.test",
+      AUTH_MODE: "trusted-header",
+      DESIGNER_TOKEN: "designer-token-0123456789abcdef0123456789",
+      FORMASPEC_TRUSTED_PROXIES: "127.0.0.1",
+      FORMASPEC_PROXY_SECRET: PROXY_SECRET,
+    })).toThrow(/same public origin/);
+  });
+
   it("allows an explicit loopback-published container boundary without weakening ordinary local mode", () => {
     const config = loadConfig({
       APP_MODE: "local",

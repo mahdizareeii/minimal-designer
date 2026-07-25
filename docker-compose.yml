@@ -62,6 +62,7 @@ services:
       DATA_DIR: /data
       BACKUP_DIR: /backups
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4310}
+      FORMASPEC_WEB_BASE_URL: ${FORMASPEC_WEB_BASE_URL:-${PUBLIC_BASE_URL:-http://localhost:4310}}
       AUTH_MODE: ${AUTH_MODE:-none}
       DESIGNER_TOKEN: ${DESIGNER_TOKEN:-}
       FORMASPEC_PROXY_SECRET: ${FORMASPEC_PROXY_SECRET:-}

@@ -24,7 +24,6 @@ describe("generic MCP client configuration", () => {
     expect(configuration).toMatchObject({
       serverId: "formaspec",
       displayName: "FormaSpec",
-      displayAliases: ["Minimal UI"],
       transport: "streamable_http",
       connectionMode: "loopback_bridge",
       url: "http://127.0.0.1:4312/mcp",
@@ -46,9 +45,9 @@ url = "http://127.0.0.1:4312/mcp"`);
     }
     expect(configuration.verificationInstructions.join("\n")).toContain("formaspec://schema/v2");
     expect(configuration.verificationInstructions.join("\n")).toContain("does not edit unsupported client files");
-    expect(configuration.verificationInstructions.join("\n")).toContain("primary natural-language identity");
+    expect(configuration.verificationInstructions.join("\n")).toContain("single natural-language identity");
     expect(configuration.verificationInstructions.join("\n")).toContain("Use FormaSpec");
-    expect(configuration.verificationInstructions.join("\n")).toContain("compatibility-only");
+    expect(configuration.verificationInstructions.join("\n")).not.toContain("Minimal UI");
   });
 
   it("accepts credential-free exact /mcp URLs on loopback HTTP or public HTTPS", () => {
@@ -104,8 +103,9 @@ url = "http://localhost:54321/mcp"`,
     expect(output).toContain("print-only; no client configuration file was read or changed");
     expect(output).toContain("curl --fail --silent --show-error http://127.0.0.1:4312/health");
     expect(output).toContain("Keep write-tool approval enabled");
-    expect(output).toContain("Primary agent identity: FormaSpec");
-    expect(output).toContain("Compatibility aliases: Minimal UI");
+    expect(output).toContain("Agent identity: FormaSpec");
+    expect(output).not.toContain("Compatibility aliases:");
+    expect(output).not.toContain("Minimal UI");
 
     const invalidIo = collectingIo();
     expect(runGenericMcpConfigCli(["--output", "/tmp/client.json"], invalidIo)).toBe(1);

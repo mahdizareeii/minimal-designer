@@ -1,4 +1,5 @@
 import {
+  ComponentDefinitionSchema,
   FORMASPEC_FOUNDATION_SYSTEM,
   createGroupNode,
   createStarterDocument,
@@ -7,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   componentInsertionParentOptions,
+  componentPropertyDefaults,
+  componentSlotKeys,
+  parseVisualOverrides,
 } from "../components/ComponentLibraryPanel";
 import {
   commitComponentInsertionPreview,
@@ -107,6 +111,7 @@ describe("manual pinned component insertion", () => {
           activeState: "default",
           instanceId,
           nodeIdMapping: { [definition.root_node_id]: targetNodeId },
+          assetIdMapping: {},
         },
       }), { status: 201, headers: { "content-type": "application/json" } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -122,6 +127,9 @@ describe("manual pinned component insertion", () => {
       parent: { node_id: document.pages[0]!.children[0]! },
       activeState: "default",
       position: { x: 24.5, y: 36.25 },
+      properties: { label: "Continue securely" },
+      slots: { supporting: [document.pages[0]!.children[0]!] },
+      visualOverrides: { [definition.root_node_id]: { fill: "#123456" } },
     });
     const committed = await commitComponentInsertionPreview({
       designId: document.id,
@@ -148,6 +156,9 @@ describe("manual pinned component insertion", () => {
       parent: { node_id: document.pages[0]!.children[0]! },
       activeState: "default",
       position: { x: 24.5, y: 36.25 },
+      properties: { label: "Continue securely" },
+      slots: { supporting: [document.pages[0]!.children[0]!] },
+      visualOverrides: { [definition.root_node_id]: { fill: "#123456" } },
     });
     expect(fetch.mock.calls[2]?.[0]).toBe(`/api/designs/${document.id}/previews/${previewId}/commit`);
     expect(JSON.parse(String(fetch.mock.calls[2]?.[1]?.body))).toEqual({
@@ -155,5 +166,49 @@ describe("manual pinned component insertion", () => {
       idempotencyKey: "component_insert_retry0001",
       message: "Insert verified design-system component",
     });
+  });
+
+  it("derives typed property defaults, slot controls, and bounded visual override JSON", () => {
+    const definition = ComponentDefinitionSchema.parse({
+      id: "component_web_control_contract_01",
+      key: "button.webControl",
+      name: "Web control",
+      version: 1,
+      status: "published",
+      root_node_id: "node_web_control_root_0001",
+      properties_schema: [
+        { key: "label", label: "Label", type: "text", required: true, default: "Continue" },
+        { key: "leadingIcon", label: "Leading icon", type: "icon", required: false, default: "sparkles" },
+        { key: "content", label: "Content", type: "node_slot", required: false, min_items: 0, max_items: 2 },
+      ],
+      property_bindings: [],
+      slots: [{ key: "supporting", name: "Supporting", required: false, min_items: 0, max_items: 1 }],
+      slot_anchors: [
+        { slot_key: "content", target_node_id: "node_web_control_root_0001" },
+        { slot_key: "supporting", target_node_id: "node_web_control_root_0001" },
+      ],
+      states: [{ key: "default", name: "Default", node_id: "node_web_control_root_0001" }],
+      allowed_overrides: {
+        allow_text: false,
+        allow_assets: false,
+        allow_icons: false,
+        allowed_token_families: [],
+        allowed_style_paths: ["fill", "opacity"],
+      },
+      platform_mappings: [],
+      documentation: { summary: "", usage: [], accessibility: [], do_list: [], dont_list: [] },
+    });
+    expect(componentPropertyDefaults(definition)).toEqual({
+      label: "Continue",
+      leadingIcon: { icon_name: "sparkles" },
+    });
+    expect(componentSlotKeys(definition)).toEqual(["content", "supporting"]);
+    expect(parseVisualOverrides(JSON.stringify({
+      node_web_control_root_0001: { fill: "#123456", opacity: 0.8 },
+    }))).toEqual({
+      node_web_control_root_0001: { fill: "#123456", opacity: 0.8 },
+    });
+    expect(() => parseVisualOverrides("[]")).toThrow(/JSON object/);
+    expect(() => parseVisualOverrides(JSON.stringify({ node_web_control_root_0001: { unknown: true } }))).toThrow();
   });
 });

@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { ProductIdSchema } from "@designer/core";
 import { z } from "zod";
 
 import { normalizeImageAsset, safeFilename } from "./assets.js";
@@ -10,6 +11,10 @@ import { appendAuditEvent, resolveAccess } from "./authorization.js";
 import { verifyBackupBundle, type BackupManager } from "./backup.js";
 import type { ServerConfig } from "./config.js";
 import { DomainError } from "./errors.js";
+import {
+  deterministicPdfExport,
+  deterministicSvgExport,
+} from "./deterministic-document-export.js";
 import { canReadDesignerEvent } from "./event-authorization.js";
 import type { DesignerEvent, EventHub } from "./events.js";
 import type { MaintenanceStore } from "./maintenance.js";
@@ -25,10 +30,12 @@ import type { EnterpriseService } from "./enterprise-service.js";
 
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
 const designIdParams = z.object({ id: z.string().min(1).max(200) });
+const dataStoreIdSchema = z.string().regex(/^store_[a-f0-9]{32}$/);
 
 const createDesignSchema = z.object({
   name: z.string().trim().min(1).max(255),
   preset: z.enum(["web", "phone", "tablet"]).default("web"),
+  productId: ProductIdSchema.optional(),
   idempotencyKey: idempotencyKeySchema,
 }).strict();
 
@@ -46,11 +53,17 @@ const previewSchema = z.object({
 
 const previewRenderQuerySchema = z.object({
   taskId: z.string().min(1).max(240).optional(),
+  storeId: dataStoreIdSchema.optional(),
   _retry: z.string().max(100).optional(),
   mode: z.enum(["exact", "adhoc"]).default("exact"),
   pageId: z.string().min(1).max(300).optional(),
   nodeId: z.string().min(1).max(300).optional(),
   maxSize: z.coerce.number().int().min(64).max(4096).optional(),
+}).strict();
+
+const previewReadQuerySchema = z.object({
+  taskId: z.string().min(1).max(240).optional(),
+  storeId: dataStoreIdSchema.optional(),
 }).strict();
 
 const revisionSchema = z.object({
@@ -72,6 +85,29 @@ const restoreSchema = z.object({
   idempotencyKey: idempotencyKeySchema,
 }).strict();
 
+const designExportQuerySchema = z.object({
+  version: z.coerce.number().int().positive().optional(),
+  format: z.enum(["json", "svg", "pdf"]).default("json"),
+  pageId: z.string().min(1).max(300).optional(),
+  nodeId: z.string().min(1).max(300).optional(),
+  maxSize: z.coerce.number().int().min(64).max(4096).default(2048),
+}).strict().superRefine((query, context) => {
+  if (query.pageId !== undefined && query.nodeId !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["nodeId"],
+      message: "Choose either pageId or nodeId for an export, not both.",
+    });
+  }
+  if (query.format === "json" && (query.pageId !== undefined || query.nodeId !== undefined || query.maxSize !== 2048)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["format"],
+      message: "Page, node, and raster-size options apply only to SVG or PDF export.",
+    });
+  }
+});
+
 const contextSchema = z.object({
   designId: z.string().min(1).nullable().optional(),
   pageId: z.string().min(1).nullable().optional(),
@@ -81,6 +117,7 @@ const contextSchema = z.object({
 
 function revisionResponse(result: RevisionResult): Record<string, unknown> {
   return {
+    productId: result.design.productId,
     version: result.revision.version,
     revisionId: result.revision.id,
     snapshotHash: result.revision.snapshotHash,
@@ -93,7 +130,7 @@ function revisionResponse(result: RevisionResult): Record<string, unknown> {
   };
 }
 
-function previewResponse(preview: PreviewResult): Record<string, unknown> {
+function previewResponse(preview: PreviewResult, dataStoreId: string): Record<string, unknown> {
   return {
     previewId: preview.id,
     designId: preview.designId,
@@ -115,7 +152,25 @@ function previewResponse(preview: PreviewResult): Record<string, unknown> {
     createdIds: preview.createdIds,
     document: preview.document,
     schemaVersion: preview.schemaVersion,
+    dataStoreId,
   };
+}
+
+function assertDataStoreIdentity(service: DesignerService, requestedDataStoreId?: string): void {
+  const actualDataStoreId = service.database.dataStoreId();
+  if (requestedDataStoreId === undefined || requestedDataStoreId === actualDataStoreId) return;
+  throw new DomainError(
+    "DATA_STORE_MISMATCH",
+    "This review link belongs to a different FormaSpec data store.",
+    409,
+    {
+      details: {
+        expectedDataStoreId: requestedDataStoreId,
+        actualDataStoreId,
+        recovery: "Start the FormaSpec runtime that created this preview, then reopen the review link.",
+      },
+    },
+  );
 }
 
 function parseInteger(value: unknown, fallback?: number): number | undefined {
@@ -354,7 +409,10 @@ export function registerHttpRoutes(
       renderer: rendered.renderer,
       warnings: rendered.warnings,
     });
-    return reply.code(201).send(previewResponse(service.getPreview(request.actorId, id, preview.id)));
+    return reply.code(201).send(previewResponse(
+      service.getPreview(request.actorId, id, preview.id),
+      service.database.dataStoreId(),
+    ));
   });
 
   app.get("/api/designs/:id/previews/:previewId", async (request) => {
@@ -365,8 +423,12 @@ export function registerHttpRoutes(
       rawRequestField(request.query, "taskId") || undefined,
     );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
-    const query = z.object({ taskId: z.string().min(1).max(240).optional() }).strict().parse(request.query);
-    return previewResponse(service.getPreview(request.actorId, params.id, params.previewId, query));
+    const query = previewReadQuerySchema.parse(request.query);
+    assertDataStoreIdentity(service, query.storeId);
+    return previewResponse(
+      service.getPreview(request.actorId, params.id, params.previewId, query),
+      service.database.dataStoreId(),
+    );
   });
 
   app.post("/api/designs/:id/previews/:previewId/commit", async (request) => {
@@ -433,7 +495,10 @@ export function registerHttpRoutes(
       renderer: rendered.renderer,
       warnings: rendered.warnings,
     });
-    return reply.code(201).send(previewResponse(service.getPreview(request.actorId, id, preview.id)));
+    return reply.code(201).send(previewResponse(
+      service.getPreview(request.actorId, id, preview.id),
+      service.database.dataStoreId(),
+    ));
   });
 
   app.post("/api/designs/:id/archive-previews/:previewId/commit", async (request) => {
@@ -597,11 +662,35 @@ export function registerHttpRoutes(
   app.get("/api/designs/:id/export", async (request, reply) => {
     service.authorizeDesignRead(request.actorId, rawRequestField(request.params, "id"));
     const { id } = designIdParams.parse(request.params);
-    const query = request.query as Record<string, unknown>;
-    const result = service.getDesign(request.actorId, id, parseInteger(query.version));
+    const query = designExportQuerySchema.parse(request.query);
+    const result = service.getDesign(request.actorId, id, query.version);
+    if (query.format === "json") {
+      return reply
+        .header("content-disposition", `attachment; filename="${id}-v${result.revision.version}.json"`)
+        .send(result.canonicalDocument);
+    }
+    const rendered = await renderCanonicalDocument(request.actorId, result.canonicalDocument, {
+      ...(query.pageId === undefined ? {} : { pageId: query.pageId }),
+      ...(query.nodeId === undefined ? {} : { nodeId: query.nodeId }),
+      maxSize: query.maxSize,
+    });
+    const artifact = query.format === "svg"
+      ? deterministicSvgExport(rendered.png, rendered.width, rendered.height)
+      : deterministicPdfExport(rendered.png, rendered.width, rendered.height);
+    const sourcePngSha256 = createHash("sha256").update(rendered.png).digest("hex");
+    const artifactSha256 = createHash("sha256").update(artifact).digest("hex");
     return reply
-      .header("content-disposition", `attachment; filename="${id}-v${result.revision.version}.json"`)
-      .send(result.canonicalDocument);
+      .header("content-type", query.format === "svg" ? "image/svg+xml; charset=utf-8" : "application/pdf")
+      .header("content-disposition", `attachment; filename="${id}-v${result.revision.version}.${query.format}"`)
+      .header("cache-control", query.version === undefined ? "no-store" : "private, max-age=31536000, immutable")
+      .header("content-security-policy", "default-src 'none'; img-src data:; style-src 'none'; sandbox")
+      .header("x-content-type-options", "nosniff")
+      .header("x-formaspec-export-format", query.format)
+      .header("x-formaspec-export-sha256", artifactSha256)
+      .header("x-formaspec-source-png-sha256", sourcePngSha256)
+      .header("x-designer-renderer", rendered.renderer)
+      .header("x-designer-render-warnings", rendered.warnings.join(" | ").slice(0, 1000))
+      .send(artifact);
   });
 
   const renderCanonicalDocument = async (
@@ -662,6 +751,7 @@ export function registerHttpRoutes(
     );
     const params = z.object({ id: z.string(), previewId: z.string() }).parse(request.params);
     const query = previewRenderQuerySchema.parse(request.query);
+    assertDataStoreIdentity(service, query.storeId);
     if (query.mode === "adhoc") {
       const rendered = await renderDocument(request.actorId, params.id, { previewId: params.previewId }, query);
       return reply
@@ -681,6 +771,19 @@ export function registerHttpRoutes(
     }
     const access = query.taskId === undefined ? {} : { taskId: query.taskId };
     const exact = service.getExactPreviewForRender(request.actorId, params.id, params.previewId, access);
+    const stored = service.readStoredExactPreviewRender(request.actorId, params.id, params.previewId, access);
+    if (stored !== null) {
+      return reply
+        .header("content-type", "image/png")
+        .header("cache-control", "no-store")
+        .header("etag", `"${stored.renderMetadata.sha256}"`)
+        .header("x-formaspec-preview-render-mode", "exact")
+        .header("x-formaspec-preview-artifact", "stored")
+        .header("x-formaspec-preview-render-sha256", stored.renderMetadata.sha256)
+        .header("x-designer-renderer", stored.renderMetadata.renderer)
+        .header("x-designer-render-warnings", stored.renderMetadata.warnings.join(" | ").slice(0, 1000))
+        .send(stored.png);
+    }
     const rendered = await renderCanonicalDocument(
       request.actorId,
       exact.preview.canonicalDocument,
@@ -698,6 +801,7 @@ export function registerHttpRoutes(
       .header("cache-control", "no-store")
       .header("etag", `"${verified.sha256}"`)
       .header("x-formaspec-preview-render-mode", "exact")
+      .header("x-formaspec-preview-artifact", "hydrated")
       .header("x-formaspec-preview-render-sha256", verified.sha256)
       .header("x-designer-renderer", rendered.renderer)
       .header("x-designer-render-warnings", rendered.warnings.join(" | ").slice(0, 1000))

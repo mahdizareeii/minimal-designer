@@ -39,10 +39,9 @@ pnpm release:evidence:macos:verify
 pnpm release:evidence:macos:gate
 ```
 
-The standalone packaged-runtime contract suite currently passes 11/11. For a
-fresh current-source payload it requires both managed version-0.2.0 identities
-(FormaSpec and Minimal UI), both standalone and plugin-contained skills, both
-plugin manifests, and one credential-free `formaspec` MCP entry targeting
+The standalone packaged-runtime contract suite is retained for historical
+evidence. A fresh current-source payload requires one managed FormaSpec 0.3.0
+plugin-contained skill, one plugin manifest, and one credential-free `formaspec` MCP entry targeting
 `http://127.0.0.1:4312/mcp`. This contract does not make the retained
 schema-12 PKG current or installed.
 
@@ -63,9 +62,9 @@ The smoke invokes only `pkgutil` inspection/private expansion and the extracted
 Node runtime. For a fresh current-source package it starts the extracted API,
 renderer, and CLI against private runtime/data/backup/log/support directories;
 verifies schema 16, a real Playwright PNG, the current 52-tool/25-resource MCP
-inventory, both version-0.2.0 plugin identities and their token-free loopback
-MCP configuration, migration, backup, and support-bundle path behavior; then
-terminates process groups and removes the private tree. It never invokes
+inventory, the single managed FormaSpec 0.3.0 plugin identity and its token-free
+loopback MCP configuration, migration, backup, and support-bundle path behavior;
+then terminates process groups and removes the private tree. It never invokes
 package installation, LaunchAgents, Keychain, Codex, protocol handlers, or a
 browser opener. This is stronger packaged-byte evidence, not privileged
 lifecycle or renderer-egress proof. The retained schema-12 checkpoint remains
@@ -344,9 +343,10 @@ These verified historical results belong only to artifact SHA-256
 - render health reported Playwright worker mode with no warnings;
 - a real 1100×720 PNG fixture was fully decoded and normalized by the packaged
   worker to a deterministic 83,398-byte content-addressed PNG;
-- MCP `initialize` returned server ID `formaspec`, version `0.2.0`, the Minimal
-  UI alias workflow, and protocol `2025-06-18`; `tools/list` returned 42 tools,
-  and `context_get` plus `design_create` completed against a new V1 project;
+- MCP `initialize` returned server ID `formaspec`, version `0.2.0`, the now-
+  superseded dual-identity workflow, and protocol `2025-06-18`; `tools/list`
+  returned 42 tools, and `context_get` plus `design_create` completed against a
+  new V1 project;
 - `design_render` returned a 408×512 PNG through the packaged Playwright
   renderer;
 - the packaged CLI emitted token-free generic Streamable HTTP configuration

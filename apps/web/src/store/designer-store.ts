@@ -166,7 +166,7 @@ interface DesignerState {
   productBriefGuard: ProductBriefDraftGuard | null;
   archivedDesignState: ArchivedDesignState | null;
   loadProjects: () => Promise<void>;
-  createProject: (name: string, preset: DevicePreset) => Promise<string>;
+  createProject: (name: string, preset: DevicePreset, productId?: string) => Promise<string>;
   archiveProject: (projectId: string, confirmationName: string) => Promise<void>;
   openDesign: (id: string) => Promise<void>;
   closeDesign: () => void;
@@ -301,6 +301,11 @@ function inversePatch(node: DesignNode, patch: UpdateNodePatch): UpdateNodePatch
       inverse.accessibility_label = null;
     }
   }
+  if (patch.responsive_variant !== undefined) {
+    inverse.responsive_variant = node.type === "frame"
+      ? structuredClone(node.responsive_variant ?? null)
+      : null;
+  }
   for (const key of [
     "content", "direction", "asset_id", "alt", "object_fit", "icon_name", "label",
     "component_id", "overrides", "clip_content", "role", "component_key", "description",
@@ -426,15 +431,16 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
     }
   },
 
-  createProject: async (name, preset) => {
+  createProject: async (name, preset, productId) => {
     set({ creating: true, error: null });
     try {
-      const document = await createRemoteDesign(name, preset, createClientKey("create"));
+      const created = await createRemoteDesign(name, preset, createClientKey("create"), productId);
+      const { document } = created;
       set((state) => ({
         creating: false,
         offline: false,
         projects: mergeProjects([
-          { id: document.id, name: document.name, version: document.revision, updatedAt: document.updated_at, preset },
+          { id: document.id, productId: created.productId, name: document.name, version: document.revision, updatedAt: document.updated_at, preset },
           ...state.projects,
         ]),
       }));

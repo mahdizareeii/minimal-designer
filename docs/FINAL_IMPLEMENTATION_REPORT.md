@@ -1,6 +1,6 @@
 # FormaSpec enterprise upgrade implementation report
 
-Report date: 2026-07-22
+Report date: 2026-07-25
 
 Release decision: **NO-GO for enterprise production**
 
@@ -10,23 +10,41 @@ The repository has advanced from the earlier UI-designer MVP into a substantial
 FormaSpec enterprise foundation without rewriting the working V1 application
 or discarding existing projects, revisions, assets, launcher state, or Docker
 volumes. The product remains usable for local evaluation and continued
-development, including automatic Codex connection through the FormaSpec and
-Minimal UI compatibility identities.
+development, including automatic Codex connection through the single managed
+FormaSpec identity `[@FormaSpec](plugin://formaspec@formaspec)`.
 
-Current source is at database schema 16, command engine 2, renderer 3,
+Current source is at database schema 17, command engine 3, renderer 3,
 renderer IPC protocol 2, and font bundle 1. Migration 14 adds browser-session
 authentication, migration 15 adds bounded write-once exact preview-render
-metadata, and migration 16 safely replaces the legacy schema-14/15 bootstrap-
-credential trigger with its canonical consume-once definition while preserving
-credential rows. The complete seven-package suite passes 842/842: core 59,
-server 467, web 91, CLI 96, local bridge 20, Workspace Bridge 37, and installer
-72. Launcher 225/225, all seven workspace typechecks/builds,
-editor/Administration E2E 5/5, the complete product-manager-to-backup-restore
-release scenario 1/1, focused preview integration 2/2, Chromium selection
-alignment 12/12, Firefox/WebKit alignment 12/12, visual regression 7/7, and
-macOS runtime-smoke contracts 11/11 pass.
+metadata, migration 16 canonicalizes the consume-once bootstrap-credential
+trigger, and migration 17 adds first-class Products, deterministic existing-
+Design backfill, Product-bound immutable task context, and CAS-bound Design
+move previews. The Organization-Ready 0.3.0 source surface contains one managed
+FormaSpec 0.3.0 plugin, 54 MCP tools, 26 resources, and 119 protected non-MCP
+routes. It also adds strict design-readiness evidence, content-addressed exact-
+preview PNG artifacts, secret-free `formaspec://open-review` recovery, and the
+fixed-purpose `formaspecctl ensure-running` command. The current source also
+adds linked responsive frame variants, typed property/slot/visual component
+materialization with nested dependencies and verified asset copying, and
+deterministic sanitized raster-backed SVG/PDF document export.
 
-Live agent acceptance also passed. Exact preview
+Current schema-17 package suites pass 1,027/1,027: core 74, server 540/540, web
+145, CLI 129, local bridge 27, Workspace Bridge 37, and installer 75. Four real
+Chromium render/raster tests use a scoped 20-second harness timeout while the
+application render remains hard-bounded at 15 seconds. Recursive
+typecheck and production build pass; launcher tests pass 276/276 and Compose
+configuration passes. Focused deterministic export passes 15/15,
+migration/backup/restore 59/59, Product/readiness/preview/MCP 44/44, and macOS
+packaged-runtime contracts 11/11. The launcher, full browser, Docker/recovery,
+scan, installed-plugin, hosted-provenance, and supported-OS release aggregates
+remain pending. Retained schema-16 evidence still covers editor/Administration
+11/11, release scenario 1/1, preview integration 2/2, Chromium alignment 12/12,
+Firefox/WebKit alignment 12/12, visual regression 7/7, and the 1,000-node
+budgets, but those retained runtime results are not inferred to qualify schema
+17.
+
+Historical live agent acceptance, before the website-only approval boundary,
+also passed. Exact preview
 `preview_dd4da6b79f5e4ddf8b3fd111094c5189` rendered at 1440x900 with PNG SHA-256
 `ad356b73d742c7852a86a022f86d68928dae021ab6710bd7b1d852f7e048e26c`, then
 committed the project from version 1 to version 2 and completed its task. The
@@ -35,9 +53,12 @@ bytes. Result snapshot SHA-256
 `b84512db8bde0e1acdb8c1e8dbc81f6361530a54d880675e301a665a101292a5` and
 operation SHA-256
 `6ccf0226ccf0a59d6dbd3fd3ab62069c2a45fd522b5f5f9b5f842728428896be`
-both match their persisted records.
+both match their persisted records. Current source deliberately prevents that
+agent-side commit path: direct and website requests use an immutable task,
+publish an exact preview plus readiness evidence to `awaiting_approval`, and
+create no revision until an authenticated human chooses Commit.
 
-Current local schema-16 evidence now covers Chromium alignment, representative
+Retained local schema-16 evidence covers Chromium alignment, representative
 visual baselines, the 1,000-node release budgets, the complete 20-step release
 scenario, deterministic Docker restart rendering and renderer-egress denial,
 Firefox/WebKit alignment against the same image, and copied-bundle restore into
@@ -87,21 +108,21 @@ than current or hosted provenance.
   identities fail closed, project-restricted redesign inventory does not leak,
   the bootstrap Organization Administrator survives later Codex pairing, and
   automatic Codex grants omit redesign approval/implementation/cancellation.
-  MCP now has an executable 52-tool/25-resource source contract with strict bounded
-  inputs, exact correlated nested success DTOs, strict structured errors,
+  MCP now has an executable 54-tool/26-resource source contract with strict
+  bounded inputs, exact correlated nested success DTOs, strict structured errors,
   annotation checks, static scope probes, and scoped-resource probes. Bounded
   generic JSON remains only in `error.details`; temporary-ID previews mirror
   the strict canonical operation union across all ten variants. `handoff_list`
   now returns dedicated bounded summaries with authorization-bound checksummed
   keyset cursors instead of materializing full histories. A separate
-  declarative manifest plus build-time route collector now closes the actual
-  protected non-MCP surface at exactly 108 routes (54 project, 48 organization,
-  six explicit exceptions). Project-scoped task listing now authorizes the
+  declarative manifest plus build-time route collector now enumerates the actual
+  protected non-MCP surface at exactly 119 routes. Project-scoped task listing now authorizes the
   requested design before querying and has direct HTTP no-leak/no-mutation
-  tests. The current 467-test server suite covers exact closure, generated
-  authentication rejection, and direct behavioral authorization for all 108
-  routes with zero uncovered, including the component-library and insertion
-  routes. The evidence includes role/scope,
+  tests. The current schema-17 server suite passes 540/540. Coverage includes exact
+  closure, generated authentication rejection, direct behavioral
+  authorization for the expanded route surface, Product discovery/resolved
+  context, readiness evidence, preview artifacts, deterministic export, and
+  component insertion. The retained evidence includes role/scope,
   foreign/swapped IDs, preview/task ownership, stream revocation, renderer,
   multipart/storage, non-leak, and rejected-state preservation.
   This work fixed authorization-before-expiry for design-system and product-
@@ -150,7 +171,7 @@ than current or hosted provenance.
   output, and versioned API/worker limit parity.
 - Added a source-controlled renderer-egress canary covering DNS, direct TCP,
   and non-loopback interface visibility, plus workflow-contract enforcement so
-  it cannot be silently removed. The current schema-16 image fails closed with
+  it cannot be silently removed. The retained schema-16 image failed closed with
   DNS `EAI_AGAIN`, TCP `ENETUNREACH`, and zero external interfaces.
 - Added focused prompt-injection-data regressions proving prompt-like design,
   product-specification, and repository-inventory text stays bounded data and
@@ -158,8 +179,8 @@ than current or hosted provenance.
   agent semantic-resistance and approval-flow evidence remains open.
 - Added content-addressed Brotli snapshots, revision hash chains, exact
   persisted previews, atomic CAS commits, durable idempotency, and numbered
-  schema migrations through version 16. Current runtime metadata is document
-  schema 2, command engine 2, renderer 3, renderer IPC protocol 2, raster
+  schema migrations through version 17. Current runtime metadata is document
+  schema 2, command engine 3, renderer 3, renderer IPC protocol 2, raster
   normalizer 1, font bundle 1, export format 1, and application build `0.2.0`.
   Historical migration-2 defaults remain frozen at command engine 1, renderer
   2, and font bundle 1. Migration 11 adds API-owned persistent
@@ -168,7 +189,7 @@ than current or hosted provenance.
   organization/internal scope separation, and permit-guarded exact 30-day
   terminal-record retention. The renderer remains database-free and job rows
   contain no document/image bytes or paths. Startup and backup/restore
-  validation fail closed when migration-9/10/11/12/13/14/15/16 ledger rows
+  validation fail closed when migration-9/10/11/12/13/14/15/16/17 ledger rows
   exist without the required schema objects, normalized SQL, or forbidden-
   trigger removal.
   Migration 12 adds append-only, independently authorized handoff execution
@@ -183,23 +204,35 @@ than current or hosted provenance.
   ownership, expiry, and lifecycle rechecks inside `BEGIN IMMEDIATE`. Exact HTTP
   and MCP resources reuse those options, reject overrides, verify renderer/font
   versions plus backend/dimensions/SHA-256, and reserve `mode=adhoc` for explicit
-  non-exact rendering. Migration 16 drops the over-restrictive legacy
+  non-exact rendering. Current source stores the exact PNG bytes outside SQLite
+  under a content-addressed digest path, verifies regular-file, PNG-signature,
+  size, and SHA-256 integrity on every read, and includes active referenced
+  artifacts in backup verification. Migration 16 drops the over-restrictive legacy
   `bootstrap_credentials_consume_once` trigger created by schema 14/15 and
   recreates the canonical trigger: it keeps credential identity and creation
   immutable, requires consumption timestamp/principal to change together,
   prevents any second consumption, and permits token rotation only before
-  consumption. Deterministic source-built schema 1 and schema 7–11
+  consumption. Migration 17 adds Products, `designs.product_id`, Product move
+  previews, and immutable Product-bound resolved task context. Existing Designs
+  are deterministically backfilled into one active Product each without
+  changing their IDs or immutable heads. New task context pins the Product,
+  exact Design head/version, specification hash, effective design-system
+  release, locale, direction, platforms, and repository-inventory hashes.
+  Deterministic source-built schema 1 and schema 7–11
   fixtures previously migrated through schema 12 while
   preserving exact V1 document/operation bytes, IDs, snapshots, revision hash
   chains, legacy asset bytes, organization ownership, enterprise rows, and
   schema-11 render jobs; migration 12 creates no synthetic decision records.
   Focused schema-13 tests additionally upgrade a genuine schema-12 fixture with
-  null legacy source/exact-preview fields. Current migration-14/15/16 tests
+  null legacy source/exact-preview fields. Retained migration-14/15/16 tests
   preserve enterprise and credential rows, add authentication and preview-
   render schema without fabricating historical state, keep old render metadata
   null, canonicalize both genuine schema-14 and schema-15 legacy triggers, and
-  reject trigger-SQL tampering. The CLI recognizes schema 16 and its complete
-  suite passes 96/96.
+  reject trigger-SQL tampering. Focused migration-17 fixtures cover deterministic
+  Product backfill and Product/task integrity; the current focused migration/
+  backup/restore cluster passes 59/59. The CLI recognizes schema 17 and its
+  current package passes 129/129. Packaged and real remote-host recovery remain
+  pending.
 - Added mutating portable project import behind an Organization Administrator
   boundary. Validation remains read-only; commit requires an idempotency key and
   supports preserve-ID conflict failure or deterministic clone remapping. V1/V2
@@ -229,6 +262,20 @@ than current or hosted provenance.
   prototype action, RTL metadata, fractional geometry, and legacy assets;
   unsupported GIF/font/video/binary assets retain their IDs and metadata as
   non-rendered quarantine data rather than being dropped.
+- Added first-class Products above Designs. Authorized Product create/read/
+  update/archive flows, Product-aware Design creation, and reviewed CAS-bound
+  Design move previews organize related surfaces without rewriting Design
+  history. Migration 17 deterministically backfills every existing Design into
+  one Product while preserving the Design ID and immutable head. New agent
+  tasks capture immutable Product/Design resolved context so later editor-tab
+  changes cannot silently retarget the work.
+- Added a strict design-readiness report for the managed workflow. It records
+  request classification, selected Product/Design/base version, canonical
+  specification version/hash, effective design-system release, reused/
+  extended/proposed components, target platforms, repository mappings,
+  assumptions, blockers, and bounded hierarchy, visual consistency,
+  interaction-state, accessibility, touch-target, RTL/localization, responsive,
+  prototype, engineering-feasibility, and lint checks.
 - Added product specifications, the 22-section planning workflow, design-system
   releases/pins/upgrades, source-backed typed component-contract authoring with
   immutable draft/publish/deprecate transitions and role-aware read-only catalogs,
@@ -248,12 +295,15 @@ than current or hosted provenance.
   `GET /api/designs/:id/component-library`,
   `POST /api/designs/:id/component-insertion-previews`, and MCP
   `design_system_component_insert_preview`. The server verifies the pinned
-  release/source, hydrates transitive tokens, materializes deterministic
+  release/source, hydrates transitive tokens, applies typed property-to-node
+  bindings and slot-anchor content, enforces definition-allowed visual
+  overrides, resolves bounded nested-component dependencies, verifies and
+  copies normalized image assets by content hash, materializes deterministic
   archived/locked masters, creates and renders an exact prepared V2 preview,
   and commits only through ordinary `design_commit_preview`. Generic MCP
   operations reject the server-only `insert_component_instance` record.
-  Asset-bearing sources remain blocked until content-hash copying exists, and
-  property/slot overrides remain blocked where no visual binding model exists.
+  Missing/corrupt assets, unpinned nested versions, invalid bindings/anchors,
+  and forbidden override paths fail closed.
 - Added a browser Components-tab insertion workflow over those same server
   contracts. It lists only the exact pinned release with source/asset blockers,
   requires a clean matching project head, lets the user choose component state,
@@ -262,6 +312,21 @@ than current or hosted provenance.
   SHA-256, and explicitly commits or
   discards it. Commit creates the ordinary immutable revision and reselects the
   inserted instance; no parallel browser-only mutation path exists.
+- Added linked responsive frame variants across strict V1/V2 models, typed
+  operations, validation, migration, compatibility projection, archive
+  reconciliation, MCP previews, and the browser inspector. Groups require
+  reciprocal same-page membership, one identical ordered frame list, and
+  half-open non-overlapping breakpoints. Users can link selected frames by
+  width, inspect/select/recalculate/unlink the group, and preserve it through
+  undo/redo. Focused core tests pass 9/9 and web tests pass 3/3.
+- Added authenticated deterministic SVG/PDF export for explicitly saved Design
+  revisions. The server validates bounded canonical renderer PNG bytes and
+  emits a sanitized raster-backed SVG wrapper or stable PDF image objects,
+  with source/artifact SHA-256 headers, restrictive CSP, `nosniff`, and
+  immutable caching only for historical versions. The editor exports JSON,
+  PNG, SVG, PDF, or a portable bundle and targets the selected frame when one
+  is selected. The focused export cluster passes 15/15. These formats are
+  presentation exports, not arbitrary SVG input or editable vector geometry.
 - Added project design-system pin controls in the editor with stale-state
   clearing and loading/mutation guards. Assigning or upgrading a real pin now
   creates exactly one atomic synchronized V2 head revision; V1 heads remain
@@ -269,14 +334,15 @@ than current or hosted provenance.
   verified component masters into an exact stored result snapshot; commit uses
   that stored snapshot without recalculation. Removed states, missing token
   dependencies, asset dependencies, legacy null sources, and unsupported
-  property/slot bindings block the upgrade. Pin, revision, snapshot, audit,
-  outbox, and preview rollback remains atomic.
+  property/slot upgrade rematerialization block the upgrade even though new
+  insertion supports verified asset copying and typed bindings. Pin, revision,
+  snapshot, audit, outbox, and preview rollback remains atomic.
 - Restructured the editor into Pages/Layers/Components/Assets,
   Canvas/Prototype/Before-After, Design/Content/Component/Logic/Prototype/
   Accessibility, and activity/diagnostics/revision/handoff navigation. The
   Before-After archive comparison supports minimize/reopen and correct modal
   focus/inert/Escape behavior; components/assets navigate to their owning page.
-  Its current editor/Administration browser gate passes 5/5,
+  Its retained schema-16 editor/Administration browser gate passed 5/5,
   including real click-to-frame navigation without canonical document mutation
   and the guided policy form plus Expert JSON/YAML workflows.
 - Added deterministic V2 enterprise lint for raw values, component states,
@@ -284,15 +350,26 @@ than current or hosted provenance.
   lifecycle/contracts, and product-rule/entity links.
 - Added immutable agent tasks, the `formaspec` MCP identity, `formaspec://`
   resources, a token-free loopback bridge, OS credential storage, and automatic
-  Codex configuration. Both managed version-`0.2.0` identities are installed and
-  enabled over the same token-free MCP connection: the canonical
-  `[@FormaSpec](plugin://formaspec@formaspec)` identity and the compatibility
-  `[@Minimal UI](plugin://minimal-ui@formaspec)` identity. Official Codex skill
-  and plugin validators pass for both standalone skills, both plugin-contained
-  skills, and both manifests.
+  Codex configuration. Current source installs and verifies exactly one managed
+  FormaSpec 0.3.0 plugin before removing only installer-owned legacy assets;
+  unmanaged files are preserved and reported. Exact legacy Minimal UI TOML
+  cleanup removes only the matching parent/descendant tables, preserves
+  multiline-string lookalikes, similarly prefixed IDs, and unrelated config,
+  and is failure-safe and idempotent. The only public identity is
+  `[@FormaSpec](plugin://formaspec@formaspec)` over the token-free `formaspec`
+  MCP connection. A fresh schema-17 installed-plugin lifecycle run is pending.
+- Direct requests now resolve exactly one Product and Design, create and claim
+  an immutable `design_preview` task, read the bound context, preview/render/
+  lint the proposal, return the readiness report, and transition to
+  `awaiting_approval`. Ambiguous context fails closed. Agents never commit this
+  workflow; only the authenticated website Commit/Discard action changes
+  history. The task transition exposes the exact `reviewDeepLink` plus a
+  secret-free `formaspec://open-review?design=…&preview=…&task=…&store=…`
+  launcher for recovery against the pinned data-store identity.
 - Added task-scoped before/after proposal review with side-by-side and toggle
   modes, changed-node highlighting, diagnostics, exact PNG dimensions/SHA-256,
-  exact commit, and atomic discard/preview expiry. Expired or unreadable
+  content-addressed durable PNG retrieval, exact commit, and atomic discard/
+  preview expiry. Expired or unreadable
   previews clear stale approval controls, PNG failures offer Retry, and commit
   stays disabled until the persisted exact PNG loads successfully.
 - Connected Workspace Bridge grants now load enforced repository exclusions,
@@ -303,6 +380,11 @@ than current or hosted provenance.
   least-privilege scope and project sets. Stale, missing, overbroad, malformed,
   or unavailable context rotates through one-time pairing without exposing the
   credential to Codex.
+- Added fixed-purpose `formaspecctl ensure-running --json`. It reads only the
+  recorded runtime mode, resumes or validates that exact local/development/
+  Docker/server instance, checks the origin and persistent data-store identity,
+  starts or validates the matching loopback bridge, and fails with actionable
+  blockers instead of guessing another mode or silently switching storage.
 - Added bounded fail-closed framework-aware scanners for web, Android,
   iOS/Xcode, Flutter, React Native, and generic Git. Worktree pointer/back-
   reference validation, ancestor-swap defense, dual directory enumeration,
@@ -365,13 +447,13 @@ than current or hosted provenance.
   and fails startup if production `/data` or `/backups` mounts are present.
 - Added a deterministic 20-sample pinned-Chromium 1,000-node gate covering cold
   load, selection, gesture pacing/work, commit/autosave, history, preview
-  validation, and full 1440×900 rendering. The current schema-16 run passes
+  validation, and full 1440×900 rendering. The retained schema-16 run passed
   every specified local budget: 303.30 ms initial interactive load p95, 26.80 ms
   selection p95, 16.70 ms cadence-normalized gesture p95/maximum with no frame
   over 50 ms, 287.90 ms commit/autosave p95, 17.30 ms history p95, 325.88 ms
   preview-validation p95, and 234.63 ms 1440×900 render p95.
-- Added a 20-step product-manager-to-backup-restore scenario whose current
-  schema-16 run passes, spanning the real browser prompt box, all 22 interview
+- Added a 20-step product-manager-to-backup-restore scenario whose retained
+  schema-16 run passed, spanning the real browser prompt box, all 22 interview
   sections, scoped MCP pairing and task execution, multi-screen design,
   human/agent iteration, immutable history, portable export, verified stopped-
   database restore, restart, exact hashes/state, and PNG smoke.
@@ -396,31 +478,39 @@ than current or hosted provenance.
   Neither platform has
   release-qualified artifact or lifecycle evidence.
 
-## Latest verified checkpoint changes
+## Latest source delta and verified checkpoint
 
-- Schema-16 delta: migration 16 canonicalizes the legacy schema-14/15 bootstrap-
-  credential consume-once trigger without losing credential data; the CLI,
-  Docker startup, recovery runner, and runtime contracts recognize the same
-  migration level. The complete seven-package suite passes 842/842, launcher
-  passes 225/225, all seven workspaces pass typecheck/build,
-  editor/Administration E2E passes 5/5, the complete release scenario passes
-  1/1, focused preview integration passes 2/2, and macOS runtime-smoke contracts
-  pass 11/11. Source inventory remains 52 MCP tools, 25 resources, and 108
-  protected non-MCP routes.
-- Current browser/runtime evidence: Chromium selection alignment passes 12/12
-  within 0.75 CSS px, representative visual regression passes 7/7, the
-  1,000-node gate passes all release budgets, and Firefox/WebKit alignment
-  passes 12/12 against the current Docker image. The same image passes schema-16
+- Organization-Ready 0.3.0 source delta: database schema 17, command engine 3,
+  migration 17, first-class Products, deterministic Design backfill, reviewed
+  Design move previews, immutable Product-bound task context, strict readiness
+  reports, content-addressed exact-preview PNG artifacts, secret-free review
+  launch, fixed-purpose `ensure-running`, linked responsive frames, richer
+  component materialization, deterministic SVG/PDF export, and one managed
+  FormaSpec 0.3.0 plugin. The source inventory is 54 MCP tools, 26 resources,
+  and 119 protected non-MCP routes. Current package suites pass 1,027/1,027 and
+  recursive typecheck/build pass. Full browser, Docker/recovery, scans,
+  installed-plugin, hosted-provenance, and supported-OS release gates remain
+  pending.
+- Last fully verified schema-16 checkpoint: the seven-package suite passed
+  957/957 across 147 files, launcher passed 276/276, all seven workspaces passed
+  typecheck/build, editor/Administration passed 11/11, the complete release
+  scenario passed 1/1, focused preview integration passed 2/2, and macOS
+  runtime-smoke contracts passed 11/11.
+- Retained schema-16 browser/runtime evidence: Chromium selection alignment passed 12/12
+  within 0.75 CSS px, representative visual regression passed 7/7, the
+  1,000-node gate passed all release budgets, and Firefox/WebKit alignment
+  passed 12/12 against the retained Docker image. The same image passed schema-16
   startup, deterministic rendering across API restart, non-root/read-only/
   dropped-capability boundaries, DNS/TCP/interface renderer-egress denial, and
   clean copied-bundle recovery into a separate disposable Compose project.
-- Agent identities: version-`0.2.0` `FormaSpec` and `Minimal UI` skills/plugins
-  are both installed and enabled, share the token-free `formaspec` MCP, and pass
-  official Codex validators. A newly opened Codex task is required to load the
-  refreshed plugin manifests. Native installers, hosted provenance, current
+- Agent identity: current source installs and verifies one FormaSpec 0.3.0
+  plugin, advertises only `[@FormaSpec](plugin://formaspec@formaspec)`, and then
+  removes installer-owned legacy assets while preserving unmanaged files. A
+  newly opened Codex task is required to load the refreshed plugin manifest.
+  Fresh installed lifecycle evidence is pending. Native installers, hosted provenance, current
   SBOM/security/image scans, real remote-host/TLS recovery, and supported-OS
   lifecycle evidence remain open.
-- Live exact-preview acceptance rendered
+- Historical live exact-preview acceptance rendered
   `preview_dd4da6b79f5e4ddf8b3fd111094c5189` at 1440x900 with PNG SHA-256
   `ad356b73d742c7852a86a022f86d68928dae021ab6710bd7b1d852f7e048e26c`,
   committed version 1→2, completed the task, and proved exact 76,099-byte
@@ -456,32 +546,34 @@ than current or hosted provenance.
 
 | Gate | Result |
 | --- | --- |
-| Current schema-16 application/source gate | The seven-package suite passes 842/842: core 59, server 467, web 91, CLI 96, local bridge 20, Workspace Bridge 37, and installer 72. Launcher passes 225/225; all seven workspaces pass typecheck/build; editor/Administration passes 5/5; the complete release E2E passes 1/1; preview integration passes 2/2; macOS runtime-smoke contracts pass 11/11. MCP/resource/route authorization remains 52/25/108 with zero uncovered. |
-| Historical schema-13 application/source gate | Installed/link verification confirmed `drizzle-orm` 0.45.2. Application suites passed 678/678, launcher 212/212, and all seven workspaces passed typecheck/build. Audit had zero high/critical findings. This is historical, not schema-16 qualification. |
+| Organization-Ready 0.3.0 source delta | **Implemented foundation; release gate open.** Source declares database schema 17, command engine 3, one FormaSpec 0.3.0 plugin, 54 MCP tools, 26 resources, and 119 protected non-MCP routes. Migration 17 adds Products, deterministic Design backfill, reviewed move previews, and immutable Product-bound task context. Source also contains readiness validation, content-addressed exact-preview PNG storage, secret-free review launch, `ensure-running`, linked responsive frames, richer component materialization, and deterministic SVG/PDF export. Package suites pass 1,027/1,027 and recursive typecheck/build pass; the remaining runtime/install/release evidence is pending. |
+| Current schema-17 package suites | 1,027/1,027 pass: core 74, server 540/540, web 145, CLI 129, local bridge 27, Workspace Bridge 37, installer 75. Launcher passes 276/276; deterministic document export 15/15; migration/backup/restore 59/59; Product/readiness/preview/MCP 44/44; macOS packaged-runtime contracts 11/11; release-evidence contracts 8/8; CI workflow contracts 8/8; off-host contracts 7/7; and cross-browser Docker contracts 2/2. |
+| Last fully verified schema-16 application/source gate | The seven-package suite passed 957/957 across 147 files: core 64, server 508, web 135, CLI 114, local bridge 27, Workspace Bridge 37, and installer 72. Launcher passed 276/276; all seven workspaces passed typecheck/build; editor/Administration passed 11/11; the complete release E2E passed 1/1; preview integration passed 2/2; macOS runtime-smoke contracts passed 11/11. This checkpoint covered the prior interface and does not verify schema 17. |
+| Historical schema-13 application/source gate | Installed/link verification confirmed `drizzle-orm` 0.45.2. Application suites passed 678/678, launcher 212/212, and all seven workspaces passed typecheck/build. Audit had zero high/critical findings. This is historical, not schema-17 qualification. |
 | Prior schema-12 package checkpoint | Core 47/47 across 8 files, server 437/437 across 78 files, web 69/69 across 17 files, CLI 89/89 across 9 files, local bridge 18/18 across 2 files, Workspace Bridge 37/37 across 4 files, and installer 62/62 across 5 files passed. Coverage included all 51 then-registered MCP tools and all 106 then-protected routes with zero uncovered. This remains regression evidence, not current-source qualification. |
-| Exhaustive event authorization | 7/7 focused policy and real-HTTP tests pass across exactly 18 event families. The matrix proves per-family agent scopes, human-role allowlists, project/organization/optional/control boundaries, task-only access without design access, denial of task/handoff/Redesign/admin events to design-only agents, Organization-Administrator-only connection/backup/audit families, SQL replay filtering before limits/bounds/cursors, live/replay parity, and closure after policy removal or revocation. |
-| Typecheck | All seven buildable workspace packages passed |
-| Production build | Core, server, web, CLI, local bridge, Workspace Bridge, and installer passed |
-| Launcher | 225/225 passed |
-| Enterprise editor and administration | Current targeted E2E passes 5/5. |
-| Exact preview acceptance | A 1440x900 persisted PNG was reviewed and committed version 1→2; the task completed; preview and revision JSON matched at 76,099 bytes; persisted PNG, snapshot, and operation hashes all matched. |
-| Selection alignment | Current Chromium passes 12/12 within 0.75 CSS px across the required zoom/pan/scroll/layout/node/direction/selection/DPR matrix. The current Docker image also passes Firefox/WebKit 12/12. |
+| Exhaustive event authorization | Retained schema-16 focused policy and real-HTTP tests passed 7/7 across exactly 18 event families, and those contracts pass in the current server run. The matrix proves per-family agent scopes, human-role allowlists, project/organization/optional/control boundaries, task-only access without design access, denial of task/handoff/Redesign/admin events to design-only agents, Organization-Administrator-only connection/backup/audit families, SQL replay filtering before limits/bounds/cursors, live/replay parity, and closure after policy removal or revocation. Retained hosted long-running stream evidence remains pending. |
+| Typecheck | Current recursive schema-17 typecheck passes across all seven workspaces. |
+| Production build | Current schema-17 production build passes across core, server, web, CLI, local bridge, Workspace Bridge, and installer. |
+| Launcher | Current schema-17 launcher suite passes 276/276. |
+| Enterprise editor and administration | Retained schema-16 targeted E2E passed 11/11. |
+| Exact preview acceptance | Historical pre-boundary acceptance reviewed a 1440x900 persisted PNG and agent-committed version 1→2; the task completed; preview and revision JSON matched at 76,099 bytes; persisted PNG, snapshot, and operation hashes all matched. Current source requires website-only Commit/Discard and content-addressed PNG verification; fresh schema-17 acceptance is pending. |
+| Selection alignment | Retained schema-16 Chromium passed 12/12 within 0.75 CSS px across the required zoom/pan/scroll/layout/node/direction/selection/DPR matrix. The retained Docker image also passed Firefox/WebKit 12/12. |
 | Revision inspect | The historical schema-13 pre-0.45.2 immutability E2E passed 1/1 after correcting the head-change fixture; a separate schema-16 revision-inspect rerun is not retained. |
-| Visual regression | Current schema-16 baselines pass 7/7: desktop, phone, tablet, Persian RTL, typography, clipping, and normalized image. |
+| Visual regression | Retained schema-16 baselines passed 7/7: desktop, phone, tablet, Persian RTL, typography, clipping, and normalized image. |
 | 1,000-node foundation | Validation 20.43 ms p95; apply 49.65 ms p95; preview persistence 134.43 ms p95; render 116.83 ms p95 |
-| 1,000-node browser gate | Current schema-16 release budget passes 1/1: load 303.30 ms p95, selection 26.80 ms, gesture 16.70 ms p95/maximum with no frame over 50 ms, autosave 287.90 ms, history 17.30 ms, preview validation 325.88 ms, and 1440×900 render 234.63 ms p95. |
-| Integrated release scenario | The current complete 20-step product-manager-to-backup-restore scenario passes 1/1. |
-| Migration/restore fixtures | Genuine schema 1 and schema 7–11 prefixes previously passed through schema 12. Current schema-14/15/16 tests preserve enterprise and credential rows, add authentication and immutable preview-render schema without synthesizing historical values, keep legacy render metadata null, canonicalize both legacy trigger variants, and fail closed on trigger tampering. Current same-image copied-bundle recovery reaches schema 16 with SQLite integrity `ok`, zero foreign-key violations, exact design/revision/asset/render equality, and complete cleanup. Broader packaged-native and real remote-host/TLS restore evidence remains open. |
-| Historical dependency/security gate | `drizzle-orm` moved from 0.44.7 to installed/linked 0.45.2 after GHSA-gpj5-g38j-94v9. The retained audit reports info 0, low 0, moderate 2, high 0, critical 0 across 416 dependencies; the remaining advisories were under remediation. This is not a current schema-16 SBOM, dependency, native-binary, Chromium, image, or OS scan. |
-| Historical SBOM/license evidence | Exact schema-13 linked-tree evidence at `/private/tmp/formaspec-release-evidence-schema13-drizzle0452-20260721-current` reports 342 components and zero policy violations. SHA-256 values: `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8` (`SHA256SUMS`), `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a` (CDX), `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0` (licenses). Local temporary `NO-GO`, not schema-16 or hosted provenance. |
-| Retained-CI foundation | Repository-native workflows cover source, dependency audit, browser, Docker/egress/recovery, deterministic evidence, unsigned Linux, and non-installing macOS gates. Current local schema-16 Docker, Firefox/WebKit, and copied-bundle recovery artifacts are retained under `artifacts/ci`; exact SBOM/license evidence remains historical schema 13. No GitHub-hosted current run, current native package, current SBOM/security/image scan set, or real supported-OS lifecycle artifact has been retained. |
+| 1,000-node browser gate | Retained schema-16 release budget passed 1/1: load 303.30 ms p95, selection 26.80 ms, gesture 16.70 ms p95/maximum with no frame over 50 ms, autosave 287.90 ms, history 17.30 ms, preview validation 325.88 ms, and 1440×900 render 234.63 ms p95. |
+| Integrated release scenario | The retained schema-16 complete 20-step product-manager-to-backup-restore scenario passed 1/1. |
+| Migration/restore fixtures | Genuine schema 1 and schema 7–11 prefixes previously passed through schema 12. Retained schema-14/15/16 tests preserve enterprise and credential rows, add authentication and immutable preview-render schema without synthesizing historical values, keep legacy render metadata null, canonicalize both legacy trigger variants, and fail closed on trigger tampering. Current migration-17 fixtures cover deterministic Product backfill and Product/task integrity; the focused migration/backup/restore cluster passes 59/59. Retained same-image copied-bundle recovery reached schema 16 with SQLite integrity `ok`, zero foreign-key violations, exact design/revision/asset/render equality, and complete cleanup. Broader packaged-native and real remote-host/TLS schema-17 restore evidence remains open. |
+| Historical dependency/security gate | `drizzle-orm` moved from 0.44.7 to installed/linked 0.45.2 after GHSA-gpj5-g38j-94v9. The retained audit reports info 0, low 0, moderate 2, high 0, critical 0 across 416 dependencies; the remaining advisories were under remediation. This is not a current schema-17 SBOM, dependency, native-binary, Chromium, image, or OS scan. |
+| Historical SBOM/license evidence | Exact schema-13 linked-tree evidence at `/private/tmp/formaspec-release-evidence-schema13-drizzle0452-20260721-current` reports 342 components and zero policy violations. SHA-256 values: `82794fb6d820633ba4687126f3668ab21f045c6ceb73cd7761d3abd48b204bf8` (`SHA256SUMS`), `2519a41a66f84120ed8db9d48c4ee6706d40faf7a279bca79fb74120c81aaf9a` (CDX), `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0` (licenses). Local temporary `NO-GO`, not schema-17 or hosted provenance. |
+| Retained-CI foundation | Repository-native workflows cover source, dependency audit, browser, Docker/egress/recovery, deterministic evidence, unsigned Linux, and non-installing macOS gates. Retained local schema-16 Docker, Firefox/WebKit, and copied-bundle recovery artifacts are stored under `artifacts/ci`; exact SBOM/license evidence remains historical schema 13. No GitHub-hosted schema-17 run, current native package, current SBOM/security/image scan set, or real supported-OS lifecycle artifact has been retained. |
 | Reverse-proxy lifecycle | Controlled actual TCP sockets pass 1/1 for caller-header replacement, direct-peer denial, ambiguous identity/secret append rejection, canonical principal bootstrap, and restart-bound secret rotation. This is not real Nginx/TLS or public-network proof. |
-| Unsigned macOS PKG checkpoint | `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`, SHA-256 `9724f2874c520b5b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`, size 185,279,180 bytes, is retained historical unsigned evidence and was not installed. Its frozen package/runtime checks cover schema-12 health and the 51-tool/25-resource inventory. It predates migrations 13–16, exhaustive event authorization, revision-bound release reads, source-backed component authoring/library/insertion, exact preview-render evidence, the dual FormaSpec/Minimal UI identity, and the 52-tool/108-route interface. The candidate-root checksum manifest and original evidence remain valid only for those frozen bytes. The preserved schema-11 and schema-10 candidates are older historical evidence. |
+| Unsigned macOS PKG checkpoint | `artifacts/candidates/schema12-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`, SHA-256 `9724f2874c520b5b2fa99419978c392a22ee2f534ec9c1ca6e6c49db3fea18`, size 185,279,180 bytes, is retained historical unsigned evidence and was not installed. Its frozen package/runtime checks cover schema-12 health and the 51-tool/25-resource inventory. It predates migrations 13–17, exhaustive event authorization, revision-bound release reads, source-backed component authoring/library/insertion, durable exact-preview artifacts, Products and immutable Product-bound tasks, the superseded dual-identity payload, the current single FormaSpec 0.3.0 plugin, and the 54-tool/26-resource/119-route interface. The candidate-root checksum manifest and original evidence remain valid only for those frozen bytes. The preserved schema-11 and schema-10 candidates are older historical evidence. |
 | macOS reproducibility diagnostic | Same-host repeat artifact SHA-256 `2c49f45a6840218b995cc969576f4209d0c94802a160c679ad02483ed5ba4dd0`, size 185,279,075 bytes, differs from the current checkpoint's outer PKG while retaining identical payload and workspace-tree hashes. Reproducibility therefore failed. The checksum-bound diagnostic summary SHA-256 is `570d1fb98fb61bc8b2f56b75a4a4379575d7ef2c6bf10bb2a1000ad69a2de710`. Chromium LGPL policy approval, signing, notarization, independent reproducibility, vulnerability scanning, and clean privileged native lifecycle proof remain open. |
 | Compose | `docker compose config --quiet` passed |
-| Current schema-16 Docker smoke | Disposable project `formaspeccischema16743bd0f03d`, image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`, reached schema 16, created design `document_8d664d6b08f44442b65fa22806b3501a` at revision `revision_a581fafd11474f1b8e62f4d5ed97a90f`, and rendered identical PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf` before/after API restart. API and renderer ran non-root with read-only roots, all capabilities dropped, no-new-privileges, bounded resources, renderer `network_mode: none`, DNS `EAI_AGAIN`, TCP `ENETUNREACH`, zero external interfaces, and complete cleanup. Evidence: `artifacts/ci/docker-schema11/summary.json`. |
-| Current schema-16 cross-browser | The same image passed Firefox/WebKit selection alignment 12/12 in a network-disabled, read-only, non-root disposable runner with complete cleanup. Evidence: `artifacts/ci/cross-browser-docker/summary.json`. This remains local Linux browser evidence, not hosted or supported-OS lifecycle qualification. |
-| Current schema-16 copied-bundle recovery | Same-host isolated recovery from `formaspecdrsourcef0e7383b16` to `formaspecdrtargetf0e7383b16` preserved design `document_5e10dc4173b74eb497879f172547cfdb` at revision `revision_3555acf966584c77bd1ddeeed5fe250b`, asset bytes/hash/metadata, snapshot and revision hashes, deterministic render SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`, SQLite integrity `ok`, and zero foreign-key violations. Copied bundle SHA-256 was `afefdf32645be87451fc5a8f5a0a1a2fc11e0d277fb37d68521721f43c48cc7b`; all disposable resources were removed. Evidence: `artifacts/ci/offhost-restore-simulation/NO-GO-SUMMARY.json`. No real remote host, network transfer, or TLS was exercised. |
+| Retained schema-16 Docker smoke | Disposable project `formaspeccischema16743bd0f03d`, image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`, reached schema 16, created design `document_8d664d6b08f44442b65fa22806b3501a` at revision `revision_a581fafd11474f1b8e62f4d5ed97a90f`, and rendered identical PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf` before/after API restart. API and renderer ran non-root with read-only roots, all capabilities dropped, no-new-privileges, bounded resources, renderer `network_mode: none`, DNS `EAI_AGAIN`, TCP `ENETUNREACH`, zero external interfaces, and complete cleanup. Evidence: `artifacts/ci/docker-schema11/summary.json`. |
+| Retained schema-16 cross-browser | The same image passed Firefox/WebKit selection alignment 12/12 in a network-disabled, read-only, non-root disposable runner with complete cleanup. Evidence: `artifacts/ci/cross-browser-docker/summary.json`. This remains local Linux browser evidence, not hosted or supported-OS lifecycle qualification. |
+| Retained schema-16 copied-bundle recovery | Same-host isolated recovery from `formaspecdrsourcef0e7383b16` to `formaspecdrtargetf0e7383b16` preserved design `document_5e10dc4173b74eb497879f172547cfdb` at revision `revision_3555acf966584c77bd1ddeeed5fe250b`, asset bytes/hash/metadata, snapshot and revision hashes, deterministic render SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf`, SQLite integrity `ok`, and zero foreign-key violations. Copied bundle SHA-256 was `afefdf32645be87451fc5a8f5a0a1a2fc11e0d277fb37d68521721f43c48cc7b`; all disposable resources were removed. Evidence: `artifacts/ci/offhost-restore-simulation/NO-GO-SUMMARY.json`. No real remote host, network transfer, or TLS was exercised. |
 | Historical dependency-linked Docker smoke | Project `formaspeccischema1369037dfc8a`, image `sha256:55601784007855ffac507b20c8025d64d9ca5f572eb9a2834a0fb239a30378a0`, reached schema 13, created design `document_c304f0d8e19d449fa450b335e79c182e` at revision `revision_b71067ccd8e548b1b5385c366dabb263`, and rendered PNG SHA-256 `cacf72adda9b70d6c7e732676da6c2be2575d7b456abffb35d04f749cfe7bdcf` before/after restart. Egress and cleanup passed. Summary SHA-256 `8e0d3baa22b934f90d7e6f36022365a825f5b6457ca6bb6e51f993a1fb59caed`. |
 | Historical dependency-linked cross-browser | The same schema-13 image passed Firefox/WebKit 12/12 with cleanup. Summary SHA-256 `a4c16b03a094abba6abd2144c9ed0af78684897c97956c77789526f57eb6f41c`. |
 | Historical dependency-linked copied-bundle recovery | Schema-13 recovery from `formaspecdrsource8878ef1a23` to `formaspecdrtarget8878ef1a23` preserved design `document_34da61e488444c48b144646e778f7edc` at revision `revision_5da62614cff8498db21be8d9346eb34a`; bundle SHA-256 `3fcba430b476f1dc2ce943405af418a1b1fdc629876f1e8407b8cf5b725c2fef`. All comparisons/cleanup passed; summary SHA-256 `198f93aace5caf60f550e95436711b10107433acc7d85b9175fce8d4722dcc6d`. |
@@ -491,15 +583,15 @@ than current or hosted provenance.
 | Restore control | Maintenance inactive; no operation; no worker lock |
 | Repository hygiene | `git diff --check` passed |
 
-The current schema-16 browser gate proves the 1440×900 Chromium budget locally,
-and the current image proves Firefox/WebKit alignment, deterministic restart
+The retained schema-16 browser gate proved the 1440×900 Chromium budget locally,
+and the retained image proved Firefox/WebKit alignment, deterministic restart
 rendering, egress denial, and same-host isolated recovery. A pinned hosted
 release image, current scan/SBOM artifacts, supported-OS browser and native
 lifecycle coverage, and real remote-host/TLS recovery are still required.
 
 ## Runtime and data-preservation evidence
 
-The current disposable Docker smoke verified schema 16, Playwright rendering
+The retained disposable Docker smoke verified schema 16, Playwright rendering
 without fallback, a deterministic PNG hash, and exact design/version
 persistence across API-only restart. The same image passed DNS/TCP/interface
 egress denial and Firefox/WebKit 12/12. A same-image source-to-clean-target
@@ -522,15 +614,16 @@ has SHA-256
 These hashes prove the retained bytes, not signed provenance or off-site
 recoverability.
 
-At final handoff the live workstation services were rebuilt from the verified
-working tree as local image
+At the retained schema-16 handoff the live workstation services were rebuilt
+as local image
 `sha256:eb778753645b5cdc14542e4e7f0bc6772cfc982065b673b792255339e417cb3a`.
 API readiness again reported migration 16 and the network-isolated Playwright
 worker without fallback; the design catalog still contained `miare courier app`
 at version 40 and `Renderer smoke test` at version 23. The loopback bridge was
-healthy and its live MCP initialize response contained both managed plugin
-mentions in the bounded 510-character instructions. This rebuilt image is a
-local operational checkpoint, not the retained provenance-bound CI image.
+healthy and its live MCP initialize response contained a superseded dual-
+identity payload in the bounded instructions. This rebuilt image is historical
+local operational evidence, not the retained provenance-bound CI image and not
+verification of the current single FormaSpec 0.3.0 plugin.
 
 Earlier installed-volume evidence remains separately recorded: project
 `miare courier app` was version 31 at revision
@@ -538,11 +631,13 @@ Earlier installed-volume evidence remains separately recorded: project
 That historical record is preservation evidence, not a substitute for broader
 customer upgrade fixtures.
 
-The launcher also refreshed its exact mode-`0600` Docker runtime binding,
-started the local bridge, verified MCP `formaspec`, and reinstalled/verified the
-managed FormaSpec and Minimal UI integrations without placing a bearer token in
-generated Codex configuration. Both plugin identities share the same bridge;
-Codex must open a new task after refresh to load them.
+The retained launcher also refreshed its exact mode-`0600` Docker runtime
+binding, started the local bridge, verified MCP `formaspec`, and installed the
+then-current superseded dual-identity payload without placing a bearer token in
+generated Codex configuration. Current source instead installs and verifies
+one FormaSpec 0.3.0 plugin before removing installer-owned legacy assets; a
+fresh installed lifecycle run is pending, and Codex must open a new task after
+refresh to load the new manifest.
 
 ## macOS release blockers
 
@@ -550,9 +645,10 @@ The retained pre-current-SSE-authorization schema-12 PKG was not installed. Its
 original package integrity and private extracted-runtime smoke remain valid,
 but it is not an artifact of the current source tree. The current verifier
 reports expected event-authorization and project/revision-bound historical-
-release interface drift, migrations 13–16, source-backed component-library/
-insertion, session authentication, preview-render evidence, and dual FormaSpec/
-Minimal UI identity drift. Its
+release interface drift, migrations 13–17, source-backed component-library/
+insertion, session authentication, durable preview-render artifacts, Products,
+immutable Product-bound task context, and the change from its superseded dual-
+identity payload to the current single FormaSpec 0.3.0 plugin. Its
 same-host repeat produced identical payload and
 workspace-tree hashes but different outer PKG bytes, so reproducibility remains
 failed. A frozen final candidate still requires:
@@ -568,6 +664,11 @@ failed. A frozen final candidate still requires:
 
 ## Additional enterprise evidence still required
 
+- Retain the passing schema-17 package/typecheck/build, Product/readiness/MCP,
+  migration/backup, export, bridge, and installer-source results under release
+  provenance, then run the remaining launcher, full browser, Docker/recovery,
+  live managed-plugin, scan, and supported-OS aggregates. Retained schema-16
+  runtime results cannot qualify the Organization-Ready 0.3.0 source delta.
 - Freeze and rebuild the final macOS candidate, resolve its outer-PKG
   nondeterminism, then prove clean install/autostart/protocol/upgrade/uninstall/
   reinstall. Build and test Linux DEB/RPM artifacts
@@ -595,10 +696,12 @@ failed. A frozen final candidate still requires:
   Multipart bodies now stream to private disk and entries inflate one at a time
   into private files; individual JSON/raster entries are read under the 64 MiB
   per-entry cap when parsed or normalized.
-- Complete property-to-node and slot-anchor binding semantics, safe content-
-  hash asset copying, and broader component-library accessibility, stale-head,
-  conflict, backup, portable-export/import, and restore evidence around the
-  implemented exact browser/MCP insertion flow. Complete richer design-system
+- Complete broader component-library accessibility, contract/release authoring,
+  stale-head, conflict, backup, portable-export/import, restore, theme/state,
+  and visual-comparison evidence around the implemented exact browser/MCP
+  insertion flow. Typed property bindings, slot anchors/content, allowed visual
+  overrides, nested-component resolution, and verified content-hash asset
+  copying are implemented foundations. Complete richer design-system
   release authoring and visual upgrade comparison around the implemented
   project pin controls and atomic V2 head sync. Add
   automatic mapping suggestions, incremental rescans, portable mapping round
@@ -617,13 +720,15 @@ failed. A frozen final candidate still requires:
 
 ## Final release decision
 
-**NO-GO for enterprise production.** Current local functional, browser,
-performance, Docker, and same-host recovery gates pass, but release approval is
-blocked by unsigned/unqualified native installers, missing hosted provenance,
-missing current SBOM/security/image scans, no real remote-host/TLS recovery
-exercise, and no supported-OS install/upgrade/uninstall/reinstall lifecycle
-evidence. These are external release-evidence gaps and are not satisfied by the
-passing local schema-16 checkpoint.
+**NO-GO for enterprise production.** Current schema-17 package suites and
+recursive typecheck/build pass, but the full browser/runtime/Docker/recovery,
+live managed-plugin, security-scan, installer-lifecycle, and hosted release
+aggregate is incomplete. Retained schema-16 browser, performance, Docker, and
+same-host recovery gates do not qualify the Organization-Ready 0.3.0 delta.
+Release approval is also blocked by unsigned/unqualified native installers,
+missing hosted provenance, missing current SBOM/security/image scans, no real
+remote-host/TLS recovery exercise, and no supported-OS install/upgrade/
+uninstall/reinstall lifecycle evidence.
 
 ## Operator handoff
 
@@ -675,19 +780,16 @@ qualification is claimed by this checkpoint.
 
 Administration supplies the short-lived one-time pairing nonce. This performs
 the single explicit authorization, starts/verifies the loopback
-bridge, installs the credential-free `formaspec` MCP configuration and both
-managed version-`0.2.0` skills/plugins, and retains the upstream grant in the
+bridge, installs the credential-free `formaspec` MCP configuration, installs
+and verifies the single managed FormaSpec 0.3.0 plugin before removing only
+installer-owned legacy assets, and retains the upstream grant in the
 operating-system credential store. Open a new Codex task after installation or
-refresh so the plugin manifests are loaded. In Codex, use one of:
+refresh so the plugin manifest is loaded. In Codex, use one of:
 
 - `Use FormaSpec`
-- `Use Minimal UI`
 - `Design this with FormaSpec`
-- `Design this with Minimal UI`
 - `Refine this selection with FormaSpec`
-- `Refine this selection with Minimal UI`
 - `[@FormaSpec](plugin://formaspec@formaspec)`
-- `[@Minimal UI](plugin://minimal-ui@formaspec)`
 
 ### Backup and restore
 
@@ -721,7 +823,7 @@ in [`BACKUP_AND_RESTORE.md`](./BACKUP_AND_RESTORE.md).
 
 - Strict V1 read/import and immutable historical revisions remain supported;
   V2 is separate and V1→V2 migration preserves stable IDs. Current database
-  migration level is 16. Existing legacy columns/history remain in the
+  migration level is 17. Existing legacy columns/history remain in the
   expand/verify window.
 - Verify a backup before migration or restore. Packaged native arbitrary-bundle
   restore fails closed until native supervision is implemented.

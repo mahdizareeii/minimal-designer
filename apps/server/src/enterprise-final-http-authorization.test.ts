@@ -9,6 +9,7 @@ import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import type { DesignSystemReleaseResult, DesignSystemUpgradePreviewResult } from "./design-system-service.js";
 import { DomainError } from "./errors.js";
+import { moveDesignFixtureToOrganization } from "../test-fixtures/product.js";
 
 const PROXY_SECRET = "enterprise-final-proxy-secret-0123456789abcdef";
 const PUBLIC_ORIGIN = "https://design.example.test";
@@ -238,9 +239,10 @@ async function createFixture(label: string): Promise<Fixture> {
   application.database.sqlite.prepare(
     "UPDATE design_systems SET organization_id = ? WHERE id = ?",
   ).run(FOREIGN_ORGANIZATION_ID, foreignSystem.id);
-  application.database.sqlite.prepare(
-    "UPDATE designs SET organization_id = ? WHERE id = ?",
-  ).run(FOREIGN_ORGANIZATION_ID, foreign.document.id);
+  moveDesignFixtureToOrganization(application.database.sqlite, {
+    designId: foreign.document.id,
+    organizationId: FOREIGN_ORGANIZATION_ID,
+  });
 
   const mappingGrant = application.enterprise.createAgentConnection(ADMIN_ACTOR, {
     adapter: "codex",

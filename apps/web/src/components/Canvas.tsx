@@ -22,6 +22,12 @@ import {
 } from "react";
 import Moveable from "react-moveable";
 import Selecto from "react-selecto";
+import {
+  projectedComponentNode,
+  projectedComponentSlotChildren,
+  readComponentInstanceProjection,
+  type ComponentInstanceProjection,
+} from "@designer/core";
 
 import {
   linksForNode,
@@ -74,6 +80,8 @@ interface ComponentSourceViewProps {
   parentMode?: DesignNode["layout"]["mode"] | null;
   root?: boolean;
   definitionStack?: readonly NodeId[];
+  projection?: ComponentInstanceProjection | null;
+  sourceNodeStack?: readonly NodeId[];
 }
 
 /**
@@ -88,9 +96,13 @@ export function ComponentSourceView({
   parentMode = null,
   root = false,
   definitionStack = [],
+  projection = null,
+  sourceNodeStack = [],
 }: ComponentSourceViewProps) {
-  const node = document.nodes[nodeId];
-  if (!node || !node.visible || definitionStack.length > 32) return null;
+  const canonicalNode = document.nodes[nodeId];
+  if (!canonicalNode || definitionStack.length > 32 || sourceNodeStack.includes(nodeId)) return null;
+  const node = projectedComponentNode(canonicalNode, projection);
+  if (!node.visible) return null;
 
   const css = styleForNode(document, node, {
     parentLayoutMode: parentMode,
@@ -107,6 +119,8 @@ export function ComponentSourceView({
   } : { ...css, pointerEvents: "none" };
 
   const children = nodeChildren(node);
+  const slotChildren = projectedComponentSlotChildren(projection, node.id);
+  const nextSourceNodeStack = [...sourceNodeStack, node.id];
   const content = (() => {
     if (node.type === "text") return <>{node.content}</>;
     if (node.type === "image") {
@@ -123,24 +137,42 @@ export function ComponentSourceView({
       if (definitionStack.includes(definitionRootId)) {
         return <span className="component-source-error">Component cycle</span>;
       }
+      const nestedProjection = readComponentInstanceProjection(node.overrides);
       return document.nodes[definitionRootId]
         ? <ComponentSourceView
             document={document}
             nodeId={definitionRootId}
             root
             definitionStack={[...definitionStack, definitionRootId]}
+            projection={nestedProjection}
+            sourceNodeStack={nextSourceNodeStack}
           />
         : <span className="component-source-error">Missing component</span>;
     }
-    return children.map((childId) => (
-      <ComponentSourceView
-        key={`${nodeId}:${childId}`}
-        document={document}
-        nodeId={childId}
-        parentMode={node.layout.mode}
-        definitionStack={definitionStack}
-      />
-    ));
+    return <>
+      {children.map((childId) => (
+        <ComponentSourceView
+          key={`${nodeId}:${childId}`}
+          document={document}
+          nodeId={childId}
+          parentMode={node.layout.mode}
+          definitionStack={definitionStack}
+          projection={projection}
+          sourceNodeStack={nextSourceNodeStack}
+        />
+      ))}
+      {slotChildren.map((childId) => (
+        <ComponentSourceView
+          key={`${nodeId}:slot:${childId}`}
+          document={document}
+          nodeId={childId}
+          parentMode={node.layout.mode}
+          definitionStack={definitionStack}
+          projection={null}
+          sourceNodeStack={nextSourceNodeStack}
+        />
+      ))}
+    </>;
   })();
 
   return (
@@ -148,6 +180,7 @@ export function ComponentSourceView({
       className={`component-source-node is-${node.type}`}
       data-component-source-node-id={node.id}
       dir={node.type === "text" ? node.direction ?? "auto" : undefined}
+      aria-label={typeof node.metadata.accessible_label === "string" ? node.metadata.accessible_label : undefined}
       style={{
         ...sourceStyle,
         ...(node.type === "text" ? { unicodeBidi: "plaintext" } : {}),
@@ -214,12 +247,14 @@ function NodeViewComponent({
       return <Icon size={Math.max(12, Math.min(node.layout.width, node.layout.height) * .46)} aria-label={node.label} />;
     }
     if (node.type === "instance") {
+      const projection = readComponentInstanceProjection(node.overrides);
       return document.nodes[node.component_id]
         ? <ComponentSourceView
             document={document}
             nodeId={node.component_id}
             root
             definitionStack={[node.component_id]}
+            projection={projection}
           />
         : <span className="component-source-error">{node.name}</span>;
     }
@@ -245,6 +280,7 @@ function NodeViewComponent({
       data-node-type={node.type}
       data-action={prototype && Boolean(clickLink)}
       dir={node.type === "text" ? node.direction ?? "auto" : undefined}
+      aria-label={typeof node.metadata.accessible_label === "string" ? node.metadata.accessible_label : undefined}
       style={{
         ...css,
         ...(node.type === "text" ? { unicodeBidi: "plaintext" } : {}),

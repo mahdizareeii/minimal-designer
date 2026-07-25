@@ -10,6 +10,7 @@ import {
   createStarterDocument,
   migrateDesignDocumentV1ToV2,
   parseComponentSourceBundle,
+  toV1CompatibleDesignDocument,
   type ComponentSourceBundle,
   type DesignDocumentV2,
 } from "@designer/core";
@@ -200,6 +201,186 @@ describe("prepared component insertion", () => {
       releaseTokens: {},
       parent: { node_id: frameId },
       instanceId: "node_insertable_instance_03",
-    })).toThrow(/asset dependency can be copied by content hash/);
+    })).toThrow(/verified content-addressed copy for every asset dependency/);
+  });
+
+  it("persists typed properties, slot content, and remapped visual overrides in exact operation evidence", () => {
+    const document = project();
+    const frameId = document.pages[0]!.children[0]!;
+    const bundle = source();
+    const contract = definition(bundle);
+    contract.properties_schema = [{
+      key: "label",
+      label: "Label",
+      type: "text",
+      required: true,
+      default: "Continue",
+    }];
+    contract.property_bindings = [{ property_key: "label", target_node_id: labelId, target: "text_content" }];
+    contract.slots = [{
+      key: "supporting",
+      name: "Supporting content",
+      required: false,
+      min_items: 0,
+      max_items: 1,
+      allowed_node_types: ["text"],
+    }];
+    contract.slot_anchors = [{ slot_key: "supporting", target_node_id: rootId }];
+    contract.allowed_overrides.allowed_style_paths = ["fill"];
+    const slotId = "node_insertable_slot_content_01";
+    document.nodes[slotId] = DesignNodeV2Schema.parse({
+      id: slotId,
+      name: "Supporting detail",
+      type: "text",
+      content: "No setup fee",
+      direction: "auto",
+      layout: { x: 0, y: 0, width: 120, height: 20, mode: "absolute", width_sizing: "fixed", height_sizing: "fixed" },
+      style: {},
+      visible: true,
+      locked: false,
+      archived: true,
+      semantics: { role: "generic", business_rule_ids: [], acceptance_criterion_ids: [] },
+      metadata: {},
+    });
+
+    const prepared = prepareComponentInstanceInsertion({
+      document,
+      designSystemId: "system_insertable_fixture_01",
+      definition: contract,
+      source: bundle,
+      sourceHash: hash(bundle),
+      releaseTokens: {},
+      parent: { node_id: frameId },
+      instanceId: "node_insertable_instance_contract_01",
+      properties: { label: "Pay securely" },
+      slots: { supporting: [slotId] },
+      visualOverrides: { [rootId]: { fill: "#123456" } },
+    });
+    const instance = prepared.document.nodes.node_insertable_instance_contract_01;
+    if (!instance || instance.type !== "component_instance") throw new Error("inserted instance missing");
+    const mappedRootId = prepared.nodeIdMapping[rootId]!;
+    expect(instance.properties).toEqual({ label: "Pay securely" });
+    expect(instance.slots).toEqual({ supporting: [slotId] });
+    expect(instance.visual_overrides).toEqual({ [mappedRootId]: { fill: "#123456" } });
+    expect(prepared.operation).toMatchObject({
+      properties: { label: "Pay securely" },
+      slots: { supporting: [slotId] },
+      visual_overrides: { [mappedRootId]: { fill: "#123456" } },
+    });
+    expect(DesignOperationSchema.parse(prepared.operation)).toEqual(prepared.operation);
+  });
+
+  it("materializes exact nested component dependencies before the parent source", () => {
+    const document = project();
+    const frameId = document.pages[0]!.children[0]!;
+    const nestedComponentId = "component_insertable_nested_01";
+    const nestedRootId = "node_insertable_nested_root_01";
+    const nestedLabelId = "node_insertable_nested_label_01";
+    const nestedSource = parseComponentSourceBundle({
+      format: "formaspec-component-source",
+      format_version: 1,
+      schema_version: 2,
+      component_definition_id: nestedComponentId,
+      component_version: 1,
+      root_node_id: nestedRootId,
+      states: [{ key: "default", name: "Default", root_node_id: nestedRootId }],
+      nodes: [
+        DesignNodeV2Schema.parse({
+          id: nestedRootId,
+          name: "Nested icon root",
+          type: "container",
+          children: [nestedLabelId],
+          clip_content: false,
+          layout: { x: 0, y: 0, width: 80, height: 24, mode: "horizontal", width_sizing: "fixed", height_sizing: "fixed" },
+          style: {},
+          visible: true,
+          locked: false,
+          archived: false,
+          semantics: { role: "generic", business_rule_ids: [], acceptance_criterion_ids: [] },
+          metadata: {},
+        }),
+        DesignNodeV2Schema.parse({
+          id: nestedLabelId,
+          name: "Nested label",
+          type: "text",
+          content: "Verified nested",
+          direction: "auto",
+          layout: { x: 0, y: 0, width: 80, height: 24, mode: "absolute", width_sizing: "fixed", height_sizing: "fixed" },
+          style: {},
+          visible: true,
+          locked: false,
+          archived: false,
+          semantics: { role: "generic", business_rule_ids: [], acceptance_criterion_ids: [] },
+          metadata: {},
+        }),
+      ],
+      prototype_links: [],
+      dependencies: { token_ids: [], asset_ids: [] },
+    });
+    const nestedDefinition = ComponentDefinitionSchema.parse({
+      id: nestedComponentId,
+      key: "icon.nested",
+      name: "Nested icon",
+      version: 1,
+      status: "published",
+      root_node_id: nestedRootId,
+      properties_schema: [],
+      property_bindings: [],
+      slots: [],
+      slot_anchors: [],
+      states: [{ key: "default", name: "Default", node_id: nestedRootId }],
+      allowed_overrides: { allow_text: false, allow_assets: false, allow_icons: false, allowed_token_families: [], allowed_style_paths: [] },
+      platform_mappings: [],
+      documentation: { summary: "", usage: [], accessibility: [], do_list: [], dont_list: [] },
+    });
+    const outerSource = source();
+    const nestedInstance = DesignNodeV2Schema.parse({
+      id: labelId,
+      name: "Nested icon instance",
+      type: "component_instance",
+      component_definition_id: nestedComponentId,
+      component_version: 1,
+      properties: {},
+      slots: {},
+      visual_overrides: {},
+      active_state: "default",
+      layout: { x: 16, y: 10, width: 80, height: 24, mode: "absolute", width_sizing: "fixed", height_sizing: "fixed" },
+      style: {},
+      visible: true,
+      locked: false,
+      archived: false,
+      semantics: { role: "generic", business_rule_ids: [], acceptance_criterion_ids: [] },
+      metadata: {},
+    });
+    const nestedOuterSource = parseComponentSourceBundle({
+      ...structuredClone(outerSource),
+      nodes: outerSource.nodes.map((node) => node.id === labelId ? nestedInstance : node),
+    });
+    const prepared = prepareComponentInstanceInsertion({
+      document,
+      designSystemId: "system_insertable_fixture_01",
+      definition: definition(nestedOuterSource),
+      source: nestedOuterSource,
+      sourceHash: hash(nestedOuterSource),
+      releaseTokens: {},
+      parent: { node_id: frameId },
+      instanceId: "node_insertable_nested_instance_01",
+      componentDependencies: [{
+        definition: nestedDefinition,
+        source: nestedSource,
+        sourceHash: hash(nestedSource),
+      }],
+    });
+    expect(prepared.document.component_definitions[nestedComponentId]).toBeDefined();
+    expect(prepared.document.component_definitions[componentId]).toBeDefined();
+    const projected = toV1CompatibleDesignDocument(prepared.document);
+    const outerInstance = projected.nodes.node_insertable_nested_instance_01;
+    if (!outerInstance || outerInstance.type !== "instance") throw new Error("outer instance missing");
+    const outerRoot = projected.nodes[outerInstance.component_id];
+    if (!outerRoot || outerRoot.type !== "component") throw new Error("outer source missing");
+    const projectedNested = projected.nodes[outerRoot.children[0]!];
+    expect(projectedNested).toMatchObject({ type: "instance" });
+    if (!projectedNested || projectedNested.type !== "instance") throw new Error("nested instance missing");
+    expect(projected.nodes[projectedNested.component_id]).toMatchObject({ type: "component" });
   });
 });

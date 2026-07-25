@@ -449,7 +449,7 @@ function insertEnterpriseRows(
     value: "#123456",
     deprecated: false,
   });
-  const component = ComponentDefinitionSchema.parse({
+  const historicalComponent = {
     id: COMPONENT_DEFINITION_ID,
     key: "fixture.historicalCard",
     name: "Historical card",
@@ -474,6 +474,11 @@ function insertEnterpriseRows(
       do_list: [],
       dont_list: [],
     },
+  } as const;
+  const component = ComponentDefinitionSchema.parse({
+    ...historicalComponent,
+    property_bindings: [],
+    slot_anchors: [],
   });
   const release = DesignSystemReleaseSchema.parse({
     id: DESIGN_SYSTEM_RELEASE_ID,
@@ -501,7 +506,7 @@ function insertEnterpriseRows(
      (design_system_id, component_id, version, status, definition_json, replacement_component_id,
       created_by, created_at)
      VALUES (?, ?, 1, 'published', ?, NULL, ?, ?)`,
-  ).run(DESIGN_SYSTEM_ID, component.id, canonicalJson(component), PRINCIPAL_ID, CREATED_AT);
+  ).run(DESIGN_SYSTEM_ID, component.id, canonicalJson(historicalComponent), PRINCIPAL_ID, CREATED_AT);
   sqlite.prepare(
     `INSERT INTO design_system_releases
      (id, design_system_id, version, name, status, release_json, created_by, created_at, published_at)
@@ -767,8 +772,14 @@ function rowWithBlobDigests(row: Record<string, unknown>): Record<string, unknow
 }
 
 export function schemaElevenPreservationFingerprint(sqlite: Database.Database): string {
+  const hasProductId = (sqlite.prepare("PRAGMA table_info(designs)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "product_id");
   const queries = [
-    "SELECT * FROM designs WHERE id = ?",
+    hasProductId
+      ? `SELECT id, actor_id, name, current_version, current_revision_id,
+                created_at, updated_at, organization_id
+         FROM designs WHERE id = ?`
+      : "SELECT * FROM designs WHERE id = ?",
     "SELECT * FROM revisions WHERE design_id = ? ORDER BY version",
     "SELECT * FROM snapshots ORDER BY snapshot_hash",
     "SELECT * FROM assets WHERE design_id = ? ORDER BY id",

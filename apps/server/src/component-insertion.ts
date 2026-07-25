@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 
 import {
+  AssetIdSchema,
   ComponentDefinitionSchema,
+  ComponentInstanceNodeV2Schema,
+  DesignAssetV2Schema,
   DesignDocumentV2Schema,
-  DesignNodeV2Schema,
   DesignSystemTokenSchema,
   ParentReferenceSchema,
   TokenIdSchema,
@@ -12,10 +14,12 @@ import {
   type ComponentDefinition,
   type ComponentSourceBundle,
   type ComponentSourceStateKey,
+  type ComponentPropertyValue,
   type DesignDocumentV2,
   type DesignSystemToken,
   type InsertComponentInstanceOperation,
   type NodeId,
+  type NodeStyle,
   type ParentReference,
 } from "@designer/core";
 
@@ -35,6 +39,18 @@ export interface PrepareComponentInsertionInput {
   index?: number;
   position?: { x: number; y: number };
   name?: string;
+  properties?: Record<string, ComponentPropertyValue>;
+  slots?: Record<string, NodeId[]>;
+  visualOverrides?: Partial<Record<NodeId, NodeStyle>>;
+  assetCopies?: Array<{
+    sourceAssetId: string;
+    asset: DesignDocumentV2["assets"][string];
+  }>;
+  componentDependencies?: Array<{
+    definition: ComponentDefinition;
+    source: ComponentSourceBundle;
+    sourceHash: string;
+  }>;
 }
 
 export interface PreparedComponentInsertion {
@@ -42,6 +58,7 @@ export interface PreparedComponentInsertion {
   operation: InsertComponentInstanceOperation;
   createdNodeIds: NodeId[];
   hydratedTokenIds: string[];
+  hydratedAssetIds: string[];
   nodeIdMapping: Record<string, NodeId>;
 }
 
@@ -118,10 +135,77 @@ function insertIntoParent(
   children.splice(insertionIndex, 0, instanceId);
 }
 
+function remapComponentAssets(
+  document: DesignDocumentV2,
+  source: ComponentSourceBundle,
+  rawCopies: PrepareComponentInsertionInput["assetCopies"],
+): { source: ComponentSourceBundle; hydratedAssetIds: string[] } {
+  const required = new Set(source.dependencies.asset_ids);
+  const copies = new Map<string, DesignDocumentV2["assets"][string]>();
+  for (const rawCopy of rawCopies ?? []) {
+    const sourceAssetId = AssetIdSchema.parse(rawCopy.sourceAssetId);
+    const asset = DesignAssetV2Schema.parse(rawCopy.asset);
+    if (!required.has(sourceAssetId)) continue;
+    if (copies.has(sourceAssetId)) {
+      throw new DomainError("VALIDATION_FAILED", "Component asset copies must map each declared source dependency exactly once.", 422, {
+        details: { sourceAssetId },
+      });
+    }
+    copies.set(sourceAssetId, asset);
+  }
+  if (copies.size !== required.size) {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "Component insertion requires a verified content-addressed copy for every asset dependency.",
+      422,
+      { details: { requiredAssetIds: [...required].sort(), copiedAssetIds: [...copies.keys()].sort() } },
+    );
+  }
+  if (required.size === 0) return { source, hydratedAssetIds: [] };
+
+  const remapped = structuredClone(source);
+  const targetIds = new Map<string, string>();
+  const hydratedAssetIds: string[] = [];
+  for (const [sourceAssetId, asset] of copies) {
+    targetIds.set(sourceAssetId, asset.id);
+    const existing = document.assets[asset.id];
+    if (existing && (existing.sha256 !== asset.sha256 || existing.mime_type !== asset.mime_type)) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "A copied component asset ID conflicts with project asset metadata.", 409, {
+        details: { assetId: asset.id },
+      });
+    }
+    if (!existing) hydratedAssetIds.push(asset.id);
+    document.assets[asset.id] = structuredClone(asset);
+  }
+  for (const node of remapped.nodes) {
+    if (node.type === "image" && node.asset_id !== undefined) {
+      const targetId = targetIds.get(node.asset_id);
+      if (!targetId) {
+        throw new DomainError("VALIDATION_FAILED", "Component image dependency has no copied target asset.", 422, {
+          details: { assetId: node.asset_id },
+        });
+      }
+      node.asset_id = AssetIdSchema.parse(targetId);
+    }
+    if (node.type === "component_instance") {
+      for (const [propertyKey, value] of Object.entries(node.properties)) {
+        if (!value || typeof value !== "object" || !("asset_id" in value)) continue;
+        const targetId = targetIds.get(value.asset_id);
+        if (targetId) node.properties[propertyKey] = { asset_id: AssetIdSchema.parse(targetId) };
+      }
+    }
+  }
+  remapped.dependencies.asset_ids = [...targetIds.values()].map((id) => AssetIdSchema.parse(id)).sort();
+  return {
+    source: parseComponentSourceBundle(remapped),
+    hydratedAssetIds: hydratedAssetIds.sort(),
+  };
+}
+
 export function prepareComponentInstanceInsertion(
   rawInput: PrepareComponentInsertionInput,
 ): PreparedComponentInsertion {
-  const document = DesignDocumentV2Schema.parse(structuredClone(rawInput.document));
+  let document = DesignDocumentV2Schema.parse(structuredClone(rawInput.document));
   const definition = ComponentDefinitionSchema.parse(rawInput.definition);
   const source = parseComponentSourceBundle(rawInput.source);
   const parent = ParentReferenceSchema.parse(rawInput.parent);
@@ -129,26 +213,57 @@ export function prepareComponentInstanceInsertion(
   if (sourceHash(source) !== rawInput.sourceHash) {
     throw new DomainError("INTERNAL_ERROR", "Component source hash verification failed before insertion.", 500);
   }
-  if (source.dependencies.asset_ids.length > 0) {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      "Component insertion is blocked until every normalized asset dependency can be copied by content hash.",
-      422,
-      { details: { assetIds: [...source.dependencies.asset_ids] } },
-    );
-  }
   if (document.nodes[rawInput.instanceId]) {
     throw new DomainError("IDEMPOTENCY_CONFLICT", "The generated component instance ID already exists.", 409, {
       details: { instanceId: rawInput.instanceId },
     });
   }
 
-  const hydratedTokenIds = hydrateRequiredTokens(document, source, rawInput.releaseTokens);
+  const hydratedTokenIds = new Set<string>();
+  const hydratedAssetIds = new Set<string>();
+  const dependencyNodeMappings: Record<string, Record<string, NodeId>> = {};
+  for (const dependencyInput of rawInput.componentDependencies ?? []) {
+    const dependencyDefinition = ComponentDefinitionSchema.parse(dependencyInput.definition);
+    const dependencySource = parseComponentSourceBundle(dependencyInput.source);
+    if (sourceHash(dependencySource) !== dependencyInput.sourceHash) {
+      throw new DomainError("INTERNAL_ERROR", "Nested component source hash verification failed before insertion.", 500);
+    }
+    for (const tokenId of hydrateRequiredTokens(document, dependencySource, rawInput.releaseTokens)) hydratedTokenIds.add(tokenId);
+    const remappedDependencyAssets = remapComponentAssets(document, dependencySource, rawInput.assetCopies);
+    for (const assetId of remappedDependencyAssets.hydratedAssetIds) hydratedAssetIds.add(assetId);
+    const materializedDependencyDefinition = structuredClone(dependencyDefinition);
+    for (const property of materializedDependencyDefinition.properties_schema) {
+      if (property.type === "asset" && property.default_asset_id !== undefined) {
+        const copied = rawInput.assetCopies?.find((entry) => entry.sourceAssetId === property.default_asset_id);
+        if (copied) property.default_asset_id = copied.asset.id;
+      }
+    }
+    const dependency = materializeComponentSource(document, {
+      designSystemId: rawInput.designSystemId,
+      sourceHash: dependencyInput.sourceHash,
+      definition: materializedDependencyDefinition,
+      source: remappedDependencyAssets.source,
+      dependencyNodeMappings,
+    });
+    document = dependency.document;
+    dependencyNodeMappings[dependencyDefinition.id] = dependency.nodeIdMapping;
+  }
+  for (const tokenId of hydrateRequiredTokens(document, source, rawInput.releaseTokens)) hydratedTokenIds.add(tokenId);
+  const remappedAssets = remapComponentAssets(document, source, rawInput.assetCopies);
+  for (const assetId of remappedAssets.hydratedAssetIds) hydratedAssetIds.add(assetId);
+  const materializedDefinition = structuredClone(definition);
+  for (const property of materializedDefinition.properties_schema) {
+    if (property.type === "asset" && property.default_asset_id !== undefined) {
+      const copied = rawInput.assetCopies?.find((entry) => entry.sourceAssetId === property.default_asset_id);
+      if (copied) property.default_asset_id = copied.asset.id;
+    }
+  }
   const materialized = materializeComponentSource(document, {
     designSystemId: rawInput.designSystemId,
     sourceHash: rawInput.sourceHash,
-    definition,
-    source,
+    definition: materializedDefinition,
+    source: remappedAssets.source,
+    dependencyNodeMappings,
   });
   const state = definition.states.find((candidate) => candidate.key === activeState);
   if (!state) {
@@ -164,14 +279,35 @@ export function prepareComponentInstanceInsertion(
   }
 
   const position = rawInput.position ?? { x: sourceRoot.layout.x, y: sourceRoot.layout.y };
-  const instance = DesignNodeV2Schema.parse({
+  const properties = structuredClone(rawInput.properties ?? {});
+  for (const property of materializedDefinition.properties_schema) {
+    if (property.type !== "asset") continue;
+    const value = properties[property.key];
+    if (!value || typeof value !== "object" || !("asset_id" in value)) continue;
+    const copied = rawInput.assetCopies?.find((entry) => entry.sourceAssetId === value.asset_id);
+    if (copied) properties[property.key] = { asset_id: copied.asset.id };
+  }
+  const visualOverrides = Object.fromEntries(Object.entries(rawInput.visualOverrides ?? {}).flatMap(([sourceNodeId, style]) => {
+    if (style === undefined) return [];
+    const targetNodeId = materialized.nodeIdMapping[sourceNodeId];
+    if (!targetNodeId) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        `Visual override target ${sourceNodeId} is outside the verified component source.`,
+        422,
+      );
+    }
+    return [[targetNodeId, structuredClone(style)]];
+  }));
+  const instance = ComponentInstanceNodeV2Schema.parse({
     id: rawInput.instanceId,
     name: rawInput.name?.trim() || definition.name,
     type: "component_instance",
     component_definition_id: definition.id,
     component_version: definition.version,
-    properties: {},
-    slots: {},
+    properties,
+    slots: structuredClone(rawInput.slots ?? {}),
+    visual_overrides: visualOverrides,
     active_state: activeState,
     layout: {
       x: position.x,
@@ -212,6 +348,9 @@ export function prepareComponentInstanceInsertion(
     source_hash: rawInput.sourceHash,
     instance_id: instance.id,
     active_state: activeState,
+    properties: structuredClone(instance.properties),
+    slots: structuredClone(instance.slots),
+    visual_overrides: structuredClone(instance.visual_overrides),
     ...(rawInput.index === undefined ? {} : { index: rawInput.index }),
     ...(rawInput.position === undefined ? {} : { position: rawInput.position }),
   };
@@ -223,7 +362,8 @@ export function prepareComponentInstanceInsertion(
     document: DesignDocumentV2Schema.parse(materialized.document),
     operation,
     createdNodeIds,
-    hydratedTokenIds,
+    hydratedTokenIds: [...hydratedTokenIds].sort(),
+    hydratedAssetIds: [...hydratedAssetIds].sort(),
     nodeIdMapping: materialized.nodeIdMapping,
   };
 }

@@ -212,7 +212,10 @@ describe("agent before/after review", () => {
     expect(agentTaskInstruction(task())).toContain("design_preview_changes");
     expect(agentTaskInstruction(task())).toContain("returned PNG in Codex");
     expect(agentTaskInstruction(task())).toContain("design_lint");
-    expect(agentTaskInstruction(task())).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
+    expect(agentTaskInstruction(task())).toContain("immutable Product");
+    expect(agentTaskInstruction(task())).toContain("reused, extended, or proposed");
+    expect(agentTaskInstruction(task())).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>","readiness":');
+    expect(agentTaskInstruction(task())).toContain("DesignReadinessReport");
     expect(agentTaskInstruction(task())).toContain("Do not commit it");
     const launchUrl = new URL(codexTaskLaunchUrl(task()));
     expect(launchUrl.protocol).toBe("codex:");

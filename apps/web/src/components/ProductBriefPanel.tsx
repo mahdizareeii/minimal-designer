@@ -720,6 +720,10 @@ export function ProductBriefPanel() {
 
   const commitAgentPreview = async () => {
     if (!designId || !reviewTask || !reviewPreview) return;
+    if (!reviewTask.readiness) {
+      setReviewError("This proposal has no immutable FormaSpec readiness report. Regenerate it before approval.");
+      return;
+    }
     const current = useDesignerStore.getState();
     setReviewBusy(true);
     setReviewError(null);
@@ -846,6 +850,7 @@ export function ProductBriefPanel() {
             previewRenderRetryKey={previewRenderRetryKey}
             canCommit={Boolean(reviewTask && reviewPreview
               && reviewTask.status === "awaiting_approval"
+              && reviewTask.readiness
               && reviewPreview.canCommit
               && reviewPreview.status === "ready"
               && baseVersion === reviewPreview.rootBaseVersion

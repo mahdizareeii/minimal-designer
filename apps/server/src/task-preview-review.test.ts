@@ -1,11 +1,20 @@
 import { createHash } from "node:crypto";
 
+import {
+  createFrameNode,
+  createSequentialIdFactory,
+  validateDesignDocument,
+} from "@designer/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { resolveAccess } from "./authorization.js";
 import { loadConfig } from "./config.js";
 import { encodeRgbaPng } from "./render.js";
+import {
+  agentTaskResolvedContextFixture,
+  designReadinessFixture,
+} from "../test-fixtures/product.js";
 
 function testConfig() {
   return loadConfig({
@@ -237,7 +246,7 @@ describe("task-scoped agent preview review", () => {
       .toContain("task_id");
 
     const createdTask = await callMcpTool<{
-      task: { id: string; designId: string; status: string };
+      task: { id: string; designId: string; status: string; resolvedContext: unknown };
       codexLaunchUrl: string;
       websiteTaskLink: string;
     }>(application, agent.token, "task_create", {
@@ -319,7 +328,12 @@ describe("task-scoped agent preview review", () => {
     expect(previewed.output.preview.projectDeepLink).not.toContain(previewed.output.preview.id);
     expect(application.service.getDesign("local", designId).revision.version).toBe(1);
 
-    const awaiting = await callMcpTool<{ task: { status: string }; reviewDeepLink: string | null }>(
+    const awaiting = await callMcpTool<{
+      task: { status: string; readiness: unknown };
+      readiness: { selected: { productId: string; designId: string; baseVersion: number } };
+      reviewDeepLink: string | null;
+      reviewLaunchLink: string | null;
+    }>(
       application,
       agent.token,
       "task_transition",
@@ -327,18 +341,40 @@ describe("task-scoped agent preview review", () => {
         task_id: createdTask.output.task.id,
         expected_status: "in_progress",
         to_status: "awaiting_approval",
-        data: { previewId: previewed.output.preview.id },
+        data: {
+          previewId: previewed.output.preview.id,
+          readiness: designReadinessFixture(createdTask.output.task.resolvedContext),
+        },
       },
     );
     expect(awaiting.output.task.status).toBe("awaiting_approval");
+    expect(awaiting.output.task.readiness).toEqual(awaiting.output.readiness);
+    expect(awaiting.output.readiness.selected).toEqual({
+      productId: (createdTask.output.task.resolvedContext as { product: { id: string } }).product.id,
+      designId,
+      baseVersion: 1,
+    });
     const reviewLink = new URL(awaiting.output.reviewDeepLink as string);
     expect(reviewLink.pathname).toBe(`/design/${designId}/previews/${previewed.output.preview.id}/review`);
     expect(reviewLink.searchParams.get("task")).toBe(createdTask.output.task.id);
+    expect(reviewLink.searchParams.get("store")).toBe(application.database.dataStoreId());
+    const reviewLaunchLink = new URL(awaiting.output.reviewLaunchLink as string);
+    expect(reviewLaunchLink.protocol).toBe("formaspec:");
+    expect(reviewLaunchLink.hostname).toBe("open-review");
+    expect(reviewLaunchLink.searchParams.get("store")).toBe(application.database.dataStoreId());
     expect(awaiting.content.find((item) => item.type === "text")).toMatchObject({
       type: "text",
       text: expect.stringContaining(awaiting.output.reviewDeepLink as string),
     });
-    const reread = await callMcpTool<{ task: { status: string }; reviewDeepLink: string | null }>(
+    expect(awaiting.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "image", mimeType: "image/png" }),
+    ]));
+    const reread = await callMcpTool<{
+      task: { status: string; readiness: unknown };
+      readiness: unknown;
+      reviewDeepLink: string | null;
+      reviewLaunchLink: string | null;
+    }>(
       application,
       agent.token,
       "task_read",
@@ -346,6 +382,19 @@ describe("task-scoped agent preview review", () => {
     );
     expect(reread.output).toMatchObject({
       task: { status: "awaiting_approval" },
+      readiness: awaiting.output.readiness,
+      reviewDeepLink: awaiting.output.reviewDeepLink,
+      reviewLaunchLink: awaiting.output.reviewLaunchLink,
+    });
+    expect(reread.output.task.readiness).toEqual(awaiting.output.readiness);
+    const websiteTask = await application.app.inject({
+      method: "GET",
+      url: `/api/agent-tasks/${createdTask.output.task.id}`,
+    });
+    expect(websiteTask.statusCode, websiteTask.body).toBe(200);
+    expect(websiteTask.json()).toMatchObject({
+      task: { readiness: awaiting.output.readiness },
+      readiness: awaiting.output.readiness,
       reviewDeepLink: awaiting.output.reviewDeepLink,
     });
 
@@ -362,6 +411,218 @@ describe("task-scoped agent preview review", () => {
     expect(approved.json<{ task: { status: string }; version: number }>()).toMatchObject({
       task: { status: "completed" },
       version: 2,
+    });
+  });
+
+  it("previews a reciprocal responsive-frame operation batch atomically through MCP", async () => {
+    const created = application.service.createDesign("local", {
+      name: "Responsive MCP checkout",
+      preset: "web",
+      idempotencyKey: "responsive-mcp-design-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const desktopId = created.document.pages[0]!.children[0]!;
+    const desktop = created.document.nodes[desktopId];
+    if (desktop?.type !== "frame") throw new Error("Expected starter desktop frame.");
+    const ids = createSequentialIdFactory("responsivemcp");
+    const phone = createFrameNode({
+      name: "Checkout phone",
+      role: "screen",
+      layout: { ...desktop.layout, x: 0, y: 0, width: 390, height: 844 },
+    }, ids);
+    const tablet = createFrameNode({
+      name: "Checkout tablet",
+      role: "screen",
+      layout: { ...desktop.layout, x: 430, y: 0, width: 834, height: 1194 },
+    }, ids);
+    const frameIds = [phone.id, tablet.id, desktop.id];
+    const groupId = "responsive_mcp_checkout_0001";
+    phone.responsive_variant = { group_id: groupId, frame_ids: frameIds, breakpoint: { min_width: 0, max_width: 600 } };
+    tablet.responsive_variant = { group_id: groupId, frame_ids: frameIds, breakpoint: { min_width: 600, max_width: 1_024 } };
+    const prepared = application.service.createPreview("local", designId, {
+      baseVersion: 1,
+      operations: [
+        { type: "create_tree", parent: { page_id: pageId }, root_ids: [phone.id, tablet.id], nodes: [phone, tablet] },
+        {
+          type: "update_node",
+          node_id: desktop.id,
+          patch: { responsive_variant: { group_id: groupId, frame_ids: frameIds, breakpoint: { min_width: 1_024 } } },
+        },
+      ],
+    });
+    application.service.commitPreview("local", designId, {
+      previewId: prepared.id,
+      expectedBaseVersion: 1,
+      idempotencyKey: "responsive-mcp-setup-commit-0001",
+      message: "Create responsive frame fixtures",
+    });
+
+    const agent = installAgent(application, designId, "responsive_mcp_agent");
+    const task = await callMcpTool<{ task: { id: string } }>(application, agent.token, "task_create", {
+      design_id: designId,
+      brief: "Refine the linked phone, tablet, and desktop breakpoints",
+      selection: frameIds,
+      base_version: 2,
+      expected_output: "design_preview",
+      idempotency_key: "responsive-mcp-task-0001",
+    });
+    await callMcpTool(application, agent.token, "task_claim", { task_id: task.output.task.id });
+    await callMcpTool(application, agent.token, "task_transition", {
+      task_id: task.output.task.id,
+      expected_status: "claimed",
+      to_status: "in_progress",
+    });
+
+    const relationships = [
+      { group_id: groupId, frame_ids: frameIds, breakpoint: { min_width: 0, max_width: 640 } },
+      { group_id: groupId, frame_ids: frameIds, breakpoint: { min_width: 640, max_width: 1_100 } },
+      { group_id: groupId, frame_ids: frameIds, breakpoint: { min_width: 1_100 } },
+    ];
+    const previewed = await callMcpTool<{
+      preview: { id: string; changedNodeIds: string[]; rootBaseVersion: number };
+    }>(application, agent.token, "design_preview_changes", {
+      design_id: designId,
+      task_id: task.output.task.id,
+      base_version: 2,
+      page_id: pageId,
+      max_size: 512,
+      operations: frameIds.map((nodeId, index) => ({
+        type: "update_node",
+        node_id: nodeId,
+        patch: { responsive_variant: relationships[index] },
+      })),
+    });
+    expect(previewed.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "image", mimeType: "image/png" }),
+    ]));
+    expect(previewed.output.preview).toMatchObject({ rootBaseVersion: 2 });
+    expect(new Set(previewed.output.preview.changedNodeIds)).toEqual(new Set(frameIds));
+    const exact = application.service.getPreview(agent.actorId, designId, previewed.output.preview.id, {
+      taskId: task.output.task.id,
+    });
+    expect(exact.canonicalDocument.revision).toBe(3);
+    expect(validateDesignDocument(exact.canonicalDocument).success).toBe(true);
+    expect(frameIds.map((frameId) => {
+      const frame = exact.canonicalDocument.nodes[frameId];
+      return frame?.type === "frame" ? frame.responsive_variant?.breakpoint : undefined;
+    })).toEqual(relationships.map((relationship) => relationship.breakpoint));
+    expect(application.service.getDesign("local", designId).revision.version).toBe(2);
+  });
+
+  it("binds readiness evidence to the immutable Product, specification, release, component, and repository context", () => {
+    const created = application.service.createDesign("local", {
+      name: "Readiness-bound preview",
+      preset: "phone",
+      idempotencyKey: "task-readiness-create-0001",
+    });
+    const designId = created.document.id;
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const agent = installAgent(application, designId, "task_readiness_agent");
+    const task = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: "Return a fully evidenced checkout refinement",
+      selection: [frameId],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "task-readiness-task-0001",
+      expiresInSeconds: 3_600,
+      platform: "phone",
+    });
+    application.enterprise.claimAgentTask(agent.actorId, task.id);
+    application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "claimed",
+      toStatus: "in_progress",
+    });
+    const preview = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Readiness-reviewed checkout" } }],
+      taskId: task.id,
+    });
+    persistExactRender(application, agent.actorId, designId, preview.id, pageId, frameId, task.id);
+    const readiness = designReadinessFixture(task.resolvedContext);
+    expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.id },
+    }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
+    const mismatches = [
+      (() => {
+        const report = structuredClone(readiness);
+        report.selected.productId = "product_wrongreadiness0001";
+        return report;
+      })(),
+      (() => {
+        const report = structuredClone(readiness);
+        report.productSpecification = report.productSpecification === null
+          ? { version: 1, specificationHash: "a".repeat(64) }
+          : { ...report.productSpecification, specificationHash: "b".repeat(64) };
+        return report;
+      })(),
+      (() => {
+        const report = structuredClone(readiness);
+        report.designSystem.releaseId = "release_wrongreadiness0001";
+        return report;
+      })(),
+      (() => {
+        const report = structuredClone(readiness);
+        report.repositoryMappingsConsidered.push({
+          inventoryId: "inventory_wrongreadiness0001",
+          inventoryHash: "c".repeat(64),
+        });
+        return report;
+      })(),
+      (() => {
+        const report = structuredClone(readiness);
+        report.components.reused.push({
+          componentDefinitionId: "component_wrongreadiness0001",
+          version: 1,
+          reason: "Claim a component that is not in the frozen release.",
+        });
+        return report;
+      })(),
+    ];
+    for (const report of mismatches) {
+      expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+        expectedStatus: "in_progress",
+        toStatus: "awaiting_approval",
+        data: { previewId: preview.id, readiness: report },
+      }))).toMatchObject({
+        code: "VALIDATION_FAILED",
+        statusCode: 422,
+        details: { issues: expect.any(Array) },
+      });
+      expect(application.enterprise.readAgentTask("local", task.id).status).toBe("in_progress");
+    }
+
+    const awaiting = application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: preview.id, readiness },
+    });
+    expect(awaiting).toMatchObject({
+      status: "awaiting_approval",
+      readiness,
+      transitions: expect.arrayContaining([
+        expect.objectContaining({
+          toStatus: "awaiting_approval",
+          data: { previewId: preview.id, readiness },
+        }),
+      ]),
+    });
+    const approved = application.enterprise.approveAgentTaskDesignPreview("local", task.id, {
+      designId,
+      previewId: preview.id,
+      expectedBaseVersion: 1,
+      idempotencyKey: "task-readiness-approval-0001",
+    });
+    expect(approved.task).toMatchObject({
+      status: "completed",
+      readiness,
+      transitions: expect.arrayContaining([
+        expect.objectContaining({ toStatus: "completed", data: { previewId: preview.id, readiness } }),
+      ]),
     });
   });
 
@@ -408,7 +669,7 @@ describe("task-scoped agent preview review", () => {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
       message: "Ready for product-manager review",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     });
 
     expect(captureThrown(() => application.service.commitPreview(agent.actorId, designId, {
@@ -434,7 +695,10 @@ describe("task-scoped agent preview review", () => {
       status: "awaiting_approval",
       claimedBy: expect.stringMatching(/^principal_/),
       transitions: expect.arrayContaining([
-        expect.objectContaining({ toStatus: "awaiting_approval", data: { previewId: preview.id } }),
+        expect.objectContaining({
+          toStatus: "awaiting_approval",
+          data: expect.objectContaining({ previewId: preview.id }),
+        }),
       ]),
     });
     expect(application.database.sqlite.prepare(
@@ -496,7 +760,7 @@ describe("task-scoped agent preview review", () => {
       expectedStatus: "awaiting_approval",
       toStatus: "completed",
       message: "Generic completion must not bypass atomic approval",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
 
     const approvalRequest = {
@@ -577,7 +841,7 @@ describe("task-scoped agent preview review", () => {
     expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     }))).toMatchObject({ code: "PREVIEW_ENGINE_MISMATCH", statusCode: 409 });
 
     const payload = {
@@ -600,7 +864,7 @@ describe("task-scoped agent preview review", () => {
     application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     });
     const retried = await application.app.inject({
       method: "POST",
@@ -644,7 +908,7 @@ describe("task-scoped agent preview review", () => {
     application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     });
     const before = {
       audits: (application.database.sqlite.prepare("SELECT COUNT(*) AS count FROM audit_events").get() as { count: number }).count,
@@ -709,12 +973,17 @@ describe("task-scoped agent preview review", () => {
     const local = resolveAccess(application.database.sqlite, "local");
     const createdAt = new Date().toISOString();
     const expiresAt = new Date(Date.parse(createdAt) + 60_000).toISOString();
+    const resolved = agentTaskResolvedContextFixture(application.database.sqlite, {
+      designId,
+      capturedAt: createdAt,
+      platform: "phone",
+    });
     application.database.sqlite.prepare(
       `INSERT INTO agent_tasks
-       (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
-        expected_output, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, ?)`,
-    ).run(taskId, local.organizationId, designId, local.principalId, "Expired exact preview approval", JSON.stringify([frameId]), createdAt, expiresAt);
+       (id, organization_id, product_id, design_id, actor_id, brief, selection_json, base_version,
+        expected_output, created_at, expires_at, resolved_context_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, ?, ?)`,
+    ).run(taskId, local.organizationId, resolved.productId, designId, local.principalId, "Expired exact preview approval", JSON.stringify([frameId]), createdAt, expiresAt, resolved.json);
     const insertTransition = application.database.sqlite.prepare(
       `INSERT INTO agent_task_transitions
        (id, task_id, from_status, to_status, actor_id, message, data_json, created_at)
@@ -840,12 +1109,17 @@ describe("task-scoped agent preview review", () => {
     const local = resolveAccess(application.database.sqlite, "local");
     const now = new Date().toISOString();
     const expiresAt = new Date(Date.parse(now) + 60_000).toISOString();
+    const resolved = agentTaskResolvedContextFixture(application.database.sqlite, {
+      designId,
+      capturedAt: now,
+      platform: "phone",
+    });
     application.database.sqlite.prepare(
       `INSERT INTO agent_tasks
-       (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
-        expected_output, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, ?)`,
-    ).run(taskId, local.organizationId, designId, local.principalId, "Expired task without an expiry transition", JSON.stringify([frameId]), now, expiresAt);
+       (id, organization_id, product_id, design_id, actor_id, brief, selection_json, base_version,
+        expected_output, created_at, expires_at, resolved_context_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'design_preview', ?, ?, ?)`,
+    ).run(taskId, local.organizationId, resolved.productId, designId, local.principalId, "Expired task without an expiry transition", JSON.stringify([frameId]), now, expiresAt, resolved.json);
     const insertTransition = application.database.sqlite.prepare(
       `INSERT INTO agent_task_transitions
        (id, task_id, from_status, to_status, actor_id, message, data_json, created_at)
@@ -1037,7 +1311,7 @@ describe("task-scoped agent preview review", () => {
     expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, secondTask.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: firstPreview.id },
+      data: { previewId: firstPreview.id, readiness: designReadinessFixture(secondTask.resolvedContext) },
     }))).toMatchObject({ code: "VALIDATION_FAILED", statusCode: 422 });
     expect(application.enterprise.readAgentTask("local", secondTask.id).status).toBe("in_progress");
     expect(application.service.getDesign("local", designId).revision.version).toBe(1);
@@ -1252,7 +1526,7 @@ describe("task-scoped agent preview review", () => {
     application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     });
     application.database.sqlite.prepare(
       "UPDATE previews SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
@@ -1315,7 +1589,7 @@ describe("task-scoped agent preview review", () => {
     application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: preview.id },
+      data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
     });
 
     const discardInput = {

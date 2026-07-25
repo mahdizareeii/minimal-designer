@@ -47,6 +47,7 @@ import {
   readSnapshotJson,
   revisionHash,
 } from "./persistence.js";
+import { parsePreviewRenderMetadata } from "./preview-render-metadata.js";
 
 const MAX_BACKUP_ENTRIES = 20_000;
 export const MAX_BACKUP_BUNDLE_BYTES = 16 * 1024 * 1024 * 1024;
@@ -642,6 +643,85 @@ async function copyReferencedAssetFiles(
   }
 }
 
+function previewRenderArchivePath(sha256: string): string {
+  if (!/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new DomainError("VALIDATION_FAILED", "Backup preview render metadata contains an invalid SHA-256.", 422);
+  }
+  return `preview-renders/${sha256}.png`;
+}
+
+async function copyReferencedPreviewRenderFiles(
+  databasePath: string,
+  sourceDataDirectory: string,
+  stagingDirectory: string,
+  backupCreatedAt: string,
+): Promise<void> {
+  const sqlite = new Database(databasePath, { readonly: true, fileMustExist: true });
+  const copied = new Set<string>();
+  try {
+    const previewsTable = sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'previews'",
+    ).get();
+    if (!previewsTable) return;
+    const previewColumns = new Set(
+      (sqlite.prepare("PRAGMA table_info(previews)").all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!previewColumns.has("render_metadata_json")
+      || !previewColumns.has("status")
+      || !previewColumns.has("expires_at")) return;
+    boundedTableCount(sqlite, "previews");
+    const rows = sqlite.prepare(
+      `SELECT id, status, expires_at, render_metadata_json
+       FROM previews WHERE render_metadata_json IS NOT NULL ORDER BY id`,
+    ).iterate() as Iterable<{
+      id: unknown;
+      status: unknown;
+      expires_at: unknown;
+      render_metadata_json: unknown;
+    }>;
+    for (const row of rows) {
+      if (typeof row.render_metadata_json !== "string") {
+        throw new DomainError("VALIDATION_FAILED", "Backup database contains invalid preview render metadata.", 422);
+      }
+      const metadata = parsePreviewRenderMetadata(row.render_metadata_json);
+      const archivePath = previewRenderArchivePath(metadata.sha256);
+      if (copied.has(archivePath)) continue;
+      const active = (row.status === "ready" || row.status === "blocked")
+        && typeof row.expires_at === "string"
+        && row.expires_at > backupCreatedAt;
+      if (!active) continue;
+      const source = path.join(sourceDataDirectory, ...archivePath.split("/"));
+      let stat: fs.Stats;
+      try {
+        stat = await fs.promises.lstat(source);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new DomainError(
+            "PREVIEW_ENGINE_MISMATCH",
+            `Active preview ${String(row.id)} is missing its exact PNG artifact; load or regenerate it before backup.`,
+            409,
+            { retryable: true, details: { previewId: String(row.id), expectedSha256: metadata.sha256 } },
+          );
+        }
+        throw error;
+      }
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new DomainError("VALIDATION_FAILED", `Preview render source is not a safe regular file: ${archivePath}.`, 422);
+      }
+      const digest = await fileDigest(source);
+      if (digest.sha256 !== metadata.sha256) {
+        throw new DomainError("VALIDATION_FAILED", `Preview render source hash does not match its metadata: ${archivePath}.`, 422);
+      }
+      const destination = path.join(stagingDirectory, ...archivePath.split("/"));
+      await fs.promises.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+      copied.add(archivePath);
+    }
+  } finally {
+    sqlite.close();
+  }
+}
+
 async function fileDigest(filename: string): Promise<{ sizeBytes: number; sha256: string }> {
   const hash = createHash("sha256");
   let sizeBytes = 0;
@@ -808,7 +888,7 @@ function verifyDatabaseMigrationLedger(sqlite: Database.Database, manifestVersio
 
 function boundedTableCount(
   sqlite: Database.Database,
-  table: "assets" | "snapshots" | "revisions" | "designs" | "design_systems" | "design_system_tokens"
+  table: "assets" | "previews" | "snapshots" | "revisions" | "designs" | "design_systems" | "design_system_tokens"
     | "component_definitions" | "design_system_releases" | "project_design_system_pins",
 ): number {
   const row = sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count?: unknown } | undefined;
@@ -893,6 +973,55 @@ function verifyAssetManifestFileSet(
     }
   }
   return archiveAssets;
+}
+
+function verifyPreviewRenderFiles(
+  sqlite: Database.Database,
+  manifestFiles: ReadonlyMap<string, BackupManifest["files"][number]>,
+  backupCreatedAt: string,
+): void {
+  const requiredActive = new Set<string>();
+  const previewsTable = sqlite.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'previews'",
+  ).get();
+  if (previewsTable) {
+    const previewColumns = new Set(
+      (sqlite.prepare("PRAGMA table_info(previews)").all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (previewColumns.has("render_metadata_json")
+      && previewColumns.has("status")
+      && previewColumns.has("expires_at")) {
+      boundedTableCount(sqlite, "previews");
+      const rows = sqlite.prepare(
+        `SELECT status, expires_at, render_metadata_json
+         FROM previews WHERE render_metadata_json IS NOT NULL ORDER BY id`,
+      ).iterate() as Iterable<{ status: unknown; expires_at: unknown; render_metadata_json: unknown }>;
+      for (const row of rows) {
+        if (typeof row.render_metadata_json !== "string") {
+          throw new DomainError("VALIDATION_FAILED", "Backup database contains invalid preview render metadata.", 422);
+        }
+        const sha256 = parsePreviewRenderMetadata(row.render_metadata_json).sha256;
+        if ((row.status === "ready" || row.status === "blocked")
+          && typeof row.expires_at === "string"
+          && row.expires_at > backupCreatedAt) {
+          requiredActive.add(sha256);
+        }
+      }
+    }
+  }
+  for (const [filePath, record] of manifestFiles) {
+    if (!filePath.startsWith("preview-renders/")) continue;
+    const match = /^preview-renders\/([a-f0-9]{64})\.png$/.exec(filePath);
+    if (!match || record.sha256 !== match[1] || !requiredActive.has(match[1]!)) {
+      throw new DomainError("VALIDATION_FAILED", `Backup contains an invalid or unreferenced preview render: ${filePath}.`, 422);
+    }
+  }
+  for (const sha256 of requiredActive) {
+    const archivePath = previewRenderArchivePath(sha256);
+    if (!manifestFiles.has(archivePath)) {
+      throw new DomainError("VALIDATION_FAILED", `Backup is missing active exact preview render ${archivePath}.`, 422);
+    }
+  }
 }
 
 async function verifyRasterDecode(
@@ -1264,14 +1393,15 @@ function loadVerifiedDesignSystemState(
       || (row.replacement_component_id !== null && typeof row.replacement_component_id !== "string")) {
       throw new DomainError("VALIDATION_FAILED", "Backup database contains an invalid component-definition version.", 422);
     }
-    const parsed = ComponentDefinitionSchema.safeParse(parseBoundedStoredJson(
+    const storedDefinition = parseBoundedStoredJson(
       row.definition_json,
       `Backup component definition ${row.component_id}@${row.version}`,
       DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES,
-    ));
+    );
+    const parsed = ComponentDefinitionSchema.safeParse(storedDefinition);
     const key = versionedEntityKey(row.design_system_id, row.component_id, row.version as number);
     if (!parsed.success
-      || canonicalJson(parsed.data) !== row.definition_json
+      || canonicalJson(storedDefinition) !== row.definition_json
       || parsed.data.id !== row.component_id
       || parsed.data.version !== row.version
       || parsed.data.status !== row.status
@@ -1884,6 +2014,7 @@ async function verifyExtractedBackup(
       verifyOrganizationPolicyBackupConfiguration(sqlite, organizationConfigContents);
     }
     const databaseAssets = await verifyDatabaseAssetReferences(sqlite, archivedAssets, root, migrationVersion, options);
+    verifyPreviewRenderFiles(sqlite, manifestFiles, manifest.createdAt);
     const snapshotHashes = migrationVersion >= 2 ? verifySnapshotIntegrity(sqlite) : new Set<string>();
     verifyRevisionAndHeadIntegrity(sqlite, migrationVersion, snapshotHashes, databaseAssets);
     return {
@@ -2453,6 +2584,7 @@ export class BackupManager {
         stagedDatabase.close();
       }
       await copyReferencedAssetFiles(stagedDatabasePath, this.dataDirectory, staging);
+      await copyReferencedPreviewRenderFiles(stagedDatabasePath, this.dataDirectory, staging, now.toISOString());
       const assetFiles = (await listFiles(path.join(staging, "assets"))).map((relative) => `assets/${relative}`);
       await fs.promises.writeFile(path.join(staging, "asset-manifest.json"), `${JSON.stringify({ files: assetFiles }, null, 2)}\n`, { mode: 0o600 });
       await fs.promises.writeFile(

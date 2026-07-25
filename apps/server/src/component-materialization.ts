@@ -30,6 +30,7 @@ export interface MaterializeComponentInput {
   definition: ComponentDefinition;
   source: ComponentSourceBundle;
   updateInstances?: boolean;
+  dependencyNodeMappings?: Readonly<Record<string, Readonly<Record<string, NodeId>>>>;
 }
 
 export interface MaterializedComponentResult {
@@ -87,6 +88,31 @@ function assertSourceMatchesDefinition(
       422,
     );
   }
+  const sourceNodes = new Map(source.nodes.map((node) => [node.id, node]));
+  for (const binding of definition.property_bindings) {
+    const target = sourceNodes.get(binding.target_node_id);
+    if (!target) {
+      throw new DomainError("VALIDATION_FAILED", `Property binding ${binding.property_key} targets a node outside the component source.`, 422);
+    }
+    const validTarget = binding.target === "visibility"
+      || binding.target === "accessibility_label"
+      || (binding.target === "text_content" && target.type === "text")
+      || (binding.target === "icon_name" && target.type === "icon")
+      || (binding.target === "asset_id" && target.type === "image");
+    if (!validTarget) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        `Property binding ${binding.property_key} is incompatible with source node ${target.id}.`,
+        422,
+      );
+    }
+  }
+  for (const anchor of definition.slot_anchors) {
+    const target = sourceNodes.get(anchor.target_node_id);
+    if (!target || (target.type !== "frame" && target.type !== "container")) {
+      throw new DomainError("VALIDATION_FAILED", `Slot anchor ${anchor.slot_key} must target a component source container.`, 422);
+    }
+  }
 }
 
 function cloneMaterializedNode(
@@ -113,7 +139,22 @@ function cloneMaterializedNode(
     clone.children = clone.children.map((childId) => mapping.get(childId)!);
   }
   if (clone.type === "component_instance") {
-    throw new DomainError("VALIDATION_FAILED", "Nested component sources cannot be materialized.", 422);
+    const dependencyMapping = input.dependencyNodeMappings?.[clone.component_definition_id];
+    clone.slots = Object.fromEntries(Object.entries(clone.slots).map(([slotKey, childIds]) => [
+      slotKey,
+      childIds.map((childId) => mapping.get(childId) ?? childId),
+    ]));
+    clone.visual_overrides = Object.fromEntries(Object.entries(clone.visual_overrides).map(([sourceNodeId, style]) => {
+      const targetNodeId = dependencyMapping?.[sourceNodeId];
+      if (!targetNodeId) {
+        throw new DomainError(
+          "VALIDATION_FAILED",
+          `Nested component ${clone.component_definition_id} has an unavailable visual-override target.`,
+          422,
+        );
+      }
+      return [targetNodeId, style];
+    }));
   }
   return clone;
 }
@@ -154,6 +195,14 @@ export function materializeComponentSource(
   materializedDefinition.states = materializedDefinition.states.map((state) => ({
     ...state,
     node_id: mapping.get(state.node_id)!,
+  }));
+  materializedDefinition.property_bindings = materializedDefinition.property_bindings.map((binding) => ({
+    ...binding,
+    target_node_id: mapping.get(binding.target_node_id)!,
+  }));
+  materializedDefinition.slot_anchors = materializedDefinition.slot_anchors.map((anchor) => ({
+    ...anchor,
+    target_node_id: mapping.get(anchor.target_node_id)!,
   }));
   document.component_definitions[definition.id] = materializedDefinition;
 

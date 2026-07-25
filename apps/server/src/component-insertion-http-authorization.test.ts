@@ -10,6 +10,7 @@ import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import { encodeRgbaPng } from "./render.js";
 import { createComponentSourceRevisionFixture } from "../test-fixtures/component-source.js";
+import { moveDesignFixtureToOrganization } from "../test-fixtures/product.js";
 
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
@@ -264,9 +265,10 @@ describe("component insertion preview HTTP authorization", () => {
     fixture.database.sqlite.prepare(
       "INSERT INTO organizations (id, name, config_json, created_at, updated_at) VALUES ('organization_component_insertion_foreign', 'Foreign', '{}', ?, ?)",
     ).run(now, now);
-    fixture.database.sqlite.prepare(
-      "UPDATE designs SET organization_id = 'organization_component_insertion_foreign' WHERE id = ?",
-    ).run(denied.designId);
+    moveDesignFixtureToOrganization(fixture.database.sqlite, {
+      designId: denied.designId,
+      organizationId: "organization_component_insertion_foreign",
+    });
 
     const allowedLibraryResponse = await fixture.app.inject({
       method: "GET",

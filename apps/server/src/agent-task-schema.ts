@@ -1,7 +1,12 @@
-import { NodeIdSchema } from "@designer/core";
+import {
+  AgentTaskResolvedContextSchema,
+  NodeIdSchema,
+  ProductIdentitySchema,
+} from "@designer/core";
 import { z } from "zod";
 
 import { BoundedJsonObjectSchema } from "./bounded-json-schema.js";
+import { DesignReadinessReportSchema } from "./design-readiness.js";
 
 export const AGENT_TASK_EXPECTED_OUTPUTS = [
   "design_preview",
@@ -31,7 +36,10 @@ const taskArtifactIdentifier = z.string().trim().min(1).max(240);
 const transitionMessage = z.string().trim().max(4_000).optional();
 
 export const AgentTaskCompletionSchemas = {
-  design_preview: z.object({ previewId: taskArtifactIdentifier }).strict(),
+  design_preview: z.object({
+    previewId: taskArtifactIdentifier,
+    readiness: DesignReadinessReportSchema,
+  }).strict(),
   design_commit: z.object({ revisionId: taskArtifactIdentifier }).strict(),
   product_spec_preview: z.object({ previewId: taskArtifactIdentifier }).strict(),
   product_spec_commit: z.object({ version: z.number().int().positive().max(1_000_000_000) }).strict(),
@@ -40,6 +48,7 @@ export const AgentTaskCompletionSchemas = {
 export const AgentTaskCompletionDataSchema = z.union([
   AgentTaskCompletionSchemas.design_preview,
   AgentTaskCompletionSchemas.design_commit,
+  AgentTaskCompletionSchemas.product_spec_preview,
   AgentTaskCompletionSchemas.product_spec_commit,
 ]);
 
@@ -142,6 +151,7 @@ export const AgentTaskTransitionResultSchema = z.object({
 
 export const AgentTaskResultSchema = z.object({
   id: taskArtifactIdentifier,
+  product: ProductIdentitySchema,
   designId: taskArtifactIdentifier,
   brief: z.string().trim().min(1).max(100_000),
   selection: AgentTaskSelectionSchema,
@@ -152,5 +162,7 @@ export const AgentTaskResultSchema = z.object({
   createdBy: taskArtifactIdentifier,
   createdAt: z.string().datetime({ offset: true }),
   expiresAt: z.string().datetime({ offset: true }),
+  resolvedContext: AgentTaskResolvedContextSchema.nullable(),
+  readiness: DesignReadinessReportSchema.nullable(),
   transitions: z.array(AgentTaskTransitionResultSchema).max(10_000),
 }).strict();

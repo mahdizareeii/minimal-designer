@@ -127,7 +127,6 @@ function managedCodexAssetsFixture() {
   const root = temporaryRoot("formaspec-macos-codex-assets-");
   const identities = [
     { skillName: "formaspec", pluginName: "formaspec", displayName: "FormaSpec" },
-    { skillName: "minimal-ui", pluginName: "minimal-ui", displayName: "Minimal UI" },
   ];
   writeManagedCodexAsset(root, "codex-marketplace/.agents/plugins/marketplace.json", `${JSON.stringify({
     name: "formaspec",
@@ -147,11 +146,9 @@ function managedCodexAssetsFixture() {
       `  default_prompt: \"Use $${identity.skillName} to design this interface with ${identity.displayName}.\"`,
       "",
     ].join("\n");
-    writeManagedCodexAsset(root, `skills/${identity.skillName}/SKILL.md`, skill);
-    writeManagedCodexAsset(root, `skills/${identity.skillName}/agents/openai.yaml`, metadata);
     writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`, `${JSON.stringify({
       name: identity.pluginName,
-      version: "0.2.0",
+      version: "0.3.0",
       interface: { displayName: identity.displayName },
     })}\n`);
     writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`, skill);
@@ -160,12 +157,12 @@ function managedCodexAssetsFixture() {
   return root;
 }
 
-test("packaged Codex assets expose the FormaSpec and Minimal UI agent identities", () => {
+test("packaged Codex assets expose exactly one FormaSpec agent identity", () => {
   const root = managedCodexAssetsFixture();
   assert.deepEqual(inspectManagedCodexAssets(root), {
     marketplaceName: "formaspec",
     marketplaceDisplayName: "FormaSpec",
-    pluginVersion: "0.2.0",
+    pluginVersion: "0.3.0",
     identities: [
       {
         skillName: "formaspec",
@@ -174,18 +171,19 @@ test("packaged Codex assets expose the FormaSpec and Minimal UI agent identities
         displayName: "FormaSpec",
         mention: "[@FormaSpec](plugin://formaspec@formaspec)",
       },
-      {
-        skillName: "minimal-ui",
-        pluginName: "minimal-ui",
-        pluginId: "minimal-ui@formaspec",
-        displayName: "Minimal UI",
-        mention: "[@Minimal UI](plugin://minimal-ui@formaspec)",
-      },
     ],
   });
 
-  fs.rmSync(path.join(root, "codex-marketplace/plugins/minimal-ui"), { recursive: true, force: true });
-  assert.throws(() => inspectManagedCodexAssets(root), /minimal-ui/u);
+  writeManagedCodexAsset(root, "codex-marketplace/plugins/minimal-ui/.codex-plugin/plugin.json", "{}\n");
+  assert.throws(() => inspectManagedCodexAssets(root), /removed identity path/u);
+
+  const retiredTrigger = managedCodexAssetsFixture();
+  writeManagedCodexAsset(
+    retiredTrigger,
+    "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
+    "---\nname: formaspec\ndescription: Fixture.\n---\n\nUse Minimal UI.\n",
+  );
+  assert.throws(() => inspectManagedCodexAssets(retiredTrigger), /must not advertise a retired agent identity/u);
 });
 
 test("nested containment accepts a canonicalized temporary root without allowing escapes", () => {

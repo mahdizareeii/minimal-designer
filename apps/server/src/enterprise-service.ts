@@ -1,13 +1,22 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
+  AgentTaskResolvedContextSchema,
   AnyDesignDocumentSchema,
+  FORMASPEC_FOUNDATION_SYSTEM,
+  FORMASPEC_FOUNDATION_RELEASE_ID,
+  FORMASPEC_FOUNDATION_SYSTEM_ID,
+  FORMASPEC_FOUNDATION_VERSION,
   PLANNING_SECTIONS,
   PlanningSectionSchema,
   PlanningSessionSchema,
   ProductSpecificationSchema,
+  ProductLocaleSchema,
+  ProductPlatformSchema,
   toV1CompatibleDesignDocument,
   type PlanningSession,
+  type AgentTaskResolvedContext,
+  type ProductPlatform,
   type ProductSpecification,
 } from "@designer/core";
 import { z } from "zod";
@@ -33,7 +42,7 @@ import { activeDesignSqlPredicate, requireActiveDesign } from "./active-design.j
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
 import type { DesignerEventType, EventHub } from "./events.js";
-import { hashPayload } from "./ids.js";
+import { canonicalJson, hashPayload } from "./ids.js";
 import {
   loadOrganizationPolicy,
   ORGANIZATION_AGENT_SCOPES,
@@ -41,10 +50,26 @@ import {
 } from "./organization-policy-model.js";
 import { canonicalProductSpecification } from "./product-spec-persistence.js";
 import { previewTaskId } from "./preview-task-binding.js";
+import {
+  DesignReadinessReportSchema,
+  type DesignReadinessReport,
+} from "./design-readiness.js";
 import type { DesignerService, PreviewKind, RevisionResult } from "./service.js";
 
 const MAX_TRANSITION_DATA_BYTES = 65_536;
 const IDEMPOTENCY_TTL_MS = 86_400_000;
+
+const persistedReleaseReadinessSchema = z.object({
+  release: z.object({
+    id: z.string().trim().min(1).max(240),
+    design_system_id: z.string().trim().min(1).max(240),
+    version: z.number().int().positive().max(1_000_000_000),
+  }).passthrough(),
+  component_versions: z.array(z.object({
+    component_definition_id: z.string().trim().min(1).max(240),
+    version: z.number().int().positive().max(1_000_000_000),
+  }).strict()).max(5_000),
+}).passthrough();
 
 export { AGENT_TASK_EXPECTED_OUTPUTS, AGENT_TASK_STATUSES };
 export type { AgentTaskExpectedOutput, AgentTaskStatus };
@@ -54,7 +79,14 @@ export type PlanningStatus = "draft" | "in_progress" | "ready_for_review" | "com
 export type AgentConnectionStatus = "pending" | "active" | "expired" | "revoked" | "error";
 
 export const AGENT_CONNECTION_SCOPES = ORGANIZATION_AGENT_SCOPES;
-const MANAGED_CODEX_CONNECTION_NAMES = ["Codex — FormaSpec", "Codex — Minimal UI"] as const;
+const FORMASPEC_INSTALLER_MANAGED_CODEX_CONNECTION_NAME = "Codex — FormaSpec" as const;
+// Upgrade-only reconciliation marker for installer-owned 0.2.x connection rows.
+// It is never returned as a current identity or offered for new connections.
+const LEGACY_INSTALLER_MANAGED_CODEX_CONNECTION_NAME = "Codex — Minimal UI" as const;
+const INSTALLER_MANAGED_CODEX_RECONCILIATION_NAMES = [
+  FORMASPEC_INSTALLER_MANAGED_CODEX_CONNECTION_NAME,
+  LEGACY_INSTALLER_MANAGED_CODEX_CONNECTION_NAME,
+] as const;
 
 const taskTransitionGraph: Record<AgentTaskStatus, readonly AgentTaskStatus[]> = {
   queued: ["claimed", "cancelled", "expired"],
@@ -77,6 +109,7 @@ const planningTransitionGraph: Record<PlanningStatus, readonly PlanningStatus[]>
 
 interface DesignAccessRow {
   id: string;
+  product_id: string;
   organization_id: string;
   current_version: number;
   current_revision_id: string;
@@ -144,6 +177,7 @@ interface PlanningVersionRow {
 interface AgentTaskRow {
   id: string;
   organization_id: string;
+  product_id: string | null;
   design_id: string;
   actor_id: string;
   brief: string;
@@ -152,6 +186,7 @@ interface AgentTaskRow {
   expected_output: AgentTaskExpectedOutput;
   created_at: string;
   expires_at: string;
+  resolved_context_json: string | null;
 }
 
 interface AgentTaskTransitionRow {
@@ -249,6 +284,11 @@ export interface AgentTaskTransition {
 
 export interface AgentTaskResult {
   id: string;
+  product: {
+    id: string;
+    name: string;
+    status: "active" | "archived";
+  };
   designId: string;
   brief: string;
   selection: string[];
@@ -259,6 +299,8 @@ export interface AgentTaskResult {
   createdBy: string;
   createdAt: string;
   expiresAt: string;
+  resolvedContext: AgentTaskResolvedContext | null;
+  readiness: DesignReadinessReport | null;
   transitions: AgentTaskTransition[];
 }
 
@@ -835,12 +877,16 @@ export class EnterpriseService {
     expectedOutput: AgentTaskExpectedOutput;
     idempotencyKey: string;
     expiresInSeconds?: number;
+    locale?: string;
+    platform?: ProductPlatform;
   }): AgentTaskResult {
     const { access, design } = this.requireTaskCreateDesign(actorId, input.designId);
     const brief = boundedText(input.brief, "Task brief", 100_000);
     const selection = parseInput(AgentTaskSelectionSchema, input.selection ?? [], "Task selection");
     const expectedOutput = parseInput(AgentTaskExpectedOutputSchema, input.expectedOutput, "Expected task output");
     const expiresInSeconds = input.expiresInSeconds ?? 86_400;
+    const requestedLocale = input.locale === undefined ? undefined : ProductLocaleSchema.parse(input.locale);
+    const requestedPlatform = ProductPlatformSchema.parse(input.platform ?? "unspecified");
     assertSeconds(expiresInSeconds, "Task expiry", 60, 604_800);
     if (design.current_version !== input.baseVersion) {
       throw this.versionConflict(input.baseVersion, design.current_version, "design");
@@ -886,12 +932,32 @@ export class EnterpriseService {
       }
       const taskId = workflowId("task");
       const expiresAt = new Date(nowDate.getTime() + expiresInSeconds * 1_000).toISOString();
+      const resolvedContext = this.resolveAgentTaskContext(
+        access,
+        current,
+        now,
+        requestedLocale,
+        requestedPlatform,
+      );
       this.database.sqlite.prepare(
         `INSERT INTO agent_tasks
-         (id, organization_id, design_id, actor_id, brief, selection_json, base_version,
-          expected_output, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(taskId, access.organizationId, design.id, access.principalId, brief, JSON.stringify(selection), input.baseVersion, expectedOutput, now, expiresAt);
+         (id, organization_id, product_id, design_id, actor_id, brief, selection_json, base_version,
+          expected_output, created_at, expires_at, resolved_context_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        taskId,
+        access.organizationId,
+        current.product_id,
+        design.id,
+        access.principalId,
+        brief,
+        JSON.stringify(selection),
+        input.baseVersion,
+        expectedOutput,
+        now,
+        expiresAt,
+        canonicalJson(resolvedContext),
+      );
       this.appendTaskTransition(access, taskId, null, "queued", "Task created", {}, now);
       appendAuditEvent(this.database.sqlite, access, "agent_task.create", "agent_task", taskId, {
         designId: design.id,
@@ -1019,6 +1085,7 @@ export class EnterpriseService {
     if (access.role === "agent") assertScope(access, "task:update");
     const message = input.message === undefined ? null : boundedText(input.message, "Transition message", 4_000, true);
     const data = parseInput(AgentTaskTransitionDataSchema, input.data ?? {}, "Task transition data");
+    let normalizedData = data;
     if (Buffer.byteLength(JSON.stringify(data), "utf8") > MAX_TRANSITION_DATA_BYTES) {
       throw new DomainError("PAYLOAD_TOO_LARGE", "Task transition data may not exceed 64 KiB.", 413);
     }
@@ -1144,7 +1211,7 @@ export class EnterpriseService {
       }
       if (input.toStatus === "awaiting_approval" || input.toStatus === "completed") {
         try {
-          this.validateTaskCompletion(row, data);
+          normalizedData = this.validateTaskCompletion(row, data);
         } catch (error) {
           if (error instanceof DomainError
             && error.code === "PREVIEW_EXPIRED"
@@ -1169,7 +1236,7 @@ export class EnterpriseService {
       const discardedPreviewId = input.toStatus === "cancelled"
         ? this.expireDiscardedTaskPreview(row, current, data, now)
         : null;
-      this.appendTaskTransition(access, row.id, current.to_status, input.toStatus, message, data, now);
+      this.appendTaskTransition(access, row.id, current.to_status, input.toStatus, message, normalizedData, now);
       appendAuditEvent(this.database.sqlite, access, "agent_task.transition", "agent_task", row.id, {
         fromStatus: current.to_status,
         toStatus: input.toStatus,
@@ -1258,7 +1325,7 @@ export class EnterpriseService {
       if (proposal.previewId !== previewId) {
         throw new DomainError("VALIDATION_FAILED", "The preview does not match the task proposal awaiting approval.", 422);
       }
-      this.validateTaskCompletion(currentTask, { previewId });
+      const completion = this.validateTaskCompletion(currentTask, proposal);
       const revision = designer.commitExactTaskPreviewInCurrentTransaction(actorId, input.designId, {
         previewId,
         expectedBaseVersion: input.expectedBaseVersion,
@@ -1272,7 +1339,7 @@ export class EnterpriseService {
         "awaiting_approval",
         "completed",
         "The product manager approved and committed the exact design preview.",
-        { previewId },
+        completion,
         approvalNow,
       );
       appendAuditEvent(this.database.sqlite, access, "agent_task.transition", "agent_task", currentTask.id, {
@@ -1340,8 +1407,10 @@ export class EnterpriseService {
       const replacedConnectionIds: string[] = [];
       if (input.replaceExisting === true) {
         const replacementNames = input.adapter === "codex"
-          && MANAGED_CODEX_CONNECTION_NAMES.includes(displayName as (typeof MANAGED_CODEX_CONNECTION_NAMES)[number])
-          ? MANAGED_CODEX_CONNECTION_NAMES
+          && INSTALLER_MANAGED_CODEX_RECONCILIATION_NAMES.includes(
+            displayName as (typeof INSTALLER_MANAGED_CODEX_RECONCILIATION_NAMES)[number],
+          )
+          ? INSTALLER_MANAGED_CODEX_RECONCILIATION_NAMES
           : [displayName];
         const existingRows = this.database.sqlite.prepare(
           `SELECT * FROM agent_connections
@@ -1930,8 +1999,39 @@ export class EnterpriseService {
     const transitions = this.taskTransitions(row.id);
     const current = transitions.at(-1);
     if (!current) throw new DomainError("INTERNAL_ERROR", "The agent task has no initial transition.", 500);
+    const productId = row.product_id ?? (this.database.sqlite.prepare(
+      "SELECT product_id FROM designs WHERE id = ? AND organization_id = ?",
+    ).get(row.design_id, row.organization_id) as { product_id: string } | undefined)?.product_id;
+    const product = productId === undefined ? undefined : this.database.sqlite.prepare(
+      "SELECT id, name, status FROM products WHERE id = ? AND organization_id = ?",
+    ).get(productId, row.organization_id) as {
+      id: string;
+      name: string;
+      status: "active" | "archived";
+    } | undefined;
+    if (!product) throw new DomainError("INTERNAL_ERROR", "The agent task Product context is unavailable.", 500);
+    let resolvedContext: AgentTaskResolvedContext | null = null;
+    if (row.resolved_context_json !== null) {
+      try {
+        resolvedContext = AgentTaskResolvedContextSchema.parse(JSON.parse(row.resolved_context_json) as unknown);
+      } catch (error) {
+        throw new DomainError("INTERNAL_ERROR", "The persisted agent task Product context is invalid.", 500, { cause: error });
+      }
+    }
+    let readiness: DesignReadinessReport | null = null;
+    for (let index = transitions.length - 1; index >= 0; index -= 1) {
+      const candidate = transitions[index]?.data.readiness;
+      if (candidate === undefined) continue;
+      try {
+        readiness = DesignReadinessReportSchema.parse(candidate);
+      } catch (error) {
+        throw new DomainError("INTERNAL_ERROR", "The persisted task readiness report is invalid.", 500, { cause: error });
+      }
+      break;
+    }
     return {
       id: row.id,
+      product,
       designId: row.design_id,
       brief: row.brief,
       selection: AgentTaskSelectionSchema.parse(JSON.parse(row.selection_json) as unknown),
@@ -1942,8 +2042,142 @@ export class EnterpriseService {
       createdBy: row.actor_id,
       createdAt: row.created_at,
       expiresAt: row.expires_at,
+      resolvedContext,
+      readiness,
       transitions,
     };
+  }
+
+  private resolveAgentTaskContext(
+    access: AccessContext,
+    design: DesignAccessRow,
+    capturedAt: string,
+    requestedLocale: string | undefined,
+    platform: ProductPlatform,
+  ): AgentTaskResolvedContext {
+    const product = this.database.sqlite.prepare(
+      `SELECT id, name, status, updated_at, canonical_specification_design_id,
+              default_design_system_release_id, default_locale, default_direction, locales_json
+       FROM products WHERE id = ? AND organization_id = ? AND status = 'active'`,
+    ).get(design.product_id, access.organizationId) as {
+      id: string;
+      name: string;
+      status: "active";
+      updated_at: string;
+      canonical_specification_design_id: string | null;
+      default_design_system_release_id: string | null;
+      default_locale: string;
+      default_direction: "ltr" | "rtl" | "auto";
+      locales_json: string;
+    } | undefined;
+    if (!product) throw new DomainError("PRODUCT_CONTEXT_REQUIRED", "The design has no active Product context.", 409);
+    let locales: string[];
+    try {
+      const parsed = JSON.parse(product.locales_json) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("not an array");
+      locales = parsed.map((locale) => ProductLocaleSchema.parse(locale));
+    } catch (error) {
+      throw new DomainError("INTERNAL_ERROR", "The Product locale configuration is invalid.", 500, { cause: error });
+    }
+    const locale = requestedLocale ?? ProductLocaleSchema.parse(product.default_locale);
+    if (!locales.includes(locale)) {
+      throw new DomainError("VALIDATION_FAILED", "The requested task locale is not enabled for this Product.", 422, {
+        details: { locale, productId: product.id, supportedLocales: locales },
+      });
+    }
+    const specification = product.canonical_specification_design_id === null
+      ? undefined
+      : this.database.sqlite.prepare(
+        `SELECT design_id, version, specification_hash
+         FROM product_specifications WHERE design_id = ? ORDER BY version DESC LIMIT 1`,
+      ).get(product.canonical_specification_design_id) as {
+        design_id: string;
+        version: number;
+        specification_hash: string;
+      } | undefined;
+    const projectPin = this.database.sqlite.prepare(
+      `SELECT design_system_id, release_id, release_version
+       FROM project_design_system_pins WHERE design_id = ? AND organization_id = ?`,
+    ).get(design.id, access.organizationId) as {
+      design_system_id: string;
+      release_id: string;
+      release_version: number;
+    } | undefined;
+    let designSystem: AgentTaskResolvedContext["designSystem"];
+    if (projectPin) {
+      designSystem = {
+        source: "project_pin",
+        designSystemId: projectPin.design_system_id,
+        releaseId: projectPin.release_id,
+        releaseVersion: projectPin.release_version,
+      };
+    } else if (product.default_design_system_release_id
+      && product.default_design_system_release_id !== FORMASPEC_FOUNDATION_RELEASE_ID) {
+      const productRelease = this.database.sqlite.prepare(
+        `SELECT release.design_system_id, release.id, release.version
+         FROM design_system_releases release
+         JOIN design_systems system ON system.id = release.design_system_id
+         WHERE release.id = ? AND release.status = 'published'
+           AND system.organization_id = ? AND system.status = 'active'`,
+      ).get(product.default_design_system_release_id, access.organizationId) as {
+        design_system_id: string;
+        id: string;
+        version: number;
+      } | undefined;
+      if (!productRelease) {
+        throw new DomainError("INTERNAL_ERROR", "The Product default design-system release is unavailable.", 500);
+      }
+      designSystem = {
+        source: "product_default",
+        designSystemId: productRelease.design_system_id,
+        releaseId: productRelease.id,
+        releaseVersion: productRelease.version,
+      };
+    } else {
+      designSystem = {
+        source: "formaspec_foundation",
+        designSystemId: FORMASPEC_FOUNDATION_SYSTEM_ID,
+        releaseId: FORMASPEC_FOUNDATION_RELEASE_ID,
+        releaseVersion: FORMASPEC_FOUNDATION_VERSION,
+      };
+    }
+    const inventories = this.database.sqlite.prepare(
+      `SELECT DISTINCT inventory.id, inventory.inventory_hash
+       FROM implementation_mappings mapping
+       JOIN designs mapped_design ON mapped_design.id = mapping.design_id
+       JOIN repository_inventories inventory ON inventory.id = mapping.inventory_id
+       WHERE mapped_design.product_id = ? AND mapped_design.organization_id = ?
+         AND inventory.status = 'active'
+       ORDER BY inventory.created_at DESC, inventory.id DESC LIMIT 100`,
+    ).all(product.id, access.organizationId) as Array<{ id: string; inventory_hash: string }>;
+    return AgentTaskResolvedContextSchema.parse({
+      schemaVersion: 1,
+      product: {
+        id: product.id,
+        name: product.name,
+        status: product.status,
+        updatedAt: product.updated_at,
+      },
+      design: {
+        id: design.id,
+        version: design.current_version,
+        revisionId: design.current_revision_id,
+      },
+      productSpecification: specification === undefined ? null : {
+        designId: specification.design_id,
+        version: specification.version,
+        specificationHash: specification.specification_hash,
+      },
+      designSystem,
+      repositoryInventories: inventories.map((inventory) => ({
+        id: inventory.id,
+        inventoryHash: inventory.inventory_hash,
+      })),
+      locale,
+      direction: product.default_direction,
+      platform,
+      capturedAt,
+    });
   }
 
   private taskTransitions(taskId: string): AgentTaskTransition[] {
@@ -2006,7 +2240,148 @@ export class EnterpriseService {
     }, now);
   }
 
-  private validateTaskCompletion(task: AgentTaskRow, data: Record<string, unknown>): void {
+  private validateDesignReadiness(
+    task: AgentTaskRow,
+    input: unknown,
+  ): DesignReadinessReport {
+    if (task.resolved_context_json === null) {
+      throw new DomainError(
+        "PRODUCT_CONTEXT_REQUIRED",
+        "The design-preview task has no immutable Product readiness context; create a new task.",
+        409,
+      );
+    }
+    let context: AgentTaskResolvedContext;
+    try {
+      context = AgentTaskResolvedContextSchema.parse(JSON.parse(task.resolved_context_json) as unknown);
+    } catch (error) {
+      throw new DomainError("INTERNAL_ERROR", "The persisted agent task Product context is invalid.", 500, { cause: error });
+    }
+    if (task.product_id === null
+      || context.product.id !== task.product_id
+      || context.design.id !== task.design_id
+      || context.design.version !== task.base_version) {
+      throw new DomainError("INTERNAL_ERROR", "The persisted agent task context does not match its immutable task input.", 500);
+    }
+    const report = parseInput(DesignReadinessReportSchema, input, "Design readiness report");
+    const issues: Array<{ path: string; message: string }> = [];
+    const mismatch = (path: string, message: string): void => {
+      issues.push({ path, message });
+    };
+    if (report.selected.productId !== context.product.id) {
+      mismatch("selected.productId", "Product does not match the immutable task context.");
+    }
+    if (report.selected.designId !== context.design.id) {
+      mismatch("selected.designId", "Design does not match the immutable task context.");
+    }
+    if (report.selected.baseVersion !== context.design.version) {
+      mismatch("selected.baseVersion", "Base version does not match the immutable task context.");
+    }
+    if (context.productSpecification === null) {
+      if (report.productSpecification !== null) {
+        mismatch("productSpecification", "The task captured no canonical Product specification.");
+      }
+    } else if (report.productSpecification === null
+      || report.productSpecification.version !== context.productSpecification.version
+      || report.productSpecification.specificationHash !== context.productSpecification.specificationHash) {
+      mismatch("productSpecification", "Product-specification version or hash does not match the immutable task context.");
+    }
+    if (report.designSystem.source !== context.designSystem.source) {
+      mismatch("designSystem.source", "Design-system source does not match the immutable task context.");
+    }
+    if (report.designSystem.releaseId !== context.designSystem.releaseId) {
+      mismatch("designSystem.releaseId", "Design-system release does not match the immutable task context.");
+    }
+    if (report.designSystem.releaseVersion !== context.designSystem.releaseVersion) {
+      mismatch("designSystem.releaseVersion", "Design-system release version does not match the immutable task context.");
+    }
+    if (!report.platforms.includes(context.platform)) {
+      mismatch("platforms", `Readiness must include the task platform ${context.platform}.`);
+    }
+    const expectedInventories = new Map(context.repositoryInventories.map((inventory) => [
+      inventory.id,
+      inventory.inventoryHash,
+    ]));
+    const reportedInventories = new Map(report.repositoryMappingsConsidered.map((inventory) => [
+      inventory.inventoryId,
+      inventory.inventoryHash,
+    ]));
+    if (expectedInventories.size !== reportedInventories.size
+      || [...expectedInventories].some(([inventoryId, inventoryHash]) => (
+        reportedInventories.get(inventoryId) !== inventoryHash
+      ))) {
+      mismatch(
+        "repositoryMappingsConsidered",
+        "Repository inventory IDs and hashes must exactly match the immutable task context.",
+      );
+    }
+    const releaseComponents = this.resolvedReadinessComponentVersions(context);
+    for (const [classification, components] of [
+      ["reused", report.components.reused],
+      ["extended", report.components.extended],
+    ] as const) {
+      for (const [index, component] of components.entries()) {
+        if (!releaseComponents.has(`${component.componentDefinitionId}\u0000${component.version}`)) {
+          mismatch(
+            `components.${classification}.${index}`,
+            "Component/version is not present in the immutable effective design-system release.",
+          );
+        }
+      }
+    }
+    if (issues.length > 0) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "Design readiness does not match the immutable task context.",
+        422,
+        { details: { issues } },
+      );
+    }
+    return report;
+  }
+
+  private resolvedReadinessComponentVersions(context: AgentTaskResolvedContext): Set<string> {
+    if (context.designSystem.source === "formaspec_foundation") {
+      if (context.designSystem.designSystemId !== FORMASPEC_FOUNDATION_SYSTEM.id
+        || context.designSystem.releaseId !== FORMASPEC_FOUNDATION_SYSTEM.release.id
+        || context.designSystem.releaseVersion !== FORMASPEC_FOUNDATION_SYSTEM.release.version) {
+        throw new DomainError("INTERNAL_ERROR", "The frozen FormaSpec Foundation release context is inconsistent.", 500);
+      }
+      return new Set(FORMASPEC_FOUNDATION_SYSTEM.release.component_versions.map((component) => (
+        `${component.component_definition_id}\u0000${component.version}`
+      )));
+    }
+    const row = this.database.sqlite.prepare(
+      `SELECT release_json FROM design_system_releases
+       WHERE id = ? AND design_system_id = ? AND version = ?`,
+    ).get(
+      context.designSystem.releaseId,
+      context.designSystem.designSystemId,
+      context.designSystem.releaseVersion,
+    ) as { release_json: string } | undefined;
+    if (!row) {
+      throw new DomainError("INTERNAL_ERROR", "The frozen design-system release is unavailable.", 500);
+    }
+    let envelope: z.infer<typeof persistedReleaseReadinessSchema>;
+    try {
+      envelope = persistedReleaseReadinessSchema.parse(JSON.parse(row.release_json) as unknown);
+    } catch (error) {
+      throw new DomainError("INTERNAL_ERROR", "The frozen design-system release is invalid.", 500, { cause: error });
+    }
+    if (envelope.release.id !== context.designSystem.releaseId
+      || envelope.release.design_system_id !== context.designSystem.designSystemId
+      || envelope.release.version !== context.designSystem.releaseVersion) {
+      throw new DomainError("INTERNAL_ERROR", "The frozen design-system release identity is inconsistent.", 500);
+    }
+    return new Set(envelope.component_versions.map((component) => (
+      `${component.component_definition_id}\u0000${component.version}`
+    )));
+  }
+
+  private validateTaskCompletion(
+    task: AgentTaskRow,
+    data: Record<string, unknown>,
+  ): z.infer<typeof AgentTaskTransitionDataSchema> {
     const schema = AgentTaskCompletionSchemas[task.expected_output];
     const parsed = schema.safeParse(data);
     if (!parsed.success) {
@@ -2016,7 +2391,11 @@ export class EnterpriseService {
     }
     switch (task.expected_output) {
       case "design_preview": {
-        const { previewId } = parsed.data as { previewId: string };
+        const { previewId, readiness: rawReadiness } = parsed.data as {
+          previewId: string;
+          readiness: DesignReadinessReport;
+        };
+        const readiness = this.validateDesignReadiness(task, rawReadiness);
         const row = this.database.sqlite.prepare(
           `SELECT id, actor_id, expires_at, render_metadata_json FROM previews
            WHERE id = ? AND design_id = ? AND root_base_version = ? AND status IN ('ready', 'committed')`,
@@ -2039,7 +2418,13 @@ export class EnterpriseService {
             retryable: true,
           });
         }
-        return;
+        this.#designerService?.requireStoredExactPreviewRender(
+          row.actor_id,
+          task.design_id,
+          previewId,
+          { taskId: task.id },
+        );
+        return AgentTaskTransitionDataSchema.parse({ previewId, readiness });
       }
       case "design_commit": {
         const { revisionId } = parsed.data as { revisionId: string };
@@ -2049,7 +2434,7 @@ export class EnterpriseService {
         if (!row || !this.taskArtifactBelongsToClaimedAgent(task.id, row.actor_id)) {
           throw new DomainError("VALIDATION_FAILED", "The completed design revision does not match the task base or claimed agent.", 422);
         }
-        return;
+        return AgentTaskTransitionDataSchema.parse(parsed.data);
       }
       case "product_spec_preview": {
         const { previewId } = parsed.data as { previewId: string };
@@ -2060,7 +2445,7 @@ export class EnterpriseService {
         if (!row || !this.taskArtifactBelongsToClaimedAgent(task.id, row.actor_id)) {
           throw new DomainError("VALIDATION_FAILED", "The completed product specification preview does not match the task or claimed agent.", 422);
         }
-        return;
+        return AgentTaskTransitionDataSchema.parse(parsed.data);
       }
       case "product_spec_commit": {
         const { version } = parsed.data as { version: number };
@@ -2070,6 +2455,7 @@ export class EnterpriseService {
         if (!row || !this.taskArtifactBelongsToClaimedAgent(task.id, row.actor_id)) {
           throw new DomainError("VALIDATION_FAILED", "The completed product specification version does not match the claimed agent.", 422);
         }
+        return AgentTaskTransitionDataSchema.parse(parsed.data);
       }
     }
   }

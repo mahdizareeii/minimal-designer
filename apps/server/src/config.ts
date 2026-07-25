@@ -48,6 +48,7 @@ const envSchema = z.object({
   DATA_DIR: z.string().default("data"),
   BACKUP_DIR: z.string().optional(),
   PUBLIC_BASE_URL: z.string().url().optional(),
+  FORMASPEC_WEB_BASE_URL: z.string().url().optional(),
   AUTH_MODE: z.enum(["none", "token", "trusted-header", "session"]).default("none"),
   DESIGNER_TOKEN: optionalToken,
   TRUSTED_USER_HEADER: z.string().regex(/^[A-Za-z0-9-]+$/).default("x-designer-user"),
@@ -90,6 +91,7 @@ export interface ServerConfig {
   backupDir: string;
   databasePath: string;
   publicBaseUrl: string;
+  webBaseUrl: string;
   authMode: "none" | "token" | "trusted-header" | "session";
   authToken?: string;
   trustedUserHeader: string;
@@ -120,6 +122,19 @@ function isLoopbackHost(host: string): boolean {
   return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
 }
 
+function rootHttpBaseUrl(value: string, variable: "PUBLIC_BASE_URL" | "FORMASPEC_WEB_BASE_URL"): URL {
+  const url = new URL(value);
+  if ((url.protocol !== "http:" && url.protocol !== "https:")
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+    || (url.pathname !== "" && url.pathname !== "/")) {
+    throw new Error(`${variable} must be a root HTTP(S) origin without credentials, a path prefix, query, or fragment`);
+  }
+  return url;
+}
+
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -133,12 +148,18 @@ export function loadConfig(
     : path.resolve(configuredDatabasePath);
   const authToken = parsed.DESIGNER_TOKEN ?? parsed.DESIGNER_AUTH_TOKEN;
   const authMode = parsed.DESIGNER_AUTH_REQUIRED && parsed.AUTH_MODE === "none" ? "token" : parsed.AUTH_MODE;
-  const publicBaseUrl = parsed.PUBLIC_BASE_URL ?? `http://${parsed.HOST}:${parsed.PORT}`;
-  const publicUrl = new URL(publicBaseUrl);
+  const publicUrl = rootHttpBaseUrl(
+    parsed.PUBLIC_BASE_URL ?? `http://${parsed.HOST}:${parsed.PORT}`,
+    "PUBLIC_BASE_URL",
+  );
+  const publicBaseUrl = publicUrl.origin;
+  const webUrl = rootHttpBaseUrl(parsed.FORMASPEC_WEB_BASE_URL ?? publicBaseUrl, "FORMASPEC_WEB_BASE_URL");
+  const webBaseUrl = webUrl.origin;
   const maxAssetBytes = parsed.DESIGNER_MAX_ASSET_BYTES ?? parsed.MAX_UPLOAD_BYTES;
   const maxAssetPixels = parsed.DESIGNER_MAX_ASSET_PIXELS ?? parsed.FORMASPEC_RENDER_MAX_PIXELS;
   const corsOrigins = new Set(parsed.DESIGNER_CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean));
-  corsOrigins.add(new URL(publicBaseUrl).origin);
+  corsOrigins.add(publicUrl.origin);
+  corsOrigins.add(webUrl.origin);
 
   validateRendererLimitParity({
     maxAssetBytes,
@@ -160,8 +181,10 @@ export function loadConfig(
     }
     const containerHost = parsed.FORMASPEC_CONTAINER_LOCAL
       && ["0.0.0.0", "::"].includes(parsed.HOST.trim().toLowerCase().replace(/^\[|\]$/g, ""));
-    if ((!isLoopbackHost(parsed.HOST) && !containerHost) || !isLoopbackHost(publicUrl.hostname)) {
-      throw new Error("APP_MODE=local requires HOST and PUBLIC_BASE_URL to use loopback only");
+    if ((!isLoopbackHost(parsed.HOST) && !containerHost)
+      || !isLoopbackHost(publicUrl.hostname)
+      || !isLoopbackHost(webUrl.hostname)) {
+      throw new Error("APP_MODE=local requires HOST, PUBLIC_BASE_URL, and FORMASPEC_WEB_BASE_URL to use loopback only");
     }
     if (parsed.FORMASPEC_CONTAINER_LOCAL && !containerHost) {
       throw new Error("FORMASPEC_CONTAINER_LOCAL requires APP_MODE=local and HOST=0.0.0.0 or ::");
@@ -169,6 +192,10 @@ export function loadConfig(
   } else {
     if (parsed.FORMASPEC_CONTAINER_LOCAL) throw new Error("FORMASPEC_CONTAINER_LOCAL cannot be enabled in server mode");
     if (publicUrl.protocol !== "https:") throw new Error("APP_MODE=server requires an HTTPS PUBLIC_BASE_URL");
+    if (webUrl.protocol !== "https:") throw new Error("APP_MODE=server requires an HTTPS FORMASPEC_WEB_BASE_URL");
+    if (webUrl.origin !== publicUrl.origin) {
+      throw new Error("APP_MODE=server requires FORMASPEC_WEB_BASE_URL and PUBLIC_BASE_URL to use the same public origin");
+    }
     if (authMode !== "trusted-header" && authMode !== "session") {
       throw new Error("APP_MODE=server requires AUTH_MODE=trusted-header or session for browser identity and scoped MCP authentication");
     }
@@ -219,6 +246,7 @@ export function loadConfig(
     backupDir,
     databasePath,
     publicBaseUrl,
+    webBaseUrl,
     authMode,
     ...(authToken ? { authToken } : {}),
     trustedUserHeader,

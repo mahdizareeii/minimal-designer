@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getDescendantIds, type UpdateNodePatch } from "@designer/core";
 
 import {
+  createClientKey,
   isNodeContainer,
   linksForNode,
   parentOf,
@@ -44,6 +45,11 @@ import {
   isPrimaryInspectorTab,
   type PrimaryInspectorTab,
 } from "../lib/editor-information-architecture";
+import {
+  createResponsiveVariantPlan,
+  recalculateResponsiveVariantPlan,
+  unlinkResponsiveVariantUpdates,
+} from "../lib/responsive-variants";
 import { createTokenDraft, useDesignerStore } from "../store/designer-store";
 import { navigate } from "../App";
 
@@ -135,6 +141,9 @@ export function TextTypographyEditor({
 function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspectorTab }) {
   const document = useDesignerStore((state) => state.document)!;
   const updateNode = useDesignerStore((state) => state.updateNode);
+  const updateNodes = useDesignerStore((state) => state.updateNodes);
+  const select = useDesignerStore((state) => state.select);
+  const setNotice = useDesignerStore((state) => state.setNotice);
   const setNodePrototype = useDesignerStore((state) => state.setNodePrototype);
   const duplicateSelection = useDesignerStore((state) => state.duplicateSelection);
   const deleteSelection = useDesignerStore((state) => state.deleteSelection);
@@ -162,6 +171,32 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
     metadata: { ...node.metadata, [key]: value },
     metadata_mode: "replace",
   });
+  const responsiveRelationship = node.type === "frame" ? node.responsive_variant : undefined;
+  const responsiveFrames = responsiveRelationship
+    ? responsiveRelationship.frame_ids.flatMap((id) => {
+      const frame = document.nodes[id];
+      return frame?.type === "frame" && !frame.archived ? [frame] : [];
+    })
+    : [];
+  const recalculateResponsiveGroup = () => {
+    if (!responsiveRelationship) return;
+    const plan = recalculateResponsiveVariantPlan(
+      document,
+      responsiveRelationship.frame_ids,
+      responsiveRelationship.group_id,
+    );
+    if (!plan.ok) {
+      setNotice(plan.message);
+      return;
+    }
+    updateNodes(plan.updates);
+    setNotice("Responsive breakpoints recalculated from the current frame widths.");
+  };
+  const unlinkResponsiveGroup = () => {
+    if (!responsiveRelationship) return;
+    updateNodes(unlinkResponsiveVariantUpdates(document, responsiveRelationship.group_id));
+    setNotice("Responsive frame relationship removed. The frames remain editable.");
+  };
 
   return (
     <>
@@ -215,6 +250,29 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
             <label className="inspector-field"><span>Justify</span><select value={node.layout.justify_content ?? "start"} onChange={(event) => updateNode(node.id, { layout: { justify_content: event.target.value as "start" | "center" | "end" | "space-between" | "space-around" | "space-evenly" } })}><option value="start">Start</option><option value="center">Center</option><option value="end">End</option><option value="space-between">Between</option><option value="space-around">Around</option><option value="space-evenly">Evenly</option></select></label>
             {node.type === "frame" && <label className="inspector-field wide"><span>Clip</span><input type="checkbox" checked={node.clip_content} onChange={(event) => updateNode(node.id, { clip_content: event.target.checked })} /></label>}
           </div>
+        </div>
+      )}
+
+      {node.type === "frame" && (
+        <div className="inspector-section">
+          <div className="inspector-section-title"><span>Responsive variants</span><span>{responsiveRelationship ? `${responsiveFrames.length} linked` : "Not linked"}</span></div>
+          {responsiveRelationship ? <>
+            <div className="responsive-variant-list">
+              {responsiveFrames.map((frame) => {
+                const breakpoint = frame.responsive_variant?.breakpoint;
+                const range = breakpoint
+                  ? `${breakpoint.min_width}–${breakpoint.max_width ?? "∞"} px`
+                  : "Invalid range";
+                return <button type="button" key={frame.id} onClick={() => select([frame.id])}><strong title={frame.name}>{frame.name}</strong><small>{Math.round(frame.layout.width)} px frame · {range}</small></button>;
+              })}
+            </div>
+            <p className="inspector-note">Group <code>{responsiveRelationship.group_id}</code> is ordered from the narrowest frame to the widest. Resize a frame, then recalculate to update its breakpoint ranges.</p>
+            <div className="responsive-variant-actions">
+              <button type="button" className="button button-secondary" onClick={() => select(responsiveRelationship.frame_ids)}><Layers3 size={11} /> Select all</button>
+              <button type="button" className="button button-secondary" onClick={recalculateResponsiveGroup}><RotateCcw size={11} /> Recalculate</button>
+              <button type="button" className="button button-danger" onClick={unlinkResponsiveGroup}><Trash2 size={11} /> Unlink</button>
+            </div>
+          </> : <p className="inspector-note">Select two or more frames on this page to link phone, tablet, and desktop variants with explicit non-overlapping breakpoints.</p>}
         </div>
       )}
 
@@ -337,6 +395,38 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
   );
 }
 
+function ResponsiveFrameSelectionPanel({ frameIds }: { frameIds: NodeId[] }) {
+  const document = useDesignerStore((state) => state.document)!;
+  const updateNodes = useDesignerStore((state) => state.updateNodes);
+  const setNotice = useDesignerStore((state) => state.setNotice);
+  const frames = frameIds.flatMap((id) => {
+    const node = document.nodes[id];
+    return node?.type === "frame" && !node.archived ? [node] : [];
+  });
+  const existingGroups = new Set(frames.flatMap((frame) => frame.responsive_variant?.group_id ? [frame.responsive_variant.group_id] : []));
+  const createRelationship = () => {
+    const plan = createResponsiveVariantPlan(document, frameIds, createClientKey("responsive"));
+    if (!plan.ok) {
+      setNotice(plan.message);
+      return;
+    }
+    updateNodes(plan.updates);
+    setNotice(`${plan.orderedFrameIds.length} frames linked as responsive variants.`);
+  };
+
+  return (
+    <div className="inspector-section responsive-selection-panel">
+      <div className="inspector-section-title"><span>Responsive variants</span><span>{frames.length} frames</span></div>
+      <p className="inspector-note">FormaSpec orders the selected frames by width and creates deterministic, non-overlapping breakpoint ranges on their shared page.</p>
+      <div className="responsive-variant-list">
+        {[...frames].sort((left, right) => left.layout.width - right.layout.width).map((frame) => <div key={frame.id}><strong title={frame.name}>{frame.name}</strong><small>{Math.round(frame.layout.width)} × {Math.round(frame.layout.height)} px</small></div>)}
+      </div>
+      <button type="button" className="button" disabled={existingGroups.size > 0 || frames.length < 2} onClick={createRelationship}><Link2 size={12} /> Link responsive variants</button>
+      {existingGroups.size > 0 && <p className="inspector-note is-warning">One or more selected frames already belong to a responsive group. Select a linked frame and unlink its current group first.</p>}
+    </div>
+  );
+}
+
 function TokensPanel() {
   const document = useDesignerStore((state) => state.document)!;
   const upsertToken = useDesignerStore((state) => state.upsertToken);
@@ -427,6 +517,10 @@ export function InspectorPanel() {
   const tab = useDesignerStore((state) => state.inspectorTab);
   const setTab = useDesignerStore((state) => state.setInspectorTab);
   const node = selectedIds.length === 1 ? document?.nodes[selectedIds[0]!] : undefined;
+  const responsiveFrameSelection = Boolean(document && selectedIds.length >= 2 && selectedIds.every((id) => {
+    const candidate = document.nodes[id];
+    return candidate?.type === "frame" && !candidate.archived;
+  }));
 
   return (
     <aside className="right-sidebar">
@@ -449,7 +543,7 @@ export function InspectorPanel() {
       </nav>
       {tab === "tokens" && document ? <TokensPanel /> : tab === "history" ? <HistoryPanel /> : (
         <div className="right-sidebar-scroll">
-          {node && !node.archived && isPrimaryInspectorTab(tab) ? <DesignInspector node={node} tab={tab} /> : (
+          {responsiveFrameSelection && tab === "design" ? <ResponsiveFrameSelectionPanel frameIds={selectedIds} /> : node && !node.archived && isPrimaryInspectorTab(tab) ? <DesignInspector node={node} tab={tab} /> : (
             <div className="empty-inspector"><span><Square size={16} /></span><strong>{selectedIds.length > 1 ? `${selectedIds.length} layers selected` : "Nothing selected"}</strong><small>Select one layer to inspect its design, content, component contract, logic, prototype, and accessibility.</small></div>
           )}
         </div>

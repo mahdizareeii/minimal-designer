@@ -1,6 +1,18 @@
 import { z } from "zod";
 
-import { resolveDesignToken, type DesignSystemToken } from "./design-system.js";
+import {
+  ComponentInstanceProjectionSchema,
+  withComponentInstanceProjection,
+  type ComponentInstanceProjection,
+  type ComponentProjectedNodeOverride,
+} from "./component-instance-projection.js";
+import {
+  resolveDesignToken,
+  type ComponentDefinition,
+  type ComponentProperty,
+  type ComponentSlot,
+  type DesignSystemToken,
+} from "./design-system.js";
 import { migrateDesignDocumentV1ToV2 } from "./migration-v2.js";
 import {
   DesignDocumentSchema,
@@ -193,6 +205,190 @@ function componentSourceNodeIds(document: DesignDocumentV2): Set<string> {
   return result;
 }
 
+function definitionSourceNodeIds(
+  document: DesignDocumentV2,
+  definition: ComponentDefinition,
+): Set<string> {
+  const result = new Set<string>();
+  const collect = (nodeId: string): void => {
+    if (result.has(nodeId)) return;
+    const node = document.nodes[nodeId];
+    if (!node) return;
+    result.add(nodeId);
+    if (node.type === "frame" || node.type === "container") {
+      for (const childId of node.children) collect(childId);
+    }
+  };
+  for (const state of definition.states) collect(state.node_id);
+  return result;
+}
+
+function componentPropertyValue(
+  instance: Extract<DesignNodeV2, { type: "component_instance" }>,
+  property: ComponentProperty,
+): unknown {
+  if (Object.prototype.hasOwnProperty.call(instance.properties, property.key)) {
+    return instance.properties[property.key];
+  }
+  switch (property.type) {
+    case "text":
+    case "boolean":
+    case "enum":
+    case "icon":
+      return property.default;
+    case "asset":
+      return property.default_asset_id === undefined ? undefined : { asset_id: property.default_asset_id };
+    case "node_slot":
+      return undefined;
+  }
+}
+
+function componentSlotContracts(definition: ComponentDefinition): Map<string, ComponentSlot> {
+  const slots = new Map(definition.slots.map((slot) => [slot.key, slot]));
+  for (const property of definition.properties_schema) {
+    if (property.type !== "node_slot" || slots.has(property.key)) continue;
+    slots.set(property.key, {
+      key: property.key,
+      name: property.label,
+      required: property.required,
+      min_items: property.min_items,
+      max_items: property.max_items,
+    });
+  }
+  return slots;
+}
+
+function projectedComponentInstanceOverrides(
+  document: DesignDocumentV2,
+  instance: Extract<DesignNodeV2, { type: "component_instance" }>,
+  definition: ComponentDefinition,
+): Metadata {
+  const sourceIds = definitionSourceNodeIds(document, definition);
+  const nodeOverrides: Record<string, ComponentProjectedNodeOverride> = {};
+  const overrideFor = (nodeId: string): ComponentProjectedNodeOverride => (
+    nodeOverrides[nodeId] ??= {}
+  );
+  const properties = new Map(definition.properties_schema.map((property) => [property.key, property]));
+
+  for (const binding of definition.property_bindings) {
+    const property = properties.get(binding.property_key);
+    const target = document.nodes[binding.target_node_id];
+    if (!property || !target || !sourceIds.has(target.id)) {
+      compatibilityFailure(
+        "V2_COMPONENT_BINDING_TARGET_INVALID",
+        `Component ${definition.id} contains an unavailable property binding target.`,
+        ["component_definitions", definition.id, "property_bindings", binding.property_key],
+      );
+    }
+    const value = componentPropertyValue(instance, property);
+    if (value === undefined || value === null) continue;
+    const projected = overrideFor(target.id);
+    switch (binding.target) {
+      case "text_content":
+        if (target.type !== "text" || typeof value !== "string") {
+          compatibilityFailure("V2_COMPONENT_BINDING_VALUE_INVALID", `Property ${property.key} cannot populate text content.`, ["nodes", instance.id, "properties", property.key]);
+        }
+        projected.content = value;
+        break;
+      case "visibility":
+        if (typeof value !== "boolean") {
+          compatibilityFailure("V2_COMPONENT_BINDING_VALUE_INVALID", `Property ${property.key} cannot control visibility.`, ["nodes", instance.id, "properties", property.key]);
+        }
+        projected.visible = value;
+        break;
+      case "icon_name": {
+        const iconName = typeof value === "string"
+          ? value
+          : typeof value === "object" && value !== null && "icon_name" in value
+            ? (value as { icon_name: unknown }).icon_name
+            : undefined;
+        if (target.type !== "icon" || typeof iconName !== "string") {
+          compatibilityFailure("V2_COMPONENT_BINDING_VALUE_INVALID", `Property ${property.key} cannot populate an icon.`, ["nodes", instance.id, "properties", property.key]);
+        }
+        projected.icon_name = iconName;
+        break;
+      }
+      case "asset_id": {
+        const assetId = typeof value === "object" && value !== null && "asset_id" in value
+          ? (value as { asset_id: unknown }).asset_id
+          : undefined;
+        if (target.type !== "image" || typeof assetId !== "string" || document.assets[assetId] === undefined) {
+          compatibilityFailure("V2_COMPONENT_BINDING_VALUE_INVALID", `Property ${property.key} cannot populate an available image asset.`, ["nodes", instance.id, "properties", property.key]);
+        }
+        projected.asset_id = assetId as Extract<DesignNode, { type: "image" }>["asset_id"];
+        break;
+      }
+      case "accessibility_label": {
+        const label = typeof value === "string"
+          ? value
+          : typeof value === "object" && value !== null && "icon_name" in value
+            ? (value as { icon_name: unknown }).icon_name
+            : undefined;
+        if (typeof label !== "string") {
+          compatibilityFailure("V2_COMPONENT_BINDING_VALUE_INVALID", `Property ${property.key} cannot populate an accessibility label.`, ["nodes", instance.id, "properties", property.key]);
+        }
+        projected.accessibility_label = label;
+        break;
+      }
+    }
+  }
+
+  const allowedStylePaths = new Set(definition.allowed_overrides.allowed_style_paths);
+  for (const [nodeId, style] of Object.entries(instance.visual_overrides)) {
+    if (style === undefined) continue;
+    if (!sourceIds.has(nodeId) || document.nodes[nodeId] === undefined) {
+      compatibilityFailure("V2_COMPONENT_VISUAL_OVERRIDE_TARGET_INVALID", `Visual override targets a node outside component ${definition.id}.`, ["nodes", instance.id, "visual_overrides", nodeId]);
+    }
+    for (const stylePath of Object.keys(style)) {
+      if (!allowedStylePaths.has(stylePath as never)) {
+        compatibilityFailure("V2_COMPONENT_VISUAL_OVERRIDE_FORBIDDEN", `Component ${definition.id} does not allow the ${stylePath} visual override.`, ["nodes", instance.id, "visual_overrides", nodeId, stylePath]);
+      }
+    }
+    overrideFor(nodeId).style = structuredClone(style);
+  }
+
+  const slotContracts = componentSlotContracts(definition);
+  const anchors = new Map(definition.slot_anchors.map((anchor) => [anchor.slot_key, anchor.target_node_id]));
+  const slotChildren: Record<string, string[]> = {};
+  const usedSlotNodes = new Set<string>();
+  for (const [slotKey, childIds] of Object.entries(instance.slots)) {
+    const slot = slotContracts.get(slotKey);
+    const anchorId = anchors.get(slotKey);
+    if (!slot || (childIds.length > 0 && anchorId === undefined)) {
+      compatibilityFailure("V2_COMPONENT_SLOT_INVALID", `Component slot ${slotKey} has no exact contract and anchor.`, ["nodes", instance.id, "slots", slotKey]);
+    }
+    if (childIds.length < slot.min_items || childIds.length > slot.max_items || (slot.required && childIds.length === 0)) {
+      compatibilityFailure("V2_COMPONENT_SLOT_CARDINALITY_INVALID", `Component slot ${slotKey} violates its item-count contract.`, ["nodes", instance.id, "slots", slotKey]);
+    }
+    if (anchorId === undefined) continue;
+    const anchor = document.nodes[anchorId];
+    if (!anchor || !sourceIds.has(anchorId) || (anchor.type !== "frame" && anchor.type !== "container")) {
+      compatibilityFailure("V2_COMPONENT_SLOT_ANCHOR_INVALID", `Component slot ${slotKey} has an unavailable container anchor.`, ["component_definitions", definition.id, "slot_anchors", slotKey]);
+    }
+    for (const childId of childIds) {
+      const child = document.nodes[childId];
+      if (!child || sourceIds.has(childId) || usedSlotNodes.has(childId)
+        || (slot.allowed_node_types !== undefined && !slot.allowed_node_types.includes(child.type))) {
+        compatibilityFailure("V2_COMPONENT_SLOT_NODE_INVALID", `Component slot ${slotKey} contains an unavailable, repeated, or disallowed node.`, ["nodes", instance.id, "slots", slotKey]);
+      }
+      usedSlotNodes.add(childId);
+    }
+    slotChildren[anchorId] = [...childIds];
+  }
+
+  const projection = ComponentInstanceProjectionSchema.parse({
+    schema_version: 1,
+    node_overrides: nodeOverrides,
+    slot_children: slotChildren,
+  });
+  const hasProjection = Object.keys(projection.node_overrides).length > 0
+    || Object.keys(projection.slot_children).length > 0;
+  return withComponentInstanceProjection(
+    structuredClone(document.migration?.legacy_component_overrides[instance.id] ?? {}),
+    hasProjection ? projection as ComponentInstanceProjection : null,
+  );
+}
+
 function projectNode(
   document: DesignDocumentV2,
   node: DesignNodeV2,
@@ -210,6 +406,9 @@ function projectNode(
         children: [...node.children],
         clip_content: node.clip_content,
         ...(role === undefined ? {} : { role }),
+        ...(node.responsive_variant === undefined
+          ? {}
+          : { responsive_variant: structuredClone(node.responsive_variant) }),
       };
     }
     case "container": {
@@ -304,7 +503,7 @@ function projectNode(
         ...common,
         type: "instance",
         component_id: activeState.node_id,
-        overrides: structuredClone(document.migration?.legacy_component_overrides[node.id] ?? {}),
+        overrides: projectedComponentInstanceOverrides(document, node, definition),
       };
     }
   }
@@ -474,6 +673,7 @@ function mergeExistingNode(
         component_version: definition.version,
         properties: structuredClone(base.properties),
         slots: structuredClone(base.slots),
+        visual_overrides: structuredClone(base.visual_overrides),
         active_state: base.active_state,
         semantics: structuredClone(base.semantics),
       };
@@ -498,6 +698,7 @@ function mergeExistingNode(
       component_version: base.component_version,
       properties: structuredClone(base.properties),
       slots: structuredClone(base.slots),
+      visual_overrides: structuredClone(base.visual_overrides),
       active_state: base.active_state,
     } : {}),
   } as DesignNodeV2;

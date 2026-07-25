@@ -17,6 +17,9 @@ describe("server-resolved component instance operations", () => {
     source_hash: "a".repeat(64),
     instance_id: "node_component_instance_01",
     active_state: "hover" as const,
+    properties: {},
+    slots: {},
+    visual_overrides: {},
     index: 0,
     position: { x: 24.5, y: 36.25 },
   };

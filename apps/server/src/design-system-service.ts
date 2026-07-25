@@ -631,6 +631,14 @@ function captureComponentSourceBundle(
     collectComponentSourceTokenIds(node.layout, tokenIds);
     collectComponentSourceTokenIds(node.style, tokenIds);
     if (node.type === "image" && node.asset_id !== undefined) assetIds.add(node.asset_id);
+    if (node.type === "component_instance") {
+      collectComponentSourceTokenIds(node.visual_overrides, tokenIds);
+      for (const value of Object.values(node.properties)) {
+        if (value && typeof value === "object" && "asset_id" in value && typeof value.asset_id === "string") {
+          assetIds.add(value.asset_id);
+        }
+      }
+    }
   }
 
   const parsed = ComponentSourceBundleSchema.safeParse({
@@ -685,23 +693,23 @@ function captureComponentSourceBundle(
 }
 
 function componentVersionResultFromRow(row: ComponentVersionRow): ComponentDefinitionVersionResult {
-  let canonical: { value: ComponentDefinition; json: string };
+  let definition: ComponentDefinition;
   try {
-    canonical = canonicalEntity(
-      ComponentDefinitionSchema,
-      JSON.parse(row.definition_json) as unknown,
-      "Persisted component definition",
-    );
+    const stored = JSON.parse(row.definition_json) as unknown;
+    if (canonicalJson(stored) !== row.definition_json
+      || Buffer.byteLength(row.definition_json, "utf8") > DESIGN_SYSTEM_ENTITY_JSON_MAX_BYTES) {
+      throw new Error("Persisted component definition is not canonical.");
+    }
+    definition = ComponentDefinitionSchema.parse(stored);
   } catch (error) {
     throw new DomainError("INTERNAL_ERROR", "Persisted component-definition integrity check failed.", 500, {
       cause: error,
     });
   }
-  if (canonical.json !== row.definition_json
-    || canonical.value.id !== row.component_id
-    || canonical.value.version !== row.version
-    || canonical.value.status !== row.status
-    || (canonical.value.replacement_component_id ?? null) !== row.replacement_component_id) {
+  if (definition.id !== row.component_id
+    || definition.version !== row.version
+    || definition.status !== row.status
+    || (definition.replacement_component_id ?? null) !== row.replacement_component_id) {
     throw new DomainError("INTERNAL_ERROR", "Persisted component-definition integrity check failed.", 500);
   }
   return {
@@ -709,8 +717,8 @@ function componentVersionResultFromRow(row: ComponentVersionRow): ComponentDefin
     componentId: row.component_id,
     version: row.version,
     status: row.status,
-    definition: canonical.value,
-    source: persistedComponentSource(row, canonical.value).metadata,
+    definition,
+    source: persistedComponentSource(row, definition).metadata,
     createdBy: row.created_by,
     createdAt: row.created_at,
   };

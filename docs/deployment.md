@@ -233,6 +233,7 @@ PORT=4310
 DATA_DIR=/srv/formaspec/data
 BACKUP_DIR=/srv/formaspec/backups
 PUBLIC_BASE_URL=https://designer.company.example
+FORMASPEC_WEB_BASE_URL=https://designer.company.example
 AUTH_MODE=trusted-header
 DESIGNER_TOKEN=replace-with-a-long-random-compatibility-secret
 FORMASPEC_PROXY_SECRET=replace-with-a-separate-32-plus-character-random-hop-secret
@@ -382,17 +383,13 @@ to a client-provided value.
 ## MCP and agent deployment behavior
 
 The automatic Codex setup registers MCP server ID `formaspec` at the
-credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs the primary
-managed version-0.2.0 FormaSpec skills/plugins plus the Minimal UI legacy
-compatibility assets, and provides:
+credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs and verifies
+the single managed FormaSpec 0.3.0 plugin, removes installer-owned legacy
+identity assets, and provides:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec)
 ```
-
-> **Legacy prompt compatibility:** existing integrations may continue to use
-> `[@Minimal UI](plugin://minimal-ui@formaspec)`. New integrations should use
-> FormaSpec.
 
 The bridge creates a scoped, expiring upstream grant and stores it in macOS
 Keychain, Linux Secret Service, or a Windows current-user DPAPI ciphertext

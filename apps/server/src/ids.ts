@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-export type IdPrefix = "document" | "page" | "node" | "asset" | "component" | "revision" | "preview" | "txn" | "render";
+export type IdPrefix = "product" | "document" | "page" | "node" | "asset" | "component" | "revision" | "preview" | "txn" | "render";
 
 export function createId(prefix: IdPrefix): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;

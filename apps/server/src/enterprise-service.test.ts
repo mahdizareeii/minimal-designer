@@ -12,6 +12,7 @@ import { EnterpriseService } from "./enterprise-service.js";
 import { EventHub } from "./events.js";
 import { encodeRgbaPng } from "./render.js";
 import { DesignerService } from "./service.js";
+import { designReadinessFixture } from "../test-fixtures/product.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -68,7 +69,7 @@ describe("enterprise workflow migration", () => {
 
     const migrated = new DesignerDatabase(filename);
     try {
-      expect(migrated.schemaVersion()).toBe(16);
+      expect(migrated.schemaVersion()).toBe(17);
       expect(migrated.sqlite.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'product_spec_previews'",
       ).get()).toEqual({ name: "product_spec_previews" });
@@ -433,7 +434,7 @@ describe("immutable agent task workflow", () => {
       const awaitingApproval = opened.enterprise.transitionAgentTask("usr_codex", task.id, {
         expectedStatus: "in_progress",
         toStatus: "awaiting_approval",
-        data: { previewId: preview.id },
+        data: { previewId: preview.id, readiness: designReadinessFixture(task.resolvedContext) },
       });
       expect(awaitingApproval.status).toBe("awaiting_approval");
       const completed = opened.enterprise.approveAgentTaskDesignPreview("local", task.id, {

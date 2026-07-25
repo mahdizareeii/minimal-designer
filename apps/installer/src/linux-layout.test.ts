@@ -128,7 +128,9 @@ describe("native Linux installer layout", () => {
     expect(handler).toContain("http://127.0.0.1:4310/administration");
     expect(handler).toContain("--pairing-nonce");
     expect(handler).toContain("--connection-id");
-    expect(handler).toContain('[ "${#URL}" -le 512 ]');
+    expect(handler).toContain('[ "${#URL}" -le 2048 ]');
+    expect(handler).toContain("formaspec://open-review");
+    expect(handler).toContain("ensure-running --json");
     expect(handler).toContain('[ "${#1}" -eq 50 ]');
     expect(handler).toContain('[ "${#1}" -eq 43 ]');
     expect(handler).not.toMatch(/eval|Bearer|token=/);
@@ -205,6 +207,55 @@ describe("native Linux installer layout", () => {
         const rejected = spawnSync("/bin/sh", [script, candidate], { env: environment, encoding: "utf8" });
         expect(rejected.status, candidate).toBe(2);
       }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes only the recorded store before opening an exact review URL", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "formaspec-linux-review-protocol-"));
+    try {
+      const cli = path.join(root, "formaspecctl");
+      const opener = path.join(root, "xdg-open");
+      const script = path.join(root, "formaspec-open");
+      const openCapture = path.join(root, "open-arguments.txt");
+      writeExecutable(cli, `#!/bin/sh
+[ "$1" = ensure-running ] && [ "$2" = --json ] || exit 9
+printf '{"schemaVersion":1,"ok":true,"status":"ready","mode":"local","started":false,"origin":"http://127.0.0.1:4310","webOrigin":"http://127.0.0.1:4311","dataStoreId":"%s","bridgeReady":true}\n' "\${FORMASPEC_TEST_STORE}"
+`);
+      writeExecutable(opener, '#!/bin/sh\nprintf "%s\\n" "$@" >"${FORMASPEC_OPEN_CAPTURE}"\n');
+      writeExecutable(script, linuxUrlHandler()
+        .replace("FORMASPECCTL='/usr/bin/formaspecctl'", `FORMASPECCTL='${cli}'`)
+        .replace("XDG_OPEN='/usr/bin/xdg-open'", `XDG_OPEN='${opener}'`));
+      const designId = `document_${"d".repeat(32)}`;
+      const previewId = `preview_${"e".repeat(32)}`;
+      const taskId = `task_${"f".repeat(32)}`;
+      const storeId = `store_${"a".repeat(32)}`;
+      const review = `formaspec://open-review?design=${designId}&preview=${previewId}&task=${taskId}&store=${storeId}`;
+      const environment = {
+        ...process.env,
+        HOME: root,
+        XDG_STATE_HOME: path.join(root, "state"),
+        FORMASPEC_OPEN_CAPTURE: openCapture,
+        FORMASPEC_TEST_STORE: storeId,
+      };
+
+      const accepted = spawnSync("/bin/sh", [script, review], { env: environment, encoding: "utf8" });
+      expect(accepted.status, accepted.stderr).toBe(0);
+      expect(fs.readFileSync(openCapture, "utf8").trim()).toBe(
+        `http://127.0.0.1:4311/design/${designId}/previews/${previewId}/review?task=${taskId}&store=${storeId}`,
+      );
+
+      fs.rmSync(openCapture, { force: true });
+      const wrongStore = spawnSync("/bin/sh", [script, review], {
+        env: { ...environment, FORMASPEC_TEST_STORE: `store_${"b".repeat(32)}` },
+        encoding: "utf8",
+      });
+      expect(wrongStore.status).toBe(1);
+      expect(fs.existsSync(openCapture)).toBe(false);
+
+      const duplicateStore = `${review}&store=${storeId}`;
+      expect(spawnSync("/bin/sh", [script, duplicateStore], { env: environment }).status).toBe(2);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

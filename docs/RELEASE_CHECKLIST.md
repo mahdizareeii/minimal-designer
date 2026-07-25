@@ -1,8 +1,8 @@
 # FormaSpec release checklist
 
-Last updated: 2026-07-22
+Last updated: 2026-07-25
 
-Current decision: **NO-GO — enterprise-foundation checkpoint**
+Current decision: **NO-GO — Organization-Ready 0.3.0 source checkpoint**
 
 This checklist is evidence-based. Check an item only when implementation,
 migration, documentation, and relevant tests exist in the repository and have
@@ -56,17 +56,35 @@ workspace trees. It is not reproducible, signed, notarized, scanned, installed,
 or lifecycle-qualified. The preserved schema-11 and schema-10 packages are
 historical.
 
-Current source is database schema 16, command engine 2, renderer 3, renderer
-IPC protocol 2, with 52 MCP tools, 25 resources, and 108 protected non-MCP
-routes. The complete seven-package suite passes 842/842: core 59, server 467,
-web 91, CLI 96, local bridge 20, Workspace Bridge 37, and installer 72.
-Launcher passes 225/225; all seven workspaces pass typecheck/build;
-editor/Administration E2E passes 5/5; release E2E passes 1/1; focused preview
-integration passes 2/2; Chromium and Firefox/WebKit alignment pass 12/12 each;
-visual regression passes 7/7; all 1,000-node browser budgets pass; and macOS
-runtime-smoke contracts pass 11/11.
+Current source is database schema 17, command engine 3, renderer 3, renderer
+IPC protocol 2, with one managed FormaSpec 0.3.0 plugin, 54 MCP tools, 26
+resources, and 119 protected non-MCP routes. Migration 17 adds Products,
+deterministic existing-Design backfill, reviewed CAS-bound Design move previews,
+and immutable Product-bound agent-task context. Source also includes a strict
+design-readiness report, content-addressed exact-preview PNG storage, secret-
+free `formaspec://open-review` recovery, and fixed-purpose `formaspecctl
+ensure-running`. It also includes linked responsive frame variants, typed
+property/slot/visual component materialization with nested dependencies and
+verified asset copying, and deterministic sanitized raster-backed SVG/PDF
+document export.
 
-Live agent acceptance passed with exact preview
+Current schema-17 package suites pass 1,027/1,027: core 74, server 540/540, web
+145, CLI 129, local bridge 27, Workspace Bridge 37, and installer 75. Four real
+Chromium render/raster tests use a scoped 20-second harness timeout while the
+application render remains hard-bounded at 15 seconds. Recursive
+typecheck and production build pass; launcher tests pass 276/276 and Compose
+configuration passes. Focused deterministic document export
+passes 15/15, migration/backup/restore 59/59, Product/readiness/preview/MCP
+44/44, and macOS packaged-runtime contracts 11/11. The launcher, full browser,
+Docker/recovery, scan, installed-plugin, hosted-provenance, and supported-OS
+release aggregates remain pending. Retained schema-16 editor/Administration
+E2E 11/11, release E2E 1/1, preview integration 2/2, Chromium and
+Firefox/WebKit alignment 12/12 each, visual regression 7/7, and the 1,000-node
+budgets remain regression evidence rather than schema-17 release
+qualification.
+
+Historical live agent acceptance, before the website-only approval boundary,
+passed with exact preview
 `preview_dd4da6b79f5e4ddf8b3fd111094c5189`: 1440x900 PNG SHA-256
 `ad356b73d742c7852a86a022f86d68928dae021ab6710bd7b1d852f7e048e26c`,
 project version 1→2 commit, completed task, exact 76,099-byte preview/revision
@@ -74,10 +92,13 @@ JSON equality, result snapshot SHA-256
 `b84512db8bde0e1acdb8c1e8dbc81f6361530a54d880675e301a665a101292a5`,
 and operation SHA-256
 `6ccf0226ccf0a59d6dbd3fd3ab62069c2a45fd522b5f5f9b5f842728428896be`.
+Current source forbids agent-side commit for direct and website design tasks;
+the exact preview is published to `awaiting_approval`, and only an authenticated
+human Commit/Discard action changes history.
 
 The selection, visual, performance, complete 20-step, Docker restart/egress,
 Firefox/WebKit, and copied-bundle recovery gates have now been repeated locally
-at schema 16. The 342-component SBOM/license result remains historical
+at the retained schema-16 checkpoint. The 342-component SBOM/license result remains historical
 schema-13 evidence; at that checkpoint audit reported info 0, low 0, moderate
 2, high 0, and critical 0. No current native macOS package, hosted provenance,
 current security/SBOM/image/OS scans, or real server-mode/off-site release
@@ -121,7 +142,7 @@ Do not start a production rollout or V2 head migration until every item passes:
   or losing fractional geometry/rotation.
 - [ ] The deterministic 1,000-node service harness and 20-sample pinned-
   Chromium browser gate are retained on hosted supported-OS release runners.
-  Current schema-16 local evidence passes every budget without software
+  Retained schema-16 local evidence passed every budget without software
   fallback; hosted retention remains open.
 - [ ] Numbered database migrations pass clean install and legacy upgrade.
 - [x] Deterministic source-built schema 1 and schema 7–12 fixtures apply the
@@ -134,10 +155,15 @@ Do not start a production rollout or V2 head migration until every item passes:
   preserve enterprise rows, and leave historical render evidence null.
   Migration-16 fixtures preserve credential rows while canonicalizing the
   legacy bootstrap trigger.
-- [x] `formaspecctl` source recognizes server database schema 16 for migration status,
+- [x] Focused schema-17 migration/backup/restore fixtures prove deterministic
+  one-Product-per-existing-Design backfill, preserved Design IDs and immutable
+  heads, valid Product ownership, Product/task integrity, exact preview-artifact
+  backup coverage, and rollback on failure. The focused cluster passes 59/59.
+  Packaged, anonymized-customer, and real remote-host recovery remain open.
+- [x] `formaspecctl` source recognizes server database schema 17 for migration status,
   backup compatibility, restore compatibility, and support-bundle reporting.
 - [x] Startup, backup verification, restore preflight, and restore control source
-  checks fail closed when migration-9/10/11/12/13/14/15/16 ledger rows lack required tables, columns,
+  checks fail closed when migration-9/10/11/12/13/14/15/16/17 ledger rows lack required tables, columns,
   indexes, triggers, normalized schema SQL, or forbidden-trigger removal.
   Focused migration/backup/restore/maintenance tests pass 59/59; release-
   candidate Docker/server/off-site recovery remains pending.
@@ -146,11 +172,14 @@ Do not start a production rollout or V2 head migration until every item passes:
   REST, SSE, MCP, assets, previews, revisions, and contexts. Focused
   project-scoped REST/MCP/SSE isolation and fail-closed trusted-identity tests
   pass. A declarative manifest and build-time route collector prove exact
-  closure of all 108 protected non-MCP routes (54 project, 48 organization, six
-  explicit exceptions). The current application suite rejects missing/
+  closure of the retained schema-16 108-route surface. Current source expands
+  the executable inventory to 54 MCP tools, 26 resources, and 119 protected
+  non-MCP routes (55 project, 58 organization, six explicit exceptions).
+  Focused schema-17 route-contract/authentication tests assert the expanded
+  surface, and the current server package passes 540/540. The retained application suite rejects missing/
   malformed identities before parsing or mutation, exercises mapped/disabled
   identities and pairing nonce replay, and provides direct behavioral
-  authorization across all 108 routes with zero uncovered. The ten previously
+  authorization across its 108 routes with zero uncovered. The ten previously
   uncovered opaque-ID
   routes, all four product-specification routes, all twelve handoff routes,
   implementation-mapping creation, all six Redesign assessment routes, Agent
@@ -235,8 +264,8 @@ Do not start a production rollout or V2 head migration until every item passes:
   task, multi-screen preview/lint/render/commit, human correction, selection
   refinement, immutable history restore, canonical/portable export, verified
   source-local backup, stopped-database restore, restart, exact hashes, product
-  specification, planning/task state, drift removal, and PNG smoke. The current
-  schema-16 complete scenario also passes 1/1 locally; hosted supported-OS
+  specification, planning/task state, drift removal, and PNG smoke. The retained
+  schema-16 complete scenario also passed 1/1 locally; hosted supported-OS
   retention remains open.
 - [x] Managed restore opens the source with `O_NOFOLLOW`, copies/hashes it into
   private mode-`0700` staging on `/backups`, changes the pinned file to mode
@@ -310,25 +339,58 @@ Do not start a production rollout or V2 head migration until every item passes:
   clear stale state, and assigning or upgrading a pin atomically synchronizes
   one V2 head revision while leaving V1 heads unchanged. Schema-13 V2 upgrade
   previews persist and commit the exact result snapshot, materialize target
-  tokens/component masters, and block removed states, missing dependencies,
-  asset copying, legacy sources, and unsupported property/slot bindings. An
-  exact project/revision-bound REST, MCP-tool, and MCP-resource read returns the
+  tokens/component masters, and block removed states, missing token
+  dependencies, asset-bearing source upgrades, legacy sources, and existing
+  instances with non-empty properties/slots until safe upgrade rematerialization
+  exists. Insertion supports those contracts; release upgrade remains a
+  separate fail-closed path. An exact project/revision-bound REST, MCP-tool,
+  and MCP-resource read returns the
   release used by an authorized historical revision without exposing the
   organization catalog.
 - [x] Exact pinned-release insertion exists through the read-only component
   library, REST preview, MCP PNG preview, and ordinary preview commit. The
   Components tab requires a clean matching V2 head, exposes source/asset
-  blockers, lets a reviewer select state/parent/position/name, renders
-  diagnostics and the result hash, and explicitly commits or discards. Focused
-  server 16/16 and web 6/6 pass. Property-to-node/slot bindings, content-hash
-  asset copying, and broader accessibility/conflict/backup/export/restore
-  evidence remain open.
+  blockers, lets a reviewer select state/parent/position/name plus typed
+  properties, slots, and visual overrides, renders diagnostics and the result
+  hash, and explicitly commits or discards. Insertion resolves bounded nested
+  component graphs and copies normalized image assets only after exact content-
+  hash/size/MIME/dimension verification. Property bindings, slot anchors, and
+  allowed visual overrides are validated and materialized. Broader
+  accessibility/conflict/backup/export/restore and visual-upgrade evidence
+  remains open.
+- [x] Linked responsive frame variants use stable reciprocal groups, identical
+  ordered same-page membership, and half-open non-overlapping breakpoint
+  ranges across strict V1/V2 validation, typed operations, archive cleanup,
+  migration/compatibility projection, MCP preview, browser authoring, and undo/
+  redo. Focused core tests pass 9/9 and web tests pass 3/3.
+- [x] Source defines first-class Products above Designs with authorized Product
+  create/read/update/archive flows, Product-aware Design creation, recoverable
+  archival, and reviewed CAS-bound Design move previews. Product deletion is
+  forbidden.
+- [x] Migration 17 deterministically assigns every existing Design to one
+  active Product without changing the Design ID or immutable head, and new
+  tasks capture immutable Product/Design resolved context including the exact
+  Design head/version, specification hash, effective design-system release,
+  locale, direction, platforms, and repository-inventory hashes.
+- [ ] Retained schema-17 Product/backfill/move/task-context browser and release-
+  environment authorization/recovery aggregates pass. Current focused Product/
+  readiness/preview/MCP tests pass 44/44, migration/backup/restore passes 59/59,
+  and server tests pass 540/540; retained schema-16 runtime evidence does not
+  close the browser/deployment gate.
+- [x] A strict managed-workflow readiness-report schema covers request
+  classification, selected Product/Design/base version, specification hash,
+  design-system release, reused/extended/proposed components, platforms,
+  repository mappings, assumptions, blockers, hierarchy, visual consistency,
+  interaction states, accessibility, touch targets, RTL/localization,
+  responsive variants, prototypes, engineering feasibility, and lint.
+- [ ] The readiness report is exercised by the full task-backed schema-17 agent
+  E2E and retained as release evidence.
 - [x] Product specification natural-language/structured synchronization passes.
 - [x] All 22 interview sections persist, resume, edit, and version correctly in
   service/integration tests and in the integrated browser release E2E.
 - [x] Enterprise editor navigation, panels, administration, click-through
-  prototype behavior, and exact manual component insertion have current targeted
-  editor/Administration coverage at 5/5. The broader historical schema-13
+  prototype behavior, and exact manual component insertion have retained
+  schema-16 editor/Administration coverage at 11/11. The broader historical schema-13
   pre-0.45.2 gate passed 4/4 for Pages/Layers/
   Components/Assets,
   Canvas/Prototype/Before-After, Design/Content/Component/Logic/Prototype/
@@ -336,19 +398,19 @@ Do not start a production rollout or V2 head migration until every item passes:
   click-to-frame navigation without document mutation. The insertion case
   verifies backup-gated V1→V2 migration, exact Foundation catalog loading,
   isolated rendered preview without head mutation, ordinary CAS commit,
-  version-3 reload, and an active projected instance. The current schema-16
-  editor/Administration gate passes 5/5 locally; hosted supported-OS retention
+  version-3 reload, and an active projected instance. The retained schema-16
+  editor/Administration gate passed locally; hosted supported-OS retention
   remains open.
 - [x] Revision-pinned inspect API/view remains on the requested immutable
   revision when the project head changes and exposes integrity hashes, resolved
   tokens, assets, components, rules, acceptance criteria, implementation
-  mappings, stable IDs, and JSON paths. The fresh revision-inspect immutability
-  E2E passes 1/1, independently of the 12/12 selection-alignment gate;
+  mappings, stable IDs, and JSON paths. The retained revision-inspect immutability
+  E2E passed 1/1, independently of the 12/12 selection-alignment gate;
   broader cross-browser/accessibility evidence remains open.
 - [x] Enterprise V2 lint rules cover raw values, missing states, hierarchy,
   accessibility, touch targets, prototypes, RTL, detached/deprecated
   components, typed property/slot/state contracts, and missing rule/entity
-  links. Current schema-16 visual regression passes all 7/7 representative
+  links. Retained schema-16 visual regression passed all 7/7 representative
   snapshots including Persian RTL; reviewed hosted/cross-platform baselines
   remain open.
 - [ ] `.formaspec.zip` rejects traversal/symlinks/bombs and round-trips
@@ -370,6 +432,12 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [ ] Add larger adversarial, concurrent-import, sustained-resource, and
   packaged cross-platform evidence for the streaming import path.
 - [x] DTCG and bounded platform token exporters pass golden tests.
+- [x] Saved Design revisions export deterministic sanitized raster-backed SVG
+  and PDF with bounded renderer-PNG validation, source/artifact SHA-256 headers,
+  restrictive CSP, `nosniff`, explicit revision/page/frame targeting, and
+  immutable historical caching. The editor exposes JSON/PNG/SVG/PDF/portable
+  actions only from an explicitly saved revision. Focused export tests pass
+  15/15. SVG is intentionally a PNG wrapper, not editable vector geometry.
 
 ## Phase 3 gate
 
@@ -377,7 +445,8 @@ Do not start a production rollout or V2 head migration until every item passes:
   `formaspec://`, and the safe workflow is self-contained in the first 512
   instruction characters.
 - [x] Every MCP tool has a strict schema, correct annotations, and scoped
-  authorization. The executable 52-tool/25-resource matrix now proves strict
+  authorization. The current executable inventory contains 54 tools and 26
+  resources, adding Product list/read discovery to the strict
   top-level inputs; exact strict `ok:true` success and `ok:false,error` output
   branches; annotations; every static agent scope; secondary design-read gates;
   and all scoped resources. Temporary-ID preview operations mirror the strict
@@ -388,24 +457,36 @@ Do not start a production rollout or V2 head migration until every item passes:
   handoff/redesign scopes have dedicated focused coverage.
   `design_system_component_insert_preview` resolves only the exact pinned
   release and returns PNG plus source/release/instance metadata. Direct
-  non-task requests commit only through `design_commit_preview` after write
-  approval; website tasks stop at `awaiting_approval` for human commit or
-  discard. Generic operations reject the server-only insertion record. The
-  current 108-route application authorization run passes with zero uncovered.
-- [x] Agent task inputs are immutable and transitions are append-only.
+  and website design requests create or use an immutable task, resolve exactly
+  one Product and Design, preview/render/lint, return the readiness report, and
+  stop at `awaiting_approval`; the managed workflow never performs agent-side
+  commit or restore. Only the authenticated website Commit/Discard action may
+  change history. Generic operations reject the server-only insertion record.
+  Current schema-17 server tests pass 540/540; the focused Product/readiness/
+  preview/MCP cluster passes 44/44 across the
+  54/26/119 source surface. Hosted
+  connected-agent and long-running authorization evidence remains pending.
+- [x] Agent task inputs and migration-17 Product/Design resolved context are
+  immutable; transitions are append-only.
 - [x] Claim/progress/complete/cancel/expiry/base-version/output validation pass
   in service and HTTP/MCP integration tests.
 - [x] Dashboard and editor prompt boxes create tasks and never call an embedded
   AI API.
-- [x] One explicit Codex authorization configures, verifies, and installs the
-  primary managed version-0.2.0 FormaSpec integration plus the Minimal UI
-  legacy compatibility assets without a token in generated TOML.
-- [x] Codex recognizes the recommended “Use FormaSpec” trigger and
-  `[@FormaSpec](plugin://formaspec@formaspec)` mention. The managed
-  “Use Minimal UI” and `[@Minimal UI](plugin://minimal-ui@formaspec)` aliases
-  remain tested only for backward compatibility. Managed content is refreshed
-  only after ownership markers verify; unmanaged content is preserved. Both
-  identities share the token-free `formaspec` MCP server.
+- [x] One explicit Codex authorization configures one token-free `formaspec`
+  MCP connection and installs/verifies exactly one managed FormaSpec 0.3.0
+  plugin before removing only installer-owned legacy assets. Managed content is
+  refreshed only after ownership markers verify; unmanaged files are preserved
+  and reported. The exact Minimal UI TOML parent/descendant cleanup preserves
+  multiline-string lookalikes, similarly prefixed IDs, and unrelated config,
+  and is failure-safe and idempotent.
+- [x] The only supported public identity is
+  `[@FormaSpec](plugin://formaspec@formaspec)`, with the recommended “Use
+  FormaSpec,” “Design this with FormaSpec,” and selection/refinement triggers.
+- [x] Immutable task transitions expose the exact website `reviewDeepLink` and
+  secret-free `formaspec://open-review?design=…&preview=…&task=…&store=…`
+  launcher. Protocol handling invokes fixed-purpose `formaspecctl
+  ensure-running --json`, validates the recorded origin/store identity, and
+  opens the exact persisted review rather than a committed-head route.
 - [x] Agent pairing nonce, scope, project restriction, expiry, reconnect, and
   immediate revocation tests pass.
 - [x] Unsupported MCP clients receive safe generic instructions; unknown
@@ -415,10 +496,10 @@ Do not start a production rollout or V2 head migration until every item passes:
   base/proposed versions and hashes, exact commit, and atomic discard/preview
   expiry. Expired/read-failed previews clear stale approval state, PNG failures
   expose Retry, and commit is disabled until the persisted PNG loads.
-- [x] Current release E2E passes 1/1 and covers the product-manager-to-Codex
+- [x] Retained schema-16 release E2E passed 1/1 and covers the product-manager-to-Codex
   preview/render/website-approval/commit/task-completion path. Retained live
   exact-preview acceptance separately proves exact document and hash equality.
-  The complete schema-16 20-step scenario passes locally; hosted supported-OS
+  The complete retained schema-16 20-step scenario passed locally; hosted supported-OS
   retention remains open.
 
 ## Phase 4 and 5 gate
@@ -472,12 +553,15 @@ Do not start a production rollout or V2 head migration until every item passes:
 
 ## Phase 6 delivery gate
 
-- [ ] Retain the current schema-16 checkpoint on hosted supported-OS release
-  runners. The 842-test package suite, launcher, all workspace typechecks/builds,
+- [ ] Retain the passing schema-17 1,027-test package total and recursive
+  typecheck/build, 15/15 export, 59/59 migration/backup, 44/44 Product/readiness/
+  preview/MCP, and 11/11 macOS packaged-runtime contracts on provenance-bound
+  hosted runners, then complete full browser, Docker/recovery, live
+  managed-plugin, scan, and supported-OS installer gates. Retained schema-16
   editor/Administration, release, preview, alignment, visual, performance,
-  Docker/egress, Firefox/WebKit, copied-bundle recovery, and macOS runtime-smoke
-  contract gates pass locally. Current SBOM/security/image/OS scans, signed
-  native lifecycle evidence, and real remote-host/TLS recovery remain open.
+  Docker/egress, Firefox/WebKit, and copied-bundle recovery results do not
+  qualify schema 17. Current SBOM/security/image/OS scans, signed native
+  lifecycle evidence, and real remote-host/TLS recovery also remain open.
 - [x] Strict versioned organization-policy read/update through the guided
   12-section Administration form and Expert JSON, MCP read/resource,
   secret-free YAML export, optimistic configuration-hash concurrency,
@@ -489,7 +573,10 @@ Do not start a production rollout or V2 head migration until every item passes:
 - [ ] Delegated administration and policy roles, installed external schedule
   invocation and alert delivery, policy rollout/version migration, broader organization
   lifecycle evidence, and the exhaustive browser/HTTP/MCP matrix pass.
-- [ ] Self-contained `formaspecctl` commands pass clean-system tests.
+- [ ] Self-contained `formaspecctl` commands pass clean-system tests. Current
+  source includes fixed-purpose `ensure-running`, which resumes only the
+  recorded runtime, validates origin/store and bridge identity, and refuses
+  silent storage-mode fallback; fresh packaged lifecycle evidence is pending.
 - [ ] `designer` migrates legacy state and delegates without data loss.
 - [ ] Release-ready macOS PKG, Windows WiX v4 MSI, and Linux DEB/RPM
   artifacts are produced and pass their platform gates.
@@ -509,11 +596,15 @@ Do not start a production rollout or V2 head migration until every item passes:
   protocol registration tests pass on each supported OS.
 - [ ] Setup wizard completes agent authorization, backup destination, render
   verification, and health checks.
+- [ ] Native/source installers prove that FormaSpec 0.3.0 is installed and
+  verified before installer-owned legacy assets are removed, unmanaged files
+  are preserved, and only `[@FormaSpec](plugin://formaspec@formaspec)` is
+  advertised after upgrade.
 - [ ] The single `formaspec/server` image with two long-lived API/renderer
   services and the profiled one-shot restore worker passes non-root,
   capability, filesystem, migration, readiness, restart, restore, and egress
   tests.
-- [x] Current local schema-16 image
+- [x] Retained local schema-16 image
   `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`
   passes migration/readiness, deterministic PNG rendering across API restart,
   renderer DNS/TCP/interface egress denial, non-root/read-only/capability
@@ -587,7 +678,7 @@ Do not start a production rollout or V2 head migration until every item passes:
   (CDX), and
   `d296b7340521a7f7854dc13fbf4b9e245d79e23ca7169da4146babb23eca52b0`
   (licenses). This remains temporary local `NO-GO` evidence and is not current
-  schema-16 qualification.
+  schema-17 qualification.
 - [x] The earlier unsigned macOS ARM64 PKG candidate at
   `artifacts/candidates/schema10-current/installers/FormaSpec-0.2.0-macos-arm64-unsigned.pkg`
   has checkpoint offline evidence: SHA-256
@@ -649,12 +740,12 @@ Do not start a production rollout or V2 head migration until every item passes:
   `NO-GO-offhost-restore-*`. Workflow contract tests pass 8/8,
   cross-browser runner tests pass 2/2, off-host simulation tests pass 7/7,
   release-evidence tests pass 8/8, macOS package-evidence tests pass 12/12,
-  and macOS runtime-smoke contract tests pass 11/11. Current schema-16 local
-  runtime executions pass; hosted workflow provenance remains open.
-- [ ] Retain the current schema-16 Docker/off-host gates on hosted runners and
-  build a current macOS package for the extracted-runtime gate. The local
-  schema-16 Docker, Firefox/WebKit, and copied-bundle simulations pass, but no
-  current native package or hosted runtime matrix has satisfied the gate.
+  and macOS runtime-smoke contract tests pass 11/11. Retained schema-16 local
+  runtime executions passed; hosted workflow provenance remains open.
+- [ ] Run the schema-17 Docker/off-host gates on hosted runners and build a
+  current macOS package for the extracted-runtime gate. The retained local
+  schema-16 Docker, Firefox/WebKit, and copied-bundle simulations passed, but no
+  current native package or hosted schema-17 runtime matrix has satisfied the gate.
 - [ ] Retain successful GitHub-hosted runs and real Ubuntu DEB/RPM artifacts;
   current workflow presence and local contracts are not hosted release evidence.
 - [ ] Signing/notarization uses real operator credentials or artifacts are
@@ -665,10 +756,11 @@ Do not start a production rollout or V2 head migration until every item passes:
 ## Release performance budgets
 
 Representative projects must contain at least 1,000 nodes.
-The measurements below are from the current schema-16 local pinned-Chromium
-run. They pass every budget; hosted supported-OS retention remains required.
+The measurements below are from the retained schema-16 local pinned-Chromium
+run. They passed every budget; a schema-17 rerun and hosted supported-OS
+retention remain required.
 
-| Measurement | Required p95 / hard limit | Current schema-16 local evidence |
+| Measurement | Required p95 / hard limit | Retained schema-16 local evidence |
 | --- | --- | --- |
 | Initial interactive load | at most 2.5 seconds p95 | **Pass:** 303.30 ms p95, 20 cold samples |
 | Selection response | at most 50 ms p95 | **Pass:** 26.80 ms p95, 20 samples |
@@ -699,7 +791,7 @@ pass a budget.
   repository-inventory text remains bounded data and cannot create task/archive
   side effects or expand authority. Real connected-agent semantic-resistance
   and approval-flow evidence remains open.
-- [x] The current schema-16 renderer egress canary cannot resolve or connect
+- [x] The retained schema-16 renderer egress canary could not resolve or connect
   externally: DNS and direct TCP fail closed and no external interfaces are
   visible. Hosted and native-package evidence remains open.
 - [ ] No credentials appear in logs, audit payloads, exports, bundles, tasks,
@@ -733,12 +825,13 @@ pass a budget.
 - [ ] AI screens use organization tokens/components by default.
 - [ ] Linked components and instances are versioned/manageable.
 - [ ] Selection controls remain within 0.75 CSS px in a retained hosted
-  supported-OS release-candidate matrix. Current schema-16 local Chromium and
-  Firefox/WebKit matrices pass 12/12 each.
+  supported-OS release-candidate matrix. Retained schema-16 local Chromium and
+  Firefox/WebKit matrices passed 12/12 each.
 - [x] Concurrent same-base writes yield one success/one conflict.
 - [x] Retried commits create no duplicate revision.
 - [x] Persisted previews survive restart until expiry with immutable render
-  target, dimensions, backend, warnings, and PNG SHA-256 evidence.
+  target, dimensions, backend, warnings, PNG SHA-256 evidence, and current
+  source content-addressed exact PNG storage with integrity verification.
 - [ ] Backup restore reproduces all required data.
 - [ ] Repository analysis occurs before redesign proposals.
 - [ ] Repository files are unchanged without an approved plan.
@@ -747,21 +840,23 @@ pass a budget.
   in the focused revision-pinned inspect path; broader role/browser coverage
   remains part of the release authorization matrix.
 - [ ] Renderer cannot access external network in a retained hosted release-
-  candidate Docker topology. Current schema-16 local image evidence denies
+  candidate Docker topology. Retained schema-16 local image evidence denied
   DNS, direct-TCP, and external-interface egress.
 - [ ] Production application and renderer do not run as root in a retained
-  hosted release-candidate image. The current schema-16 local image passes this
+  hosted release-candidate image. The retained schema-16 local image passed this
   check.
 - [ ] Representative 1,000-node budgets pass in a retained hosted release
-  candidate. Current schema-16 local measurements pass every budget.
+  candidate. Retained schema-16 local measurements passed every budget.
 - [ ] No critical/high security defects remain.
 - [ ] Source-workspace production dependencies comply with the approved license
-  policy for the schema-16 release candidate. The historical exact linked-0.45.2
+  policy for the schema-17 release candidate. The historical exact linked-0.45.2
   schema-13 evidence passed. The
   schema-12 macOS PKG matches
   its frozen packaged workspace outputs and passes private extracted-runtime
-  checks, but it predates schemas 13–16, the dual FormaSpec/Minimal UI plugin
-  payload, and the 52-tool/108-route interface. The
+  checks, but it predates schemas 13–17, Products, immutable Product-bound
+  tasks, durable exact-preview artifacts, the superseded dual-identity payload,
+  the current single FormaSpec 0.3.0 plugin, and the
+  54-tool/26-resource/119-route interface. The
   installed tree uses `drizzle-orm` 0.45.2; the historical 342-component report
   has zero policy violations. Chromium legal
   approval, reproducibility, signing/notarization, vulnerability scans, and

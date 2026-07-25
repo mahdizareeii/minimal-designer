@@ -85,18 +85,18 @@ describe("content-addressed persistence", () => {
     const firstId = firstOpen.dataStoreId();
     expect(firstId).toMatch(/^store_[a-f0-9]{32}$/);
     expect(firstOpen.metadata("data_store_id")).toBe(firstId);
-    expect(firstOpen.schemaVersion()).toBe(16);
+    expect(firstOpen.schemaVersion()).toBe(17);
     firstOpen.close();
 
     const reopened = new DesignerDatabase(firstFilename);
     expect(reopened.dataStoreId()).toBe(firstId);
-    expect(reopened.schemaVersion()).toBe(16);
+    expect(reopened.schemaVersion()).toBe(17);
     reopened.close();
 
     const second = new DesignerDatabase(secondFilename);
     expect(second.dataStoreId()).toMatch(/^store_[a-f0-9]{32}$/);
     expect(second.dataStoreId()).not.toBe(firstId);
-    expect(second.schemaVersion()).toBe(16);
+    expect(second.schemaVersion()).toBe(17);
     second.close();
   });
 
@@ -293,13 +293,14 @@ describe("content-addressed persistence", () => {
 
       const upgraded = new DesignerDatabase(filename);
       try {
-        expect(upgraded.schemaVersion()).toBe(16);
+        expect(upgraded.schemaVersion()).toBe(17);
         expect(upgraded.sqlite.prepare(
           "SELECT version, name FROM schema_migrations WHERE version >= 14 ORDER BY version",
         ).all()).toEqual([
           { version: 14, name: "browser_session_authentication" },
           { version: 15, name: "preview_render_metadata" },
           { version: 16, name: "bootstrap_credential_trigger_canonicalization" },
+          { version: 17, name: "product_organization_foundation" },
         ]);
         expect(upgraded.sqlite.prepare(
           "SELECT id, token_hash, created_at, consumed_at, consumed_by FROM bootstrap_credentials",
@@ -378,7 +379,7 @@ describe("content-addressed persistence", () => {
 
     const opened = openService(filename);
     try {
-      expect(opened.database.schemaVersion()).toBe(16);
+      expect(opened.database.schemaVersion()).toBe(17);
       expect(opened.database.sqlite.prepare(
         "SELECT version, name FROM schema_migrations ORDER BY version",
       ).all()).toEqual([
@@ -398,8 +399,9 @@ describe("content-addressed persistence", () => {
         { version: 14, name: "browser_session_authentication" },
         { version: 15, name: "preview_render_metadata" },
         { version: 16, name: "bootstrap_credential_trigger_canonicalization" },
+        { version: 17, name: "product_organization_foundation" },
       ]);
-      expect(opened.database.metadata("database_schema_version")).toBe("16");
+      expect(opened.database.metadata("database_schema_version")).toBe("17");
       expect(DEFAULT_RUNTIME_VERSIONS).toMatchObject({
         commandEngine: ENGINE_VERSIONS.commandEngine,
         renderer: ENGINE_VERSIONS.renderer,
@@ -547,7 +549,7 @@ describe("content-addressed persistence", () => {
       const inspected = new Database(filename, { readonly: true });
       try {
         expect(inspected.prepare("SELECT MAX(version) AS version FROM schema_migrations").get())
-          .toEqual({ version: 16 });
+          .toEqual({ version: 17 });
       } finally {
         inspected.close();
       }

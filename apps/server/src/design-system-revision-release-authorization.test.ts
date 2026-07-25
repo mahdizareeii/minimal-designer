@@ -11,6 +11,7 @@ import type {
   RevisionDesignSystemReleaseResult,
 } from "./design-system-service.js";
 import { DomainError } from "./errors.js";
+import { moveDesignFixtureToOrganization } from "../test-fixtures/product.js";
 
 const PROXY_SECRET = "revision-release-proxy-secret-0123456789abcdef";
 const PUBLIC_ORIGIN = "https://design.example.test";
@@ -238,9 +239,10 @@ async function createFixture(): Promise<Fixture> {
     `INSERT INTO organizations (id, name, config_json, created_at, updated_at)
      VALUES (?, 'Foreign revision release organization', '{}', ?, ?)`,
   ).run(FOREIGN_ORGANIZATION_ID, now, now);
-  application.database.sqlite.prepare(
-    "UPDATE designs SET organization_id = ? WHERE id = ?",
-  ).run(FOREIGN_ORGANIZATION_ID, foreign.design.id);
+  moveDesignFixtureToOrganization(application.database.sqlite, {
+    designId: foreign.design.id,
+    organizationId: FOREIGN_ORGANIZATION_ID,
+  });
 
   return {
     application,

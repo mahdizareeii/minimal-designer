@@ -53,11 +53,12 @@ describe("enterprise domain migration", () => {
   it("brings a clean database through enterprise domains, render jobs, and handoff execution decisions", () => {
     const database = new DesignerDatabase(temporaryDatabase());
     try {
-      expect(database.schemaVersion()).toBe(16);
-      expect(database.metadata("database_schema_version")).toBe("16");
+      expect(database.schemaVersion()).toBe(17);
+      expect(database.metadata("database_schema_version")).toBe("17");
       const tables = database.sqlite.prepare(
         `SELECT name FROM sqlite_master
          WHERE type = 'table' AND name IN (
+           'products', 'product_move_previews',
            'design_systems', 'design_system_tokens', 'component_definitions',
            'design_system_releases', 'project_design_system_pins',
            'design_system_upgrade_previews', 'repository_inventories',
@@ -77,6 +78,8 @@ describe("enterprise domain migration", () => {
         "handoff_versions",
         "handoffs",
         "implementation_mappings",
+        "product_move_previews",
+        "products",
         "project_design_system_pins",
         "redesign_assessment_versions",
         "redesign_assessments",
@@ -102,13 +105,25 @@ describe("enterprise domain migration", () => {
 
     const upgraded = new DesignerDatabase(source);
     try {
-      expect(upgraded.schemaVersion()).toBe(16);
+      expect(upgraded.schemaVersion()).toBe(17);
       expect(upgraded.sqlite.prepare(
-        "SELECT current_version, current_revision_id, organization_id FROM designs WHERE id = ?",
+        "SELECT current_version, current_revision_id, organization_id, product_id FROM designs WHERE id = ?",
       ).get(fixture.evidence.designId)).toEqual({
         current_version: 2,
         current_revision_id: fixture.evidence.currentRevisionId,
         organization_id: "organization_legacy",
+        product_id: `product_${fixture.evidence.designId.slice("document_".length)}`,
+      });
+      expect(upgraded.sqlite.prepare(
+        `SELECT id, organization_id, name, canonical_specification_design_id, status, metadata_json
+         FROM products WHERE id = ?`,
+      ).get(`product_${fixture.evidence.designId.slice("document_".length)}`)).toEqual({
+        id: `product_${fixture.evidence.designId.slice("document_".length)}`,
+        organization_id: "organization_legacy",
+        name: "Historical checkout",
+        canonical_specification_design_id: fixture.evidence.designId,
+        status: "active",
+        metadata_json: JSON.stringify({ legacyBackfill: true, sourceDesignId: fixture.evidence.designId }),
       });
       for (const expected of fixture.evidence.revisions) {
         const actual = upgraded.sqlite.prepare(
@@ -168,7 +183,7 @@ describe("enterprise domain migration", () => {
 
     const upgraded = new DesignerDatabase(source);
     try {
-      expect(upgraded.schemaVersion()).toBe(16);
+      expect(upgraded.schemaVersion()).toBe(17);
       expect(upgraded.sqlite.prepare(
         "SELECT version, name FROM schema_migrations WHERE version >= 11 ORDER BY version",
       ).all()).toEqual([
@@ -178,6 +193,7 @@ describe("enterprise domain migration", () => {
         { version: 14, name: "browser_session_authentication" },
         { version: 15, name: "preview_render_metadata" },
         { version: 16, name: "bootstrap_credential_trigger_canonicalization" },
+        { version: 17, name: "product_organization_foundation" },
       ]);
       expect(schemaElevenPreservationFingerprint(upgraded.sqlite)).toBe(before);
       expect(upgraded.sqlite.prepare("SELECT organization_id FROM designs WHERE id = ?")
@@ -218,7 +234,7 @@ describe("enterprise domain migration", () => {
 
     const upgraded = new DesignerDatabase(source);
     try {
-      expect(upgraded.schemaVersion()).toBe(16);
+      expect(upgraded.schemaVersion()).toBe(17);
       expect(upgraded.sqlite.prepare(
         "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version",
       ).all()).toEqual([
@@ -227,6 +243,7 @@ describe("enterprise domain migration", () => {
         { version: 14, name: "browser_session_authentication" },
         { version: 15, name: "preview_render_metadata" },
         { version: 16, name: "bootstrap_credential_trigger_canonicalization" },
+        { version: 17, name: "product_organization_foundation" },
       ]);
       expect(schemaTwelvePreservationFingerprint(upgraded.sqlite)).toBe(before);
       expect(upgraded.sqlite.prepare(

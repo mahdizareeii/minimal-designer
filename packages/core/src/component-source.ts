@@ -195,6 +195,15 @@ function validateDependencies(
   for (const [index, node] of bundle.nodes.entries()) {
     collectTokenReferences(node.layout, ["nodes", index, "layout"], tokenReferences);
     collectTokenReferences(node.style, ["nodes", index, "style"], tokenReferences);
+    if (node.type === "component_instance") {
+      collectTokenReferences(node.visual_overrides, ["nodes", index, "visual_overrides"], tokenReferences);
+      for (const [propertyKey, value] of Object.entries(node.properties)) {
+        if (value && typeof value === "object" && "asset_id" in value && typeof value.asset_id === "string"
+          && !assetReferences.has(value.asset_id)) {
+          assetReferences.set(value.asset_id, ["nodes", index, "properties", propertyKey, "asset_id"]);
+        }
+      }
+    }
     if (node.type === "image" && node.asset_id !== undefined && !assetReferences.has(node.asset_id)) {
       assetReferences.set(node.asset_id, ["nodes", index, "asset_id"]);
     }
@@ -250,11 +259,6 @@ function validateSourceTrees(bundle: ComponentSourceBundleData, context: z.Refin
       code: z.ZodIssueCode.custom,
       path: ["nodes", index, "archived"],
       message: "Component source nodes cannot be archived.",
-    });
-    if (node.type === "component_instance") context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["nodes", index, "type"],
-      message: "Nested component instances are external references and are not allowed in a component source bundle.",
     });
     if (node.semantics.business_rule_ids.length > 0 || node.semantics.acceptance_criterion_ids.length > 0) {
       context.addIssue({

@@ -34,10 +34,11 @@ export interface WindowsWixSourceOptions {
 
 export type WindowsProtocolAction =
   | { kind: "open" }
-  | { kind: "connect"; pairingNonce?: string; connectionId?: string };
+  | { kind: "connect"; pairingNonce?: string; connectionId?: string }
+  | { kind: "review"; designId: string; previewId: string; taskId: string; storeId: string };
 
 export function parseWindowsProtocolUrl(value: string): WindowsProtocolAction {
-  if (value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+  if (value.length > 2_048 || /[\u0000-\u001f\u007f]/.test(value)) {
     throw new Error("FormaSpec protocol URL is malformed.");
   }
   let url: URL;
@@ -50,6 +51,17 @@ export function parseWindowsProtocolUrl(value: string): WindowsProtocolAction {
     throw new Error("FormaSpec protocol URL is malformed.");
   }
   if ((url.hostname === "" || url.hostname === "open") && url.search === "") return { kind: "open" };
+  if (url.hostname === "open-review") {
+    const review = /^\?design=(document_[A-Za-z0-9][A-Za-z0-9_-]{7,199})&preview=(preview_[A-Za-z0-9][A-Za-z0-9_-]{7,199})&task=(task_[a-f0-9]{32})&store=(store_[a-f0-9]{32})$/.exec(url.search);
+    if (!review) throw new Error("FormaSpec review URL is malformed.");
+    return {
+      kind: "review",
+      designId: review[1]!,
+      previewId: review[2]!,
+      taskId: review[3]!,
+      storeId: review[4]!,
+    };
+  }
   if (url.hostname !== "connect-agent") throw new Error("FormaSpec protocol action is unsupported.");
   if (url.search === "") return { kind: "connect" };
   const nonceOnly = /^\?nonce=(fspair_[A-Za-z0-9_-]{43})$/.exec(url.search);
@@ -63,7 +75,7 @@ export function parseWindowsProtocolUrl(value: string): WindowsProtocolAction {
 
 export function windowsProtocolHandlerSource(): string {
   return `"use strict";
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -74,7 +86,7 @@ function fail(message) {
 }
 
 function parseProtocolUrl(value) {
-  if (typeof value !== "string" || value.length > 512 || /[\\u0000-\\u001f\\u007f]/.test(value)) {
+  if (typeof value !== "string" || value.length > 2048 || /[\\u0000-\\u001f\\u007f]/.test(value)) {
     return fail("FormaSpec protocol URL is malformed.");
   }
   let url;
@@ -83,6 +95,11 @@ function parseProtocolUrl(value) {
     return fail("FormaSpec protocol URL is malformed.");
   }
   if ((url.hostname === "" || url.hostname === "open") && url.search === "") return { kind: "open" };
+  if (url.hostname === "open-review") {
+    const review = /^\\?design=(document_[A-Za-z0-9][A-Za-z0-9_-]{7,199})&preview=(preview_[A-Za-z0-9][A-Za-z0-9_-]{7,199})&task=(task_[a-f0-9]{32})&store=(store_[a-f0-9]{32})$/.exec(url.search);
+    if (!review) return fail("FormaSpec review URL is malformed.");
+    return { kind: "review", designId: review[1], previewId: review[2], taskId: review[3], storeId: review[4] };
+  }
   if (url.hostname !== "connect-agent") return fail("FormaSpec protocol action is unsupported.");
   if (url.search === "") return { kind: "connect" };
   const nonceOnly = /^\\?nonce=(fspair_[A-Za-z0-9_-]{43})$/.exec(url.search);
@@ -97,6 +114,17 @@ function openEditor(installRoot) {
   const serviceHost = path.join(installRoot, "service", "FormaSpec.ServiceHost.exe");
   if (!fs.existsSync(serviceHost)) return;
   const child = spawn(serviceHost, ["--open-editor"], {
+    detached: true,
+    shell: false,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+}
+
+function openExternalUrl(target) {
+  if (process.platform !== "win32") return;
+  const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", target], {
     detached: true,
     shell: false,
     stdio: "ignore",
@@ -133,12 +161,57 @@ function packagedEnvironment(installRoot) {
   };
 }
 
+function resolveReviewTarget(action, installRoot) {
+  const cliEntry = path.join(installRoot, "app", "apps", "cli", "dist", "index.js");
+  if (!fs.existsSync(cliEntry)) return fail("The packaged formaspecctl entry point is unavailable.");
+  const result = spawnSync(process.execPath, [cliEntry, "ensure-running", "--json"], {
+    cwd: path.join(installRoot, "app"),
+    env: packagedEnvironment(installRoot),
+    encoding: "utf8",
+    maxBuffer: 256 * 1024,
+    shell: false,
+    timeout: 180000,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    return fail("FormaSpec could not resume its recorded runtime. Run formaspecctl ensure-running --json for the blocker.");
+  }
+  let ensured;
+  try { ensured = JSON.parse(result.stdout); } catch { return fail("FormaSpec ensure-running returned invalid JSON."); }
+  if (!ensured || ensured.schemaVersion !== 1 || ensured.ok !== true
+    || typeof ensured.dataStoreId !== "string" || typeof ensured.webOrigin !== "string") {
+    return fail("FormaSpec ensure-running did not return a ready runtime identity.");
+  }
+  if (ensured.dataStoreId !== action.storeId) {
+    return fail("FormaSpec review belongs to data store " + action.storeId
+      + ", but the recorded runtime exposes " + ensured.dataStoreId + ".");
+  }
+  let target;
+  try { target = new URL(ensured.webOrigin); } catch { return fail("FormaSpec ensure-running returned an invalid web origin."); }
+  const host = target.hostname.toLowerCase().replace(/^\\[|\\]$/g, "");
+  const loopbackHttp = target.protocol === "http:" && ["127.0.0.1", "::1", "localhost"].includes(host);
+  const publicHttps = target.protocol === "https:" && host !== "" && !["127.0.0.1", "::1", "localhost"].includes(host);
+  if ((!loopbackHttp && !publicHttps) || target.username || target.password || target.pathname !== "/"
+    || target.search || target.hash) {
+    return fail("FormaSpec ensure-running returned an invalid web origin.");
+  }
+  target.pathname = "/design/" + action.designId + "/previews/" + action.previewId + "/review";
+  target.searchParams.set("task", action.taskId);
+  target.searchParams.set("store", action.storeId);
+  return target.toString();
+}
+
 function main() {
   const action = parseProtocolUrl(process.argv[2] || "");
   if (!action) return;
   const installRoot = path.dirname(__dirname);
   if (action.kind === "open") {
     openEditor(installRoot);
+    return;
+  }
+  if (action.kind === "review") {
+    const target = resolveReviewTarget(action, installRoot);
+    if (target) openExternalUrl(target);
     return;
   }
   const cliEntry = path.join(installRoot, "app", "apps", "cli", "dist", "index.js");

@@ -5,10 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { applicationRoute } from "../App";
 import { AgentPreviewReviewDialog, reviewPage } from "../components/AgentPreviewReview";
-import { validatePreviewReviewTarget } from "../components/PreviewReviewPage";
+import {
+  DesignReadinessReportCard,
+  previewReviewFailureMessage,
+  validatePreviewReviewTarget,
+} from "../components/PreviewReviewPage";
 import type { PageId } from "../domain";
 import {
   designPreviewReviewPath,
+  ApiError,
   readDesignPreview,
   readAgentTask,
   subscribeToEvents,
@@ -52,15 +57,16 @@ describe("visible exact preview review", () => {
   it("routes an exact preview separately from the committed project head", () => {
     expect(applicationRoute(
       "/design/document_review_0001/previews/preview_review_0001/review",
-      "?task=task_review_0001",
+      `?task=task_review_0001&store=store_${"a".repeat(32)}`,
     )).toEqual({
       kind: "preview-review",
       designId: "document_review_0001",
       previewId: "preview_review_0001",
       taskId: "task_review_0001",
+      storeId: `store_${"a".repeat(32)}`,
     });
-    expect(designPreviewReviewPath("document a", "preview/b", "task c")).toBe(
-      "/design/document%20a/previews/preview%2Fb/review?task=task+c",
+    expect(designPreviewReviewPath("document a", "preview/b", "task c", `store_${"b".repeat(32)}`)).toBe(
+      `/design/document%20a/previews/preview%2Fb/review?task=task+c&store=store_${"b".repeat(32)}`,
     );
     expect(applicationRoute("/design/document_review_0001", "?task=task_review_0001")).toEqual({
       kind: "design",
@@ -82,6 +88,26 @@ describe("visible exact preview review", () => {
     expect(() => validatePreviewReviewTarget("document_review_0001", "preview_review_0001", task)).not.toThrow();
     expect(() => validatePreviewReviewTarget("document_other_0001", "preview_review_0001", task)).toThrow(/does not belong/i);
     expect(() => validatePreviewReviewTarget("document_review_0001", "preview_other_0001", task)).toThrow(/does not reference/i);
+  });
+
+  it("explains offline and wrong-data-store review failures instead of leaving a blank page", () => {
+    expect(previewReviewFailureMessage(new ApiError("network", { code: "NETWORK_ERROR" }))).toMatch(/offline/i);
+    expect(previewReviewFailureMessage(new ApiError("store", { code: "DATA_STORE_MISMATCH", status: 409 })))
+      .toMatch(/another FormaSpec data store/i);
+    expect(previewReviewFailureMessage(new ApiError("expired", { code: "PREVIEW_EXPIRED", status: 410 })))
+      .toMatch(/expired/i);
+    expect(previewReviewFailureMessage(new ApiError("missing", { code: "PREVIEW_ENGINE_MISMATCH", status: 409 })))
+      .toMatch(/persisted PNG is missing/i);
+    expect(previewReviewFailureMessage(new ApiError("stale", { code: "VERSION_CONFLICT", status: 409 })))
+      .toMatch(/project changed/i);
+    expect(previewReviewFailureMessage(new ApiError("auth", { code: "AUTH_REQUIRED", status: 401 })))
+      .toMatch(/Sign in/i);
+    expect(previewReviewFailureMessage(new ApiError("missing task", { code: "NOT_FOUND", status: 404 })))
+      .toMatch(/project, task, or preview is unavailable/i);
+    expect(previewReviewFailureMessage(new ApiError("committed", { code: "PREVIEW_ALREADY_COMMITTED", status: 409 })))
+      .toMatch(/already committed/i);
+    expect(previewReviewFailureMessage(new ApiError("discarded", { code: "PREVIEW_NOT_COMMITTABLE", status: 409 })))
+      .toMatch(/discarded/i);
   });
 
   it("renders before/after review inline without an automatic approval modal", () => {
@@ -140,6 +166,71 @@ describe("visible exact preview review", () => {
     expect(markup).toContain("Before");
     expect(markup).toContain("Proposed");
     expect(markup).not.toContain("Discard proposal");
+  });
+
+  it("shows the immutable senior readiness report on the exact approval surface", () => {
+    const task = reviewTask("document_review_0001", "preview_review_0001");
+    task.product = { id: "product_review_0001", name: "Checkout Product", status: "active" };
+    task.resolvedContext = {
+      schemaVersion: 1,
+      product: { ...task.product, updatedAt: "2026-07-22T08:00:00.000Z" },
+      design: { id: task.designId, version: 1, revisionId: "revision_review_0001" },
+      productSpecification: {
+        designId: task.designId,
+        version: 4,
+        specificationHash: "a".repeat(64),
+      },
+      designSystem: {
+        source: "product_default",
+        designSystemId: "design_system_review_0001",
+        releaseId: "release_review_0001",
+        releaseVersion: 3,
+      },
+      repositoryInventories: [{ id: "inventory_review_0001", inventoryHash: "b".repeat(64) }],
+      locale: "fa-IR",
+      direction: "rtl",
+      platform: "phone",
+      capturedAt: "2026-07-22T08:00:00.000Z",
+    };
+    task.readiness = {
+      schemaVersion: 1,
+      requestClassification: "refine",
+      selected: { productId: task.product.id, designId: task.designId, baseVersion: 1 },
+      productSpecification: { version: 4, specificationHash: "a".repeat(64) },
+      designSystem: { source: "product_default", releaseId: "release_review_0001", releaseVersion: 3 },
+      components: {
+        reused: [{ componentDefinitionId: "component_button_review_0001", version: 2, reason: "Uses the approved primary action." }],
+        extended: [],
+        proposed: [{ key: "checkout.summary", name: "Checkout summary", reason: "No released component satisfies the business rules." }],
+      },
+      platforms: ["phone"],
+      repositoryMappingsConsidered: [{ inventoryId: "inventory_review_0001", inventoryHash: "b".repeat(64) }],
+      assumptions: ["Guest checkout remains supported."],
+      blockers: [],
+      checks: {
+        hierarchy: "pass",
+        visualConsistency: "pass",
+        interactionStates: "warning",
+        accessibility: "pass",
+        touchTargets: "pass",
+        rtlLocalization: "pass",
+        responsiveVariants: "warning",
+        prototypeCoverage: "pass",
+        engineeringFeasibility: "pass",
+        lint: "pass",
+      },
+    };
+
+    const markup = renderToStaticMarkup(<DesignReadinessReportCard task={task} designName="Checkout mobile" />);
+    expect(markup).toContain("FormaSpec readiness report");
+    expect(markup).toContain("Checkout Product");
+    expect(markup).toContain("Checkout mobile");
+    expect(markup).toContain("Specification");
+    expect(markup).toContain("release_review_0001");
+    expect(markup).toContain("Checkout summary");
+    expect(markup).toContain("RTL / localization");
+    expect(markup).toContain("Responsive variants");
+    expect(markup).toContain("Guest checkout remains supported.");
   });
 
   it("keeps Before empty when the proposal creates a newly selected page", () => {

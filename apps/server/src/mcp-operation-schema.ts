@@ -70,6 +70,8 @@ function withTemporaryEntityIds(
     result = cloneWithDefinition(schema, { schema: withTemporaryEntityIds(schema.innerType(), memo) });
   } else if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
     result = cloneWithDefinition(schema, { innerType: withTemporaryEntityIds(schema.unwrap(), memo) });
+  } else if (schema instanceof z.ZodDefault) {
+    result = cloneWithDefinition(schema, { innerType: withTemporaryEntityIds(schema._def.innerType, memo) });
   } else if (schema instanceof z.ZodRecord) {
     result = cloneWithDefinition(schema, {
       keyType: withTemporaryEntityIds(schema.keySchema, memo),

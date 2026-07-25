@@ -23,6 +23,8 @@ import { createPortableProjectBundle, readPortableProjectBundle } from "./portab
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
 const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
+// Real Chromium work is bounded internally at 15 seconds; leave room for route setup and cleanup under CI load.
+const CHROMIUM_ROUTE_TEST_TIMEOUT_MS = 20_000;
 
 afterEach(async () => {
   await Promise.all(applications.splice(0).map((application) => application.app.close()));
@@ -323,7 +325,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
       expect((application.database.sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count)
         .toBe(mutationCounts[table]);
     }
-  });
+  }, CHROMIUM_ROUTE_TEST_TIMEOUT_MS);
 
   it("imports a conflict-free V1 bundle atomically and persists its external product specification as local version 1", async () => {
     const source = await localApplication();
@@ -1189,7 +1191,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
       sha256: importedAssetMetadata.sha256,
     });
     expect(createHash("sha256").update(storedAsset.data).digest("hex")).toBe(importedAssetMetadata.sha256);
-  });
+  }, CHROMIUM_ROUTE_TEST_TIMEOUT_MS);
 
   it("uses the organization preview default while allowing an explicit portable-export override", async () => {
     const application = await localApplication();
@@ -1214,7 +1216,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
     expect(Object.keys(readPortableProjectBundle(withPreview.rawPayload).previews)).toEqual([
       "previews/project-preview.png",
     ]);
-  });
+  }, CHROMIUM_ROUTE_TEST_TIMEOUT_MS);
 
   it("applies the organization portable-bundle policy to export, validation, and mutation", async () => {
     const application = await localApplication();
@@ -1420,7 +1422,7 @@ describe("operational backup and portable bundle HTTP routes", () => {
       revisionId: cloneResult.project.revisionId,
       specification: clonedDocument.product_specification,
     });
-  });
+  }, CHROMIUM_ROUTE_TEST_TIMEOUT_MS);
 
   it("creates, records, verifies, lists, and downloads only managed verified backups", async () => {
     const application = await localApplication();

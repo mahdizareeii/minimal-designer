@@ -47,10 +47,17 @@ export interface ResolvedPinnedComponentRelease {
   source: ComponentSourceBundle;
   sourceHash: string;
   releaseTokens: Record<string, DesignSystemToken>;
+  nestedComponents: ResolvedComponentSource[];
+}
+
+export interface ResolvedComponentSource {
+  definition: ComponentDefinition;
+  source: ComponentSourceBundle;
+  sourceHash: string;
 }
 
 export interface PinnedComponentCatalogBlocker {
-  code: "NO_VERIFIED_SOURCE" | "ASSET_COPY_UNAVAILABLE";
+  code: "NO_VERIFIED_SOURCE" | "ASSET_COPY_UNAVAILABLE" | "NESTED_COMPONENT_UNAVAILABLE";
   message: string;
 }
 
@@ -158,9 +165,133 @@ function verifiedSource(
   return { source, sourceHash: hash };
 }
 
+function nestedComponentReferences(source: ComponentSourceBundle): Array<{
+  componentDefinitionId: string;
+  componentVersion: number;
+}> {
+  const references = new Map<string, number>();
+  for (const node of source.nodes) {
+    if (node.type !== "component_instance") continue;
+    const previous = references.get(node.component_definition_id);
+    if (previous !== undefined && previous !== node.component_version) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        `Component source references ${node.component_definition_id} at conflicting versions.`,
+        422,
+      );
+    }
+    references.set(node.component_definition_id, node.component_version);
+  }
+  return [...references].sort(([left], [right]) => left.localeCompare(right)).map(([componentDefinitionId, componentVersion]) => ({
+    componentDefinitionId,
+    componentVersion,
+  }));
+}
+
+function resolveComponentGraph(
+  root: ResolvedComponentSource,
+  load: (componentDefinitionId: string, componentVersion: number) => ResolvedComponentSource,
+): ResolvedComponentSource[] {
+  const resolved = new Map<string, ResolvedComponentSource>();
+  const visiting = new Set<string>();
+  const ordered: ResolvedComponentSource[] = [];
+  const visit = (component: ResolvedComponentSource): void => {
+    const key = `${component.definition.id}@${component.definition.version}`;
+    if (resolved.has(key)) return;
+    if (visiting.has(key)) {
+      throw new DomainError("VALIDATION_FAILED", `Nested component dependency cycle detected at ${key}.`, 422);
+    }
+    if (resolved.size + visiting.size >= 100) {
+      throw new DomainError("PAYLOAD_TOO_LARGE", "A component may depend on at most 100 nested component versions.", 413);
+    }
+    visiting.add(key);
+    for (const reference of nestedComponentReferences(component.source)) {
+      visit(load(reference.componentDefinitionId, reference.componentVersion));
+    }
+    visiting.delete(key);
+    resolved.set(key, component);
+    ordered.push(component);
+  };
+  visit(root);
+  return ordered;
+}
+
+function resolveCatalogComponentGraph(
+  root: ResolvedComponentSource,
+  load: (componentDefinitionId: string, componentVersion: number) => ResolvedComponentSource,
+): { graph: ResolvedComponentSource[]; blockers: PinnedComponentCatalogBlocker[] } {
+  try {
+    return { graph: resolveComponentGraph(root, load), blockers: [] };
+  } catch (error) {
+    if (!(error instanceof DomainError)) throw error;
+    return {
+      graph: [root],
+      blockers: [{
+        code: "NESTED_COMPONENT_UNAVAILABLE",
+        message: `Insertion is blocked because a nested released component dependency is unavailable or invalid: ${error.message}`,
+      }],
+    };
+  }
+}
+
+function foundationResolvedComponent(
+  componentDefinitionId: string,
+  componentVersion: number,
+): ResolvedComponentSource {
+  const selected = FORMASPEC_FOUNDATION_SYSTEM.release.component_versions.find(
+    (candidate) => candidate.component_definition_id === componentDefinitionId,
+  );
+  const definition = FORMASPEC_FOUNDATION_SYSTEM.components[componentDefinitionId];
+  if (!selected || !definition || selected.version !== componentVersion || definition.version !== componentVersion) {
+    throw new DomainError("VALIDATION_FAILED", "A nested component is not selected at the required version in the pinned FormaSpec Foundation release.", 422, {
+      details: { componentDefinitionId, componentVersion },
+    });
+  }
+  const source = foundationComponentSource(definition);
+  return {
+    definition,
+    source,
+    sourceHash: createHash("sha256").update(canonicalComponentSourceBundleBytes(source)).digest("hex"),
+  };
+}
+
+function persistedResolvedComponent(
+  database: DesignerDatabase,
+  designSystemId: string,
+  selectedVersions: ReadonlyMap<string, number>,
+  componentDefinitionId: string,
+  componentVersion: number,
+): ResolvedComponentSource {
+  if (selectedVersions.get(componentDefinitionId) !== componentVersion) {
+    throw new DomainError("VALIDATION_FAILED", "A nested component is not selected at the required version in the pinned release.", 422, {
+      details: { componentDefinitionId, componentVersion },
+    });
+  }
+  const componentRow = database.sqlite.prepare(
+    `SELECT definition_json, source_json, source_hash
+     FROM component_definitions
+     WHERE design_system_id = ? AND component_id = ? AND version = ?`,
+  ).get(designSystemId, componentDefinitionId, componentVersion) as {
+    definition_json: string;
+    source_json: string | null;
+    source_hash: string | null;
+  } | undefined;
+  if (!componentRow) throw new DomainError("INTERNAL_ERROR", "Pinned nested component row is missing.", 500);
+  const definition = ComponentDefinitionSchema.parse(JSON.parse(componentRow.definition_json) as unknown);
+  if (definition.id !== componentDefinitionId || definition.version !== componentVersion) {
+    throw new DomainError("INTERNAL_ERROR", "Pinned nested component definition integrity verification failed.", 500);
+  }
+  const source = verifiedSource(definition, componentVersion, componentRow.source_json, componentRow.source_hash);
+  return { definition, source: source.source, sourceHash: source.sourceHash };
+}
+
 function catalogItem(
+  database: DesignerDatabase,
+  organizationId: string,
   definition: ComponentDefinition,
   source: { source: ComponentSourceBundle; sourceHash: string } | null,
+  componentGraph: readonly ResolvedComponentSource[] = [],
+  dependencyBlockers: readonly PinnedComponentCatalogBlocker[] = [],
 ): PinnedComponentCatalogItem {
   if (!source) {
     const blockers: PinnedComponentCatalogBlocker[] = [{
@@ -178,17 +309,34 @@ function catalogItem(
       blockers,
     };
   }
-  const assetDependencyIds = [...source.source.dependencies.asset_ids].sort();
-  const blockers: PinnedComponentCatalogBlocker[] = assetDependencyIds.length > 0 ? [{
-    code: "ASSET_COPY_UNAVAILABLE",
-    message: "Insertion is blocked until every normalized asset dependency can be copied by content hash.",
-  }] : [];
+  const sources = componentGraph.length > 0
+    ? componentGraph.map((component) => component.source)
+    : [source.source];
+  const assetDependencyIds = [...new Set(sources.flatMap((componentSource) => (
+    componentSource.dependencies.asset_ids
+  )))].sort();
+  const tokenDependencyIds = [...new Set(sources.flatMap((componentSource) => (
+    componentSource.dependencies.token_ids
+  )))].sort();
+  const availableAssetIds = assetDependencyIds.length === 0
+    ? new Set<string>()
+    : new Set((database.sqlite.prepare(
+      `SELECT id FROM assets WHERE organization_id = ? AND id IN (${assetDependencyIds.map(() => "?").join(", ")})`,
+    ).all(organizationId, ...assetDependencyIds) as Array<{ id: string }>).map((row) => row.id));
+  const missingAssetIds = assetDependencyIds.filter((assetId) => !availableAssetIds.has(assetId));
+  const blockers: PinnedComponentCatalogBlocker[] = [
+    ...dependencyBlockers,
+    ...(missingAssetIds.length > 0 ? [{
+      code: "ASSET_COPY_UNAVAILABLE" as const,
+      message: `Insertion is blocked because ${missingAssetIds.length} released asset dependency or dependencies are unavailable for verified content-hash copying.`,
+    }] : []),
+  ];
   return {
     definition,
     sourceHash: source.sourceHash,
-    sourceNodeCount: source.source.nodes.length,
-    prototypeLinkCount: source.source.prototype_links.length,
-    tokenDependencyIds: [...source.source.dependencies.token_ids].sort(),
+    sourceNodeCount: sources.reduce((total, componentSource) => total + componentSource.nodes.length, 0),
+    prototypeLinkCount: sources.reduce((total, componentSource) => total + componentSource.prototype_links.length, 0),
+    tokenDependencyIds,
     assetDependencyIds,
     insertable: blockers.length === 0,
     blockers,
@@ -213,7 +361,16 @@ export function listPinnedComponentRelease(
       }
       const source = foundationComponentSource(definition);
       const sourceHash = createHash("sha256").update(canonicalComponentSourceBundleBytes(source)).digest("hex");
-      return catalogItem(definition, { source, sourceHash });
+      const resolved = { definition, source, sourceHash };
+      const dependencies = resolveCatalogComponentGraph(resolved, foundationResolvedComponent);
+      return catalogItem(
+        database,
+        organizationId,
+        definition,
+        { source, sourceHash },
+        dependencies.graph,
+        dependencies.blockers,
+      );
     }).sort((left, right) => left.definition.name.localeCompare(right.definition.name)
       || left.definition.id.localeCompare(right.definition.id));
     return {
@@ -250,6 +407,10 @@ export function listPinnedComponentRelease(
     || envelope.release.status !== releaseRow.status) {
     throw new DomainError("INTERNAL_ERROR", "Pinned design-system release integrity verification failed.", 500);
   }
+  const selectedVersions = new Map(envelope.component_versions.map((selection) => [
+    selection.component_definition_id,
+    selection.version,
+  ]));
   const components = envelope.component_versions.map((selection) => {
     const componentRow = database.sqlite.prepare(
       `SELECT definition_json, source_json, source_hash
@@ -267,13 +428,31 @@ export function listPinnedComponentRelease(
       || definition.version !== selection.version) {
       throw new DomainError("INTERNAL_ERROR", "Pinned component definition integrity verification failed.", 500);
     }
-    if (componentRow.source_json === null && componentRow.source_hash === null) return catalogItem(definition, null);
-    return catalogItem(definition, verifiedSource(
+    if (componentRow.source_json === null && componentRow.source_hash === null) return catalogItem(database, organizationId, definition, null);
+    const source = verifiedSource(
       definition,
       selection.version,
       componentRow.source_json,
       componentRow.source_hash,
-    ));
+    );
+    const dependencies = resolveCatalogComponentGraph(
+      { definition, source: source.source, sourceHash: source.sourceHash },
+      (nestedId, nestedVersion) => persistedResolvedComponent(
+        database,
+        pin.design_system_id,
+        selectedVersions,
+        nestedId,
+        nestedVersion,
+      ),
+    );
+    return catalogItem(
+      database,
+      organizationId,
+      definition,
+      source,
+      dependencies.graph,
+      dependencies.blockers,
+    );
   }).sort((left, right) => left.definition.name.localeCompare(right.definition.name)
     || left.definition.id.localeCompare(right.definition.id));
   return {
@@ -305,8 +484,11 @@ export function resolvePinnedComponentRelease(
     if (!selected || !definition || selected.version !== definition.version) {
       throw new DomainError("NOT_FOUND", "Component is not selected in the pinned FormaSpec Foundation release.", 404);
     }
-    const source = foundationComponentSource(definition);
-    const sourceHash = createHash("sha256").update(canonicalComponentSourceBundleBytes(source)).digest("hex");
+    const graph = resolveComponentGraph(
+      foundationResolvedComponent(definition.id, definition.version),
+      foundationResolvedComponent,
+    );
+    const resolved = graph.at(-1)!;
     const releaseTokens = Object.fromEntries(FORMASPEC_FOUNDATION_SYSTEM.release.token_ids.map((tokenId) => {
       const token = FORMASPEC_FOUNDATION_SYSTEM.tokens[tokenId];
       if (!token) throw new DomainError("INTERNAL_ERROR", "FormaSpec Foundation token selection is incomplete.", 500);
@@ -317,9 +499,10 @@ export function resolvePinnedComponentRelease(
       releaseId: pin.release_id,
       releaseVersion: pin.release_version,
       definition,
-      source,
-      sourceHash,
+      source: resolved.source,
+      sourceHash: resolved.sourceHash,
       releaseTokens,
+      nestedComponents: graph.slice(0, -1),
     };
   }
 
@@ -352,23 +535,21 @@ export function resolvePinnedComponentRelease(
     (candidate) => candidate.component_definition_id === componentDefinitionId,
   );
   if (!selected) throw new DomainError("NOT_FOUND", "Component is not selected in the pinned release.", 404);
-  const componentRow = database.sqlite.prepare(
-    `SELECT definition_json, source_json, source_hash
-     FROM component_definitions
-     WHERE design_system_id = ? AND component_id = ? AND version = ?`,
-  ).get(pin.design_system_id, componentDefinitionId, selected.version) as {
-    definition_json: string;
-    source_json: string | null;
-    source_hash: string | null;
-  } | undefined;
-  if (!componentRow) throw new DomainError("INTERNAL_ERROR", "Pinned release component row is missing.", 500);
-  const definition = ComponentDefinitionSchema.parse(JSON.parse(componentRow.definition_json) as unknown);
-  if (canonicalJson(definition) !== componentRow.definition_json
-    || definition.id !== componentDefinitionId
-    || definition.version !== selected.version) {
-    throw new DomainError("INTERNAL_ERROR", "Pinned component definition integrity verification failed.", 500);
-  }
-  const source = verifiedSource(definition, selected.version, componentRow.source_json, componentRow.source_hash);
+  const selectedVersions = new Map(envelope.component_versions.map((selection) => [
+    selection.component_definition_id,
+    selection.version,
+  ]));
+  const graph = resolveComponentGraph(
+    persistedResolvedComponent(database, pin.design_system_id, selectedVersions, componentDefinitionId, selected.version),
+    (nestedId, nestedVersion) => persistedResolvedComponent(
+      database,
+      pin.design_system_id,
+      selectedVersions,
+      nestedId,
+      nestedVersion,
+    ),
+  );
+  const resolved = graph.at(-1)!;
   const releaseTokens: Record<string, DesignSystemToken> = {};
   for (const tokenSelection of envelope.token_versions) {
     const tokenRow = database.sqlite.prepare(
@@ -386,9 +567,10 @@ export function resolvePinnedComponentRelease(
     designSystemId: pin.design_system_id,
     releaseId: pin.release_id,
     releaseVersion: pin.release_version,
-    definition,
-    source: source.source,
-    sourceHash: source.sourceHash,
+    definition: resolved.definition,
+    source: resolved.source,
+    sourceHash: resolved.sourceHash,
     releaseTokens,
+    nestedComponents: graph.slice(0, -1),
   };
 }

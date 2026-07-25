@@ -9,6 +9,7 @@ import {
   type DesignNode,
   type JsonValue,
 } from "./model.js";
+import { validateResponsiveFrameVariants } from "./responsive-frame-variants.js";
 
 export const DiagnosticSeveritySchema = z.enum(["error", "warning", "info"]);
 export const DiagnosticSchema = z
@@ -157,6 +158,10 @@ export function lintDesignDocument(document: DesignDocument): Diagnostic[] {
       );
     }
     if (!token.archived) tokenPaths.set(token.path, token.id);
+  }
+
+  for (const issue of validateResponsiveFrameVariants(document)) {
+    diagnostics.push(diagnostic("error", issue.code, issue.message, issue.path, issue.entity_id));
   }
 
   // Component definitions and their descendants are detached reusable source

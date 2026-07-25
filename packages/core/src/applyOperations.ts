@@ -38,6 +38,7 @@ import {
   lintDesignDocument,
   validateDesignDocument,
 } from "./validation.js";
+import { reconcileResponsiveFrameVariantsAfterArchive } from "./responsive-frame-variants.js";
 
 export type OperationErrorCode =
   | "invalid_document"
@@ -225,6 +226,7 @@ const fieldCompatibility: Record<string, ReadonlySet<DesignNode["type"]>> = {
   role: new Set(["frame"]),
   component_key: new Set(["component"]),
   description: new Set(["component"]),
+  responsive_variant: new Set(["frame"]),
 };
 
 function updateNode(document: DesignDocument, operation: UpdateNodeOperation, context: ApplyContext): void {
@@ -472,6 +474,7 @@ function applyOperation(document: DesignDocument, operation: DesignOperation, co
         const node = document.nodes[nodeId];
         if (node !== undefined) node.archived = true;
       }
+      reconcileResponsiveFrameVariantsAfterArchive(document, archived);
       for (const [linkId, link] of Object.entries(document.prototype_links)) {
         const targetNodeId =
           link.action.type === "navigate" || link.action.type === "open_overlay" ? link.action.node_id : undefined;
@@ -504,6 +507,7 @@ function applyOperation(document: DesignDocument, operation: DesignOperation, co
         const node = document.nodes[nodeId];
         if (node !== undefined) node.archived = true;
       }
+      reconcileResponsiveFrameVariantsAfterArchive(document, archived);
       for (const [linkId, link] of Object.entries(document.prototype_links)) {
         const targetsArchivedPage =
           (link.action.type === "navigate" || link.action.type === "open_overlay")

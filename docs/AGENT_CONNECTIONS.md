@@ -45,24 +45,18 @@ ticket over its private control endpoint. The bridge posts only `{ "nonce":
 "…" }` to exact `POST /api/agent-connections/pair`, verifies the optional
 expected connection ID, verifies MCP and the returned authorization context,
 then stores the upstream scoped grant in the OS credential store. It writes a
-credential-free `formaspec` MCP entry, installs the primary managed
-version-0.2.0 FormaSpec skills/plugins plus the Minimal UI legacy compatibility
-assets, and verifies Codex configuration.
+credential-free `formaspec` MCP entry, installs and verifies the managed
+FormaSpec 0.3.0 plugin, removes the legacy plugin through Codex, and verifies
+the final single-identity configuration.
 
-Canonical installation completes before managed compatibility assets are
-refreshed. Older `minimal-ui` content is replaced only when its own
-`.formaspec-managed.json` marker proves ownership by `formaspecctl`; unmanaged
-legacy content is left untouched. The connector never overwrites an unmanaged
-`formaspec` or `minimal-ui` skill/plugin/marketplace. Start a new Codex task
-and use the primary mention:
+Installer-owned standalone legacy skills are deleted only when their
+`.formaspec-managed.json` marker proves ownership. Unmanaged files are
+preserved and reported as a collision. Start a new Codex task after the upgrade
+and use the only supported mention:
 
 ```text
 [@FormaSpec](plugin://formaspec@formaspec)
 ```
-
-> **Legacy prompt compatibility:** the managed
-> `[@Minimal UI](plugin://minimal-ui@formaspec)` alias remains available for
-> existing workflows and shares the same token-free MCP entry.
 
 ## Website task approval boundary
 
@@ -72,9 +66,9 @@ preview, runs linting, and transitions the task to `awaiting_approval` with the
 `previewId`. The agent must not commit the preview or complete the task. A
 human uses FormaSpec's before/after review to **Commit** or **Discard**.
 
-Direct non-task MCP requests remain separate: after normal write approval, an
-authorized agent may commit an exact inspected preview with
-`design_commit_preview`.
+Direct requests create and claim an immutable design-preview task first. The
+agent publishes the inspected exact preview and never calls
+`design_commit_preview`; a human commits or discards it in FormaSpec.
 
 Only `/api/agent-connections/pair` is available to the headless bridge without
 a browser session or trusted identity. Creating a connection, reconnecting it,
@@ -111,6 +105,9 @@ shell or bearer token, and open Administration. The macOS, Linux, and Windows
 source handlers also accept the explicitly tested queryless local-no-auth and
 nonce-only forms; they reject extra, reordered, duplicated, encoded,
 credential-bearing, oversized, control-character, and otherwise unsafe input.
+They separately accept the secret-free, ordered `open-review` identifiers,
+run the fixed `ensure-running` recovery preflight, require an exact data-store
+match, and then open only the corresponding persisted-preview review route.
 Clean installed protocol lifecycle evidence remains a release blocker.
 
 ## Other MCP clients

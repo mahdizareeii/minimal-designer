@@ -1,10 +1,6 @@
 # Getting started
 
-FormaSpec is the browser product and primary agent identity.
-
-> **Backward compatibility:** **Minimal UI** remains a legacy alias for
-> existing prompts and integrations. Use FormaSpec for all new work. Both
-> identities use the same token-free `formaspec` MCP connection.
+FormaSpec is the browser product and the only supported agent identity.
 
 ## Install and start
 
@@ -56,19 +52,15 @@ Then use:
 Other supported triggers include `Use FormaSpec`, `Design this with FormaSpec`,
 and `Refine this selection with FormaSpec`.
 
-> **Legacy prompt compatibility:** existing workflows may still use
-> `Use Minimal UI` or
-> `[@Minimal UI](plugin://minimal-ui@formaspec)`, but new workflows should not.
-
-The primary FormaSpec plugin and its managed compatibility alias are version
-0.2.0; start a new Codex task after installation or refresh.
+The managed FormaSpec plugin is version 0.3.0. Start a new Codex task after an
+installation or upgrade so the task receives the new plugin inventory.
 
 When **Submit to @FormaSpec** creates a website task, Codex previews the design,
 inspects the PNG, runs linting, and returns the task in
 `awaiting_approval`. The product manager then commits or discards the exact
-preview in FormaSpec. Codex must not commit or complete a website-created task.
-A direct non-task Codex request may commit through MCP only after normal write
-approval.
+preview in FormaSpec. Direct requests create the same immutable task first;
+Codex never commits a design preview. The website Commit button is the approval
+boundary.
 
 ## Export and administer
 

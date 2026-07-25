@@ -175,6 +175,41 @@ const containerRoleSchema = z.enum([
   "dialog",
 ]);
 
+export const ResponsiveFrameGroupIdSchema = z.string().regex(
+  /^responsive_[A-Za-z0-9][A-Za-z0-9_-]{7,}$/,
+  "Invalid responsive frame group id",
+);
+
+export const ResponsiveBreakpointSchema = z.object({
+  min_width: z.number().int().nonnegative().max(100_000).default(0),
+  max_width: z.number().int().positive().max(100_000).optional(),
+}).strict().superRefine((breakpoint, context) => {
+  if (breakpoint.max_width !== undefined && breakpoint.max_width <= breakpoint.min_width) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["max_width"],
+      message: "Responsive breakpoint max width must be greater than min width",
+    });
+  }
+});
+
+export const ResponsiveFrameVariantSchema = z.object({
+  group_id: ResponsiveFrameGroupIdSchema,
+  frame_ids: z.array(NodeIdSchema).min(2).max(32).superRefine((frameIds, context) => {
+    if (new Set(frameIds).size !== frameIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: "Responsive frame IDs must be unique and ordered",
+      });
+    }
+  }),
+  breakpoint: ResponsiveBreakpointSchema.default({ min_width: 0 }),
+}).strict();
+export type ResponsiveFrameGroupId = z.infer<typeof ResponsiveFrameGroupIdSchema>;
+export type ResponsiveBreakpoint = z.infer<typeof ResponsiveBreakpointSchema>;
+export type ResponsiveFrameVariant = z.infer<typeof ResponsiveFrameVariantSchema>;
+
 export const FrameNodeSchema = z
   .object({
     ...commonNodeShape,
@@ -182,6 +217,7 @@ export const FrameNodeSchema = z
     children: z.array(NodeIdSchema),
     clip_content: z.boolean(),
     role: containerRoleSchema.optional(),
+    responsive_variant: ResponsiveFrameVariantSchema.optional(),
   })
   .strict();
 

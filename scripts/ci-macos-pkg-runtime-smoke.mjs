@@ -432,7 +432,7 @@ export function inspectBrowserPayload(browserRoot, expectedRevision, architectur
 
 export function inspectManagedCodexAssets(assetsRoot) {
   const root = requireContainedDirectory(assetsRoot, assetsRoot, "Packaged FormaSpec Codex asset root");
-  const pluginVersion = "0.2.0";
+  const pluginVersion = "0.3.0";
   const identities = [
     {
       skillName: "formaspec",
@@ -441,19 +441,10 @@ export function inspectManagedCodexAssets(assetsRoot) {
       displayName: "FormaSpec",
       mention: "[@FormaSpec](plugin://formaspec@formaspec)",
     },
-    {
-      skillName: "minimal-ui",
-      pluginName: "minimal-ui",
-      pluginId: "minimal-ui@formaspec",
-      displayName: "Minimal UI",
-      mention: "[@Minimal UI](plugin://minimal-ui@formaspec)",
-    },
   ];
   const requiredFiles = [
     "codex-marketplace/.agents/plugins/marketplace.json",
     ...identities.flatMap((identity) => [
-      `skills/${identity.skillName}/SKILL.md`,
-      `skills/${identity.skillName}/agents/openai.yaml`,
       `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`,
       `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`,
       `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
@@ -462,8 +453,17 @@ export function inspectManagedCodexAssets(assetsRoot) {
   for (const relativePath of requiredFiles) {
     requireContainedRegular(root, path.join(root, ...relativePath.split("/")), `Packaged Codex asset ${relativePath}`);
   }
+  const marketplacePath = path.join(root, "codex-marketplace/.agents/plugins/marketplace.json");
+  const marketplaceText = readBoundedText(
+    marketplacePath,
+    256 * 1024,
+    "Packaged FormaSpec Codex marketplace manifest",
+  );
+  if (/minimal-ui|minimal ui/iu.test(marketplaceText)) {
+    throw new Error("Packaged Codex marketplace must not advertise a retired agent identity.");
+  }
   const marketplace = readBoundedJson(
-    path.join(root, "codex-marketplace/.agents/plugins/marketplace.json"),
+    marketplacePath,
     256 * 1024,
     "Packaged FormaSpec Codex marketplace manifest",
   );
@@ -472,10 +472,28 @@ export function inspectManagedCodexAssets(assetsRoot) {
     || marketplace?.interface?.displayName !== "FormaSpec"
     || !Array.isArray(marketplace?.plugins)
     || marketplace.plugins.length !== identities.length
-  ) throw new Error("Packaged Codex marketplace must expose exactly the FormaSpec and Minimal UI identities.");
+  ) throw new Error("Packaged Codex marketplace must expose exactly one FormaSpec identity.");
+
+  for (const removedPath of [
+    "skills/formaspec",
+    "skills/minimal-ui",
+    "codex-marketplace/plugins/minimal-ui",
+  ]) {
+    if (fs.existsSync(path.join(root, ...removedPath.split("/")))) {
+      throw new Error(`Packaged Codex assets must not contain removed identity path ${removedPath}.`);
+    }
+  }
 
   for (const identity of identities) {
     const pluginPath = `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`;
+    const pluginText = readBoundedText(
+      path.join(root, ...pluginPath.split("/")),
+      256 * 1024,
+      `Packaged ${identity.displayName} Codex plugin manifest`,
+    );
+    if (/minimal-ui|minimal ui/iu.test(pluginText)) {
+      throw new Error("Packaged Codex plugin must not advertise a retired agent identity.");
+    }
     const plugin = readBoundedJson(
       path.join(root, ...pluginPath.split("/")),
       256 * 1024,
@@ -500,10 +518,12 @@ export function inspectManagedCodexAssets(assetsRoot) {
     ) throw new Error(`Packaged Codex marketplace identity is not ${identity.pluginId}.`);
 
     for (const relativePath of [
-      `skills/${identity.skillName}/SKILL.md`,
       `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`,
     ]) {
       const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
+      if (/minimal-ui|minimal ui/iu.test(contents)) {
+        throw new Error(`Packaged Codex skill must not advertise a retired agent identity: ${relativePath}`);
+      }
       const escapedSkillName = identity.skillName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       if (!new RegExp(`^name:\\s*${escapedSkillName}\\s*$`, "mu").test(contents)) {
         throw new Error(`Packaged Codex skill identity is stale: ${relativePath}`);
@@ -511,10 +531,12 @@ export function inspectManagedCodexAssets(assetsRoot) {
     }
 
     for (const relativePath of [
-      `skills/${identity.skillName}/agents/openai.yaml`,
       `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
     ]) {
       const contents = readBoundedText(path.join(root, ...relativePath.split("/")), 256 * 1024, relativePath);
+      if (/minimal-ui|minimal ui/iu.test(contents)) {
+        throw new Error(`Packaged Codex skill metadata must not advertise a retired agent identity: ${relativePath}`);
+      }
       const escapedDisplayName = identity.displayName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       const escapedSkillName = identity.skillName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       if (!new RegExp(`^\\s*display_name:\\s*["']${escapedDisplayName}["']\\s*$`, "mu").test(contents)

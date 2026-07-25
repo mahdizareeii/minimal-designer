@@ -356,6 +356,7 @@ XDG_OPEN='/usr/bin/xdg-open'
 mkdir -p "\${LOG_ROOT}"
 chmod 700 "\${LOG_ROOT}"
 reject_protocol_url() { echo 'Unsupported or malformed FormaSpec URL.' >&2; exit 2; }
+reject_runtime() { echo "$1" >>"\${LOG_ROOT}/protocol.log"; echo "$1" >&2; exit 1; }
 validate_pairing_nonce() {
   [ "\${#1}" -eq 50 ] || reject_protocol_url
   case "$1" in fspair_*) ;; *) reject_protocol_url ;; esac
@@ -367,7 +368,29 @@ validate_connection_id() {
   [ "\${#HEX}" -eq 32 ] || reject_protocol_url
   case "\${HEX}" in *[!a-f0-9]*) reject_protocol_url ;; esac
 }
-[ "\${#URL}" -le 512 ] || reject_protocol_url
+validate_document_id() {
+  [ "\${#1}" -ge 17 ] && [ "\${#1}" -le 209 ] || reject_protocol_url
+  case "$1" in document_*) SUFFIX="\${1#document_}" ;; *) reject_protocol_url ;; esac
+  case "\${SUFFIX}" in [A-Za-z0-9]*) ;; *) reject_protocol_url ;; esac
+  case "$1" in *[!A-Za-z0-9_-]*) reject_protocol_url ;; esac
+}
+validate_preview_id() {
+  [ "\${#1}" -ge 16 ] && [ "\${#1}" -le 208 ] || reject_protocol_url
+  case "$1" in preview_*) SUFFIX="\${1#preview_}" ;; *) reject_protocol_url ;; esac
+  case "\${SUFFIX}" in [A-Za-z0-9]*) ;; *) reject_protocol_url ;; esac
+  case "$1" in *[!A-Za-z0-9_-]*) reject_protocol_url ;; esac
+}
+validate_task_id() {
+  [ "\${#1}" -eq 37 ] || reject_protocol_url
+  case "$1" in task_*) HEX="\${1#task_}" ;; *) reject_protocol_url ;; esac
+  case "\${HEX}" in *[!a-f0-9]*) reject_protocol_url ;; esac
+}
+validate_store_id() {
+  [ "\${#1}" -eq 38 ] || reject_protocol_url
+  case "$1" in store_*) HEX="\${1#store_}" ;; *) reject_protocol_url ;; esac
+  case "\${HEX}" in *[!a-f0-9]*) reject_protocol_url ;; esac
+}
+[ "\${#URL}" -le 2048 ] || reject_protocol_url
 case "\${URL}" in *[!A-Za-z0-9_:?\\&=/_-]*) reject_protocol_url ;; esac
 case "\${URL}" in
   ''|formaspec://|formaspec://open) TARGET='http://127.0.0.1:4310' ;;
@@ -387,6 +410,28 @@ case "\${URL}" in
     validate_pairing_nonce "\${PAIRING_NONCE}"
     "\${FORMASPECCTL}" agent connect codex --pairing-nonce "\${PAIRING_NONCE}" --connection-id "\${CONNECTION_ID}" --yes >>"\${LOG_ROOT}/protocol.log" 2>&1 &
     TARGET='http://127.0.0.1:4310/administration'
+    ;;
+  formaspec://open-review\?design=*)
+    REST="\${URL#formaspec://open-review?design=}"
+    DESIGN_ID="\${REST%%&preview=*}"
+    REST="\${REST#\${DESIGN_ID}&preview=}"
+    PREVIEW_ID="\${REST%%&task=*}"
+    REST="\${REST#\${PREVIEW_ID}&task=}"
+    TASK_ID="\${REST%%&store=*}"
+    STORE_ID="\${REST#\${TASK_ID}&store=}"
+    [ "\${URL}" = "formaspec://open-review?design=\${DESIGN_ID}&preview=\${PREVIEW_ID}&task=\${TASK_ID}&store=\${STORE_ID}" ] || reject_protocol_url
+    validate_document_id "\${DESIGN_ID}"
+    validate_preview_id "\${PREVIEW_ID}"
+    validate_task_id "\${TASK_ID}"
+    validate_store_id "\${STORE_ID}"
+    ENSURE_JSON="$("\${FORMASPECCTL}" ensure-running --json 2>>"\${LOG_ROOT}/protocol.log")" || reject_runtime 'FormaSpec could not resume its recorded runtime. Run formaspecctl ensure-running --json for the blocker.'
+    ACTIVE_STORE="$(printf '%s' "\${ENSURE_JSON}" | sed -n 's/.*"dataStoreId":"\\([^"]*\\)".*/\\1/p')"
+    WEB_ORIGIN="$(printf '%s' "\${ENSURE_JSON}" | sed -n 's/.*"webOrigin":"\\([^"]*\\)".*/\\1/p')"
+    [ "\${ACTIVE_STORE}" = "\${STORE_ID}" ] || reject_runtime "FormaSpec review belongs to data store \${STORE_ID}, but the recorded runtime exposes \${ACTIVE_STORE:-no data store}."
+    case "\${WEB_ORIGIN}" in http://*|https://*) ;; *) reject_runtime 'FormaSpec ensure-running returned an invalid web origin.' ;; esac
+    ORIGIN_AUTHORITY="\${WEB_ORIGIN#*://}"
+    case "\${ORIGIN_AUTHORITY}" in ''|*/*|*'?'*|*'#'*|*@*) reject_runtime 'FormaSpec ensure-running returned an invalid web origin.' ;; esac
+    TARGET="\${WEB_ORIGIN}/design/\${DESIGN_ID}/previews/\${PREVIEW_ID}/review?task=\${TASK_ID}&store=\${STORE_ID}"
     ;;
   *) reject_protocol_url ;;
 esac

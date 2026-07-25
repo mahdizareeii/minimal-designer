@@ -1,4 +1,4 @@
-import type { ComponentProperty, ComponentSlot } from "./design-system.js";
+import type { ComponentDefinition, ComponentProperty, ComponentSlot } from "./design-system.js";
 import { isTokenReference } from "./model.js";
 import type { DesignDocumentV2, DesignNodeV2 } from "./model-v2.js";
 import type { Diagnostic } from "./validation.js";
@@ -97,6 +97,22 @@ function rawDesignValuePaths(node: DesignNodeV2): string[][] {
 function slotAllowsNode(slot: ComponentSlot, node: DesignNodeV2 | undefined): boolean {
   if (!node) return false;
   return !slot.allowed_node_types || slot.allowed_node_types.includes(node.type);
+}
+
+function componentDefinitionNodeIds(
+  document: DesignDocumentV2,
+  definition: ComponentDefinition,
+): Set<string> {
+  const result = new Set<string>();
+  const visit = (nodeId: string): void => {
+    if (result.has(nodeId)) return;
+    const node = document.nodes[nodeId];
+    if (!node) return;
+    result.add(nodeId);
+    for (const childId of children(node)) visit(childId);
+  };
+  for (const state of definition.states) visit(state.node_id);
+  return result;
 }
 
 function specificationItems(document: DesignDocumentV2) {
@@ -316,6 +332,7 @@ export function lintDesignDocumentV2(document: DesignDocumentV2): Diagnostic[] {
 
   for (const definition of Object.values(document.component_definitions)) {
     const root = document.nodes[definition.root_node_id];
+    const sourceNodeIds = componentDefinitionNodeIds(document, definition);
     if (!root || (!root.archived && !reachable.has(root.id))) {
       add(diagnostic(
         "warning",
@@ -332,6 +349,33 @@ export function lintDesignDocumentV2(document: DesignDocumentV2): Diagnostic[] {
         "component_state_node_missing",
         `Component ${definition.name} state ${state.key} references a missing or archived node.`,
         ["component_definitions", definition.id, "states", state.key, "node_id"],
+        definition.id,
+      ));
+    }
+    for (const binding of definition.property_bindings) {
+      const target = document.nodes[binding.target_node_id];
+      const compatible = target !== undefined
+        && sourceNodeIds.has(target.id)
+        && (binding.target === "visibility"
+          || binding.target === "accessibility_label"
+          || (binding.target === "text_content" && target.type === "text")
+          || (binding.target === "icon_name" && target.type === "icon")
+          || (binding.target === "asset_id" && target.type === "image"));
+      if (!compatible) add(diagnostic(
+        "error",
+        "component_property_binding_target_invalid",
+        `Component ${definition.name} property ${binding.property_key} has an unavailable or incompatible binding target.`,
+        ["component_definitions", definition.id, "property_bindings", binding.property_key],
+        definition.id,
+      ));
+    }
+    for (const anchor of definition.slot_anchors) {
+      const target = document.nodes[anchor.target_node_id];
+      if (!target || !sourceNodeIds.has(target.id) || (target.type !== "frame" && target.type !== "container")) add(diagnostic(
+        "error",
+        "component_slot_anchor_invalid",
+        `Component ${definition.name} slot ${anchor.slot_key} has no compatible source-container anchor.`,
+        ["component_definitions", definition.id, "slot_anchors", anchor.slot_key],
         definition.id,
       ));
     }
@@ -365,6 +409,7 @@ export function lintDesignDocumentV2(document: DesignDocumentV2): Diagnostic[] {
     if (node.type !== "component_instance" || node.archived) continue;
     const definition = document.component_definitions[node.component_definition_id];
     if (!definition) continue;
+    const sourceNodeIds = componentDefinitionNodeIds(document, definition);
     if (definition.status === "draft") add(diagnostic(
       "warning",
       "draft_component_instance",
@@ -448,6 +493,38 @@ export function lintDesignDocumentV2(document: DesignDocumentV2): Diagnostic[] {
         ["nodes", node.id, "slots", slotKey],
         node.id,
       ));
+    }
+    const slottedNodeIds = new Set<string>();
+    for (const [slotKey, nodeIds] of Object.entries(node.slots)) {
+      for (const nodeId of nodeIds) {
+        if (slottedNodeIds.has(nodeId)) add(diagnostic(
+          "error",
+          "component_slot_node_reused",
+          `Instance ${node.name} reuses node ${nodeId} in more than one slot.`,
+          ["nodes", node.id, "slots", slotKey],
+          node.id,
+        ));
+        slottedNodeIds.add(nodeId);
+      }
+    }
+    const allowedStylePaths = new Set(definition.allowed_overrides.allowed_style_paths);
+    for (const [targetNodeId, style] of Object.entries(node.visual_overrides)) {
+      if (!sourceNodeIds.has(targetNodeId)) add(diagnostic(
+        "error",
+        "component_visual_override_target_invalid",
+        `Instance ${node.name} overrides a node outside component ${definition.name}.`,
+        ["nodes", node.id, "visual_overrides", targetNodeId],
+        node.id,
+      ));
+      for (const stylePath of Object.keys(style ?? {})) {
+        if (!allowedStylePaths.has(stylePath as never)) add(diagnostic(
+          "error",
+          "component_visual_override_forbidden",
+          `Component ${definition.name} does not allow the ${stylePath} visual override.`,
+          ["nodes", node.id, "visual_overrides", targetNodeId, stylePath],
+          node.id,
+        ));
+      }
     }
     if (!definition.states.some((state) => state.key === node.active_state)) add(diagnostic(
       "warning",

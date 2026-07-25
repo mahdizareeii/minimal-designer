@@ -1,7 +1,6 @@
 # Preferred setup: let FormaSpec start and authorize the loopback bridge,
-# configure Codex, install the primary managed FormaSpec version-0.2.2
-# skills/plugins plus the Minimal UI legacy compatibility assets, and verify
-# the connection automatically:
+# configure Codex, install the managed FormaSpec 0.3.0 plugin, remove
+# installer-owned legacy identities, and verify the connection automatically:
 #
 #   pnpm formaspecctl --yes agent connect codex
 #
@@ -15,6 +14,3 @@ tool_timeout_sec = 60
 
 # After the managed plugins are installed, start a new task and use:
 # [@FormaSpec](plugin://formaspec@formaspec)
-#
-# Backward compatibility only; retain for existing prompts, not new examples:
-# [@Minimal UI](plugin://minimal-ui@formaspec)

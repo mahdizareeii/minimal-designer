@@ -100,32 +100,6 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
     "app/apps/workspace-bridge/dist/cli.js",
     "app/packages/core/dist/index.js",
   ]) writeFixture(payload, relativePath, `fixture:${relativePath}\n`);
-  writeFixture(payload, "app/apps/cli/assets/skills/formaspec/SKILL.md", [
-    "---",
-    "name: formaspec",
-    "description: Fixture managed FormaSpec skill.",
-    "---",
-    "",
-  ].join("\n"));
-  writeFixture(payload, "app/apps/cli/assets/skills/formaspec/agents/openai.yaml", [
-    "interface:",
-    "  display_name: \"FormaSpec\"",
-    "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
-    "",
-  ].join("\n"));
-  writeFixture(payload, "app/apps/cli/assets/skills/minimal-ui/SKILL.md", [
-    "---",
-    "name: minimal-ui",
-    "description: Fixture managed Minimal UI alias skill.",
-    "---",
-    "",
-  ].join("\n"));
-  writeFixture(payload, "app/apps/cli/assets/skills/minimal-ui/agents/openai.yaml", [
-    "interface:",
-    "  display_name: \"Minimal UI\"",
-    "  default_prompt: \"Use $minimal-ui to design this interface with Minimal UI.\"",
-    "",
-  ].join("\n"));
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/.agents/plugins/marketplace.json", `${JSON.stringify({
     name: "formaspec",
     interface: { displayName: "FormaSpec" },
@@ -136,17 +110,11 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
         policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
         category: "Productivity",
       },
-      {
-        name: "minimal-ui",
-        source: { source: "local", path: "./plugins/minimal-ui" },
-        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-        category: "Productivity",
-      },
     ],
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
     name: "formaspec",
-    version: "0.2.2",
+    version: "0.3.0",
     interface: { displayName: "FormaSpec" },
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", [
@@ -163,28 +131,6 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
       "interface:",
       "  display_name: \"FormaSpec\"",
       "  default_prompt: \"Use $formaspec to design this interface with FormaSpec.\"",
-      "",
-    ].join("\n"),
-  );
-  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/.codex-plugin/plugin.json", `${JSON.stringify({
-    name: "minimal-ui",
-    version: "0.2.2",
-    interface: { displayName: "Minimal UI" },
-  }, null, 2)}\n`);
-  writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/skills/minimal-ui/SKILL.md", [
-    "---",
-    "name: minimal-ui",
-    "description: Fixture managed Minimal UI alias skill.",
-    "---",
-    "",
-  ].join("\n"));
-  writeFixture(
-    payload,
-    "app/apps/cli/assets/codex-marketplace/plugins/minimal-ui/skills/minimal-ui/agents/openai.yaml",
-    [
-      "interface:",
-      "  display_name: \"Minimal UI\"",
-      "  default_prompt: \"Use $minimal-ui to design this interface with Minimal UI.\"",
       "",
     ].join("\n"),
   );
@@ -348,6 +294,13 @@ describe("native Windows service-host boundary", () => {
 describe("Windows FormaSpec protocol boundary", () => {
   const nonce = `fspair_${"n".repeat(43)}`;
   const connectionId = `connection_${"a".repeat(32)}`;
+  const review = {
+    designId: `document_${"d".repeat(32)}`,
+    previewId: `preview_${"e".repeat(32)}`,
+    taskId: `task_${"f".repeat(32)}`,
+    storeId: `store_${"b".repeat(32)}`,
+  };
+  const reviewUrl = `formaspec://open-review?design=${review.designId}&preview=${review.previewId}&task=${review.taskId}&store=${review.storeId}`;
 
   it("accepts only queryless compatibility and bounded one-time pairing forms", () => {
     expect(parseWindowsProtocolUrl("formaspec://")).toEqual({ kind: "open" });
@@ -360,6 +313,7 @@ describe("Windows FormaSpec protocol boundary", () => {
     expect(parseWindowsProtocolUrl(
       `formaspec://connect-agent?connection=${connectionId}&nonce=${nonce}`,
     )).toEqual({ kind: "connect", connectionId, pairingNonce: nonce });
+    expect(parseWindowsProtocolUrl(reviewUrl)).toEqual({ kind: "review", ...review });
   });
 
   it("rejects extra, reordered, encoded, duplicated, credential-bearing, and unsafe pairing data", () => {
@@ -373,6 +327,9 @@ describe("Windows FormaSpec protocol boundary", () => {
       `formaspec://connect-agent/path?nonce=${nonce}`,
       `formaspec://connect-agent?connection=${connectionId}\\&nonce=${nonce}`,
       `formaspec://connect-agent?task=task_unsafe`,
+      reviewUrl.replace(`design=${review.designId}&preview=${review.previewId}`, `preview=${review.previewId}&design=${review.designId}`),
+      `${reviewUrl}&store=${review.storeId}`,
+      reviewUrl.replace(review.taskId, `task_${"A".repeat(32)}`),
       `https://connect-agent?nonce=${nonce}`,
     ]) expect(() => parseWindowsProtocolUrl(candidate)).toThrow(/malformed|unsupported/);
   });
@@ -384,6 +341,8 @@ describe("Windows FormaSpec protocol boundary", () => {
     expect(source).toContain('cliArguments.push("--pairing-nonce", action.pairingNonce)');
     expect(source).toContain('cliArguments.push("--connection-id", action.connectionId)');
     expect(source).toContain('cliArguments.push("--yes")');
+    expect(source).toContain('[cliEntry, "ensure-running", "--json"]');
+    expect(source).toContain('spawn("rundll32.exe", ["url.dll,FileProtocolHandler", target]');
     expect(source).toContain('FORMASPEC_UPSTREAM_AUTH_MODE: upstreamAuthMode');
     expect(source).not.toMatch(/execSync|eval\(|cmd\.exe|powershell|Bearer/);
   });
@@ -433,6 +392,51 @@ fs.writeFileSync(process.env.FORMASPEC_PROTOCOL_CAPTURE, JSON.stringify({
     });
     expect(rejected.status).toBe(2);
     expect(fs.existsSync(rejectedCapture)).toBe(false);
+  });
+
+  it("verifies the recorded store before accepting an exact review launch", async () => {
+    const root = temporaryRoot("formaspec-windows-review-protocol-");
+    const handler = writeFixture(root, WINDOWS_PROTOCOL_HANDLER_RELATIVE_PATH, windowsProtocolHandlerSource());
+    const capture = path.join(root, "review-preflight.json");
+    writeFixture(root, "service/formaspec-service.json", JSON.stringify({
+      api: { environment: { AUTH_MODE: "none" } },
+    }));
+    writeFixture(root, "app/apps/cli/dist/index.js", `
+const fs = require("node:fs");
+fs.writeFileSync(process.env.FORMASPEC_PROTOCOL_CAPTURE, JSON.stringify(process.argv.slice(2)));
+process.stdout.write(JSON.stringify({
+  schemaVersion: 1,
+  ok: true,
+  status: "ready",
+  mode: "local",
+  started: false,
+  origin: "http://127.0.0.1:4310",
+  webOrigin: "http://127.0.0.1:4311",
+  dataStoreId: process.env.FORMASPEC_TEST_STORE,
+  bridgeReady: true,
+}));
+`);
+    const environment = {
+      ...process.env,
+      FORMASPEC_PROTOCOL_CAPTURE: capture,
+      FORMASPEC_TEST_STORE: review.storeId,
+      ProgramData: path.join(root, "program-data"),
+    };
+    const accepted = spawnSync(process.execPath, [handler, reviewUrl], {
+      env: environment,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    expect(accepted.status, accepted.stderr).toBe(0);
+    expect(JSON.parse(fs.readFileSync(capture, "utf8"))).toEqual(["ensure-running", "--json"]);
+
+    const wrongStore = spawnSync(process.execPath, [handler, reviewUrl], {
+      env: { ...environment, FORMASPEC_TEST_STORE: `store_${"c".repeat(32)}` },
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    expect(wrongStore.status).toBe(2);
+    expect(wrongStore.stderr).toMatch(/belongs to data store/i);
   });
 });
 

@@ -1,7 +1,7 @@
 {
   "name": "formaspec",
-  "version": "0.2.2",
-  "description": "Design, inspect, refine, and hand off structured FormaSpec projects through the local FormaSpec MCP connection.",
+  "version": "0.3.0",
+  "description": "Plan, design, inspect, refine, and hand off structured products with a senior product, UX, and engineering workflow through the local FormaSpec MCP connection.",
   "author": {
     "name": "FormaSpec"
   },
@@ -14,8 +14,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "FormaSpec",
-    "shortDescription": "AI-first product design with FormaSpec",
-    "longDescription": "Create and refine editable FormaSpec designs, product specifications, previews, diagnostics, and engineering handoffs through the scoped local FormaSpec MCP connection.",
+    "shortDescription": "Senior product and UI/UX design",
+    "longDescription": "Resolve the exact product, inspect its specification and design system, then create and refine editable FormaSpec designs, diagnostics, previews, and engineering handoffs through the scoped local FormaSpec MCP connection.",
     "developerName": "FormaSpec",
     "category": "Productivity",
     "capabilities": [

@@ -16,10 +16,12 @@ import {
   NodeLayoutPatchSchema,
   NodeStyleSchema,
   PrototypeLinkSchema,
+  ResponsiveFrameVariantSchema,
   StringValueSchema,
   ViewportSchema,
 } from "./model.js";
 import { ComponentSourceStateKeySchema } from "./component-source.js";
+import { ComponentPropertyValueSchema } from "./model-v2.js";
 import { ComponentDefinitionIdSchema } from "./product-spec.js";
 
 const operationIdShape = { operation_id: OperationIdSchema.optional() };
@@ -114,6 +116,7 @@ export const UpdateNodePatchSchema = z
       .optional(),
     component_key: z.string().trim().min(1).max(160).optional(),
     description: z.string().max(2_000).nullable().optional(),
+    responsive_variant: ResponsiveFrameVariantSchema.nullable().optional(),
   })
   .strict();
 export type UpdateNodePatch = z.infer<typeof UpdateNodePatchSchema>;
@@ -208,6 +211,9 @@ export const InsertComponentInstanceOperationSchema = z.object({
   source_hash: z.string().regex(/^[a-f0-9]{64}$/),
   instance_id: NodeIdSchema,
   active_state: ComponentSourceStateKeySchema,
+  properties: z.record(ComponentPropertyValueSchema).default({}),
+  slots: z.record(z.array(NodeIdSchema).max(100)).default({}),
+  visual_overrides: z.record(NodeIdSchema, NodeStyleSchema).default({}),
   index: z.number().int().nonnegative().optional(),
   position: z.object({ x: z.number().finite(), y: z.number().finite() }).strict().optional(),
 }).strict();

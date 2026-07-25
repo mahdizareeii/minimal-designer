@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DEFAULT_ORGANIZATION_POLICY } from "./organization-policy-model.js";
+import { designReadinessFixture } from "../test-fixtures/product.js";
 
 const builtWebIndex = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist/index.html");
 const PROXY_SECRET = "proxy-secret-0123456789abcdef0123456789abcdef";
@@ -359,9 +360,47 @@ describe("designer server", () => {
       previewId: string;
       canCommit: boolean;
       createdIds: { temporary: Record<string, string> };
+      dataStoreId: string;
+      renderMetadata: { sha256: string };
     }>();
     expect(preview.canCommit).toBe(true);
     expect(preview.createdIds.temporary["tmp:card"]).toMatch(/^node_/);
+    expect(preview.dataStoreId).toBe(application.database.dataStoreId());
+
+    const renderJobsBeforeExact = (application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM render_jobs WHERE design_id = ?",
+    ).get(created.document.id) as { count: number }).count;
+    const exact = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${created.document.id}/previews/${preview.previewId}/render.png?storeId=${preview.dataStoreId}`,
+      headers: { "x-designer-user": "alice" },
+    });
+    expect(exact.statusCode, exact.body).toBe(200);
+    expect(exact.headers["cache-control"]).toBe("no-store");
+    expect(exact.headers["x-formaspec-preview-artifact"]).toBe("stored");
+    expect(createHash("sha256").update(exact.rawPayload).digest("hex")).toBe(preview.renderMetadata.sha256);
+    expect((application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM render_jobs WHERE design_id = ?",
+    ).get(created.document.id) as { count: number }).count).toBe(renderJobsBeforeExact);
+
+    await fs.promises.rm(application.previewRenderStore.artifactPath(preview.renderMetadata.sha256));
+    const hydrated = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${created.document.id}/previews/${preview.previewId}/render.png?storeId=${preview.dataStoreId}`,
+      headers: { "x-designer-user": "alice" },
+    });
+    expect(hydrated.statusCode, hydrated.body).toBe(200);
+    expect(hydrated.headers["x-formaspec-preview-artifact"]).toBe("hydrated");
+    expect(createHash("sha256").update(hydrated.rawPayload).digest("hex")).toBe(preview.renderMetadata.sha256);
+    expect(application.previewRenderStore.read(preview.renderMetadata.sha256)).toEqual(hydrated.rawPayload);
+
+    const wrongStore = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${created.document.id}/previews/${preview.previewId}?storeId=store_${"f".repeat(32)}`,
+      headers: { "x-designer-user": "alice" },
+    });
+    expect(wrongStore.statusCode).toBe(409);
+    expect(wrongStore.json()).toMatchObject({ error: { code: "DATA_STORE_MISMATCH" } });
 
     const render = await application.app.inject({
       method: "GET",
@@ -633,9 +672,11 @@ describe("designer server", () => {
     expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${task.task.id} with task_claim`);
     expect(taskLaunch.searchParams.get("prompt")).toContain("design_preview_changes");
     expect(taskLaunch.searchParams.get("prompt")).toContain("returned PNG in Codex");
-    expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
+    expect(taskLaunch.searchParams.get("prompt")).toContain("immutable Product");
+    expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>","readiness":');
+    expect(taskLaunch.searchParams.get("prompt")).toContain("DesignReadinessReport");
     expect(taskLaunch.searchParams.get("prompt")).toContain("Do not commit it");
-    expect(task.launchUrl).not.toMatch(/token|bearer|nonce/i);
+    expect(task.launchUrl).not.toMatch(/(?:bearer(?:%20|\+|\s)+[a-z0-9._~-]+|(?:access|mcp|auth)[_-]?token(?:=|%3D)|nonce(?:=|%3D))/i);
 
     const inspectResponse = await application.app.inject({
       method: "GET",
@@ -937,13 +978,18 @@ describe("designer server", () => {
         },
     });
     expect(response.statusCode).toBe(200);
-    const body = response.json<{ result: { serverInfo: { name: string }; instructions: string } }>();
+    const body = response.json<{ result: { serverInfo: { name: string; version: string }; instructions: string } }>();
     expect(body.result.serverInfo.name).toBe("formaspec");
-    expect(body.result.instructions).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
-    expect(body.result.instructions).toContain("Use FormaSpec");
+    expect(body.result.serverInfo.version).toBe("0.3.0");
+    expect(body.result.instructions).toContain("one exact Product and Design");
+    expect(body.result.instructions).toContain("frozen product specification");
+    expect(body.result.instructions).toContain("effective design-system release");
+    expect(body.result.instructions).toContain("repository inventory/mappings");
+    expect(body.result.instructions).toContain("validated data.readiness");
     expect(body.result.instructions).not.toContain("Use Minimal UI");
     expect(body.result.instructions).not.toContain("plugin://minimal-ui");
-    expect(body.result.instructions).toContain("return the exact preview for human approval; do not commit it");
+    expect(body.result.instructions).toContain("Only a human may Commit or Discard");
+    expect(body.result.instructions).toContain("agents never commit");
     expect(body.result.instructions).toContain("tmp:<label>");
     expect(body.result.instructions.length).toBeLessThanOrEqual(512);
 
@@ -1260,7 +1306,12 @@ describe("designer server", () => {
           task_id: taskId,
           expected_status: "in_progress",
           to_status: "awaiting_approval",
-          data: { previewId: preview.result.structuredContent.preview.id },
+          data: {
+            previewId: preview.result.structuredContent.preview.id,
+            readiness: designReadinessFixture(
+              application.enterprise.readAgentTask("local", taskId).resolvedContext,
+            ),
+          },
         },
       },
     });
@@ -1371,7 +1422,12 @@ describe("designer server", () => {
           task_id: archiveTaskId,
           expected_status: "in_progress",
           to_status: "awaiting_approval",
-          data: { previewId: archivePreview.result.structuredContent.preview.id },
+          data: {
+            previewId: archivePreview.result.structuredContent.preview.id,
+            readiness: designReadinessFixture(
+              application.enterprise.readAgentTask("local", archiveTaskId).resolvedContext,
+            ),
+          },
         },
       },
     });

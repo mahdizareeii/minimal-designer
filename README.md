@@ -6,8 +6,9 @@ manager can describe a web, phone, or tablet experience to Codex, review a
 rendered preview, and continue editing the same structured document in the
 browser.
 
-> **Backward compatibility:** **Minimal UI** remains available only as a legacy
-> alias for existing prompts and integrations. Use FormaSpec for all new work.
+The supported agent identity is exactly
+`[@FormaSpec](plugin://formaspec@formaspec)`. Upgrades remove installer-owned
+legacy identities after FormaSpec 0.3.0 has been installed and verified.
 
 The application does not embed the OpenAI API and does not require an OpenAI
 API key. Codex connects through the local FormaSpec MCP bridge. Your Codex
@@ -24,8 +25,7 @@ subscription or API usage remains separate.
 Run one installer command from the repository root. It checks the operating
 system and requirements, prepares the selected runtime, starts FormaSpec and
 the loopback bridge, and—when Codex is detected—configures the token-free
-`formaspec` MCP server, the primary managed FormaSpec identity, and the
-managed Minimal UI legacy alias.
+`formaspec` MCP server and the managed FormaSpec 0.3.0 plugin.
 
 Docker is the easiest source installation:
 
@@ -91,14 +91,9 @@ Refine this selection with FormaSpec.
 [@FormaSpec](plugin://formaspec@formaspec) create a professional mobile onboarding flow.
 ```
 
-> **Legacy prompt compatibility:** existing automation may continue to use
-> `Use Minimal UI` or
-> `[@Minimal UI](plugin://minimal-ui@formaspec)`. Do not use that alias in new
-> examples or workflows.
-
-The primary version-0.2.0 FormaSpec plugin and the managed Minimal UI legacy
-alias share the same token-free `formaspec` MCP connection. Start a new Codex
-task after installation or refresh so Codex loads the managed assets.
+FormaSpec 0.3.0 is the only managed plugin. Start a new Codex task after an
+installation or upgrade because an already-open task retains its original
+plugin inventory.
 
 The connection is intentionally token-free in Codex configuration. Codex talks
 to the loopback bridge; the bridge holds the short-lived upstream scoped grant
@@ -115,15 +110,18 @@ preview, inspect its PNG, run linting, and transition the task to
 preview or complete the task. A human reviews the exact preview in FormaSpec
 and chooses **Commit** or **Discard**.
 
-For a direct, non-task MCP request, an agent may use the ordinary write-approved
-workflow:
+For a direct, non-task request, the agent creates a task first and uses the same
+human approval boundary:
 
 1. Read project, product-specification, version, and editor-selection context.
-2. Create a bounded preview without changing history.
-3. Inspect the rendered PNG and lint diagnostics.
-4. After write approval, commit that exact preview with the expected base
-   version.
-5. Return the secret-free project/revision deep link for human review.
+2. Read the Product, canonical product specification, effective design-system
+   release, reusable components, tokens, and connected repository mappings.
+3. Create a bounded preview without changing history.
+4. Inspect the exact rendered PNG, lint diagnostics, accessibility, RTL,
+   responsive variants, interaction states, and engineering feasibility.
+5. Publish the task as `awaiting_approval`; only the website's **Commit** button
+   may save the exact preview.
+6. Return the exact rendered PNG and secret-free review links for human approval.
 
 Archive operations use their own destructive preview and commit tools. A
 `VERSION_CONFLICT` requires a fresh read and preview; V1 never auto-merges.
@@ -137,6 +135,7 @@ Run the CLI through pnpm while developing:
 ```bash
 pnpm formaspecctl -- help
 pnpm formaspecctl -- doctor auto
+pnpm formaspecctl -- ensure-running --json
 pnpm formaspecctl -- status
 pnpm formaspecctl -- start docker
 pnpm formaspecctl -- stop
@@ -167,7 +166,8 @@ Currently implemented `formaspecctl` workflows are:
 | Command | Current behavior |
 | --- | --- |
 | `install local\|docker` | Checks/prepares the source runtime, starts FormaSpec and the bridge, and offers supported Codex setup. |
-| `doctor auto\|local\|docker\|server` | Runs source-launcher diagnostics and reports Codex/bridge detection. |
+| `doctor auto\|local\|docker\|server` | Diagnoses the selected runtime, renderer, data-store identity, bridge alignment, and authenticated FormaSpec MCP connection. |
+| `ensure-running` | Recovers only the recorded runtime and data store, verifies the bridge, and returns structured blocker details with `--json`; it never guesses or silently switches runtime modes. |
 | `start`, `stop`, `restart`, `status` | Delegates application lifecycle to the compatibility launcher and manages the bridge. |
 | `migrate status` | Reports the numbered migration ledger for a source-mode database. |
 | `backup create` | Asks the running loopback FormaSpec API to create and immediately verify a managed backup. |
@@ -179,7 +179,7 @@ Currently implemented `formaspecctl` workflows are:
 | `backup restore --backup-id <id>` | Externally supervises a `HEALTHY_PLANNED_RESTORE_ONLY` operation for the launcher-recorded local Docker/server runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. This planned path still requires the current API/database for backup-ID resolution and preflight. |
 | `backup restore offline <bundle>` | With explicit `--yes`, verifies the operator-selected bundle before mutation, pins the same regular file by identity/hash/size, capacity-gates stdin and the whole workflow, streams only stdin into the network-disabled restore worker, applies forensic pre-copy capacity checks, creates and verifies an exact snapshot of the existing `/data` bytes even when SQLite is corrupt, then uses the standard verified cutover, schema/render checks, audit/outbox reconciliation, credential revocation, and readiness-gated restart. Child stdout/stderr shares one combined 4 MiB budget by default, with a 5-second SIGKILL fallback when SIGTERM is ignored. Any failure after fencing remains in maintenance for explicit resume; it never auto-aborts or restarts the API. |
 | `backup restore status\|resume\|rollback\|abort\|clear-stale-lock` | Inspects or safely recovers the exact durable Docker restore operation. Offline interruption before preparation resumes with `--offline-bundle <same-bundle>` under the current maintenance owner; `offlinePrepare` and the replacement worker never reuse a retained forensic predecessor's ID. Forensic rollback restores exact pre-state bytes, keeps maintenance active and the API stopped, and reports `maintenanceCleared: false`/`serviceReady: false`; direct clear is rejected and only a newly verified offline restore may atomically take over that fence. Abort accepts only pristine/prepared pre-cutover state with no journal/worker lock and a reverified healthy live database, so corrupt state remains fenced; stale-lock clearing requires proof that the pinned worker container is absent. |
-| `agent connect codex` | Starts/authorizes the bridge, configures MCP, installs both managed version-0.2.0 identities, and verifies the connection. |
+| `agent connect codex` | Starts or refreshes the bridge, configures token-free MCP, installs and verifies the single managed FormaSpec 0.3.0 plugin, removes only installer-owned legacy identities, and verifies the connection. |
 | `agent config generic` | Prints validated token-free loopback JSON/TOML and verification guidance without reading or modifying an unknown client. |
 | `support-bundle preview\|create` | Previews or explicitly creates a deterministic bounded diagnostic archive with aggressive redaction and no database, assets, backups, environment values, source, or credentials. |
 

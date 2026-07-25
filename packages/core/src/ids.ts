@@ -6,6 +6,10 @@ export const DocumentIdSchema = z
   .string()
   .regex(new RegExp(`^document_${idSuffixPattern}$`), "Invalid document id")
   .brand<"DocumentId">();
+export const ProductIdSchema = z
+  .string()
+  .regex(new RegExp(`^product_${idSuffixPattern}$`), "Invalid product id")
+  .brand<"ProductId">();
 export const PageIdSchema = z
   .string()
   .regex(new RegExp(`^page_${idSuffixPattern}$`), "Invalid page id")
@@ -32,6 +36,7 @@ export const OperationIdSchema = z
   .brand<"OperationId">();
 
 export type DocumentId = z.infer<typeof DocumentIdSchema>;
+export type ProductId = z.infer<typeof ProductIdSchema>;
 export type PageId = z.infer<typeof PageIdSchema>;
 export type NodeId = z.infer<typeof NodeIdSchema>;
 export type TokenId = z.infer<typeof TokenIdSchema>;
@@ -40,6 +45,7 @@ export type PrototypeLinkId = z.infer<typeof PrototypeLinkIdSchema>;
 export type OperationId = z.infer<typeof OperationIdSchema>;
 
 export type IdKind =
+  | "product"
   | "document"
   | "page"
   | "node"
@@ -49,6 +55,7 @@ export type IdKind =
   | "operation";
 
 export interface IdByKind {
+  product: ProductId;
   document: DocumentId;
   page: PageId;
   node: NodeId;
@@ -78,6 +85,7 @@ export function createSequentialIdFactory(namespace = "fixture"): IdFactory {
 }
 
 export const createDocumentId = (): DocumentId => createId("document");
+export const createProductId = (): ProductId => createId("product");
 export const createPageId = (): PageId => createId("page");
 export const createNodeId = (): NodeId => createId("node");
 export const createTokenId = (): TokenId => createId("token");
@@ -86,6 +94,7 @@ export const createPrototypeLinkId = (): PrototypeLinkId => createId("link");
 export const createOperationId = (): OperationId => createId("operation");
 
 export const asDocumentId = (value: string): DocumentId => DocumentIdSchema.parse(value);
+export const asProductId = (value: string): ProductId => ProductIdSchema.parse(value);
 export const asPageId = (value: string): PageId => PageIdSchema.parse(value);
 export const asNodeId = (value: string): NodeId => NodeIdSchema.parse(value);
 export const asTokenId = (value: string): TokenId => TokenIdSchema.parse(value);

@@ -2,6 +2,7 @@ import { blob, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizz
 
 export const designs = sqliteTable("designs", {
   id: text("id").primaryKey(),
+  productId: text("product_id").notNull(),
   actorId: text("actor_id").notNull(),
   name: text("name").notNull(),
   currentVersion: integer("current_version").notNull(),
@@ -124,6 +125,39 @@ export const organizations = sqliteTable("organizations", {
   configJson: text("config_json").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const products = sqliteTable("products", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  status: text("status").notNull(),
+  ownerPrincipalId: text("owner_principal_id").notNull(),
+  canonicalSpecificationDesignId: text("canonical_specification_design_id"),
+  defaultDesignSystemReleaseId: text("default_design_system_release_id"),
+  defaultLocale: text("default_locale").notNull(),
+  defaultDirection: text("default_direction").notNull(),
+  localesJson: text("locales_json").notNull(),
+  metadataJson: text("metadata_json").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  archivedAt: text("archived_at"),
+});
+
+export const productMovePreviews = sqliteTable("product_move_previews", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  designId: text("design_id").notNull(),
+  sourceProductId: text("source_product_id").notNull(),
+  targetProductId: text("target_product_id").notNull(),
+  expectedDesignVersion: integer("expected_design_version").notNull(),
+  status: text("status").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: text("created_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  committedAt: text("committed_at"),
 });
 
 export const principals = sqliteTable("principals", {
@@ -285,6 +319,7 @@ export const auditRetentionDeletePermits = sqliteTable("audit_retention_delete_p
 export const agentTasks = sqliteTable("agent_tasks", {
   id: text("id").primaryKey(),
   organizationId: text("organization_id").notNull(),
+  productId: text("product_id"),
   designId: text("design_id").notNull(),
   actorId: text("actor_id").notNull(),
   brief: text("brief").notNull(),
@@ -293,6 +328,7 @@ export const agentTasks = sqliteTable("agent_tasks", {
   expectedOutput: text("expected_output").notNull(),
   createdAt: text("created_at").notNull(),
   expiresAt: text("expires_at").notNull(),
+  resolvedContextJson: text("resolved_context_json"),
 });
 
 export const agentTaskTransitions = sqliteTable("agent_task_transitions", {

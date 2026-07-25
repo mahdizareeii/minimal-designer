@@ -8,6 +8,7 @@ import {
   executeCodexLaunch,
   prepareCodexLaunch,
   sanitizedCodexEnvironment,
+  spawnCodexProcess,
   type CodexProcessOptions,
 } from "./codex-launch.js";
 import { RepositoryGrantStore } from "./grants.js";
@@ -490,13 +491,14 @@ describe("implementation-authorized selected-workspace Codex launch", () => {
     const processState = temporaryDirectory("formaspec-process-tree-");
     const grandchildPidPath = path.join(processState, "grandchild.pid");
     const grandchildCode = "process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000);";
-    const codexFixture = `#!${process.execPath}\n`
-      + `const { spawn } = require('node:child_process');\n`
+    const fixtureSourcePath = path.join(processState, "codex-fixture.cjs");
+    const codexFixtureSource = `const { spawn } = require('node:child_process');\n`
       + `const fs = require('node:fs');\n`
       + `const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildCode)}], { stdio: 'ignore' });\n`
       + `fs.writeFileSync(${JSON.stringify(grandchildPidPath)}, String(child.pid));\n`
       + `setInterval(() => undefined, 1000);\n`;
-    const environment = executableEnvironment({}, codexFixture);
+    fs.writeFileSync(fixtureSourcePath, codexFixtureSource);
+    const environment = executableEnvironment();
     const options = {
       grantStore: fixture.store,
       grantId: fixture.grantId,
@@ -507,14 +509,21 @@ describe("implementation-authorized selected-workspace Codex launch", () => {
       now: () => NOW,
     };
     const plan = await prepareCodexLaunch(options);
-    const revokeWhenRunning = (async () => {
-      for (let attempt = 0; attempt < 100 && !fs.existsSync(grandchildPidPath); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      await fixture.store.revoke(fixture.grantId, new Date(NOW.getTime() + 1_000));
-    })();
-    await expect(executeCodexLaunch(plan, options)).resolves.toMatchObject({ exitCode: 128 });
-    await revokeWhenRunning;
+    await expect(executeCodexLaunch(plan, {
+      ...options,
+      processLauncher: async (_executable, arguments_, processOptions) => {
+        const running = spawnCodexProcess(process.execPath, [fixtureSourcePath, ...arguments_], processOptions);
+        for (let attempt = 0; attempt < 500 && !fs.existsSync(grandchildPidPath); attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        await fixture.store.revoke(fixture.grantId, new Date(NOW.getTime() + 1_000));
+        if (!fs.existsSync(grandchildPidPath)) {
+          await running;
+          throw new Error("The Codex process-tree fixture did not start before revocation.");
+        }
+        return running;
+      },
+    })).resolves.toMatchObject({ exitCode: 128 });
     const grandchildPid = Number(fs.readFileSync(grandchildPidPath, "utf8"));
     expect(Number.isSafeInteger(grandchildPid) && grandchildPid > 0).toBe(true);
     expect(await waitForProcessExit(grandchildPid)).toBe(true);

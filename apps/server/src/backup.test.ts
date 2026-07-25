@@ -27,6 +27,7 @@ import {
 } from "./design-system-limits.js";
 import { EventHub } from "./events.js";
 import { canonicalJson } from "./ids.js";
+import { ContentAddressedPreviewRenderStore } from "./preview-render-store.js";
 import { DesignerService } from "./service.js";
 import {
   HISTORICAL_FIXTURE_DIGESTS,
@@ -322,6 +323,80 @@ async function mutateDatabasePayload(
 }
 
 describe("verified FormaSpec backups", () => {
+  it("includes every active exact preview PNG and refuses a backup when active evidence is missing", async () => {
+    const root = await temporaryDirectory();
+    const data = path.join(root, "active-preview-data");
+    const backups = path.join(root, "active-preview-backups");
+    await fs.promises.mkdir(data, { recursive: true });
+    const database = new DesignerDatabase(path.join(data, "designer.sqlite"));
+    try {
+      const previewStore = new ContentAddressedPreviewRenderStore(data);
+      const service = new DesignerService(database, new EventHub(), 900, {}, undefined, previewStore);
+      const created = service.createDesign("local", {
+        name: "Active preview backup",
+        preset: "phone",
+        idempotencyKey: "active-preview-backup-create-0001",
+      });
+      const frameId = created.document.pages[0]!.children[0]!;
+      const preview = service.createPreview("local", created.document.id, {
+        baseVersion: 1,
+        operations: [{ type: "update_node", node_id: frameId, patch: { name: "Awaiting approval" } }],
+      });
+      const metadata = service.recordPreviewRenderMetadata("local", created.document.id, preview.id, {
+        options: { maxSize: 64 },
+        png: onePixelPng,
+        width: 1,
+        height: 1,
+        renderer: "software",
+        warnings: [],
+      });
+      const manager = new BackupManager(database, data, backups);
+      const backedUp = await manager.create();
+      expect(backedUp.verification.manifest.files).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          path: `preview-renders/${metadata.sha256}.png`,
+          sha256: metadata.sha256,
+        }),
+      ]));
+      const restored = path.join(root, "active-preview-restored");
+      await fs.promises.mkdir(restored);
+      await restoreVerifiedBackup(backedUp.path, restored, { databaseClosed: true });
+      expect(await fs.promises.readFile(path.join(restored, "preview-renders", `${metadata.sha256}.png`)))
+        .toEqual(onePixelPng);
+
+      await fs.promises.rm(previewStore.artifactPath(metadata.sha256));
+      await expect(manager.create()).rejects.toMatchObject({ code: "PREVIEW_ENGINE_MISMATCH" });
+      previewStore.write(onePixelPng, metadata.sha256);
+      database.sqlite.prepare("UPDATE previews SET status = 'expired' WHERE id = ?").run(preview.id);
+      const afterExpiry = await manager.create();
+      expect(afterExpiry.verification.manifest.files).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: `preview-renders/${metadata.sha256}.png` }),
+      ]));
+      expect(previewStore.read(metadata.sha256)).toEqual(onePixelPng);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects unreferenced preview PNGs even when a legacy database has no render-metadata columns", async () => {
+    const root = await temporaryDirectory();
+    const historical = await createHistoricalVerifiedBundle(root, 12);
+    const sha256 = digest(onePixelPng);
+    const archivePath = `preview-renders/${sha256}.png`;
+    const tampered = await mutateBundle(root, historical.path, (entries) => {
+      const manifest = parsedManifest(entries);
+      entries.set(archivePath, onePixelPng);
+      manifest.files.push({ path: archivePath, sizeBytes: onePixelPng.length, sha256 });
+      replaceChecksum(entries, archivePath, sha256);
+      rewriteManifest(entries, manifest);
+    });
+
+    await expect(verifyBackupBundle(tampered)).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/unreferenced preview render/i),
+    });
+  });
+
   it("captures and restores exact forensic bytes even when the live database is corrupt", async () => {
     const root = await temporaryDirectory();
     const data = path.join(root, "corrupt-live-data");
@@ -682,7 +757,7 @@ describe("verified FormaSpec backups", () => {
     const currentSchema = await createVerifiedBundle(root);
     await expect(verifyBackupBundle(currentSchema)).resolves.toMatchObject({
       valid: true,
-      manifest: { databaseSchemaVersion: 16 },
+      manifest: { databaseSchemaVersion: 17 },
     });
     for (const sourceVersion of [7, 8, 9, 10, 11, 12] as const) {
       const historical = await createHistoricalVerifiedBundle(root, sourceVersion);
@@ -701,8 +776,8 @@ describe("verified FormaSpec backups", () => {
       });
       const upgraded = new DesignerDatabase(path.join(restored, "designer.sqlite"));
       try {
-        expect(upgraded.schemaVersion()).toBe(16);
-        expect(upgraded.metadata("database_schema_version")).toBe("16");
+        expect(upgraded.schemaVersion()).toBe(17);
+        expect(upgraded.metadata("database_schema_version")).toBe("17");
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_retention_runs'",
         ).get()).toEqual({ name: "audit_retention_runs" });
@@ -1255,9 +1330,9 @@ describe("verified FormaSpec backups", () => {
           DROP TRIGGER schema_migrations_immutable_update;
           DROP TRIGGER schema_migrations_immutable_delete;
           INSERT INTO schema_migrations(version, name, applied_at)
-          VALUES (17, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
+          VALUES (18, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
         `);
-        manifest.databaseSchemaVersion = 16;
+        manifest.databaseSchemaVersion = 17;
       },
     ];
     for (const mutation of mutations) {
@@ -1272,7 +1347,7 @@ describe("verified FormaSpec backups", () => {
       manifest.databaseSchemaVersion = 7;
       rewriteManifest(entries, manifest);
     });
-    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 16/);
+    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 17/);
   });
 
   it("rejects snapshot, revision-chain, and project-head integrity tampering", async () => {

@@ -1,4 +1,10 @@
-import type { ComponentDefinition } from "@designer/core";
+import {
+  AssetIdSchema,
+  NodeStyleSchema,
+  type ComponentDefinition,
+  type ComponentPropertyValue,
+  type NodeStyle,
+} from "@designer/core";
 import {
   Boxes,
   CheckCircle2,
@@ -85,6 +91,41 @@ function defaultState(definition: ComponentDefinition | undefined): ComponentDef
     ?? "default";
 }
 
+export function componentPropertyDefaults(definition: ComponentDefinition | undefined): Record<string, ComponentPropertyValue> {
+  if (!definition) return {};
+  const values: Record<string, ComponentPropertyValue> = {};
+  for (const property of definition.properties_schema) {
+    if (property.type === "node_slot") continue;
+    if (property.type === "asset" && property.default_asset_id !== undefined) {
+      values[property.key] = { asset_id: property.default_asset_id };
+    } else if ("default" in property && property.default !== undefined) {
+      values[property.key] = property.type === "icon"
+        ? { icon_name: property.default }
+        : property.default;
+    }
+  }
+  return values;
+}
+
+export function componentSlotKeys(definition: ComponentDefinition | undefined): string[] {
+  if (!definition) return [];
+  return [...new Set([
+    ...definition.slots.map((slot) => slot.key),
+    ...definition.properties_schema.filter((property) => property.type === "node_slot").map((property) => property.key),
+  ])].sort();
+}
+
+export function parseVisualOverrides(value: string): Record<string, NodeStyle> {
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Visual overrides must be a JSON object keyed by component source node ID.");
+  }
+  return Object.fromEntries(Object.entries(parsed).map(([nodeId, style]) => [
+    nodeId,
+    NodeStyleSchema.parse(style),
+  ]));
+}
+
 export function ComponentLibraryPanel() {
   const document = useDesignerStore((state) => state.document);
   const baseVersion = useDesignerStore((state) => state.baseVersion);
@@ -105,6 +146,9 @@ export function ComponentLibraryPanel() {
   const [parentKey, setParentKey] = useState("");
   const [position, setPosition] = useState({ x: 64, y: 64 });
   const [instanceName, setInstanceName] = useState("");
+  const [propertyValues, setPropertyValues] = useState<Record<string, ComponentPropertyValue>>({});
+  const [slotValues, setSlotValues] = useState<Record<string, string>>({});
+  const [visualOverrides, setVisualOverrides] = useState("{}");
   const [preview, setPreview] = useState<ComponentInsertionPreviewRecord | null>(null);
   const [busy, setBusy] = useState<"preview" | "commit" | null>(null);
   const designId = document?.id ?? "";
@@ -147,6 +191,9 @@ export function ComponentLibraryPanel() {
   const component = library?.components.find((candidate) => candidate.definition.id === componentId);
   useEffect(() => {
     setActiveState(defaultState(component?.definition));
+    setPropertyValues(componentPropertyDefaults(component?.definition));
+    setSlotValues(Object.fromEntries(componentSlotKeys(component?.definition).map((key) => [key, ""])));
+    setVisualOverrides("{}");
     setPreview(null);
   }, [componentId, component?.definition.version]);
 
@@ -167,6 +214,11 @@ export function ComponentLibraryPanel() {
     setBusy("preview");
     setError(null);
     try {
+      const slots = Object.fromEntries(Object.entries(slotValues).map(([key, value]) => [
+        key,
+        value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean),
+      ]));
+      const parsedVisualOverrides = parseVisualOverrides(visualOverrides);
       const next = await createComponentInsertionPreview({
         designId,
         baseVersion,
@@ -175,6 +227,9 @@ export function ComponentLibraryPanel() {
         activeState,
         ...(parent.acceptsPosition ? { position } : {}),
         ...(instanceName.trim() ? { name: instanceName.trim() } : {}),
+        ...(Object.keys(propertyValues).length === 0 ? {} : { properties: propertyValues }),
+        ...(Object.keys(slots).length === 0 ? {} : { slots }),
+        ...(Object.keys(parsedVisualOverrides).length === 0 ? {} : { visualOverrides: parsedVisualOverrides }),
       });
       setPreview(next);
     } catch (cause) {
@@ -203,6 +258,9 @@ export function ComponentLibraryPanel() {
       if (latest.document?.nodes[insertedInstanceId]) select([insertedInstanceId]);
       setPreview(null);
       setInstanceName("");
+      setPropertyValues(componentPropertyDefaults(component?.definition));
+      setSlotValues(Object.fromEntries(componentSlotKeys(component?.definition).map((key) => [key, ""])));
+      setVisualOverrides("{}");
       setNotice(`Inserted ${component?.definition.name ?? "component"} in revision ${committed.version}.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The exact component preview could not be committed.");
@@ -234,6 +292,29 @@ export function ComponentLibraryPanel() {
           </div>}
           {component && component.blockers.map((blocker) => <div className="component-library-blocker" key={blocker.code}><ShieldAlert size={11} /><span>{blocker.message}</span></div>)}
           {component && component.definition.states.length > 1 && <label><span>State</span><select value={activeState} disabled={busy !== null} onChange={(event) => { setActiveState(event.target.value as typeof activeState); setPreview(null); }}>{component.definition.states.map((state) => <option value={state.key} key={state.key}>{state.name}</option>)}</select></label>}
+          {component && component.definition.properties_schema.filter((property) => property.type !== "node_slot").map((property) => {
+            const value = propertyValues[property.key];
+            if (property.type === "boolean") return <label key={property.key} className="component-library-checkbox"><span>{property.label}</span><input type="checkbox" checked={value === true} disabled={busy !== null} onChange={(event) => { setPropertyValues((current) => ({ ...current, [property.key]: event.target.checked })); setPreview(null); }} /></label>;
+            if (property.type === "enum") return <label key={property.key}><span>{property.label}</span><select value={typeof value === "string" ? value : property.default ?? property.values[0]} disabled={busy !== null} onChange={(event) => { setPropertyValues((current) => ({ ...current, [property.key]: event.target.value })); setPreview(null); }}>{property.values.map((option) => <option value={option} key={option}>{option}</option>)}</select></label>;
+            if (property.type === "asset") {
+              const assetId = value && typeof value === "object" && "asset_id" in value ? value.asset_id : "";
+              return <label key={property.key}><span>{property.label}</span><select value={assetId} disabled={busy !== null} onChange={(event) => { setPropertyValues((current) => {
+                const next = { ...current };
+                if (event.target.value) next[property.key] = { asset_id: AssetIdSchema.parse(event.target.value) };
+                else delete next[property.key];
+                return next;
+              }); setPreview(null); }}><option value="">Use component default</option>{Object.values(document.assets).map((asset) => <option value={asset.id} key={asset.id}>{asset.name}</option>)}</select></label>;
+            }
+            const textValue = property.type === "icon"
+              ? value && typeof value === "object" && "icon_name" in value ? value.icon_name : typeof value === "string" ? value : ""
+              : typeof value === "string" ? value : "";
+            return <label key={property.key}><span>{property.label}{property.required ? " · required" : ""}</span><input maxLength={property.type === "text" ? property.max_length ?? 100_000 : 160} value={textValue} disabled={busy !== null} onChange={(event) => { setPropertyValues((current) => ({
+              ...current,
+              [property.key]: property.type === "icon" ? { icon_name: event.target.value } : event.target.value,
+            })); setPreview(null); }} /></label>;
+          })}
+          {component && componentSlotKeys(component.definition).map((slotKey) => <label key={slotKey}><span>Slot · {slotKey} <i>node IDs</i></span><input value={slotValues[slotKey] ?? ""} placeholder="node_… (comma separated)" disabled={busy !== null} onChange={(event) => { setSlotValues((current) => ({ ...current, [slotKey]: event.target.value })); setPreview(null); }} /></label>)}
+          {component && component.definition.allowed_overrides.allowed_style_paths.length > 0 && <label><span>Visual overrides <i>{component.definition.allowed_overrides.allowed_style_paths.join(", ")}</i></span><textarea rows={4} value={visualOverrides} spellCheck={false} disabled={busy !== null} aria-label="Typed visual overrides JSON" onChange={(event) => { setVisualOverrides(event.target.value); setPreview(null); }} /></label>}
           <label><span>Insert into</span><select value={parentKey} disabled={busy !== null || parentOptions.length === 0} onChange={(event) => { setParentKey(event.target.value); setPreview(null); }}>{parentOptions.map((option) => <option value={option.key} key={option.key}>{option.label}</option>)}</select></label>
           {parent?.acceptsPosition && <div className="component-library-position"><label><span>X</span><input type="number" value={position.x} onChange={(event) => { setPosition((current) => ({ ...current, x: Number(event.target.value) })); setPreview(null); }} /></label><label><span>Y</span><input type="number" value={position.y} onChange={(event) => { setPosition((current) => ({ ...current, y: Number(event.target.value) })); setPreview(null); }} /></label></div>}
           <label><span>Instance name <i>optional</i></span><input maxLength={160} value={instanceName} placeholder={component?.definition.name ?? "Component"} onChange={(event) => { setInstanceName(event.target.value); setPreview(null); }} /></label>

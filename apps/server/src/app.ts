@@ -31,6 +31,8 @@ import { registerOperationsHttpRoutes } from "./operations-http-routes.js";
 import { OperationsService } from "./operations-service.js";
 import { registerOrganizationPolicyHttpRoutes } from "./organization-policy-http-routes.js";
 import { OrganizationPolicyService } from "./organization-policy-service.js";
+import { registerProductHttpRoutes } from "./product-http-routes.js";
+import { ProductService } from "./product-service.js";
 import {
   collectProtectedNonMcpRouteRegistration,
   type ProtectedNonMcpRouteKey,
@@ -38,6 +40,7 @@ import {
 import { PngRenderer } from "./render.js";
 import { SqliteRenderJobStore } from "./render-job-store.js";
 import { RedesignStudioService } from "./redesign-studio-service.js";
+import { ContentAddressedPreviewRenderStore } from "./preview-render-store.js";
 import { RestoreOperationStore } from "./restore-operation-store.js";
 import { RestoreWorkerLockStore } from "./restore-worker-lock.js";
 import {
@@ -80,9 +83,11 @@ export interface DesignerApplication {
   events: EventHub;
   renderer: PngRenderer;
   renderJobs: SqliteRenderJobStore;
+  previewRenderStore: ContentAddressedPreviewRenderStore;
   backups: BackupManager;
   operations: OperationsService;
   policies: OrganizationPolicyService;
+  products: ProductService;
   maintenance: MaintenanceStore;
   sessions: SessionAuthenticationService;
   registeredProtectedNonMcpRoutes: ReadonlySet<ProtectedNonMcpRouteKey>;
@@ -159,6 +164,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     );
   });
   const assetStore = new ContentAddressedRasterStore(config.dataDir);
+  const previewRenderStore = new ContentAddressedPreviewRenderStore(config.dataDir, config.renderIpcMaxBytes);
   const database = new DesignerDatabase(config.databasePath);
   let sessions: SessionAuthenticationService;
   try {
@@ -185,7 +191,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     ipcMaxMessageBytes: config.renderIpcMaxBytes,
     jobRecorder: renderJobs,
   });
-  const service = new DesignerService(database, events, config.previewTtlSeconds, {}, assetStore);
+  const service = new DesignerService(database, events, config.previewTtlSeconds, {}, assetStore, previewRenderStore);
   const enterprise = new EnterpriseService(database, events, {
     productSpecPreviewTtlSeconds: config.previewTtlSeconds,
     designerService: service,
@@ -206,6 +212,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   });
   const operations = new OperationsService(service, enterprise, renderer, backups, config.backupDir);
   const policies = new OrganizationPolicyService(database);
+  const products = new ProductService(database);
 
   app.setErrorHandler((error, request, reply) => {
     let domainError: DomainError;
@@ -324,10 +331,12 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     reply.header("x-frame-options", "DENY");
     reply.header("referrer-policy", "no-referrer");
     reply.header("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
-    reply.header(
-      "content-security-policy",
-      "default-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-    );
+    if (!reply.hasHeader("content-security-policy")) {
+      reply.header(
+        "content-security-policy",
+        "default-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      );
+    }
     if (config.appMode === "server") reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
     try {
       flushPersistedEventOutbox(database.sqlite, events);
@@ -355,7 +364,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   registerSessionAuthenticationRoutes(app, config, database, sessions);
   registerMaintenanceStatusRoute(app, maintenance);
   registerHttpRoutes(app, { config, service, enterprise, events, renderer, backups, maintenance, operations });
-  registerEnterpriseHttpRoutes(app, enterprise, config.publicBaseUrl);
+  registerEnterpriseHttpRoutes(app, enterprise, config.webBaseUrl);
   registerEnterpriseDomainHttpRoutes(app, {
     designSystems,
     componentInsertions,
@@ -366,6 +375,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   });
   registerOperationsHttpRoutes(app, operations);
   registerOrganizationPolicyHttpRoutes(app, policies);
+  registerProductHttpRoutes(app, products);
   registerMcpEndpoint(app, {
     config,
     service,
@@ -376,6 +386,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     redesign,
     renderer,
     policies,
+    products,
   });
 
   const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
@@ -428,9 +439,11 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     events,
     renderer,
     renderJobs,
+    previewRenderStore,
     backups,
     operations,
     policies,
+    products,
     maintenance,
     sessions,
     registeredProtectedNonMcpRoutes,

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const MAX_MANAGED_ASSET_BYTES = 256 * 1024;
-const MANAGED_PLUGIN_VERSION = "0.2.2";
+const MANAGED_PLUGIN_VERSION = "0.3.0";
 
 export interface ManagedCodexAssetIdentity {
   skillName: string;
@@ -29,32 +29,33 @@ export const FORMASPEC_CODEX_IDENTITY: ManagedCodexAssetIdentity = Object.freeze
   mention: "[@FormaSpec](plugin://formaspec@formaspec)",
 });
 
-export const MINIMAL_UI_CODEX_IDENTITY: ManagedCodexAssetIdentity = Object.freeze({
-  skillName: "minimal-ui",
-  pluginName: "minimal-ui",
-  marketplaceName: "formaspec",
-  pluginId: "minimal-ui@formaspec",
-  displayName: "Minimal UI",
-  mention: "[@Minimal UI](plugin://minimal-ui@formaspec)",
-});
-
 export const FORMASPEC_CODEX_ASSET_INVENTORY: ManagedCodexAssetInventory = Object.freeze({
   marketplaceName: "formaspec",
   marketplaceDisplayName: "FormaSpec",
   pluginVersion: MANAGED_PLUGIN_VERSION,
-  identities: Object.freeze([FORMASPEC_CODEX_IDENTITY, MINIMAL_UI_CODEX_IDENTITY]),
+  identities: Object.freeze([FORMASPEC_CODEX_IDENTITY]),
 });
 
 const REQUIRED_MANAGED_FILES = Object.freeze([
   "codex-marketplace/.agents/plugins/marketplace.json",
   ...FORMASPEC_CODEX_ASSET_INVENTORY.identities.flatMap((identity) => [
-    `skills/${identity.skillName}/SKILL.md`,
-    `skills/${identity.skillName}/agents/openai.yaml`,
     `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`,
     `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`,
     `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
   ]),
 ]);
+
+const FORBIDDEN_LEGACY_MANAGED_PATHS = Object.freeze([
+  "skills/formaspec",
+  "skills/minimal-ui",
+  "codex-marketplace/plugins/minimal-ui",
+]);
+
+function requireNoRetiredPublicIdentity(contents: string, description: string): void {
+  if (/minimal-ui|minimal ui/iu.test(contents)) {
+    throw new Error(`${description} must not advertise a retired agent identity.`);
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -126,8 +127,15 @@ export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAsset
     throw new Error(`Managed FormaSpec Codex asset root must be a regular directory: ${root}`);
   }
   for (const relativePath of REQUIRED_MANAGED_FILES) requireRegularFile(root, relativePath);
+  for (const relativePath of FORBIDDEN_LEGACY_MANAGED_PATHS) {
+    if (fs.existsSync(path.join(root, ...relativePath.split("/")))) {
+      throw new Error(`Legacy duplicate FormaSpec Codex asset must not be packaged: ${relativePath}`);
+    }
+  }
 
-  const marketplace = readJson(root, "codex-marketplace/.agents/plugins/marketplace.json");
+  const marketplacePath = "codex-marketplace/.agents/plugins/marketplace.json";
+  requireNoRetiredPublicIdentity(readText(root, marketplacePath), "Managed FormaSpec Codex marketplace");
+  const marketplace = readJson(root, marketplacePath);
   if (marketplace.name !== FORMASPEC_CODEX_ASSET_INVENTORY.marketplaceName) {
     throw new Error("Managed FormaSpec Codex marketplace must use the formaspec marketplace name.");
   }
@@ -140,11 +148,15 @@ export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAsset
     throw new Error("Managed FormaSpec Codex marketplace plugin inventory is malformed.");
   }
   if (marketplace.plugins.length !== FORMASPEC_CODEX_ASSET_INVENTORY.identities.length) {
-    throw new Error("Managed FormaSpec Codex marketplace must contain exactly the two managed agent identities.");
+    throw new Error("Managed FormaSpec Codex marketplace must contain exactly one managed agent identity.");
   }
 
   for (const identity of FORMASPEC_CODEX_ASSET_INVENTORY.identities) {
     const pluginPath = `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`;
+    requireNoRetiredPublicIdentity(
+      readText(root, pluginPath),
+      `Managed ${identity.displayName} Codex plugin manifest`,
+    );
     const plugin = readJson(root, pluginPath);
     if (plugin.name !== identity.pluginName || plugin.version !== MANAGED_PLUGIN_VERSION) {
       throw new Error(`Managed ${identity.displayName} Codex plugin manifest must use ${identity.pluginName} at ${MANAGED_PLUGIN_VERSION}.`);
@@ -169,28 +181,20 @@ export function inspectManagedCodexAssets(assetsRoot: string): ManagedCodexAsset
       throw new Error(`Managed ${identity.displayName} Codex marketplace policy is invalid.`);
     }
 
-    requireSkillIdentity(
-      readText(root, `skills/${identity.skillName}/SKILL.md`),
-      identity,
-      `Managed ${identity.displayName} Codex skill`,
-    );
-    requireOpenAiIdentity(
-      readText(root, `skills/${identity.skillName}/agents/openai.yaml`),
-      identity,
-      `Managed ${identity.displayName} Codex skill metadata`,
-    );
-    const standaloneSkill = readText(root, `skills/${identity.skillName}/SKILL.md`);
     const pluginSkill = readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`);
+    requireNoRetiredPublicIdentity(pluginSkill, `Managed ${identity.displayName} Codex plugin skill`);
     requireSkillIdentity(
       pluginSkill,
       identity,
       `Managed ${identity.displayName} Codex plugin skill`,
     );
-    if (standaloneSkill !== pluginSkill) {
-      throw new Error(`Managed ${identity.displayName} standalone and plugin skills must be byte-identical.`);
-    }
+    const pluginMetadata = readText(
+      root,
+      `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`,
+    );
+    requireNoRetiredPublicIdentity(pluginMetadata, `Managed ${identity.displayName} Codex plugin skill metadata`);
     requireOpenAiIdentity(
-      readText(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/agents/openai.yaml`),
+      pluginMetadata,
       identity,
       `Managed ${identity.displayName} Codex plugin skill metadata`,
     );

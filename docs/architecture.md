@@ -1,6 +1,6 @@
 # FormaSpec architecture
 
-Last audited: 2026-07-22
+Last audited: 2026-07-25
 
 This document distinguishes the architecture that exists in the repository
 today from the approved FormaSpec target. A target description is not evidence
@@ -8,22 +8,18 @@ that the subsystem has been implemented.
 
 ## Current system
 
-The product and primary agent-facing identity are **FormaSpec**. `designer`
-remains only as a compatibility launcher for existing local state.
-
-> **Backward compatibility:** **Minimal UI** is a legacy agent alias for
-> existing prompts and integrations. It shares the token-free `formaspec` MCP
-> server with the primary version-0.2.0 FormaSpec plugin.
+The product and only supported agent-facing identity are **FormaSpec**.
+`designer` remains only as a compatibility launcher for existing local state.
 The repository is an incremental pnpm TypeScript workspace:
 
 | Area | Current implementation |
 | --- | --- |
-| Shared model | `packages/core`: frozen strict V1 schemas, separate strict V2 schemas, deterministic V1→V2 conversion, typed operations, validation/linting, layout rules, product-specification types, the Foundation System, bounded token exporters, and canonical bounded detached component-source bundles. The core operation union includes a server-only `insert_component_instance` record, but generic MCP operations exclude it. |
-| Browser editor | `apps/web`: React/Vite, Zustand, structured DOM rendering, one viewport transform, Moveable/Selecto in an untransformed interaction overlay, product specification, planning, source-backed component authoring from immutable V2 revisions, and a Components-tab pinned-library flow that previews, renders, diagnoses, explicitly commits, or discards exact component insertions. Design-system administration, engineering handoff, Redesign Studio, inspect, history, prototype, JSON/PNG, and portable export/import surfaces also exist. |
-| HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, password-session and trusted-header browser authentication, organization/project authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, backups, and render orchestration. |
-| Persistence | Better SQLite3 with a numbered version-16 migration ledger, WAL, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, bounded write-once exact preview-render metadata, and a canonical consume-once bootstrap-credential trigger. |
+| Shared model | `packages/core`: frozen strict V1 schemas, separate strict V2 schemas, deterministic V1→V2 conversion, typed operations, validation/linting, layout rules, linked responsive-frame relationships, product-specification types, the Foundation System, bounded token exporters, and canonical bounded detached component-source bundles. Component contracts include typed property-to-node bindings, slot anchors, allowed visual overrides, and nested component references. The core operation union includes a server-only `insert_component_instance` record, but generic MCP operations exclude it. |
+| Browser editor | `apps/web`: React/Vite, Zustand, structured DOM rendering, one viewport transform, Moveable/Selecto in an untransformed interaction overlay, product specification, planning, source-backed component authoring from immutable V2 revisions, and a Components-tab pinned-library flow that previews, renders, diagnoses, explicitly commits, or discards exact component insertions. Multi-selected same-page frames can be linked into ordered, non-overlapping responsive variants and later selected, recalculated, or unlinked. Design-system administration, engineering handoff, Redesign Studio, inspect, history, prototype, JSON/PNG/SVG/PDF, and portable export/import surfaces also exist. |
+| HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, password-session and trusted-header browser authentication, organization/Product/Design authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, deterministic sanitized raster-backed SVG/PDF export, backups, and render orchestration. |
+| Persistence | Better SQLite3 with a numbered version-17 migration ledger, WAL, first-class Products, Product-bound immutable task context, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, bounded write-once exact preview-render metadata, and a canonical consume-once bootstrap-credential trigger. |
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
-| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus the primary managed FormaSpec plugins/skills and the Minimal UI legacy compatibility assets. |
+| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus exactly one managed FormaSpec 0.3.0 plugin. Managed cleanup removes only the exact legacy Minimal UI TOML tables and preserves unrelated or lookalike configuration. |
 | Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
 | Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. Current local schema-16 image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1` passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery; its compatibility evidence paths remain under `artifacts/ci/docker-schema11/`. It is local uncommitted-source evidence, not hosted/signed/scanned release provenance. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; native macOS/Linux/Windows lifecycle proof is missing. |
 
@@ -40,11 +36,13 @@ flowchart LR
     W --> Q["Explicitly granted local repository"]
 ```
 
-Current source advertises 52 MCP tools and 25 resources. The protected non-MCP
-manifest contains 108 routes: 54 project-scoped, 48 organization-scoped, and
-six explicit exceptions. The current application suite verifies exact
-inventory/route closure, generated authentication rejection, and direct
-behavioral authorization across all 108 routes with zero uncovered.
+Current source advertises 54 MCP tools and 26 resources, including
+`product_list`, `product_read`, and `formaspec://products/{productId}`. The
+protected non-MCP manifest contains 119 routes: 55 project-scoped, 58
+organization-scoped, and six explicit exceptions. Focused schema-17 contract
+tests verify exact inventory/route closure and authentication across that
+surface. This source contract is implemented foundation evidence, not a
+production qualification.
 
 Historical local dependency-linked schema-13 runtime evidence uses disposable Compose
 project `formaspeccischema1369037dfc8a`. Image
@@ -54,16 +52,21 @@ direct-TCP/non-loopback egress, passed Firefox/WebKit 12/12, and passed
 source-to-clean-target copied-bundle recovery with exact database, snapshot,
 revision, asset, render, integrity, and foreign-key comparisons. Cleanup passed
 for every disposable project. These are historical local `NO-GO` results, not
-the current schema-16 checkpoint, hosted provenance, or a release image.
+the retained schema-16 checkpoint, hosted provenance, or a release image.
 
-Installed/link verification confirms `drizzle-orm` 0.45.2. Current schema-16
-source passes the seven-package test suite 842/842 (core 59, server 467, web 91,
-CLI 96, local bridge 20, Workspace Bridge 37, and installer 72), all workspace
-typechecks/builds, launcher 225/225, Compose configuration, targeted editor/
-Administration 5/5, release E2E 1/1, preview integration 2/2, Chromium and
-Firefox/WebKit alignment 12/12 each, visual regression 7/7, the 1,000-node
-browser budgets, and macOS runtime-smoke contracts 11/11. Current local Docker
-restart/egress and copied-bundle recovery evidence uses image
+Installed/link verification confirms `drizzle-orm` 0.45.2. The current
+schema-17 source passes recursive typecheck and production build. Its package
+tests currently cover core 74/74, server 540/540, web 145/145, CLI 129/129,
+local bridge 27/27, Workspace Bridge 37/37, and installer 75/75: 1,027 tests in
+total. Four real Chromium render/raster cases use a scoped 20-second test-
+harness timeout while the application render remains hard-bounded at 15
+seconds. Deterministic document-export tests pass 15/15, migration/backup/restore
+tests pass 59/59, Product/readiness/preview/MCP tests pass 44/44, and macOS
+packaged-runtime contracts pass 11/11. Launcher tests pass 276/276 and
+`docker compose config --quiet` passes. These are local source checks; the full
+schema-17 browser, Docker, recovery, security-scan, and supported-OS release
+matrix remains open. Retained local Docker restart/egress and copied-bundle
+recovery evidence uses the older schema-16 image
 `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`.
 The exact SBOM/license result remains historical schema-13 evidence; hosted,
 installed-native, current security/image/OS scan, and real remote-host/TLS
@@ -71,7 +74,8 @@ matrices remain open.
 
 ### Current authoritative data flow
 
-1. The browser or MCP client reads a design and its current integer version.
+1. The browser or MCP client resolves exactly one authorized Product and Design,
+   then reads the Design's current integer version and immutable task context.
 2. Ordinary changes are represented as typed public operations. Linked
    component insertion is resolved server-side from the project's exact pinned
    release and produces a prepared `insert_component_instance` preview; callers
@@ -80,9 +84,11 @@ matrices remain open.
    persisted ephemeral preview with engine versions, hashes, diagnostics,
    permanent-ID mapping, changed IDs, expiry, and status.
 4. The caller renders, inspects, and lints the exact preview before approval.
-5. A website-created task transitions to `awaiting_approval` with the exact
-   preview ID and stops; a human commits or discards it in FormaSpec. A direct
-   non-task MCP client may commit only after its normal write approval.
+5. Website-created and managed direct FormaSpec requests transition their
+   immutable task to `awaiting_approval` with the exact preview ID and stop; a
+   human commits or discards it in FormaSpec. A generic non-managed MCP client
+   may use the ordinary commit tool only under its explicit write approval and
+   authorization contract.
 6. Commit uses one `BEGIN IMMEDIATE` transaction to authorize, enforce scoped
    idempotency, validate the preview, reference its exact snapshot, insert the
    immutable revision/hash chain, compare-and-swap the head, and write audit
@@ -97,11 +103,32 @@ stores its canonical JSON and SHA-256 with the component version. Insertion
 resolves only the project's exact pinned release, verifies source/release
 identity, hydrates transitive token aliases, materializes deterministic
 archived/locked masters, and produces an ordinary exact preview. The MCP tool
-renders that preview. A direct non-task client may call
-`design_commit_preview` after write approval; a website task records the
-preview for human approval instead. Asset-bearing sources and non-empty
-property/slot overrides fail closed until hash-based asset copying and visual
-binding semantics exist.
+renders that preview. A generic non-managed client may call
+`design_commit_preview` after explicit write approval; the managed FormaSpec
+workflow records the preview for human approval instead. Insertion materializes
+typed property bindings and slot-anchor content, applies only definition-authorized visual
+overrides, resolves bounded nested-component graphs from the pinned release,
+and copies normalized image dependencies into the target Design only after
+exact SHA-256/size/MIME/dimension verification. Missing, corrupt,
+unauthorized, or unpinned dependencies still fail closed.
+
+Linked responsive frames remain ordinary structured frame nodes with a shared
+opaque group ID, the same reciprocal ordered frame list, and one half-open
+breakpoint range per frame (`min_width <= viewport < max_width`). Every member
+must be active on the same page; overlaps, broken reciprocity, and an
+open-ended non-final range fail validation. Archive reconciliation preserves
+history while removing archived members and unlinks a lone survivor. The same
+contract is validated by V1/V2 reads, typed operations, compatibility
+projection, migration, browser undo/redo, and MCP previews.
+
+Document SVG/PDF export is a deliberately bounded presentation format, not a
+new arbitrary-vector input surface. The server authorizes the Design before
+query parsing, renders a selected saved revision/page/frame through the pinned
+renderer, validates the canonical PNG signature/chunks/checksums/dimensions,
+and emits deterministic bytes. SVG contains only a fixed `<svg><image>` wrapper
+around that PNG; PDF embeds deterministic deflated RGB image data. Responses
+include source/artifact SHA-256 headers, `nosniff`, restrictive CSP, and
+immutable caching only for an explicitly requested historical version.
 
 Portable import is a separate bounded workflow. `POST /api/imports/validate`
 parses and validates without creating project state. `POST /api/imports`
@@ -122,7 +149,8 @@ bounded JSON or raster entries are loaded only when parsed or normalized.
 
 | Table | Purpose | Important limitation |
 | --- | --- | --- |
-| `designs` | Organization-owned current head with optimistic versioning | Backup-gated V2-head migration exists; operator migration UI, broader customer fixtures, and complete project policy UI remain incomplete. |
+| `designs` | Product-owned, organization-scoped current head with optimistic versioning | Backup-gated V2-head migration exists; operator migration UI, broader customer fixtures, and complete project policy UI remain incomplete. |
+| `products` / Product move tables | Product ownership, lifecycle, default Design context, and reviewed CAS-bound movement of a Design between Products | Migration 17 creates one deterministic legacy Product per existing Design; broader product membership, folder/space, and organization-adoption UX remains incomplete. |
 | `snapshots` / `revisions` | Brotli canonical bytes plus immutable parent/snapshot/operation/metadata hash chains | Real copied legacy upgrade fixtures and operator integrity tooling remain release evidence gaps. |
 | `previews` | Exact persisted snapshots, base/result hashes, engine versions, temporary-ID map, changed IDs, expiry, kind, status, and bounded write-once page/node/max-size render options, dimensions, renderer backend, warnings, and PNG SHA-256 | Complete release-candidate fault injection and every engine-mismatch/already-committed case remain to be proven. |
 | `idempotency` | Organization/principal/scope/key response cache committed atomically with writes | Larger restart/concurrency matrices remain. |
@@ -134,14 +162,14 @@ bounded JSON or raster entries are loaded only when parsed or normalized.
 | `audit_retention_previews` / `audit_retention_runs` | Exact expiring retention plans plus immutable SHA-256 chained execution evidence | Administration UI and long-running scheduled execution remain. |
 | `portable_imports` | Immutable organization-scoped source bundle/revision hash claims, target revision, canonical ID map, manifest, diagnostics, actor, and timestamp | The source revision hash is preserved as a provenance claim; it is not revalidated as a local revision chain. Multipart and per-entry disk staging are bounded, but larger adversarial/concurrent-import and packaged cross-platform evidence remain incomplete. |
 | `handoff_execution_decisions` | Append-only, handoff-version-pinned plan/isolation/diff/validation/commit/push/PR decisions with evidence hashes, explicit supersession, and lifecycle/CAS triggers | Broader packaged-agent and real-repository execution evidence remains incomplete. |
-| `component_definitions` | Immutable definition versions plus paired canonical bounded component `source_json` and SHA-256 `source_hash`; schema-12 rows may remain null-source for compatibility but cannot enter a new release. | Property-to-node/slot bindings and content-hash asset copying are not implemented. |
-| `design_system_upgrade_previews` | Expiring upgrade diagnostics plus immutable base revision, base snapshot, and exact result snapshot hashes for V2 upgrades. | V1 compatibility previews retain their historical null exact-snapshot form; broader schema-16 hosted/off-site backup/restore and fault-injection evidence is pending. |
-| Enterprise workflow tables | Organizations, principals, roles, grants, audit, product specs, planning, tasks, connections, design systems/releases/pins, repository inventories, handoffs, redesign assessments, backup/export metadata, and locks | V2-head migration, full authoring/mapping/implementation integration, delegated administration, policy rollout/version migration, and complete retention workflows remain incomplete. |
+| `component_definitions` | Immutable definition versions plus paired canonical bounded component `source_json` and SHA-256 `source_hash`; schema-12 rows may remain null-source for compatibility but cannot enter a new release. Contracts support typed property-to-node bindings, slot anchors, allowed visual overrides, nested components, and verified content-hash asset copying during insertion. | Richer authoring UI, release-upgrade comparison, broader accessibility/conflict/portable/restore evidence, and company-wide component governance remain incomplete. |
+| `design_system_upgrade_previews` | Expiring upgrade diagnostics plus immutable base revision, base snapshot, and exact result snapshot hashes for V2 upgrades. | V1 compatibility previews retain their historical null exact-snapshot form; broader schema-17 hosted/off-site backup/restore and fault-injection evidence is pending. |
+| Enterprise workflow tables | Organizations, Products, principals, roles, grants, audit, product specs, planning, Product-bound tasks, connections, design systems/releases/pins, repository inventories, handoffs, redesign assessments, backup/export metadata, and locks | V2-head migration, full authoring/mapping/implementation integration, delegated administration, policy rollout/version migration, and complete retention workflows remain incomplete. |
 
 The `schema_migrations` ledger and database, document, command-engine,
 renderer, font, application, and export versions are explicit and synchronized
-in current source at database schema 16. Runtime metadata is document schema 2,
-command engine 2, renderer 3, renderer IPC protocol 2, raster normalizer 1,
+in current source at database schema 17. Runtime metadata is document schema 2,
+command engine 3, renderer 3, renderer IPC protocol 2, raster normalizer 1,
 font bundle 1, export format 1, and application build `0.2.0`. Migration-2 DDL
 defaults remain frozen at command engine 1, renderer 2, and font bundle 1 so a
 runtime bump does not alter historical schema-prefix fingerprints. Migration 8 is an
@@ -166,11 +194,15 @@ historical previews remain null rather than receiving fabricated PNG evidence.
 Migration 16 replaces the legacy schema-14/15 bootstrap-credential trigger
 with its canonical consume-once definition while preserving credential rows
 and failing closed on unexpected schema shape.
+Migration 17 adds first-class Products, `designs.product_id`, reviewed
+Product-move previews, and immutable resolved Product context on agent tasks.
+Existing Designs receive deterministic same-name legacy Products without ID or
+revision-history changes; no cross-Design relationship is guessed.
 None of these migrations
 changes V1 revisions or removes legacy columns.
 
 The migration ledger is necessary but not sufficient. Database startup and
-backup/restore verification validate the required migration-9/10/11/12/13/14/15/16
+backup/restore verification validate the required migration-9/10/11/12/13/14/15/16/17
 tables, columns, indexes, trigger targets/SQL, and forbidden legacy triggers. A
 database that claims a ledger version without the required schema shape fails
 closed.
@@ -185,7 +217,7 @@ preview-render evidence. Migration-16 fixtures preserve legacy credential rows
 while canonicalizing the bootstrap trigger. Current restore tests
 revoke every restored active browser session together with grants,
 connections, and pairing nonces. Same-image schema-13 copied-bundle recovery is
-historical local evidence; current schema-16 local copied-bundle recovery also
+historical local evidence; retained schema-16 local copied-bundle recovery also
 passes, while broader server-mode/off-site/native
 operator verification remains pending.
 
@@ -224,8 +256,10 @@ Remaining risks are explicit:
 - React Moveable still rounds fractional child offsets for group selections;
   FormaSpec keeps Moveable as the group gesture engine and renders the
   non-resizable group border from an exact client-space target union.
-- Auto-layout drag/reparent/constraint semantics are not complete.
-- The representative 1,000-node service gate and current schema-16 20-sample
+- Auto-layout drag/reparent/constraint semantics cover linear, wrapped, and
+  grid reorder/reparent plus fixed/fill/hug resizing; a visual insertion marker
+  and explicitly defined ambiguous multi-selection behavior remain incomplete.
+- The representative 1,000-node service gate and retained schema-16 20-sample
   pinned-Chromium browser budgets pass locally. Retained hosted release-CI and
   supported-platform repetition remain required.
 - Verified backup/retention and launcher-local Docker supervision exist. The
@@ -235,11 +269,15 @@ Remaining risks are explicit:
   provenance, anonymized real-customer fixtures, and the full asset/failure-
   injection recovery matrix remain incomplete.
 - Strict V2 heads, immutable release pinning/upgrades, source-backed component
-  authoring, exact pinned-release insertion previews, and backup-gated migration
-  foundations exist. Property-to-node/slot bindings, component asset copying,
-  richer upgrade review, broader component-library accessibility/conflict
-  coverage, and retained hosted/native schema-16 release evidence remain
-  incomplete.
+  authoring, exact pinned-release insertion previews, typed property bindings,
+  slot anchors/content, allowed visual overrides, nested-component resolution,
+  content-hash asset copying, and backup-gated migration foundations exist.
+  Insertion supports those contracts; design-system release upgrade still
+  blocks asset-bearing sources and existing non-empty property/slot instances
+  pending safe upgrade rematerialization. Richer contract authoring, visual
+  upgrade comparison, broader component-
+  library accessibility/conflict/portable/restore coverage, and retained
+  hosted/native schema-17 release evidence remain incomplete.
 - The Workspace Bridge persists bounded inventories, exact opaque mappings,
   and handoffs. Selected-workspace launch now requires the immutable
   `start_implementation` transition; the broader independently approved
@@ -317,7 +355,11 @@ migration 12 for append-only handoff execution decisions. Migration 13 adds
 source-backed component versions and exact design-system upgrade snapshot
 references. Migration 14 adds the single-administrator password-session
 boundary, persistent bounded login-attempt state, and one-time public-server
-bootstrap authorization.
+bootstrap authorization. Migration 15 adds immutable-once-recorded exact
+preview-render evidence, migration 16 canonicalizes the legacy bootstrap-
+credential trigger, and migration 17 adds Products, deterministic existing-
+Design backfill, reviewed Product moves, and immutable Product-bound task
+context.
 
 Migration 14 does not silently create a human identity. Local session mode
 bootstraps the sole Organization Administrator through the browser. A fresh

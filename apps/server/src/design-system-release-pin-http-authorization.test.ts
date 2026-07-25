@@ -12,6 +12,7 @@ import type {
   ProjectDesignSystemPinResult,
 } from "./design-system-service.js";
 import { DomainError } from "./errors.js";
+import { moveDesignFixtureToOrganization } from "../test-fixtures/product.js";
 
 const PROXY_SECRET = "design-system-release-pin-proxy-secret-0123456789abcdef";
 const PUBLIC_ORIGIN = "https://design.example.test";
@@ -187,9 +188,10 @@ async function createFixture(label: string): Promise<Fixture> {
   application.database.sqlite.prepare(
     "UPDATE design_systems SET organization_id = ? WHERE id = ?",
   ).run(FOREIGN_ORGANIZATION_ID, foreignSystem.id);
-  application.database.sqlite.prepare(
-    "UPDATE designs SET organization_id = ? WHERE id = ?",
-  ).run(FOREIGN_ORGANIZATION_ID, foreign.document.id);
+  moveDesignFixtureToOrganization(application.database.sqlite, {
+    designId: foreign.document.id,
+    organizationId: FOREIGN_ORGANIZATION_ID,
+  });
   application.database.sqlite.prepare(
     "UPDATE project_design_system_pins SET release_id = ? WHERE design_id = ?",
   ).run(foreignRelease.id, foreignReleasePin.document.id);

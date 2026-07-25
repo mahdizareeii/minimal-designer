@@ -9,8 +9,12 @@ import { chromium } from "playwright";
 import {
   V2CompatibilityError,
   nodeToCss,
+  projectedComponentNode,
+  projectedComponentSlotChildren,
+  readComponentInstanceProjection,
   toV1CompatibleDesignDocument,
   type AnyDesignDocument,
+  type ComponentInstanceProjection,
   type CssStyle,
   type DesignDocument,
   type DesignNode,
@@ -222,9 +226,14 @@ function renderNode(
   isRoot = false,
   componentSource = false,
   definitionStack: readonly string[] = [],
+  projection: ComponentInstanceProjection | null = null,
+  sourceNodeStack: readonly string[] = [],
 ): string {
-  const node = document.nodes[nodeId];
-  if (!node) return "";
+  const canonicalNode = document.nodes[nodeId];
+  if (!canonicalNode || (componentSource && sourceNodeStack.includes(nodeId))) return "";
+  const node = componentSource ? projectedComponentNode(canonicalNode, projection) : canonicalNode;
+  if (!node.visible) return "";
+  const nextSourceNodeStack = componentSource ? [...sourceNodeStack, node.id] : sourceNodeStack;
   const children = "children" in node
     ? node.children.map((childId) => renderNode(
         childId,
@@ -234,17 +243,35 @@ function renderNode(
         false,
         componentSource,
         definitionStack,
+        projection,
+        nextSourceNodeStack,
       )).join("")
     : "";
-  let content = children;
+  const slottedChildren = componentSource
+    ? projectedComponentSlotChildren(projection, node.id).map((childId) => renderNode(
+        childId,
+        document,
+        assetDataUrl,
+        node.layout.mode,
+        false,
+        true,
+        definitionStack,
+        null,
+        nextSourceNodeStack,
+      )).join("")
+    : "";
+  let content = `${children}${slottedChildren}`;
   let attributes = "";
   const containerDirection = node.metadata.text_direction;
   if ((containerDirection === "ltr" || containerDirection === "rtl") && node.type !== "text") {
     attributes = ` dir="${containerDirection}"`;
   }
+  if (typeof node.metadata.accessible_label === "string") {
+    attributes += ` aria-label="${escapeHtml(node.metadata.accessible_label)}"`;
+  }
   if (node.type === "text") {
     const direction = node.direction ?? "auto";
-    attributes = ` dir="${direction}"`;
+    attributes += ` dir="${direction}"`;
     content = `<span style="white-space:pre-wrap;overflow-wrap:anywhere;width:100%">${escapeHtml(node.content)}</span>`;
   }
   if (node.type === "image" && node.asset_id) {
@@ -258,6 +285,7 @@ function renderNode(
     if (definitionStack.includes(node.component_id)) {
       content = `<span style="margin:auto;color:#b42318">Component cycle</span>`;
     } else if (document.nodes[node.component_id]) {
+      const nestedProjection = readComponentInstanceProjection(node.overrides);
       content = renderNode(
         node.component_id,
         document,
@@ -266,6 +294,8 @@ function renderNode(
         true,
         true,
         [...definitionStack, node.component_id],
+        nestedProjection,
+        nextSourceNodeStack,
       );
     } else {
       content = `<span style="margin:auto;color:#6b7280">${escapeHtml(node.name)}</span>`;
@@ -472,9 +502,14 @@ function softwareRender(document: DesignDocument, options: RenderOptions): Rende
     root = false,
     componentSource = false,
     definitionStack: readonly string[] = [],
+    projection: ComponentInstanceProjection | null = null,
+    sourceNodeStack: readonly string[] = [],
   ): void => {
-    const node = document.nodes[nodeId];
-    if (!node || (node.archived && !componentSource) || !node.visible) return;
+    const canonicalNode = document.nodes[nodeId];
+    if (!canonicalNode || (componentSource && sourceNodeStack.includes(nodeId))) return;
+    const node = componentSource ? projectedComponentNode(canonicalNode, projection) : canonicalNode;
+    if ((node.archived && !componentSource) || !node.visible) return;
+    const nextSourceNodeStack = componentSource ? [...sourceNodeStack, node.id] : sourceNodeStack;
     const x = root ? (componentSource ? parentX : 0) : parentX + node.layout.x;
     const y = root ? (componentSource ? parentY : 0) : parentY + node.layout.y;
     let fill = parseColor(node.style.fill, document, [0, 0, 0, 0]);
@@ -483,11 +518,25 @@ function softwareRender(document: DesignDocument, options: RenderOptions): Rende
     if (node.type === "instance"
       && !definitionStack.includes(node.component_id)
       && document.nodes[node.component_id]) {
-      visit(node.component_id, x, y, true, true, [...definitionStack, node.component_id]);
+      visit(
+        node.component_id,
+        x,
+        y,
+        true,
+        true,
+        [...definitionStack, node.component_id],
+        readComponentInstanceProjection(node.overrides),
+        nextSourceNodeStack,
+      );
     }
     if ("children" in node) {
       for (const childId of node.children) {
-        visit(childId, x, y, false, componentSource, definitionStack);
+        visit(childId, x, y, false, componentSource, definitionStack, projection, nextSourceNodeStack);
+      }
+    }
+    if (componentSource) {
+      for (const childId of projectedComponentSlotChildren(projection, node.id)) {
+        visit(childId, x, y, false, true, definitionStack, null, nextSourceNodeStack);
       }
     }
   };

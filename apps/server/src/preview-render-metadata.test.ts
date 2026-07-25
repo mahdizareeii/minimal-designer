@@ -9,6 +9,7 @@ import { DesignerDatabase } from "./db/database.js";
 import { EnterpriseService } from "./enterprise-service.js";
 import { EventHub } from "./events.js";
 import { canonicalJson } from "./ids.js";
+import { ContentAddressedPreviewRenderStore } from "./preview-render-store.js";
 import { encodeRgbaPng } from "./render.js";
 import { DesignerService } from "./service.js";
 
@@ -91,6 +92,50 @@ afterEach(() => {
 });
 
 describe("exact preview render metadata", () => {
+  it("purges retained expired preview rows before collecting their old exact PNGs on startup", () => {
+    const filename = temporaryDatabase();
+    const dataDirectory = path.dirname(filename);
+    const store = new ContentAddressedPreviewRenderStore(dataDirectory);
+    const database = new DesignerDatabase(filename);
+    const events = new EventHub();
+    const service = new DesignerService(database, events, 900, {}, undefined, store);
+    const created = service.createDesign("alice", {
+      name: "Expired exact preview",
+      preset: "phone",
+      idempotencyKey: "expired-preview-render-create-0001",
+    });
+    const pageId = created.document.pages[0]!.id;
+    const frameId = created.document.pages[0]!.children[0]!;
+    const preview = service.createPreview("alice", created.document.id, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Expired frame" } }],
+    });
+    const output = png();
+    const metadata = service.recordPreviewRenderMetadata("alice", created.document.id, preview.id, {
+      options: { pageId, nodeId: frameId, maxSize: 128 },
+      png: output,
+      width: 120,
+      height: 80,
+      renderer: "software",
+      warnings: [],
+    });
+    database.sqlite.prepare(
+      "UPDATE previews SET status = 'expired', expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+    ).run(preview.id);
+    const old = new Date("2000-01-02T00:00:00.000Z");
+    fs.utimesSync(store.artifactPath(metadata.sha256), old, old);
+    database.close();
+
+    const reopened = new DesignerDatabase(filename);
+    try {
+      new DesignerService(reopened, new EventHub(), 900, {}, undefined, store);
+      expect(reopened.sqlite.prepare("SELECT id FROM previews WHERE id = ?").get(preview.id)).toBeUndefined();
+      expect(store.read(metadata.sha256)).toBeNull();
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("records the PNG target and output exactly once and reads it after restart-safe persistence", () => {
     const { database, service, created, preview, pageId, frameId } = fixture();
     try {

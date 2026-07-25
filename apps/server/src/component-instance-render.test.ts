@@ -5,6 +5,7 @@ import {
   createSequentialIdFactory,
   createStarterDocument,
   createTextNode,
+  withComponentInstanceProjection,
 } from "@designer/core";
 import { describe, expect, it } from "vitest";
 
@@ -81,6 +82,47 @@ describe("component instance HTML rendering", () => {
     const rendered = renderHtmlDocument(DesignDocumentSchema.parse(document), { nodeId: frame.id }, () => null);
     expect(rendered.html).toContain("Component cycle");
     expect(rendered.html.match(/Component cycle/g)).toHaveLength(1);
+  });
+
+  it("renders typed property, slot, and visual component projections", () => {
+    const ids = createSequentialIdFactory("servercomponentprojection");
+    const document = createStarterDocument({ preset: "phone", idFactory: ids });
+    const frame = document.nodes[document.pages[0]!.children[0]!]!;
+    if (frame.type !== "frame") throw new Error("starter frame missing");
+    const label = createTextNode({ content: "Default", archived: true, layout: { width: 180, height: 24 } }, ids);
+    const slotted = createTextNode({ content: "Slotted helper", archived: true, layout: { width: 180, height: 20 } }, ids);
+    const master = createComponentNode({
+      name: "Projected button",
+      component_key: "button.projected",
+      children: [label.id],
+      archived: true,
+      layout: { width: 220, height: 64, mode: "vertical" },
+      style: { fill: "#eeeeee" },
+    }, ids);
+    const instance = createInstanceNode({
+      component_id: master.id,
+      overrides: withComponentInstanceProjection({}, {
+        schema_version: 1,
+        node_overrides: {
+          [master.id]: { style: { fill: "#2457ff" } },
+          [label.id]: { content: "Pay now", accessibility_label: "Primary payment action" },
+        },
+        slot_children: { [master.id]: [slotted.id] },
+      }),
+      layout: { x: 24, y: 32, width: 220, height: 64 },
+    }, ids);
+    document.nodes[label.id] = label;
+    document.nodes[slotted.id] = slotted;
+    document.nodes[master.id] = master;
+    document.nodes[instance.id] = instance;
+    frame.children.push(instance.id);
+
+    const rendered = renderHtmlDocument(DesignDocumentSchema.parse(document), { nodeId: frame.id }, () => null);
+    expect(rendered.html).toContain("Pay now");
+    expect(rendered.html).toContain("Slotted helper");
+    expect(rendered.html).toContain("Primary payment action");
+    expect(rendered.html).toContain("background-color:#2457ff");
+    expect(rendered.html).not.toContain(">Default<");
   });
 
   it("renders archived pages as tombstones without exposing their retained descendants", () => {

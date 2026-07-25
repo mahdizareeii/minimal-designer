@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BackupVerification } from "./backup.js";
 import { FORMASPEC_ESSENTIAL_MCP_TOOLS, type BridgeController } from "./bridge-lifecycle.js";
-import { runCli, type CliIo } from "./command.js";
+import { runCli, type CliIo, type EnsureRunningResult } from "./command.js";
 import {
   persistDockerRuntimeBinding,
   type DockerComposeBindingLabels,
@@ -152,11 +152,32 @@ function collectingIo(): CliIo & { output: string[]; errors: string[] } {
   return { output, errors, stdout: (message) => output.push(message), stderr: (message) => errors.push(message), isInteractive: false };
 }
 
+function ensureRunningJson(io: ReturnType<typeof collectingIo>): EnsureRunningResult {
+  expect(io.errors).toEqual([]);
+  expect(io.output).toHaveLength(1);
+  return JSON.parse(io.output[0]!) as EnsureRunningResult;
+}
+
 function makeProject(root: string): string {
   fs.writeFileSync(path.join(root, "pnpm-workspace.yaml"), "packages: []\n");
   const launcher = path.join(root, "designer");
   fs.writeFileSync(launcher, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   return root;
+}
+
+function recordRuntime(
+  root: string,
+  mode: "local" | "dev" | "docker" | "server",
+  apiPort: number,
+  webPort: number,
+  url: string,
+): void {
+  const runDirectory = path.join(root, ".designer", "run");
+  fs.mkdirSync(runDirectory, { recursive: true });
+  fs.writeFileSync(path.join(runDirectory, "mode"), `${mode}\n`);
+  fs.writeFileSync(path.join(runDirectory, "api-port"), `${apiPort}\n`);
+  fs.writeFileSync(path.join(runDirectory, "web-port"), `${webPort}\n`);
+  fs.writeFileSync(path.join(runDirectory, "url"), `${url}\n`);
 }
 
 function persistKnownDockerBinding(root: string, port: number): void {
@@ -252,10 +273,18 @@ if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "add" ]; then
-  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.2.2","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.2","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  if [ -f "$FAKE_CODEX_PLUGIN_STATE" ] && grep -q 'minimal-ui@formaspec' "$FAKE_CODEX_PLUGIN_STATE"; then
+    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.3.0","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.2","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  else
+    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.3.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  fi
   exit 0
 fi
-if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then exit 9; fi
+if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then
+  [ "$FAKE_CODEX_FAIL_PLUGIN_REMOVE" = "1" ] && exit 9
+  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.3.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  exit 0
+fi
 exit 2
 `, { mode: 0o755 });
   fs.writeFileSync(log, "");
@@ -295,11 +324,11 @@ describe("formaspecctl", () => {
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
     expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
     expect(fs.readFileSync(log, "utf8").trim()).toBe("--version");
-    expect(confirmation).toContain("managed FormaSpec identity plus the Minimal UI compatibility alias");
-    expect(confirmation).not.toContain("FormaSpec and Minimal UI identities");
+    expect(confirmation).toContain("single managed FormaSpec plugin");
+    expect(confirmation).toContain("remove installer-owned legacy duplicate identities");
   });
 
-  it("configures token-free FormaSpec MCP and installs both managed agent identities", async () => {
+  it("configures token-free FormaSpec MCP and installs one managed plugin identity", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -323,7 +352,8 @@ describe("formaspecctl", () => {
     expect(calls).toContain("mcp get formaspec\n");
     expect(calls).toContain("plugin marketplace add");
     expect(calls).toContain("plugin add formaspec@formaspec --json");
-    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
+    expect(calls).not.toContain("plugin add minimal-ui@formaspec --json");
+    expect(calls).not.toContain("plugin remove minimal-ui@formaspec --json");
     expect(calls.toLowerCase()).not.toContain("bearer");
     expect(calls.toLowerCase()).not.toContain("token");
     const codexConfig = fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8");
@@ -331,7 +361,12 @@ describe("formaspecctl", () => {
     expect(codexConfig).toContain('[mcp_servers.formaspec]');
     expect(codexConfig).toContain('default_tools_approval_mode = "writes"');
     expect(codexConfig.toLowerCase()).not.toContain("bearer");
-    const skill = fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"), "utf8");
+    expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
+    expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
+    const skill = fs.readFileSync(
+      path.join(root, ".codex", "formaspec-marketplace", "plugins", "formaspec", "skills", "formaspec", "SKILL.md"),
+      "utf8",
+    );
     expect(skill).toContain("Use FormaSpec");
     expect(skill).toContain("Design this with FormaSpec");
     expect(skill).toContain("Refine this selection with FormaSpec");
@@ -340,50 +375,31 @@ describe("formaspecctl", () => {
     expect(skill).toContain("ask for confirmation");
     expect(skill).toContain("`nextCursor` is null");
     expect(skill).toContain("recommend `./designer doctor auto`");
+    expect(skill).toContain("`formaspecctl ensure-running --json`");
+    expect(skill).toContain("retry MCP initialize once");
     expect(skill).toContain("Never choose by list order");
-    const minimalUiSkill = fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", "SKILL.md"), "utf8");
-    expect(minimalUiSkill).toContain("Use Minimal UI");
-    expect(minimalUiSkill).toContain("Design this with Minimal UI");
-    expect(minimalUiSkill).toContain("Refine this selection with Minimal UI");
-    expect(minimalUiSkill).toContain("Redesign this with Minimal UI");
-    expect(minimalUiSkill).toContain("For one proven accessible project");
-    expect(minimalUiSkill).toContain("ask for confirmation");
-    expect(minimalUiSkill).toContain("`nextCursor` is null");
-    expect(minimalUiSkill).toContain("recommend `./designer doctor auto`");
-    const marker = JSON.parse(fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", ".formaspec-managed.json"), "utf8"));
-    expect(marker).toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
-    const minimalUiMarker = JSON.parse(fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", ".formaspec-managed.json"), "utf8"));
-    expect(minimalUiMarker).toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
     const marketplace = path.join(root, ".codex", "formaspec-marketplace");
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, ".agents", "plugins", "marketplace.json"), "utf8"))).toMatchObject({
       name: "formaspec",
       plugins: [
         { name: "formaspec", source: { path: "./plugins/formaspec" } },
-        { name: "minimal-ui", source: { path: "./plugins/minimal-ui" } },
       ],
     });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "formaspec",
-      version: "0.2.2",
+      version: "0.3.0",
       interface: { displayName: "FormaSpec" },
     });
-    expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
-      name: "minimal-ui",
-      version: "0.2.2",
-      interface: { displayName: "Minimal UI" },
-    });
+    expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
       ],
     });
     expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
-    expect(io.output.join("\n")).toContain("[@Minimal UI](plugin://minimal-ui@formaspec)");
-    expect(io.output.join("\n")).toContain("Primary Codex mention: [@FormaSpec]");
-    expect(io.output.join("\n")).toContain("Compatibility alias for existing prompts: [@Minimal UI]");
-    expect(io.output.join("\n")).toContain("Use FormaSpec in a new Codex task.");
-    expect(io.output.join("\n")).not.toContain("Use FormaSpec or Use Minimal UI");
+    expect(io.output.join("\n")).toContain("Codex mention: [@FormaSpec]");
+    expect(io.output.join("\n")).toContain("Use FormaSpec in a new Codex task so it loads the updated single identity.");
+    expect(io.output.join("\n")).not.toContain("[@Minimal UI]");
     const approvalConfig = [
       'basic_approval_example = """',
       "[mcp_servers.formaspec]",
@@ -516,7 +532,7 @@ describe("formaspecctl", () => {
     expect(fs.readFileSync(path.join(skill, "SKILL.md"), "utf8")).toBe("user-owned\n");
   });
 
-  it("repairs disabled or missing managed plugins and verifies both identities", async () => {
+  it("repairs a disabled or stale FormaSpec plugin and verifies one identity", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -536,16 +552,15 @@ describe("formaspecctl", () => {
     expect(result).toBe(0);
     const calls = fs.readFileSync(log, "utf8");
     expect(calls).toContain("plugin add formaspec@formaspec --json");
-    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
+    expect(calls).not.toContain("plugin add minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
       ],
     });
   });
 
-  it("retains exact Minimal UI alias configuration while preserving similarly prefixed and unrelated TOML", async () => {
+  it("removes exact legacy plugin tables after Codex removal without editing strings, prefixes, or unrelated TOML", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -585,7 +600,10 @@ describe("formaspecctl", () => {
       "",
     ].join("\n"));
     fs.writeFileSync(`${state}.plugins`, JSON.stringify({
-      installed: [{ pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true }],
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.2.0", installed: true, enabled: true },
+        { pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true },
+      ],
     }));
 
     const result = await runCli(["--yes", "agent", "connect", "codex"], {
@@ -603,32 +621,96 @@ describe("formaspecctl", () => {
     expect(updatedConfig).toContain('[[plugins."minimal-ui@formaspec-extra".connections]] # similarly prefixed array table');
     expect(updatedConfig).toContain('prefix_parent = "preserve"');
     expect(updatedConfig).toContain('prefix_array = "preserve"');
-    expect(updatedConfig).toContain('alias_parent = "preserve"');
-    expect(updatedConfig).toContain('alias_array = "preserve"');
-    expect(updatedConfig).toContain('alias_descendant = "preserve"');
+    expect(updatedConfig).not.toContain('alias_parent = "preserve"');
+    expect(updatedConfig).not.toContain('alias_array = "preserve"');
+    expect(updatedConfig).not.toContain('alias_descendant = "preserve"');
+    expect(updatedConfig).not.toContain('[plugins."minimal-ui@formaspec"] # managed legacy parent');
+    expect(updatedConfig).not.toContain('[[plugins."minimal-ui@formaspec".connections]] # managed legacy descendant array');
+    expect(updatedConfig).not.toContain('[plugins."minimal-ui@formaspec".mcp_servers.formaspec] # managed legacy descendant');
     expect(updatedConfig).toContain('[plugins."unrelated@company"] # unrelated table');
     expect(updatedConfig).toContain('unrelated = "preserve"');
     expect(updatedConfig).toContain("[mcp_servers.formaspec]");
     const calls = fs.readFileSync(log, "utf8");
-    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
-    expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
+    expect(calls).not.toContain("plugin add minimal-ui@formaspec --json");
+    expect(calls).toContain("plugin remove minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
       ],
     });
   });
 
-  it("upgrades managed legacy Minimal UI assets in place without removing the alias", async () => {
+  it("removes an already-uninstalled legacy plugin table idempotently", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
     const state = path.join(root, "codex.state");
     installFakeCodex(bin, log, state);
-    const legacySkill = path.join(root, ".codex", "skills", "minimal-ui");
-    writeFormaSpecManagedMarker(legacySkill);
-    fs.writeFileSync(path.join(legacySkill, "SKILL.md"), "legacy managed skill\n");
+    const configPath = path.join(root, ".codex", "config.toml");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, [
+      'model = "test-model"',
+      "",
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "writes"',
+      "",
+      '[plugins."minimal-ui@formaspec"]',
+      'legacy_parent_marker = "remove"',
+      "",
+      '[plugins."minimal-ui@formaspec".settings]',
+      'legacy_descendant_marker = "remove"',
+      "",
+      '[plugins."minimal-ui@formaspec-backup"]',
+      'similarly_prefixed_marker = "preserve"',
+      "",
+    ].join("\n"));
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+      ],
+    }));
+    const environment = fakeEnvironment(root, bin, log, state);
+    const bridge = fakeBridge();
+
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io: collectingIo(),
+      environment,
+    })).toBe(0);
+    const firstCleanup = fs.readFileSync(configPath, "utf8");
+    expect(firstCleanup).not.toContain('[plugins."minimal-ui@formaspec"]');
+    expect(firstCleanup).not.toContain('[plugins."minimal-ui@formaspec".settings]');
+    expect(firstCleanup).not.toContain("legacy_parent_marker");
+    expect(firstCleanup).not.toContain("legacy_descendant_marker");
+    expect(firstCleanup).toContain('[plugins."minimal-ui@formaspec-backup"]');
+    expect(firstCleanup).toContain('similarly_prefixed_marker = "preserve"');
+    expect(fs.readFileSync(log, "utf8")).not.toContain("plugin remove minimal-ui@formaspec --json");
+
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io: collectingIo(),
+      environment,
+    })).toBe(0);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(firstCleanup);
+    expect(fs.readFileSync(log, "utf8")).not.toContain("plugin remove minimal-ui@formaspec --json");
+  });
+
+  it("installs and verifies FormaSpec 0.3.0 before removing installer-owned legacy identities", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    const legacyFormaSpecSkill = path.join(root, ".codex", "skills", "formaspec");
+    const legacyMinimalUiSkill = path.join(root, ".codex", "skills", "minimal-ui");
+    writeFormaSpecManagedMarker(legacyFormaSpecSkill);
+    writeFormaSpecManagedMarker(legacyMinimalUiSkill);
+    fs.writeFileSync(path.join(legacyFormaSpecSkill, "SKILL.md"), "legacy managed primary skill\n");
+    fs.writeFileSync(path.join(legacyMinimalUiSkill, "SKILL.md"), "legacy managed alias skill\n");
     const marketplace = path.join(root, ".codex", "formaspec-marketplace");
     writeFormaSpecManagedMarker(marketplace);
     const legacyPlugin = path.join(marketplace, "plugins", "minimal-ui");
@@ -638,34 +720,34 @@ describe("formaspecctl", () => {
       installed: [{ pluginId: "minimal-ui@formaspec", version: "0.2.0", installed: true, enabled: true }],
     }));
 
+    const io = collectingIo();
     const result = await runCli(["--yes", "agent", "connect", "codex"], {
       projectRoot: root,
       bridge: fakeBridge(),
-      io: collectingIo(),
+      io,
       environment: fakeEnvironment(root, bin, log, state),
     });
 
     expect(result).toBe(0);
-    expect(fs.readFileSync(path.join(legacySkill, "SKILL.md"), "utf8")).toContain("Use Minimal UI");
-    expect(JSON.parse(fs.readFileSync(path.join(legacySkill, ".formaspec-managed.json"), "utf8")))
-      .toMatchObject({ manager: "formaspecctl", schemaVersion: 1 });
-    expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui", "legacy.txt"))).toBe(false);
-    expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"), "utf8")))
-      .toMatchObject({ name: "minimal-ui", version: "0.2.2", interface: { displayName: "Minimal UI" } });
-    expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"))).toBe(true);
+    expect(fs.existsSync(legacyFormaSpecSkill)).toBe(false);
+    expect(fs.existsSync(legacyMinimalUiSkill)).toBe(false);
+    expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui"))).toBe(false);
     expect(fs.existsSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"))).toBe(true);
     const calls = fs.readFileSync(log, "utf8");
     expect(calls).toContain("plugin add formaspec@formaspec --json");
-    expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
+    expect(calls).toContain("plugin remove minimal-ui@formaspec --json");
+    expect(calls.indexOf("plugin add formaspec@formaspec --json"))
+      .toBeLessThan(calls.indexOf("plugin remove minimal-ui@formaspec --json"));
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
       ],
     });
+    expect(io.output.join("\n")).toContain("Removed the installer-owned legacy duplicate plugin identity.");
+    expect(io.output.join("\n")).toContain("Removed installer-owned duplicate standalone skills:");
   });
 
-  it("preserves an unmanaged Minimal UI skill while repairing the managed plugin alias", async () => {
+  it("preserves and reports an unmanaged legacy skill collision without changing Codex", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -678,26 +760,74 @@ describe("formaspecctl", () => {
       installed: [{ pluginId: "minimal-ui@formaspec", version: "9.9.9", installed: true, enabled: true }],
     }));
 
+    const bridge = fakeBridge();
+    const io = collectingIo();
     const result = await runCli(["--yes", "agent", "connect", "codex"], {
       projectRoot: root,
-      bridge: fakeBridge(),
-      io: collectingIo(),
+      bridge,
+      io,
       environment: fakeEnvironment(root, bin, log, state),
     });
 
-    expect(result).toBe(0);
+    expect(result).toBe(1);
+    expect(bridge.starts).toBe(0);
     expect(fs.readFileSync(path.join(legacySkill, "SKILL.md"), "utf8")).toBe("user-owned legacy skill\n");
-    expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(root, ".codex", "formaspec-marketplace", "plugins", "minimal-ui", ".codex-plugin", "plugin.json"))).toBe(true);
     const calls = fs.readFileSync(log, "utf8");
-    expect(calls).toContain("plugin add minimal-ui@formaspec --json");
-    expect(calls).not.toContain("plugin remove minimal-ui@formaspec");
-    expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
+    expect(calls.trim()).toBe("--version");
+    expect(io.errors.join("\n")).toContain("Unmanaged legacy duplicate Codex skill collision");
+    expect(io.errors.join("\n")).toContain("FormaSpec preserved it");
+  });
+
+  it("preserves managed standalone skills when legacy plugin removal fails after the primary upgrade", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    const legacyFormaSpecSkill = path.join(root, ".codex", "skills", "formaspec");
+    const legacyMinimalUiSkill = path.join(root, ".codex", "skills", "minimal-ui");
+    writeFormaSpecManagedMarker(legacyFormaSpecSkill);
+    writeFormaSpecManagedMarker(legacyMinimalUiSkill);
+    const configPath = path.join(root, ".codex", "config.toml");
+    fs.writeFileSync(configPath, [
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "writes"',
+      "",
+      '[plugins."minimal-ui@formaspec"]',
+      'legacy_configuration = "preserve until Codex removal succeeds"',
+      "",
+    ].join("\n"));
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
+    const originalConfig = fs.readFileSync(configPath, "utf8");
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
       installed: [
         { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
         { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
       ],
-    });
+    }));
+    const environment = {
+      ...fakeEnvironment(root, bin, log, state),
+      FAKE_CODEX_FAIL_PLUGIN_REMOVE: "1",
+    };
+    const bridge = fakeBridge();
+    const io = collectingIo();
+
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment,
+    })).toBe(1);
+
+    const calls = fs.readFileSync(log, "utf8");
+    expect(calls.indexOf("plugin add formaspec@formaspec --json"))
+      .toBeLessThan(calls.indexOf("plugin remove minimal-ui@formaspec --json"));
+    expect(fs.existsSync(legacyFormaSpecSkill)).toBe(true);
+    expect(fs.existsSync(legacyMinimalUiSkill)).toBe(true);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(originalConfig);
+    expect(bridge.authorizations).toBe(0);
+    expect(io.errors.join("\n")).toContain("verified FormaSpec 0.3.0 but could not remove the legacy duplicate plugin");
   });
 
   it("prints generic MCP configuration without starting, authorizing, or modifying an unknown client", async () => {
@@ -790,6 +920,166 @@ describe("formaspecctl", () => {
       environment,
       commandRunner: runner,
     })).toBe(1);
+  });
+
+  it("keeps ensure-running blocked until one runtime mode has been recorded", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    let delegated = false;
+
+    const result = await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: path.join(root, "empty-bin") },
+      commandRunner: async () => {
+        delegated = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toBe(1);
+    expect(delegated).toBe(false);
+    expect(bridge.starts).toBe(0);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      schemaVersion: 1,
+      ok: false,
+      status: "blocked",
+      mode: null,
+      blocker: { code: "RUNTIME_NOT_RECORDED" },
+    });
+  });
+
+  it("reports the recorded development web origin while verifying the API and bridge identity", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "dev\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4310\n");
+    fs.writeFileSync(path.join(runDirectory, "web-port"), "4311\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "http://127.0.0.1:4311\n");
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    let delegated = false;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    const result = await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => {
+        delegated = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(delegated).toBe(false);
+    expect(bridge.starts).toBe(1);
+    expect(JSON.parse(io.output[0]!)).toEqual({
+      schemaVersion: 1,
+      ok: true,
+      status: "ready",
+      mode: "dev",
+      started: false,
+      origin: "http://127.0.0.1:4310",
+      webOrigin: "http://127.0.0.1:4311",
+      dataStoreId: TEST_DATA_STORE_ID,
+      bridgeReady: true,
+    });
+  });
+
+  it("resumes an offline recorded local runtime without selecting another data store", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "local\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4320\n");
+    fs.writeFileSync(path.join(runDirectory, "web-port"), "0\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "http://127.0.0.1:4320\n");
+    const bridge = fakeBridge();
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    const io = collectingIo();
+    const launcherCalls: Array<{ executable: string; args: readonly string[] }> = [];
+    let healthAttempts = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      healthAttempts += 1;
+      if (healthAttempts === 1) throw new Error("offline");
+      return new Response(JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const result = await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async (executable, args) => {
+        launcherCalls.push({ executable, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(launcherCalls).toEqual([{
+      executable: path.join(root, "designer"),
+      args: ["--yes", "start", "local", "--port", "4320", "--no-open"],
+    }]);
+    expect(bridge.starts).toBe(1);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      ok: true,
+      status: "started",
+      mode: "local",
+      origin: "http://127.0.0.1:4320",
+      webOrigin: "http://127.0.0.1:4320",
+      dataStoreId: TEST_DATA_STORE_ID,
+    });
+  });
+
+  it("does not fall back to native mode when a recorded Docker runtime lacks Docker", async () => {
+    const root = makeProject(temporaryDirectory());
+    const runDirectory = path.join(root, ".designer", "run");
+    const emptyBin = path.join(root, "empty-bin");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.mkdirSync(emptyBin);
+    fs.writeFileSync(path.join(runDirectory, "mode"), "docker\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4310\n");
+    fs.writeFileSync(path.join(runDirectory, "web-port"), "0\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "http://127.0.0.1:4310\n");
+    const bridge = fakeBridge();
+    const io = collectingIo();
+    let delegated = false;
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+
+    const result = await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: emptyBin },
+      commandRunner: async () => {
+        delegated = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toBe(1);
+    expect(delegated).toBe(false);
+    expect(bridge.starts).toBe(0);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      ok: false,
+      mode: "docker",
+      blocker: {
+        code: "DOCKER_CLI_REQUIRED",
+        action: expect.stringMatching(/Do not start local mode/i),
+      },
+    });
   });
 
   it("keeps bridge recovery on the recorded Docker data store", async () => {
@@ -1080,6 +1370,298 @@ describe("formaspecctl", () => {
     expect(io.output.join("\n")).toContain("workstation loopback bridge is intentionally disabled");
   });
 
+  it("reports an already-ready recorded local runtime without invoking the launcher", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "local", 4320, 0, "http://127.0.0.1:4320");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const bridge = fakeBridge();
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    const io = collectingIo();
+    let launcherCalls = 0;
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => {
+        launcherCalls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    })).toBe(0);
+
+    expect(launcherCalls).toBe(0);
+    expect(bridge.starts).toBe(1);
+    expect(ensureRunningJson(io)).toEqual({
+      schemaVersion: 1,
+      ok: true,
+      status: "ready",
+      mode: "local",
+      started: false,
+      origin: "http://127.0.0.1:4320",
+      webOrigin: "http://127.0.0.1:4320",
+      dataStoreId: TEST_DATA_STORE_ID,
+      bridgeReady: true,
+    });
+  });
+
+  it("resumes only the recorded local runtime on its exact API port", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "local", 4320, 0, "http://127.0.0.1:4320");
+    vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(new Response(
+        JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ));
+    const bridge = fakeBridge();
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    const io = collectingIo();
+    const calls: Array<{ executable: string; args: readonly string[]; inherit: unknown }> = [];
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async (executable, args, options) => {
+        calls.push({ executable, args, inherit: options?.inherit });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    })).toBe(0);
+
+    expect(calls).toEqual([{
+      executable: path.join(root, "designer"),
+      args: ["--yes", "start", "local", "--port", "4320", "--no-open"],
+      inherit: false,
+    }]);
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: true,
+      status: "started",
+      mode: "local",
+      started: true,
+      origin: "http://127.0.0.1:4320",
+      webOrigin: "http://127.0.0.1:4320",
+      dataStoreId: TEST_DATA_STORE_ID,
+    });
+  });
+
+  it("returns a structured blocker instead of guessing a runtime mode", async () => {
+    const root = makeProject(temporaryDirectory());
+    const io = collectingIo();
+    let launcherCalls = 0;
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => {
+        launcherCalls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    })).toBe(1);
+
+    expect(launcherCalls).toBe(0);
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: false,
+      status: "blocked",
+      mode: null,
+      started: false,
+      blocker: { code: "RUNTIME_NOT_RECORDED" },
+    });
+  });
+
+  it("reports a missing Docker CLI without starting a different runtime", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "docker", 4320, 0, "http://127.0.0.1:4320");
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const io = collectingIo();
+    let runnerCalls = 0;
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io,
+      environment: { HOME: root, PATH: path.join(root, "empty-bin") },
+      commandRunner: async () => {
+        runnerCalls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    })).toBe(1);
+
+    expect(runnerCalls).toBe(0);
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: false,
+      mode: "docker",
+      blocker: { code: "DOCKER_CLI_REQUIRED" },
+    });
+  });
+
+  it("reports stopped Docker Desktop without switching away from the recorded Docker store", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "docker", 4320, 0, "http://127.0.0.1:4320");
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "docker"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const io = collectingIo();
+    const calls: Array<{ executable: string; args: readonly string[] }> = [];
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io,
+      environment: { HOME: root, PATH: bin },
+      commandRunner: async (executable, args) => {
+        calls.push({ executable, args });
+        return { exitCode: 1, stdout: "", stderr: "daemon unavailable" };
+      },
+    })).toBe(1);
+
+    expect(calls).toEqual([{
+      executable: path.join(bin, "docker"),
+      args: ["info", "--format", "{{.ServerVersion}}"],
+    }]);
+    const result = ensureRunningJson(io);
+    expect(result).toMatchObject({
+      ok: false,
+      mode: "docker",
+      blocker: { code: "DOCKER_DESKTOP_REQUIRED" },
+    });
+    expect(result.blocker?.action).toContain("do not start local mode");
+  });
+
+  it("rejects a recorded Docker origin that conflicts with its pinned binding before startup", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "docker", 4320, 0, "http://127.0.0.1:4320");
+    persistKnownDockerBinding(root, 4310);
+    const io = collectingIo();
+    let fetchCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetchCalls += 1;
+      throw new Error("must not probe");
+    });
+    let runnerCalls = 0;
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => {
+        runnerCalls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    })).toBe(1);
+
+    expect(fetchCalls).toBe(0);
+    expect(runnerCalls).toBe(0);
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: false,
+      mode: "docker",
+      blocker: { code: "RUNTIME_CONFIGURATION_INVALID" },
+    });
+  });
+
+  it("resumes development mode with the exact recorded API and web ports", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "dev", 4325, 4326, "http://127.0.0.1:4326");
+    const launchLog = path.join(root, "dev-launch.log");
+    fs.writeFileSync(path.join(root, "designer"), [
+      "#!/bin/sh",
+      "printf '%s\\n' \"$*\" > \"$FAKE_LAUNCH_LOG\"",
+      "exit 0",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    let probes = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      probes += 1;
+      if (probes === 1 || !fs.existsSync(launchLog)) throw new Error("offline");
+      return new Response(JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const bridge = fakeBridge();
+    bridge.upstreamOrigin = "http://127.0.0.1:4325";
+    const io = collectingIo();
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin", FAKE_LAUNCH_LOG: launchLog },
+      commandRunner: async () => {
+        throw new Error("development recovery must use only the fixed detached launcher");
+      },
+    })).toBe(0);
+
+    expect(fs.readFileSync(launchLog, "utf8").trim()).toBe(
+      "--yes --no-open dev --api-port 4325 --web-port 4326 --skip-setup",
+    );
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: true,
+      status: "started",
+      mode: "dev",
+      origin: "http://127.0.0.1:4325",
+      webOrigin: "http://127.0.0.1:4326",
+      dataStoreId: TEST_DATA_STORE_ID,
+    });
+  });
+
+  it("blocks a mismatched bridge data store after verifying the recorded runtime", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "local", 4320, 0, "http://127.0.0.1:4320");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const bridge = fakeBridge();
+    bridge.upstreamOrigin = "http://127.0.0.1:4320";
+    bridge.dataStoreId = `store_${"b".repeat(32)}`;
+    const io = collectingIo();
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: false,
+      mode: "local",
+      origin: "http://127.0.0.1:4320",
+      dataStoreId: TEST_DATA_STORE_ID,
+      blocker: { code: "RUNTIME_IDENTITY_CONFLICT" },
+    });
+  });
+
+  it("rejects a development web origin that does not match the recorded web port", async () => {
+    const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "dev", 4325, 4326, "http://127.0.0.1:4999");
+    const io = collectingIo();
+
+    expect(await runCli(["ensure-running", "--json"], {
+      projectRoot: root,
+      bridge: fakeBridge(),
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+
+    expect(ensureRunningJson(io)).toMatchObject({
+      ok: false,
+      mode: "dev",
+      blocker: { code: "RUNTIME_CONFIGURATION_INVALID" },
+    });
+  });
+
   it("refreshes an already-authorized managed Codex install on startup without prompting again", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
@@ -1124,15 +1706,24 @@ describe("formaspecctl", () => {
     expect(result).toBe(0);
     expect(confirmations).toBe(0);
     expect(bridge.authorizations).toBe(1);
-    expect(io.output).toContain("Refreshing the already-authorized managed Codex connection and FormaSpec skills.");
-    expect(fs.readFileSync(path.join(root, ".codex", "skills", "formaspec", "SKILL.md"), "utf8"))
+    expect(io.output).toContain("Refreshing the already-authorized managed Codex connection and FormaSpec plugin.");
+    expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
+    expect(fs.readFileSync(path.join(
+      root,
+      ".codex",
+      "formaspec-marketplace",
+      "plugins",
+      "formaspec",
+      "skills",
+      "formaspec",
+      "SKILL.md",
+    ), "utf8"))
       .toContain("Never call `design_commit_preview`");
-    expect(fs.readFileSync(path.join(root, ".codex", "skills", "minimal-ui", "SKILL.md"), "utf8"))
-      .toContain("Minimal UI is a compatibility alias");
+    expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
+    expect(fs.existsSync(path.join(root, ".codex", "formaspec-marketplace", "plugins", "minimal-ui"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.2.2", installed: true, enabled: true },
-        { pluginId: "minimal-ui@formaspec", version: "0.2.2", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
       ],
     });
   });
@@ -1300,6 +1891,11 @@ describe("formaspecctl", () => {
       16,
       "bootstrap_credential_trigger_canonicalization",
       "2026-01-16T00:00:00.000Z",
+    );
+    sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(
+      17,
+      "product_organization_foundation",
+      "2026-01-17T00:00:00.000Z",
     );
     sqlite.close();
     const io = collectingIo();

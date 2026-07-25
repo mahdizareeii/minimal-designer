@@ -27,6 +27,7 @@ import {
   type NodeLayout,
   type NodeStyle,
   type RectangleNode,
+  type ResponsiveFrameVariant,
   type TextNode,
 } from "./model.js";
 
@@ -77,6 +78,7 @@ export interface FrameFactoryOptions extends BaseFactoryOptions {
   children?: NodeId[];
   clip_content?: boolean;
   role?: FrameNode["role"];
+  responsive_variant?: ResponsiveFrameVariant;
 }
 
 export function createFrameNode(options: FrameFactoryOptions = {}, idFactory: IdFactory = createId): FrameNode {
@@ -86,6 +88,7 @@ export function createFrameNode(options: FrameFactoryOptions = {}, idFactory: Id
     children: options.children ?? [],
     clip_content: options.clip_content ?? false,
     ...(options.role === undefined ? {} : { role: options.role }),
+    ...(options.responsive_variant === undefined ? {} : { responsive_variant: options.responsive_variant }),
   });
 }
 

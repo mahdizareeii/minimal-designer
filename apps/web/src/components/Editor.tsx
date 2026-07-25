@@ -6,7 +6,9 @@ import {
   Copy,
   Download,
   Eye,
+  FileCode2,
   FileJson,
+  FileText,
   Hand,
   ImageDown,
   LayoutPanelTop,
@@ -114,7 +116,7 @@ export function Editor({ designId }: { designId: string }) {
   const setSidebarsHidden = useDesignerStore((state) => state.setSidebarsHidden);
   const [frameMenu, setFrameMenu] = useState(false);
   const [stageTab, setStageTab] = useState<CenterWorkspaceTab>("canvas");
-  const [exporting, setExporting] = useState<"json" | "png" | "bundle" | null>(null);
+  const [exporting, setExporting] = useState<"json" | "png" | "svg" | "pdf" | "bundle" | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState<"load" | "export" | "duplicate" | "discard" | null>(null);
   const copiedNodeIds = useRef<typeof selectedIds>([]);
 
@@ -201,7 +203,7 @@ export function Editor({ designId }: { designId: string }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [undo, redo, duplicate, deleteSelection, setTool, addNode, prototypeOpen, closePrototype, select, selectedIds, setNotice]);
 
-  const performExport = async (kind: "json" | "png" | "bundle") => {
+  const performExport = async (kind: "json" | "png" | "svg" | "pdf" | "bundle") => {
     if (!document) return;
     setExporting(kind);
     try {
@@ -224,11 +226,22 @@ export function Editor({ designId }: { designId: string }) {
           portableExportUrl(currentDocument.id, current.baseVersion),
           `${currentDocument.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-v${current.baseVersion}.formaspec.zip`,
         );
-      } else {
+      } else if (kind === "png") {
         const selectedFrame = selectedIds.find((id) => currentDocument.nodes[id]?.type === "frame");
         await downloadFile(
           renderUrl(currentDocument.id, { version: current.baseVersion, pageId: activePageId ?? undefined, nodeId: selectedFrame, maxSize: 4096 }),
           `${currentDocument.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-v${current.baseVersion}.png`,
+        );
+      } else {
+        const selectedFrame = selectedIds.find((id) => currentDocument.nodes[id]?.type === "frame");
+        await downloadFile(
+          exportUrl(currentDocument.id, {
+            version: current.baseVersion,
+            format: kind,
+            ...(selectedFrame ? { nodeId: selectedFrame } : activePageId ? { pageId: activePageId } : {}),
+            maxSize: 4096,
+          }),
+          `${currentDocument.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-v${current.baseVersion}.${kind}`,
         );
       }
       setNotice(`${kind.toUpperCase()} export is ready.`);
@@ -402,6 +415,8 @@ export function Editor({ designId }: { designId: string }) {
           ><Save size={13} /><span>{archiveReview ? "Review changes" : "Save / Commit"}</span></button>
           <button className="tool-button" onClick={() => void performExport("json")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export JSON">{exporting === "json" ? <LoaderCircle size={13} /> : <FileJson size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("png")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export PNG">{exporting === "png" ? <LoaderCircle size={13} /> : <ImageDown size={13} />}</button>
+          <button className="tool-button" onClick={() => void performExport("svg")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export sanitized SVG">{exporting === "svg" ? <LoaderCircle size={13} /> : <FileCode2 size={13} />}</button>
+          <button className="tool-button" onClick={() => void performExport("pdf")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export deterministic PDF">{exporting === "pdf" ? <LoaderCircle size={13} /> : <FileText size={13} />}</button>
           <button className="tool-button" onClick={() => void performExport("bundle")} disabled={Boolean(exporting) || Boolean(conflictRecovery)} title="Export portable FormaSpec bundle">{exporting === "bundle" ? <LoaderCircle size={13} /> : <Download size={13} />}</button>
           <button className="button button-secondary" style={{ minHeight: 30, padding: "0 10px", fontSize: 10 }} onClick={openPrototype}><Play size={12} /> Preview</button>
         </div>

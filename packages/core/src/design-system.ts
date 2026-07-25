@@ -101,6 +101,25 @@ export const ComponentSlotSchema = z.object({
 });
 export type ComponentSlot = z.infer<typeof ComponentSlotSchema>;
 
+export const ComponentPropertyBindingTargetSchema = z.enum([
+  "text_content",
+  "visibility",
+  "icon_name",
+  "asset_id",
+  "accessibility_label",
+]);
+
+export const ComponentPropertyBindingSchema = z.object({
+  property_key: z.string().trim().min(1).max(160).regex(/^[A-Za-z][A-Za-z0-9_]*$/),
+  target_node_id: NodeIdSchema,
+  target: ComponentPropertyBindingTargetSchema,
+}).strict();
+
+export const ComponentSlotAnchorSchema = z.object({
+  slot_key: z.string().trim().min(1).max(160).regex(/^[A-Za-z][A-Za-z0-9_]*$/),
+  target_node_id: NodeIdSchema,
+}).strict();
+
 export const ComponentStateSchema = z.object({
   key: z.enum(["default", "hover", "pressed", "focused", "disabled", "loading", "error", "selected"]),
   name: z.string().trim().min(1).max(240),
@@ -146,7 +165,9 @@ export const ComponentDefinitionSchema = z.object({
   status: z.enum(["draft", "published", "deprecated"]),
   root_node_id: NodeIdSchema,
   properties_schema: z.array(ComponentPropertySchema).max(100).default([]),
+  property_bindings: z.array(ComponentPropertyBindingSchema).max(500).default([]),
   slots: z.array(ComponentSlotSchema).max(50).default([]),
+  slot_anchors: z.array(ComponentSlotAnchorSchema).max(50).default([]),
   states: z.array(ComponentStateSchema).min(1).max(8),
   allowed_overrides: OverridePolicySchema,
   platform_mappings: z.array(PlatformMappingSchema).max(100).default([]),
@@ -163,6 +184,45 @@ export const ComponentDefinitionSchema = z.object({
     if (property.type === "enum" && property.default !== undefined && !property.values.includes(property.default)) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["properties_schema"], message: `Invalid enum default for ${property.key}` });
     }
+  }
+  const propertyByKey = new Map(definition.properties_schema.map((property) => [property.key, property]));
+  const bindingKeys = new Set<string>();
+  const allowedBindingTargets: Record<ComponentProperty["type"], ReadonlySet<z.infer<typeof ComponentPropertyBindingTargetSchema>>> = {
+    text: new Set(["text_content", "accessibility_label"]),
+    boolean: new Set(["visibility"]),
+    enum: new Set(["text_content", "icon_name", "accessibility_label"]),
+    icon: new Set(["icon_name", "accessibility_label"]),
+    asset: new Set(["asset_id"]),
+    node_slot: new Set(),
+  };
+  for (const [index, binding] of definition.property_bindings.entries()) {
+    const property = propertyByKey.get(binding.property_key);
+    if (!property) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["property_bindings", index, "property_key"], message: `Unknown property binding: ${binding.property_key}` });
+      continue;
+    }
+    if (!allowedBindingTargets[property.type].has(binding.target)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["property_bindings", index, "target"], message: `Property ${property.key} cannot bind to ${binding.target}` });
+    }
+    const key = `${binding.property_key}\u0000${binding.target_node_id}\u0000${binding.target}`;
+    if (bindingKeys.has(key)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["property_bindings", index], message: "Duplicate property binding" });
+    bindingKeys.add(key);
+  }
+  const slotKeys = new Set([
+    ...definition.slots.map((slot) => slot.key),
+    ...definition.properties_schema
+      .filter((property): property is Extract<ComponentProperty, { type: "node_slot" }> => property.type === "node_slot")
+      .map((property) => property.key),
+  ]);
+  const anchoredSlots = new Set<string>();
+  for (const [index, anchor] of definition.slot_anchors.entries()) {
+    if (!slotKeys.has(anchor.slot_key)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["slot_anchors", index, "slot_key"], message: `Unknown slot anchor: ${anchor.slot_key}` });
+    }
+    if (anchoredSlots.has(anchor.slot_key)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["slot_anchors", index, "slot_key"], message: `Duplicate slot anchor: ${anchor.slot_key}` });
+    }
+    anchoredSlots.add(anchor.slot_key);
   }
   if (definition.replacement_component_id === definition.id) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["replacement_component_id"], message: "A component cannot replace itself" });

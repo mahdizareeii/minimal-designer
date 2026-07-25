@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DomainError } from "./errors.js";
+import { designReadinessFixture } from "../test-fixtures/product.js";
 
 const PROXY_SECRET = "core-preview-context-assets-proxy-secret-0123456789abcdef";
 const PUBLIC_ORIGIN = "https://design.example.test";
@@ -347,7 +348,7 @@ async function createFixture(label: string): Promise<Fixture> {
   application.enterprise.transitionAgentTask(restrictedGrant.actorId, task.id, {
     expectedStatus: "in_progress",
     toStatus: "awaiting_approval",
-    data: { previewId: taskPreview.id },
+    data: { previewId: taskPreview.id, readiness: designReadinessFixture(task.resolvedContext) },
   });
 
   const allowedAsset = createAsset(application, ADMIN_ACTOR, "allowed.png", allowed.id);

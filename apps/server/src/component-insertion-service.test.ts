@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { FORMASPEC_FOUNDATION_SYSTEM } from "@designer/core";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -104,6 +106,58 @@ describe("component insertion preview service", () => {
       "SELECT COUNT(*) AS count FROM previews WHERE design_id = ?",
     ).get(sourceRevision.designId) as { count: number };
     expect(previews.count).toBe(0);
+  });
+
+  it("copies released image dependencies into the target design by verified content hash", () => {
+    const database = new DesignerDatabase(":memory:");
+    databases.push(database);
+    const designer = new DesignerService(database, new EventHub(), 900);
+    const source = createComponentSourceRevisionFixture(
+      database,
+      designer,
+      "local",
+      ["node_component_asset_source_parent_01"],
+      "component-asset-source",
+    );
+    const target = createComponentSourceRevisionFixture(
+      database,
+      designer,
+      "local",
+      ["node_component_asset_target_parent_01"],
+      "component-asset-target",
+    );
+    const organization = database.sqlite.prepare(
+      "SELECT organization_id FROM designs WHERE id = ?",
+    ).get(target.designId) as { organization_id: string };
+    const data = Buffer.from("verified-component-asset-copy", "utf8");
+    const sha256 = createHash("sha256").update(data).digest("hex");
+    const sourceAssetId = "asset_component_copy_source_01";
+    database.sqlite.prepare(
+      `INSERT INTO assets
+       (id, actor_id, design_id, filename, mime_type, size_bytes, width, height, sha256, data, created_at, organization_id)
+       VALUES (?, 'local', ?, 'component.png', 'image/png', ?, 16, 12, ?, ?, '2026-07-25T00:00:00.000Z', ?)`,
+    ).run(sourceAssetId, source.designId, data.length, sha256, data, organization.organization_id);
+
+    type CopyReleasedAssets = (
+      actorId: string,
+      designId: string,
+      organizationId: string,
+      sourceAssetIds: readonly string[],
+    ) => Array<{ sourceAssetId: string; asset: { id: string; sha256?: string } }>;
+    const insertions = new ComponentInsertionService(database, designer);
+    const copyReleasedAssets = (insertions as unknown as {
+      copyReleasedComponentAssets: CopyReleasedAssets;
+    }).copyReleasedComponentAssets.bind(insertions);
+    const first = copyReleasedAssets("local", target.designId, organization.organization_id, [sourceAssetId]);
+    const second = copyReleasedAssets("local", target.designId, organization.organization_id, [sourceAssetId]);
+
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ sourceAssetId, asset: { sha256 } });
+    expect(first[0]!.asset.id).not.toBe(sourceAssetId);
+    expect(second[0]!.asset.id).toBe(first[0]!.asset.id);
+    expect(database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM assets WHERE design_id = ? AND sha256 = ?",
+    ).get(target.designId, sha256)).toEqual({ count: 1 });
   });
 
   it("does not expose component libraries or previews for archived projects", () => {

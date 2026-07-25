@@ -5,6 +5,7 @@ import {
   createSequentialIdFactory,
   createStarterDocument,
   createTextNode,
+  withComponentInstanceProjection,
 } from "@designer/core";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -82,5 +83,45 @@ describe("component instance rendering", () => {
       <NodeView document={strict} nodeId={instance.id} interactive={false} />,
     );
     expect(html).toContain("Unavailable source");
+  });
+
+  it("applies typed property, slot, accessibility, and visual projections", () => {
+    const ids = createSequentialIdFactory("webcomponentprojection");
+    const document = createStarterDocument({ idFactory: ids });
+    const frame = document.nodes[document.pages[0]!.children[0]!]!;
+    if (frame.type !== "frame") throw new Error("starter frame missing");
+    const label = createTextNode({ content: "Default", archived: true }, ids);
+    const slotted = createTextNode({ content: "Supporting detail", archived: true }, ids);
+    const master = createComponentNode({
+      component_key: "button.projected",
+      children: [label.id],
+      archived: true,
+      style: { fill: "#eeeeee" },
+    }, ids);
+    const instance = createInstanceNode({
+      component_id: master.id,
+      overrides: withComponentInstanceProjection({}, {
+        schema_version: 1,
+        node_overrides: {
+          [master.id]: { style: { fill: "#2457ff" } },
+          [label.id]: { content: "Continue securely", accessibility_label: "Secure continuation" },
+        },
+        slot_children: { [master.id]: [slotted.id] },
+      }),
+    }, ids);
+    document.nodes[label.id] = label;
+    document.nodes[slotted.id] = slotted;
+    document.nodes[master.id] = master;
+    document.nodes[instance.id] = instance;
+    frame.children.push(instance.id);
+
+    const html = renderToStaticMarkup(
+      <NodeView document={DesignDocumentSchema.parse(document)} nodeId={instance.id} interactive={false} />,
+    );
+    expect(html).toContain("Continue securely");
+    expect(html).toContain("Supporting detail");
+    expect(html).toContain("aria-label=\"Secure continuation\"");
+    expect(html).toContain("background-color:#2457ff");
+    expect(html).not.toContain(">Default<");
   });
 });

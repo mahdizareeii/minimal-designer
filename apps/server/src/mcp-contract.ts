@@ -76,6 +76,8 @@ const resource = (
 export const MCP_TOOL_CONTRACTS = {
   context_get: tool("read", scopes("design:read"), allHumanRoles, "filtered", "DesignerService.getContext"),
   organization_policy_read: tool("read", scopes("organization_policy:read"), allHumanRoles, "none", "OrganizationPolicyService.read"),
+  product_list: tool("read", scopes("design:read"), allHumanRoles, "filtered", "ProductService.listProducts"),
+  product_read: tool("read", scopes("design:read"), allHumanRoles, "filtered", "ProductService.readProduct"),
   design_list: tool("read", scopes("design:read"), allHumanRoles, "filtered", "DesignerService.listDesigns"),
   design_create: tool("write", scopes("design:write"), designWriters, "unrestricted_grant_only", "assertDesignWrite", "DesignerService.createDesign"),
   design_read: tool("read", scopes("design:read"), allHumanRoles, "required", "DesignerService.requireDesign"),
@@ -197,6 +199,7 @@ export const MCP_TOOL_CONTRACTS = {
 export const MCP_RESOURCE_CONTRACTS = {
   "formaspec-schema-v1": resource("formaspec://schema/v1", false, authenticated, allHumanRoles, "none", "authenticated MCP endpoint"),
   "formaspec-schema-v2": resource("formaspec://schema/v2", false, authenticated, allHumanRoles, "none", "authenticated MCP endpoint"),
+  "product": resource("formaspec://products/{productId}", true, scopes("design:read"), allHumanRoles, "filtered", "ProductService.readProduct"),
   "design-head": resource("formaspec://designs/{designId}/head", true, scopes("design:read"), allHumanRoles, "required", "DesignerService.getDesign"),
   "design-version": resource("formaspec://designs/{designId}/versions/{version}", true, scopes("design:read"), allHumanRoles, "required", "DesignerService.getDesign"),
   "design-node-subtree": resource("formaspec://designs/{designId}/versions/{version}/nodes/{nodeId}", true, scopes("design:read"), allHumanRoles, "required", "DesignerService.getDesign"),

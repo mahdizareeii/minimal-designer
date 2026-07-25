@@ -26,6 +26,16 @@ function evidence(testFile: string, routes: readonly RouteTuple[]): DirectAuthor
 }
 
 const definitions: DirectAuthorizationEvidenceDefinition[] = [
+  ...evidence("apps/server/src/product-http-authorization.test.ts", [
+    ["GET", "/api/products"],
+    ["POST", "/api/products"],
+    ["GET", "/api/products/:productId"],
+    ["PATCH", "/api/products/:productId"],
+    ["POST", "/api/products/:productId/archive"],
+    ["POST", "/api/products/:productId/design-move-previews"],
+    ["GET", "/api/product-move-previews/:previewId"],
+    ["POST", "/api/product-move-previews/:previewId/commit"],
+  ]),
   ...evidence("apps/server/src/planning-agent-opaque-id-http-authorization.test.ts", [
     ["GET", "/api/planning-sessions/:sessionId"],
     ["POST", "/api/planning-sessions/:sessionId/answers"],

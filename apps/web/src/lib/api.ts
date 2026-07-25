@@ -2,6 +2,8 @@ import {
   ComponentDefinitionSchema,
   type AnyDesignDocument,
   type ComponentDefinition,
+  type ComponentPropertyValue,
+  type NodeStyle,
   type RedesignStageArtifact,
   type RedesignStageArtifactMap,
 } from "@designer/core";
@@ -147,6 +149,7 @@ function asProjectSummary(input: unknown): DesignProjectSummary {
   const value = input as Record<string, unknown>;
   return {
     id: String(value.id),
+    ...(value.productId || value.product_id ? { productId: String(value.productId ?? value.product_id) } : {}),
     name: String(value.name ?? "Untitled design"),
     version: Number(value.version ?? value.revision ?? 1),
     ...(value.revisionId || value.revision_id ? { revisionId: String(value.revisionId ?? value.revision_id) } : {}),
@@ -163,16 +166,80 @@ export async function listDesigns(): Promise<DesignProjectSummary[]> {
   return rows.map(asProjectSummary);
 }
 
+export interface ProductSummary {
+  id: string;
+  name: string;
+  description: string;
+  status: "active" | "archived";
+  ownerPrincipalId: string;
+  defaultDesignSystemReleaseId: string | null;
+  defaultLocale: string;
+  defaultDirection: "ltr" | "rtl" | "auto";
+  locales: string[];
+  canonicalSpecificationDesignId: string | null;
+  designCount: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
+function asProductSummary(input: unknown): ProductSummary {
+  const value = input as Record<string, unknown>;
+  return {
+    id: String(value.id),
+    name: String(value.name ?? "Untitled product"),
+    description: String(value.description ?? ""),
+    status: value.status === "archived" ? "archived" : "active",
+    ownerPrincipalId: String(value.ownerPrincipalId ?? ""),
+    defaultDesignSystemReleaseId: value.defaultDesignSystemReleaseId == null
+      ? null
+      : String(value.defaultDesignSystemReleaseId),
+    defaultLocale: String(value.defaultLocale ?? "en"),
+    defaultDirection: value.defaultDirection === "rtl" || value.defaultDirection === "auto"
+      ? value.defaultDirection
+      : "ltr",
+    locales: Array.isArray(value.locales) ? value.locales.map(String) : ["en"],
+    canonicalSpecificationDesignId: value.canonicalSpecificationDesignId == null
+      ? null
+      : String(value.canonicalSpecificationDesignId),
+    designCount: Number(value.designCount ?? 0),
+    createdAt: String(value.createdAt ?? new Date().toISOString()),
+    updatedAt: String(value.updatedAt ?? new Date().toISOString()),
+    archivedAt: value.archivedAt == null ? null : String(value.archivedAt),
+  };
+}
+
+export async function listProducts(): Promise<ProductSummary[]> {
+  const products: ProductSummary[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 10; page += 1) {
+    const search = new URLSearchParams({ limit: "100" });
+    if (cursor) search.set("cursor", cursor);
+    const result = await request<{ products?: unknown[]; nextCursor?: string | null }>(`/products?${search}`);
+    products.push(...(result.products ?? []).map(asProductSummary));
+    cursor = result.nextCursor ?? null;
+    if (!cursor) return products;
+  }
+  throw new Error("Product list exceeds the dashboard's bounded 1,000-product limit.");
+}
+
 export async function createDesign(
   name: string,
   preset: DevicePreset,
   idempotencyKey: string,
-): Promise<DesignDocument> {
+  productId?: string,
+): Promise<{ document: DesignDocument; productId: string }> {
   const result = await request<unknown>("/designs", {
     method: "POST",
-    body: JSON.stringify({ name, preset, idempotencyKey }),
+    body: JSON.stringify({ name, preset, idempotencyKey, ...(productId === undefined ? {} : { productId }) }),
   });
-  return normalizeDocument(result);
+  const value = result as { productId?: unknown };
+  const document = normalizeDocument(result);
+  const resolvedProductId = value.productId ?? productId;
+  if (typeof resolvedProductId !== "string" || resolvedProductId.length === 0) {
+    throw new Error("The created design did not return its Product identity.");
+  }
+  return { document, productId: resolvedProductId };
 }
 
 export interface ArchivedProjectResult {
@@ -540,6 +607,7 @@ export interface PreviewRenderUrlOptions {
   pageId?: string;
   nodeId?: string;
   taskId?: string;
+  storeId?: string;
   retryKey?: number;
 }
 
@@ -558,6 +626,7 @@ export function previewRenderUrl(
   if (options.pageId) params.set("pageId", options.pageId);
   if (options.nodeId) params.set("nodeId", options.nodeId);
   if (options.taskId) params.set("taskId", options.taskId);
+  if (options.storeId) params.set("storeId", options.storeId);
   if (options.retryKey !== undefined) params.set("_retry", String(Math.max(0, Math.trunc(options.retryKey))));
   return `${API_ROOT}/designs/${encodeURIComponent(id)}/previews/${encodeURIComponent(previewId)}/render.png?${params}`;
 }
@@ -569,9 +638,28 @@ export function exactPreviewRenderUrl(id: string, previewId: string, retryKey?: 
   return `${API_ROOT}/designs/${encodeURIComponent(id)}/previews/${encodeURIComponent(previewId)}/render.png${query ? `?${query}` : ""}`;
 }
 
-export function exportUrl(id: string, version?: number): string {
-  const query = version === undefined ? "" : `?version=${encodeURIComponent(version)}`;
-  return `${API_ROOT}/designs/${encodeURIComponent(id)}/export${query}`;
+export type DesignExportFormat = "json" | "svg" | "pdf";
+
+export interface DesignExportUrlOptions {
+  version?: number;
+  format?: DesignExportFormat;
+  pageId?: string;
+  nodeId?: string;
+  maxSize?: number;
+}
+
+export function exportUrl(id: string, versionOrOptions?: number | DesignExportUrlOptions): string {
+  const options = typeof versionOrOptions === "number"
+    ? { version: versionOrOptions }
+    : versionOrOptions ?? {};
+  const params = new URLSearchParams();
+  if (options.version !== undefined) params.set("version", String(options.version));
+  if (options.format && options.format !== "json") params.set("format", options.format);
+  if (options.pageId) params.set("pageId", options.pageId);
+  if (options.nodeId) params.set("nodeId", options.nodeId);
+  if (options.maxSize !== undefined) params.set("maxSize", String(options.maxSize));
+  const query = params.toString();
+  return `${API_ROOT}/designs/${encodeURIComponent(id)}/export${query ? `?${query}` : ""}`;
 }
 
 export function portableExportUrl(id: string, version?: number): string {
@@ -1003,6 +1091,76 @@ export interface AgentTaskTransitionRecord {
   createdAt: string;
 }
 
+export type DesignReadinessCheckStatus = "pass" | "warning" | "blocked" | "not_applicable";
+
+export interface DesignReadinessReport {
+  schemaVersion: 1;
+  requestClassification: "create" | "refine" | "redesign" | "product_spec_clarification";
+  selected: {
+    productId: string;
+    designId: string;
+    baseVersion: number;
+  };
+  productSpecification: {
+    version: number;
+    specificationHash: string;
+  } | null;
+  designSystem: {
+    source: "project_pin" | "product_default" | "formaspec_foundation";
+    releaseId: string;
+    releaseVersion: number;
+  };
+  components: {
+    reused: Array<{ componentDefinitionId: string; version: number; reason: string }>;
+    extended: Array<{ componentDefinitionId: string; version: number; reason: string }>;
+    proposed: Array<{ key: string; name: string; reason: string }>;
+  };
+  platforms: string[];
+  repositoryMappingsConsidered: Array<{ inventoryId: string; inventoryHash: string }>;
+  assumptions: string[];
+  blockers: string[];
+  checks: Record<
+    | "hierarchy"
+    | "visualConsistency"
+    | "interactionStates"
+    | "accessibility"
+    | "touchTargets"
+    | "rtlLocalization"
+    | "responsiveVariants"
+    | "prototypeCoverage"
+    | "engineeringFeasibility"
+    | "lint",
+    DesignReadinessCheckStatus
+  >;
+}
+
+export interface AgentTaskResolvedContext {
+  schemaVersion: 1;
+  product: {
+    id: string;
+    name: string;
+    status: "active" | "archived";
+    updatedAt: string;
+  };
+  design: { id: string; version: number; revisionId: string };
+  productSpecification: {
+    designId: string;
+    version: number;
+    specificationHash: string;
+  } | null;
+  designSystem: {
+    source: "project_pin" | "product_default" | "formaspec_foundation";
+    designSystemId: string;
+    releaseId: string;
+    releaseVersion: number;
+  };
+  repositoryInventories: Array<{ id: string; inventoryHash: string }>;
+  locale: string;
+  direction: "ltr" | "rtl" | "auto";
+  platform: string;
+  capturedAt: string;
+}
+
 export interface AgentTaskRecord {
   id: string;
   status: AgentTaskStatus;
@@ -1015,10 +1173,14 @@ export interface AgentTaskRecord {
   createdBy: string;
   createdAt: string;
   expiresAt: string;
+  product?: { id: string; name: string; status: "active" | "archived" };
+  resolvedContext?: AgentTaskResolvedContext | null;
+  readiness?: DesignReadinessReport | null;
   transitions: AgentTaskTransitionRecord[];
   launchUrl: string;
   websiteTaskLink?: string;
   reviewDeepLink?: string | null;
+  reviewLaunchLink?: string | null;
 }
 
 function asAgentTaskRecord(
@@ -1026,6 +1188,8 @@ function asAgentTaskRecord(
   launchUrl?: string,
   websiteTaskLink?: string,
   reviewDeepLink?: string | null,
+  reviewLaunchLink?: string | null,
+  readinessOverride?: unknown,
 ): AgentTaskRecord {
   const task = input as Record<string, unknown>;
   const id = String(task.id);
@@ -1052,6 +1216,22 @@ function asAgentTaskRecord(
     ? null
     : String(task.reviewDeepLink ?? task.review_deep_link ?? "") || undefined;
   const resolvedReviewLink = reviewDeepLink ?? taskReviewLink;
+  const taskReviewLaunchLink = task.reviewLaunchLink === null || task.review_launch_link === null
+    ? null
+    : String(task.reviewLaunchLink ?? task.review_launch_link ?? "") || undefined;
+  const resolvedReviewLaunchLink = reviewLaunchLink ?? taskReviewLaunchLink;
+  const product = task.product && typeof task.product === "object" && !Array.isArray(task.product)
+    ? task.product as Record<string, unknown>
+    : null;
+  const resolvedContext = task.resolvedContext && typeof task.resolvedContext === "object" && !Array.isArray(task.resolvedContext)
+    ? task.resolvedContext as unknown as AgentTaskResolvedContext
+    : task.resolved_context && typeof task.resolved_context === "object" && !Array.isArray(task.resolved_context)
+      ? task.resolved_context as unknown as AgentTaskResolvedContext
+      : null;
+  const rawReadiness = readinessOverride ?? task.readiness;
+  const readiness = rawReadiness && typeof rawReadiness === "object" && !Array.isArray(rawReadiness)
+    ? rawReadiness as DesignReadinessReport
+    : null;
   return {
     id,
     status: String(task.status ?? transitions.at(-1)?.toStatus ?? "queued") as AgentTaskStatus,
@@ -1066,11 +1246,21 @@ function asAgentTaskRecord(
     createdBy: String(task.createdBy ?? task.created_by ?? ""),
     createdAt: String(task.createdAt ?? task.created_at ?? new Date().toISOString()),
     expiresAt: String(task.expiresAt ?? task.expires_at ?? ""),
+    ...(product && typeof product.id === "string" && typeof product.name === "string"
+      ? { product: {
+          id: product.id,
+          name: product.name,
+          status: product.status === "archived" ? "archived" as const : "active" as const,
+        } }
+      : {}),
+    ...(resolvedContext ? { resolvedContext } : {}),
+    ...(rawReadiness !== undefined ? { readiness } : {}),
     transitions,
     launchUrl: launchUrl ?? String(task.launchUrl ?? task.launch_url
       ?? `codex://new?prompt=${encodeURIComponent(`[@FormaSpec](plugin://formaspec@formaspec)\n\nUse FormaSpec. Claim task ${id} with task_claim and return an exact persisted preview for website approval. Do not commit it.`)}`),
     ...(resolvedWebsiteLink ? { websiteTaskLink: resolvedWebsiteLink } : {}),
     ...(resolvedReviewLink !== undefined ? { reviewDeepLink: resolvedReviewLink } : {}),
+    ...(resolvedReviewLaunchLink !== undefined ? { reviewLaunchLink: resolvedReviewLaunchLink } : {}),
   };
 }
 
@@ -1112,6 +1302,9 @@ export async function createAgentTask(input: {
     result.reviewDeepLink === null || result.review_deep_link === null
       ? null
       : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
+    result.reviewLaunchLink === null || result.review_launch_link === null
+      ? null
+      : String(result.reviewLaunchLink ?? result.review_launch_link ?? "") || undefined,
   );
 }
 
@@ -1125,6 +1318,10 @@ export async function readAgentTask(taskId: string): Promise<AgentTaskRecord> {
     result.reviewDeepLink === null || result.review_deep_link === null
       ? null
       : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
+    result.reviewLaunchLink === null || result.review_launch_link === null
+      ? null
+      : String(result.reviewLaunchLink ?? result.review_launch_link ?? "") || undefined,
+    result.readiness,
   );
 }
 
@@ -1160,11 +1357,16 @@ export async function transitionAgentTask(input: {
     result.reviewDeepLink === null || result.review_deep_link === null
       ? null
       : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
+    result.reviewLaunchLink === null || result.review_launch_link === null
+      ? null
+      : String(result.reviewLaunchLink ?? result.review_launch_link ?? "") || undefined,
+    result.readiness,
   );
 }
 
-export function designPreviewReviewPath(designId: string, previewId: string, taskId: string): string {
+export function designPreviewReviewPath(designId: string, previewId: string, taskId: string, storeId?: string): string {
   const query = new URLSearchParams({ task: taskId });
+  if (storeId) query.set("store", storeId);
   return `/design/${encodeURIComponent(designId)}/previews/${encodeURIComponent(previewId)}/review?${query}`;
 }
 
@@ -1212,6 +1414,7 @@ export interface DesignPreviewRecord {
   renderMetadata?: DesignPreviewRenderMetadata;
   diagnostics: DesignPreviewDiagnostic[];
   document: DesignDocument;
+  dataStoreId?: string;
 }
 
 function invalidPreviewRenderMetadata(): never {
@@ -1277,7 +1480,7 @@ export function previewRenderContractOptions(
 }
 
 export function persistedPreviewRenderUrl(
-  preview: Pick<DesignPreviewRecord, "designId" | "previewId" | "renderMetadata">,
+  preview: Pick<DesignPreviewRecord, "designId" | "previewId" | "renderMetadata" | "dataStoreId">,
   fallbackMaxSize: number,
   taskId?: string,
   retryKey?: number,
@@ -1285,6 +1488,7 @@ export function persistedPreviewRenderUrl(
   if (preview.renderMetadata) {
     const params = new URLSearchParams();
     if (taskId) params.set("taskId", taskId);
+    if (preview.dataStoreId) params.set("storeId", preview.dataStoreId);
     if (retryKey !== undefined) params.set("_retry", String(Math.max(0, Math.trunc(retryKey))));
     const query = params.toString();
     return `${API_ROOT}/designs/${encodeURIComponent(preview.designId)}/previews/${encodeURIComponent(preview.previewId)}/render.png${query ? `?${query}` : ""}`;
@@ -1292,12 +1496,18 @@ export function persistedPreviewRenderUrl(
   return previewRenderUrl(preview.designId, preview.previewId, {
     maxSize: fallbackMaxSize,
     ...(taskId ? { taskId } : {}),
+    ...(preview.dataStoreId ? { storeId: preview.dataStoreId } : {}),
     ...(retryKey === undefined ? {} : { retryKey }),
   });
 }
 
 function asDesignPreviewRecord(input: unknown): DesignPreviewRecord {
   const value = input as Record<string, unknown>;
+  const dataStoreIdValue = value.dataStoreId ?? value.data_store_id;
+  if (dataStoreIdValue !== undefined
+    && (typeof dataStoreIdValue !== "string" || !/^store_[a-f0-9]{32}$/.test(dataStoreIdValue))) {
+    throw new ApiError("Preview data-store identity is invalid.", { code: "INVALID_RESPONSE" });
+  }
   const rootBaseVersion = Number(value.rootBaseVersion ?? value.root_base_version ?? 0);
   const diagnostics = Array.isArray(value.diagnostics) ? value.diagnostics.map((item) => {
     const diagnostic = item as Record<string, unknown>;
@@ -1343,6 +1553,7 @@ function asDesignPreviewRecord(input: unknown): DesignPreviewRecord {
     ...(renderMetadata ? { renderMetadata } : {}),
     diagnostics,
     document: normalizeDocument(value.document),
+    ...(dataStoreIdValue ? { dataStoreId: dataStoreIdValue } : {}),
   };
 }
 
@@ -1463,6 +1674,7 @@ export interface ComponentInsertionPreviewRecord extends DesignPreviewRecord {
     activeState: ComponentDefinition["states"][number]["key"];
     instanceId: string;
     nodeIdMapping: Record<string, string>;
+    assetIdMapping: Record<string, string>;
   };
 }
 
@@ -1475,6 +1687,9 @@ export async function createComponentInsertionPreview(input: {
   index?: number;
   position?: { x: number; y: number };
   name?: string;
+  properties?: Record<string, ComponentPropertyValue>;
+  slots?: Record<string, string[]>;
+  visualOverrides?: Record<string, NodeStyle>;
 }): Promise<ComponentInsertionPreviewRecord> {
   const response = await request<unknown>(
     `/designs/${encodeURIComponent(input.designId)}/component-insertion-previews`,
@@ -1488,16 +1703,20 @@ export async function createComponentInsertionPreview(input: {
         ...(input.index === undefined ? {} : { index: input.index }),
         ...(input.position === undefined ? {} : { position: input.position }),
         ...(input.name === undefined ? {} : { name: input.name }),
+        ...(input.properties === undefined ? {} : { properties: input.properties }),
+        ...(input.slots === undefined ? {} : { slots: input.slots }),
+        ...(input.visualOverrides === undefined ? {} : { visualOverrides: input.visualOverrides }),
       }),
     },
   );
   const value = requiredRecord(response, "Component insertion preview response");
   const component = requiredExactRecord(
     value.component,
-    ["designSystemId", "releaseId", "releaseVersion", "componentDefinitionId", "componentVersion", "sourceHash", "activeState", "instanceId", "nodeIdMapping"],
+    ["designSystemId", "releaseId", "releaseVersion", "componentDefinitionId", "componentVersion", "sourceHash", "activeState", "instanceId", "nodeIdMapping", "assetIdMapping"],
     "Component insertion preview metadata",
   );
   const nodeIdMapping = requiredRecord(component.nodeIdMapping, "Component insertion node-ID mapping");
+  const assetIdMapping = requiredRecord(component.assetIdMapping, "Component insertion asset-ID mapping");
   const activeState = requiredString(component.activeState, "Component insertion active state");
   if (!["default", "hover", "pressed", "focused", "disabled", "loading", "error", "selected"].includes(activeState)) {
     throw new ApiError("Component insertion active state is invalid.", { code: "INVALID_RESPONSE" });
@@ -1516,6 +1735,10 @@ export async function createComponentInsertionPreview(input: {
       nodeIdMapping: Object.fromEntries(Object.entries(nodeIdMapping).map(([sourceId, targetId]) => [
         sourceId,
         requiredOpaqueId(targetId, `Component insertion node mapping for ${sourceId}`),
+      ])),
+      assetIdMapping: Object.fromEntries(Object.entries(assetIdMapping).map(([sourceId, targetId]) => [
+        sourceId,
+        requiredOpaqueId(targetId, `Component insertion asset mapping for ${sourceId}`),
       ])),
     },
   };
@@ -1550,8 +1773,10 @@ export async function readDesignPreview(
   designId: string,
   previewId: string,
   taskId: string,
+  expectedDataStoreId?: string,
 ): Promise<DesignPreviewRecord> {
   const query = new URLSearchParams({ taskId });
+  if (expectedDataStoreId) query.set("storeId", expectedDataStoreId);
   return asDesignPreviewRecord(await request<unknown>(
     `/designs/${encodeURIComponent(designId)}/previews/${encodeURIComponent(previewId)}?${query}`,
   ));

@@ -16,6 +16,7 @@ import {
   PrototypeActionSchema,
   PrototypeTransitionSchema,
   PrototypeTriggerSchema,
+  ResponsiveFrameVariantSchema,
   StringValueSchema,
 } from "./model.js";
 import {
@@ -28,6 +29,7 @@ import {
   DesignSystemPinSchema,
   DesignSystemTokenSchema,
 } from "./design-system.js";
+import { validateResponsiveFrameVariants } from "./responsive-frame-variants.js";
 
 export const SemanticRoleSchema = z.enum([
   "button",
@@ -80,6 +82,7 @@ export const FrameNodeV2Schema = z.object({
   primary_action: z.string().max(2_000).optional(),
   locale: z.string().trim().min(2).max(64).default("en"),
   text_direction: z.enum(["auto", "ltr", "rtl"]).default("auto"),
+  responsive_variant: ResponsiveFrameVariantSchema.optional(),
 }).strict();
 
 export const ContainerNodeV2Schema = z.object({
@@ -114,7 +117,7 @@ export const IconNodeV2Schema = z.object({
   label: z.string().max(1_000).optional(),
 }).strict();
 
-const ComponentPropertyValueSchema = z.union([
+export const ComponentPropertyValueSchema = z.union([
   z.string().max(100_000),
   z.number().finite(),
   z.boolean(),
@@ -122,6 +125,7 @@ const ComponentPropertyValueSchema = z.union([
   z.object({ icon_name: z.string().trim().min(1).max(160) }).strict(),
   z.object({ asset_id: AssetIdSchema }).strict(),
 ]);
+export type ComponentPropertyValue = z.infer<typeof ComponentPropertyValueSchema>;
 
 export const ComponentInstanceNodeV2Schema = z.object({
   ...commonNodeShapeV2,
@@ -130,6 +134,7 @@ export const ComponentInstanceNodeV2Schema = z.object({
   component_version: z.number().int().positive(),
   properties: z.record(ComponentPropertyValueSchema),
   slots: z.record(z.array(NodeIdSchema).max(100)),
+  visual_overrides: z.record(NodeIdSchema, NodeStyleSchema).default({}),
   active_state: z.enum(["default", "hover", "pressed", "focused", "disabled", "loading", "error", "selected"]).default("default"),
 }).strict();
 
@@ -327,6 +332,14 @@ export const DesignDocumentV2Schema = DesignDocumentV2ObjectSchema.superRefine((
   for (const rootId of activeRoots) walk(rootId);
   for (const node of Object.values(document.nodes)) {
     if (!node.archived && !visited.has(node.id)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["nodes", node.id], message: "Active node is unreachable from an active page" });
+  }
+
+  for (const issue of validateResponsiveFrameVariants(document)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: issue.path,
+      message: issue.message,
+    });
   }
 
   for (const [key, link] of Object.entries(document.prototype_links)) {

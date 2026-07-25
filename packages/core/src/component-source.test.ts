@@ -232,6 +232,7 @@ describe("component source bundles", () => {
       component_version: 1,
       properties: {},
       slots: {},
+      visual_overrides: {},
       active_state: "default",
       layout: layout({ width: 24, height: 24 }),
       style: {},
@@ -242,7 +243,10 @@ describe("component source bundles", () => {
       metadata: {},
     };
     nestedInstance.dependencies.asset_ids = [];
-    expect(() => parseComponentSourceBundle(nestedInstance)).toThrow(/Nested component instances/);
+    expect(parseComponentSourceBundle(nestedInstance).nodes.find((node) => node.id === defaultImageId)).toMatchObject({
+      type: "component_instance",
+      component_definition_id: "component_nested_source_0001",
+    });
 
     const externalRule = mutableBundle();
     externalRule.nodes[0].semantics.business_rule_ids = ["rule_component_external_01"];

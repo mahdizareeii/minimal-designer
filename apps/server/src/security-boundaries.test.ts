@@ -15,6 +15,7 @@ import { DomainError } from "./errors.js";
 import { sendSse } from "./http-routes.js";
 import { createPortableProjectBundle, readPortableProjectBundle } from "./portable-export.js";
 import { encodeRgbaPng } from "./render.js";
+import { designReadinessFixture } from "../test-fixtures/product.js";
 
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
@@ -992,7 +993,10 @@ describe("public security boundaries", () => {
     application.enterprise.transitionAgentTask(writer.actorId, archiveTask.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: archiveProposalBody.preview.id },
+      data: {
+        previewId: archiveProposalBody.preview.id,
+        readiness: designReadinessFixture(archiveTask.resolvedContext),
+      },
     });
     const wrongCommitPath = await mcpTool(application, writer.token, "design_commit_preview", {
       design_id: allowed.document.id,
@@ -1370,7 +1374,10 @@ describe("public security boundaries", () => {
     application.enterprise.transitionAgentTask(grant.actorId, task.id, {
       expectedStatus: "in_progress",
       toStatus: "awaiting_approval",
-      data: { previewId: preview.result.structuredContent.preview.id },
+      data: {
+        previewId: preview.result.structuredContent.preview.id,
+        readiness: designReadinessFixture(task.resolvedContext),
+      },
     });
 
     const commitResponse = await application.app.inject({

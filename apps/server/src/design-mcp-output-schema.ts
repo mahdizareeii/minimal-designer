@@ -6,6 +6,7 @@ import {
   DocumentIdSchema,
   NodeIdSchema,
   PageIdSchema,
+  ProductIdSchema,
   PrototypeLinkIdSchema,
   TokenIdSchema,
 } from "@designer/core";
@@ -23,6 +24,7 @@ const boundedLink = z.string().min(1).max(4_096);
 
 export const DesignSummaryResultSchema = z.object({
   id: DocumentIdSchema,
+  productId: ProductIdSchema,
   name: z.string().trim().min(1).max(255),
   version: positiveVersion,
   revisionId,
@@ -107,6 +109,11 @@ const inactiveContextSchema = z.object({
 }).strict();
 const activeContextSchema = z.object({
   designId: DocumentIdSchema,
+  product: z.object({
+    id: ProductIdSchema,
+    name: z.string().trim().min(1).max(255),
+    status: z.enum(["active", "archived"]),
+  }).strict(),
   pageId: PageIdSchema.nullable(),
   selection: z.array(NodeIdSchema).max(500),
   updatedAt: timestamp,

@@ -5,6 +5,7 @@ import { DomainError } from "./errors.js";
 
 export interface ActiveDesignAccessRow {
   id: string;
+  product_id: string;
   organization_id: string;
   current_version: number;
   current_revision_id: string;
@@ -33,7 +34,7 @@ export function requireActiveDesign(
   designId: string,
 ): ActiveDesignAccessRow {
   const row = sqlite.prepare(
-    `SELECT id, organization_id, current_version, current_revision_id
+    `SELECT id, product_id, organization_id, current_version, current_revision_id
      FROM designs
      WHERE id = ? AND ${activeDesignSqlPredicate("designs")}`,
   ).get(designId) as ActiveDesignAccessRow | undefined;

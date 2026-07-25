@@ -1,5 +1,12 @@
 import type { FastifyInstance } from "fastify";
-import { ComponentSourceStateKeySchema, ParentReferenceSchema, RedesignStageArtifactSchema } from "@designer/core";
+import {
+  ComponentPropertyValueSchema,
+  ComponentSourceStateKeySchema,
+  NodeIdSchema,
+  NodeStyleSchema,
+  ParentReferenceSchema,
+  RedesignStageArtifactSchema,
+} from "@designer/core";
 import { z } from "zod";
 
 import type { DesignSystemService } from "./design-system-service.js";
@@ -55,6 +62,9 @@ const componentInsertionPreviewBody = z.object({
   index: z.number().int().nonnegative().optional(),
   position: z.object({ x: z.number().finite(), y: z.number().finite() }).strict().optional(),
   name: z.string().trim().min(1).max(160).optional(),
+  properties: z.record(ComponentPropertyValueSchema).optional(),
+  slots: z.record(z.array(NodeIdSchema).max(100)).optional(),
+  visualOverrides: z.record(NodeIdSchema, NodeStyleSchema).optional(),
 }).strict();
 
 function insertionPreviewResponse(result: ReturnType<ComponentInsertionService["preview"]>): Record<string, unknown> {

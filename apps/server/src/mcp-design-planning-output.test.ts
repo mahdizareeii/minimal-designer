@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildApplication, type DesignerApplication } from "./app.js";
 import { loadConfig } from "./config.js";
 import { MCP_TOOL_OUTPUT_SCHEMAS } from "./mcp.js";
+import { designReadinessFixture } from "../test-fixtures/product.js";
 
 const applications: DesignerApplication[] = [];
 const temporaryDirectories: string[] = [];
@@ -293,7 +294,12 @@ describe("exact core-design and planning MCP results", () => {
       task_id: previewTaskId,
       expected_status: "in_progress",
       to_status: "awaiting_approval",
-      data: { previewId: previewResult.id },
+      data: {
+        previewId: previewResult.id,
+        readiness: designReadinessFixture(
+          built.enterprise.readAgentTask("local", previewTaskId).resolvedContext,
+        ),
+      },
     }, agent.token);
     expect(awaitingPreview).toMatchObject({
       task: { status: "awaiting_approval" },
@@ -399,7 +405,12 @@ describe("exact core-design and planning MCP results", () => {
       task_id: archiveTaskId,
       expected_status: "in_progress",
       to_status: "awaiting_approval",
-      data: { previewId: archivePreviewId },
+      data: {
+        previewId: archivePreviewId,
+        readiness: designReadinessFixture(
+          built.enterprise.readAgentTask("local", archiveTaskId).resolvedContext,
+        ),
+      },
     }, agent.token);
     await callToolError(built, "design_commit_archive_preview", {
       design_id: design.id,

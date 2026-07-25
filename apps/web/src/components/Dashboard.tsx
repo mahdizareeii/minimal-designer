@@ -28,8 +28,10 @@ import { navigate } from "../App";
 import { DEVICE_PRESETS, type DesignProjectSummary, type DevicePreset } from "../domain";
 import {
   createRedesignAssessment,
+  listProducts,
   listRepositoryInventories,
   renderUrl,
+  type ProductSummary,
   type RepositoryInventorySummary,
 } from "../lib/api";
 import { useDesignerStore } from "../store/designer-store";
@@ -366,6 +368,10 @@ export function Dashboard() {
   const archiveProject = useDesignerStore((state) => state.archiveProject);
   const [query, setQuery] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [createProductId, setCreateProductId] = useState<string | null>(null);
+  const [products, setProducts] = useState<ProductSummary[]>([]);
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState<string | null>(null);
   const [redesignOpen, setRedesignOpen] = useState(false);
   const [redesignInventories, setRedesignInventories] = useState<RepositoryInventorySummary[]>([]);
   const [ineligibleActiveInventoryCount, setIneligibleActiveInventoryCount] = useState(0);
@@ -386,6 +392,23 @@ export function Dashboard() {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
+
+  const refreshProducts = async () => {
+    setProductsLoading(true);
+    setProductsError(null);
+    try {
+      setProducts(await listProducts());
+    } catch (cause) {
+      setProducts([]);
+      setProductsError(cause instanceof Error ? cause.message : "Products could not be loaded.");
+    } finally {
+      setProductsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshProducts();
+  }, []);
 
   const loadRedesignInventories = async (isCurrent: () => boolean = () => true) => {
     setInventoryLoading(true);
@@ -419,17 +442,48 @@ export function Dashboard() {
     return () => { current = false; };
   }, [redesignOpen]);
 
-  const filtered = useMemo(() => {
+  const productGroups = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    return needle ? projects.filter((project) => project.name.toLocaleLowerCase().includes(needle)) : projects;
-  }, [projects, query]);
+    const designsByProduct = new Map<string, DesignProjectSummary[]>();
+    for (const project of projects) {
+      if (!project.productId) continue;
+      const designs = designsByProduct.get(project.productId) ?? [];
+      designs.push(project);
+      designsByProduct.set(project.productId, designs);
+    }
+    const groups: Array<{ product: ProductSummary; designs: DesignProjectSummary[] }> = [];
+    const knownProductIds = new Set(products.map((product) => product.id));
+    for (const product of products) {
+      const designs = designsByProduct.get(product.id) ?? [];
+      const productMatches = !needle
+        || product.name.toLocaleLowerCase().includes(needle)
+        || product.description.toLocaleLowerCase().includes(needle);
+      const visibleDesigns = productMatches || !needle
+        ? designs
+        : designs.filter((project) => project.name.toLocaleLowerCase().includes(needle));
+      if (!needle || productMatches || visibleDesigns.length > 0) groups.push({ product, designs: visibleDesigns });
+    }
+    const ungrouped = projects.filter((project) => (
+      (!project.productId || !knownProductIds.has(project.productId))
+      && (!needle || project.name.toLocaleLowerCase().includes(needle))
+    ));
+    return { groups, ungrouped };
+  }, [products, projects, query]);
   const archiveTarget = projects.find((project) => project.id === archiveTargetId) ?? null;
+  const createTargetProduct = products.find((product) => product.id === createProductId) ?? null;
+
+  const openCreateDialog = (productId: string | null = null) => {
+    setCreateProductId(productId);
+    setName(productId === null ? "Untitled product flow" : "Untitled design");
+    setModalOpen(true);
+  };
 
   const submit = async () => {
     const cleanName = name.trim() || "Untitled design";
     try {
-      const id = await createProject(cleanName, preset);
+      const id = await createProject(cleanName, preset, createProductId ?? undefined);
       setModalOpen(false);
+      await refreshProducts();
       navigate(`/design/${encodeURIComponent(id)}`);
     } catch {
       // The store surfaces the domain/network error in the modal and dashboard.
@@ -453,6 +507,7 @@ export function Dashboard() {
     if (!archiveTarget || archiveConfirmationName !== archiveTarget.name || archivingProjectId !== null) return;
     try {
       await archiveProject(archiveTarget.id, archiveConfirmationName);
+      await refreshProducts();
       if (selectedRedesignProjectId === archiveTarget.id) setSelectedRedesignProjectId(null);
       setArchiveTargetId(null);
       setArchiveConfirmationName("");
@@ -518,7 +573,7 @@ export function Dashboard() {
             <p>Design screens, document business logic, manage a shared design system, and hand one immutable specification to Codex or another connected agent.</p>
           </div>
           <div className="primary-action-grid" aria-label="Start a FormaSpec workflow">
-            <button className="primary-action-card is-primary" onClick={() => setModalOpen(true)}>
+            <button className="primary-action-card is-primary" onClick={() => openCreateDialog()}>
               <Plus size={20} /><span><strong>Design a new product</strong><small>Start from a structured web, phone, or tablet frame.</small></span><ArrowRight size={16} />
             </button>
             <button className="primary-action-card" onClick={openRedesign}>
@@ -543,66 +598,104 @@ export function Dashboard() {
 
         <div className="projects-toolbar" ref={projectsRef}>
           <div>
-            <h2>Recent designs</h2>
-            <span>{projects.length} {projects.length === 1 ? "project" : "projects"}</span>
+            <h2>Products and designs</h2>
+            <span>{products.length} {products.length === 1 ? "Product" : "Products"} · {projects.length} {projects.length === 1 ? "Design" : "Designs"}</span>
           </div>
           <label className="search-box">
             <Search size={16} />
-            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search FormaSpec projects" />
+            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search Products or Designs" />
             {query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={14} /></button>}
           </label>
         </div>
 
-        {loading ? (
+        {productsError && !offline && <div className="dashboard-catalog-warning" role="alert"><CloudOff size={14} /> {productsError}</div>}
+
+        {loading || productsLoading ? (
           <div className="project-grid" aria-label="Loading projects">
             {[0, 1, 2].map((item) => <div className="project-card project-skeleton" key={item} />)}
           </div>
-        ) : filtered.length > 0 ? (
-          <div className="project-grid">
-            {filtered.map((project, index) => (
-              <DashboardProjectCard
-                key={project.id}
-                project={project}
-                thumbnailIndex={index}
-                offline={offline}
-                archiveDisabled={archivingProjectId !== null}
-                onOpen={() => navigate(`/design/${encodeURIComponent(project.id)}`)}
-                onArchive={() => openArchiveDialog(project.id)}
-              />
+        ) : productGroups.groups.length > 0 || productGroups.ungrouped.length > 0 ? (
+          <div className="product-sections">
+            {productGroups.groups.map(({ product, designs }, groupIndex) => (
+              <section className="product-section" key={product.id} aria-labelledby={`product-title-${product.id}`}>
+                <header className="product-section-header">
+                  <div>
+                    <span className="product-section-mark"><FolderOpen size={15} /></span>
+                    <div>
+                      <h3 id={`product-title-${product.id}`} dir="auto" title={product.name}>{product.name}</h3>
+                      <p>{product.description || `${product.designCount} ${product.designCount === 1 ? "Design" : "Designs"} · ${product.defaultLocale.toUpperCase()} · ${product.defaultDirection.toUpperCase()}`}</p>
+                    </div>
+                  </div>
+                  <button className="button button-secondary" onClick={() => openCreateDialog(product.id)}><Plus size={14} /> Add design</button>
+                </header>
+                <div className="project-grid">
+                  {designs.map((project, index) => (
+                    <DashboardProjectCard
+                      key={project.id}
+                      project={project}
+                      thumbnailIndex={(groupIndex * 100) + index}
+                      offline={offline}
+                      archiveDisabled={archivingProjectId !== null}
+                      onOpen={() => navigate(`/design/${encodeURIComponent(project.id)}`)}
+                      onArchive={() => openArchiveDialog(project.id)}
+                    />
+                  ))}
+                  <button className="project-card new-project-card" onClick={() => openCreateDialog(product.id)}>
+                    <span><Plus size={22} /></span>
+                    <strong>Add a design</strong>
+                    <small>Keep it inside {product.name}</small>
+                  </button>
+                </div>
+              </section>
             ))}
-            <button className="project-card new-project-card" onClick={() => setModalOpen(true)}>
-              <span><Plus size={22} /></span>
-              <strong>Create a new design</strong>
-              <small>Start with a responsive frame</small>
-            </button>
+            {productGroups.ungrouped.length > 0 && (
+              <section className="product-section is-unresolved" aria-labelledby="unresolved-designs-title">
+                <header className="product-section-header">
+                  <div><span className="product-section-mark"><Database size={15} /></span><div><h3 id="unresolved-designs-title">Unresolved Product context</h3><p>These legacy Designs need an administrator-reviewed Product move.</p></div></div>
+                </header>
+                <div className="project-grid">
+                  {productGroups.ungrouped.map((project, index) => (
+                    <DashboardProjectCard
+                      key={project.id}
+                      project={project}
+                      thumbnailIndex={index}
+                      offline={offline}
+                      archiveDisabled={archivingProjectId !== null}
+                      onOpen={() => navigate(`/design/${encodeURIComponent(project.id)}`)}
+                      onArchive={() => openArchiveDialog(project.id)}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
         ) : offline ? (
           <div className="empty-projects">
             <div className="empty-orbit" style={{ color: "#efb664", borderColor: "#5a462b" }}><CloudOff size={24} /></div>
             <h3>Connect the self-hosted design server</h3>
             <p>{error ?? "Start the API on port 4310, then reload this workspace."}</p>
-            <button className="button button-secondary" onClick={() => void loadProjects()}><Server size={15} /> Retry connection</button>
+            <button className="button button-secondary" onClick={() => { void loadProjects(); void refreshProducts(); }}><Server size={15} /> Retry connection</button>
           </div>
         ) : (
           <div className="empty-projects">
             <div className="empty-orbit"><Sparkles size={24} /></div>
-            <h3>{query ? "No designs match that search" : "Your first canvas is waiting"}</h3>
-            <p>{query ? "Try another project name." : "Choose a frame and let Codex or your team shape the first screen."}</p>
-            {!query && <button className="button button-primary" onClick={() => setModalOpen(true)}><Plus size={16} /> Create design</button>}
+            <h3>{query ? "No Products or Designs match that search" : "Your first Product is waiting"}</h3>
+            <p>{query ? "Try another Product or Design name." : "Create a Product with its first structured Design."}</p>
+            {!query && <button className="button button-primary" onClick={() => openCreateDialog()}><Plus size={16} /> Design a new product</button>}
           </div>
         )}
       </section>
 
       <footer className="dashboard-footer">
         <span><Check size={13} /> Your design data stays on your server</span>
-        <span>FormaSpec 0.2 · @FormaSpec agent</span>
+        <span>FormaSpec 0.3 · @FormaSpec agent</span>
       </footer>
 
       {modalOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setModalOpen(false); }}>
           <div className="create-modal" role="dialog" aria-modal="true" aria-labelledby="create-title">
             <div className="modal-heading">
-              <div><span className="modal-icon"><Plus size={18} /></span><div><h2 id="create-title">New design</h2><p>Start with a frame sized for your product.</p></div></div>
+              <div><span className="modal-icon"><Plus size={18} /></span><div><h2 id="create-title">{createTargetProduct ? `New design in ${createTargetProduct.name}` : "New product design"}</h2><p>{createTargetProduct ? "Add a separately versioned Design to this Product." : "Create a Product and its first structured Design."}</p></div></div>
               <button className="icon-button" onClick={() => setModalOpen(false)} aria-label="Close"><X size={18} /></button>
             </div>
             <label className="field-label">Design name
@@ -623,7 +716,7 @@ export function Dashboard() {
                 );
               })}
             </div>
-            <div className="modal-note"><Sparkles size={14} /> You can add more web, phone, or tablet frames any time.</div>
+            <div className="modal-note"><Sparkles size={14} /> {createTargetProduct ? `This Design inherits ${createTargetProduct.name}'s Product context and default design-system release.` : "You can add more Designs and web, phone, or tablet frames after creation."}</div>
             {error && <div className="modal-note" style={{ color: "#ef9aa6" }}><CloudOff size={14} /> {error}</div>}
             <div className="modal-actions">
               <button className="button button-secondary" onClick={() => setModalOpen(false)}>Cancel</button>
@@ -662,7 +755,7 @@ export function Dashboard() {
             redesigning={redesigning}
             redesignError={redesignError}
             onClose={() => setRedesignOpen(false)}
-            onCreateProject={() => { setRedesignOpen(false); setModalOpen(true); }}
+            onCreateProject={() => { setRedesignOpen(false); openCreateDialog(); }}
             onRetryInventories={() => void loadRedesignInventories()}
             onSelectProject={(projectId) => { setSelectedRedesignProjectId(projectId); setRedesignError(null); }}
             onSelectInventory={(inventoryId) => { setSelectedRedesignInventoryId(inventoryId); setRedesignError(null); }}

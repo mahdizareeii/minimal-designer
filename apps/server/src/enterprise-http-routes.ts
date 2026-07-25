@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { ProductLocaleSchema, ProductPlatformSchema } from "@designer/core";
 import { PLANNING_SECTIONS } from "@designer/core";
 import { z } from "zod";
 
@@ -6,6 +7,7 @@ import { AgentTaskTransitionRequestSchema } from "./agent-task-schema.js";
 import {
   agentTaskCodexLaunchUrl,
   agentTaskPreviewReviewLink,
+  agentTaskPreviewReviewLaunchLink,
   agentTaskWebsiteLink,
 } from "./agent-task-launch.js";
 import {
@@ -44,7 +46,7 @@ function specificationPreviewResponse(result: ProductSpecificationPreviewResult)
 export function registerEnterpriseHttpRoutes(
   app: FastifyInstance,
   enterprise: EnterpriseService,
-  publicBaseUrl = "http://127.0.0.1:4310",
+  webBaseUrl = "http://127.0.0.1:4310",
 ): void {
   app.get("/api/designs/:id/product-specification", async (request) => {
     const { id } = designParams.parse(request.params);
@@ -163,6 +165,8 @@ export function registerEnterpriseHttpRoutes(
       expectedOutput: z.enum(AGENT_TASK_EXPECTED_OUTPUTS),
       idempotencyKey,
       expiresInSeconds: z.number().int().min(60).max(604_800).optional(),
+      locale: ProductLocaleSchema.optional(),
+      platform: ProductPlatformSchema.optional(),
     }).strict().parse(request.body);
     const task = enterprise.createAgentTask(request.actorId, {
       designId: id,
@@ -171,7 +175,7 @@ export function registerEnterpriseHttpRoutes(
     return reply.code(201).send({
       task,
       launchUrl: agentTaskCodexLaunchUrl(task.id),
-      websiteTaskLink: agentTaskWebsiteLink(publicBaseUrl, task.designId, task.id),
+      websiteTaskLink: agentTaskWebsiteLink(webBaseUrl, task.designId, task.id),
     });
   });
 
@@ -187,11 +191,21 @@ export function registerEnterpriseHttpRoutes(
       : null;
     return {
       task,
+      readiness: task.readiness,
       launchUrl: agentTaskCodexLaunchUrl(task.id),
-      websiteTaskLink: agentTaskWebsiteLink(publicBaseUrl, task.designId, task.id),
+      websiteTaskLink: agentTaskWebsiteLink(webBaseUrl, task.designId, task.id),
       reviewDeepLink: previewId === null
         ? null
-        : agentTaskPreviewReviewLink(publicBaseUrl, task.designId, previewId, task.id),
+        : agentTaskPreviewReviewLink(
+          webBaseUrl,
+          task.designId,
+          previewId,
+          task.id,
+          enterprise.database.dataStoreId(),
+        ),
+      reviewLaunchLink: previewId === null
+        ? null
+        : agentTaskPreviewReviewLaunchLink(task.designId, previewId, task.id, enterprise.database.dataStoreId()),
     };
   });
 
@@ -213,9 +227,19 @@ export function registerEnterpriseHttpRoutes(
       : null;
     return {
       task,
+      readiness: task.readiness,
       reviewDeepLink: previewId === null
         ? null
-        : agentTaskPreviewReviewLink(publicBaseUrl, task.designId, previewId, task.id),
+        : agentTaskPreviewReviewLink(
+          webBaseUrl,
+          task.designId,
+          previewId,
+          task.id,
+          enterprise.database.dataStoreId(),
+        ),
+      reviewLaunchLink: previewId === null
+        ? null
+        : agentTaskPreviewReviewLaunchLink(task.designId, previewId, task.id, enterprise.database.dataStoreId()),
     };
   });
 

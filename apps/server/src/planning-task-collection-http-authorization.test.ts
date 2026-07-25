@@ -698,7 +698,9 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${createdTask.task.id} with task_claim`);
     expect(taskLaunch.searchParams.get("prompt")).toContain("design_preview_changes");
     expect(taskLaunch.searchParams.get("prompt")).toContain("returned PNG in Codex");
-    expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>"}');
+    expect(taskLaunch.searchParams.get("prompt")).toContain("immutable Product");
+    expect(taskLaunch.searchParams.get("prompt")).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>","readiness":');
+    expect(taskLaunch.searchParams.get("prompt")).toContain("DesignReadinessReport");
     expect(taskLaunch.searchParams.get("prompt")).toContain("Do not commit it");
     const websiteTaskLink = new URL(createdTask.websiteTaskLink);
     expect(websiteTaskLink.origin).toBe(PUBLIC_ORIGIN);

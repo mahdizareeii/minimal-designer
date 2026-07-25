@@ -61,10 +61,12 @@ import {
   type PreviewRenderCapture,
   type PreviewRenderMetadata,
 } from "./preview-render-metadata.js";
+import type { ContentAddressedPreviewRenderStore } from "./preview-render-store.js";
 import { bindPreviewToTask, requirePreviewTaskBinding } from "./preview-task-binding.js";
 
 interface DesignRow {
   id: string;
+  product_id: string;
   actor_id: string;
   name: string;
   current_version: number;
@@ -287,6 +289,7 @@ function designArchiveMetadataKey(designId: string): string {
 
 export interface DesignSummary {
   id: string;
+  productId: string;
   name: string;
   version: number;
   revisionId: string;
@@ -377,6 +380,10 @@ export interface ExactPreviewRenderResult {
   renderMetadata: PreviewRenderMetadata;
 }
 
+export interface StoredExactPreviewRenderResult extends ExactPreviewRenderResult {
+  png: Buffer;
+}
+
 export interface HeadMigrationResult {
   migrated: boolean;
   backupId: string | null;
@@ -407,6 +414,7 @@ export interface EventReplayResult {
 function designSummary(row: DesignRow): DesignSummary {
   return {
     id: row.id,
+    productId: row.product_id,
     name: row.name,
     version: row.current_version,
     revisionId: row.current_revision_id,
@@ -457,8 +465,11 @@ export class DesignerService {
     readonly previewTtlSeconds: number,
     versions: Partial<RuntimeVersions> = {},
     readonly assetStore?: ContentAddressedRasterStore,
+    readonly previewRenderStore?: ContentAddressedPreviewRenderStore,
   ) {
     this.versions = { ...DEFAULT_RUNTIME_VERSIONS, ...versions };
+    this.database.cleanupPreviews();
+    this.cleanupPreviewRenderArtifacts();
     this.flushPendingEvents();
   }
 
@@ -651,6 +662,7 @@ export class DesignerService {
   createDesign(actorId: string, input: {
     name: string;
     preset: "web" | "phone" | "tablet";
+    productId?: string;
     idempotencyKey: string;
   }): RevisionResult {
     const access = resolveAccess(this.database.sqlite, actorId);
@@ -678,10 +690,35 @@ export class DesignerService {
           createdAt: now,
         },
       });
+      if (input.productId !== undefined) {
+        const product = this.database.sqlite.prepare(
+          `SELECT id FROM products
+           WHERE id = ? AND organization_id = ? AND status = 'active'`,
+        ).get(input.productId, access.organizationId);
+        if (!product) throw new DomainError("NOT_FOUND", "Product not found.", 404);
+      }
       this.database.sqlite.prepare(
-        `INSERT INTO designs (id, actor_id, name, current_version, current_revision_id, created_at, updated_at, organization_id)
-         VALUES (?, ?, ?, 1, ?, ?, ?, ?)`,
-      ).run(designId, actorId, input.name, revisionId, now, now, access.organizationId);
+        `INSERT INTO designs
+         (id, product_id, actor_id, name, current_version, current_revision_id, created_at, updated_at, organization_id)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      ).run(
+        designId,
+        input.productId ?? null,
+        actorId,
+        input.name,
+        revisionId,
+        now,
+        now,
+        access.organizationId,
+      );
+      if (input.productId !== undefined) {
+        this.database.sqlite.prepare(
+          `UPDATE products
+           SET canonical_specification_design_id = COALESCE(canonical_specification_design_id, ?),
+               updated_at = ?
+           WHERE id = ? AND organization_id = ? AND status = 'active'`,
+        ).run(designId, now, input.productId, access.organizationId);
+      }
       this.database.sqlite.prepare(
         `INSERT INTO revisions
          (id, design_id, version, parent_revision_id, actor_id, message, document_json, operations_json,
@@ -698,15 +735,14 @@ export class DesignerService {
         integrityHash,
         now,
       );
+      const createdDesign = this.database.sqlite.prepare(
+        "SELECT * FROM designs WHERE id = ?",
+      ).get(designId) as DesignRow | undefined;
+      if (!createdDesign?.product_id) {
+        throw new DomainError("INTERNAL_ERROR", "The new design has no Product association.", 500);
+      }
       const result: RevisionResult = {
-        design: {
-          id: designId,
-          name: input.name,
-          version: 1,
-          revisionId,
-          createdAt: now,
-          updatedAt: now,
-        },
+        design: designSummary(createdDesign),
         document,
         canonicalDocument: document,
         schemaVersion: 1,
@@ -723,8 +759,18 @@ export class DesignerService {
         diagnostics: collectDiagnostics(document),
         createdIds: [],
       };
-      this.enqueueEvent(actorId, "design.updated", { designId, version: 1, revisionId, created: true }, true, now);
-      appendAuditEvent(this.database.sqlite, access, "design.create", "design", designId, { version: 1, revisionId });
+      this.enqueueEvent(actorId, "design.updated", {
+        designId,
+        productId: createdDesign.product_id,
+        version: 1,
+        revisionId,
+        created: true,
+      }, true, now);
+      appendAuditEvent(this.database.sqlite, access, "design.create", "design", designId, {
+        productId: createdDesign.product_id,
+        version: 1,
+        revisionId,
+      });
       return result;
     });
   }
@@ -1219,6 +1265,7 @@ export class DesignerService {
     const preview = this.getPreview(actorId, designId, previewId, options);
     const metadata = buildPreviewRenderMetadata(preview.canonicalDocument, capture);
     const serialized = canonicalJson(metadata);
+    this.previewRenderStore?.write(capture.png, metadata.sha256);
     if (preview.renderMetadata !== null) {
       if (canonicalJson(preview.renderMetadata) === serialized) return preview.renderMetadata;
       throw new DomainError(
@@ -1283,6 +1330,45 @@ export class DesignerService {
     return { preview, renderMetadata };
   }
 
+  readStoredExactPreviewRender(
+    actorId: string,
+    designId: string,
+    previewId: string,
+    options: { taskId?: string } = {},
+  ): StoredExactPreviewRenderResult | null {
+    const exact = this.getExactPreviewForRender(actorId, designId, previewId, options);
+    if (!this.previewRenderStore) return null;
+    const png = this.previewRenderStore.read(exact.renderMetadata.sha256);
+    return png === null ? null : { ...exact, png };
+  }
+
+  requireStoredExactPreviewRender(
+    actorId: string,
+    designId: string,
+    previewId: string,
+    options: { taskId?: string } = {},
+  ): StoredExactPreviewRenderResult {
+    const stored = this.readStoredExactPreviewRender(actorId, designId, previewId, options);
+    if (stored !== null) return stored;
+    const exact = this.getExactPreviewForRender(actorId, designId, previewId, options);
+    if (!this.previewRenderStore) {
+      return { ...exact, png: Buffer.alloc(0) };
+    }
+    throw new DomainError(
+      "PREVIEW_ENGINE_MISMATCH",
+      "The exact preview PNG artifact is missing from durable storage.",
+      409,
+      {
+        retryable: true,
+        details: {
+          previewId,
+          expectedSha256: exact.renderMetadata.sha256,
+          recovery: "Open the exact review image once to hydrate a matching legacy preview, or regenerate it.",
+        },
+      },
+    );
+  }
+
   verifyExactPreviewRender(
     actorId: string,
     designId: string,
@@ -1316,6 +1402,7 @@ export class DesignerService {
         },
       );
     }
+    this.previewRenderStore?.write(capture.png, observed.sha256);
     return renderMetadata;
   }
 
@@ -1351,7 +1438,7 @@ export class DesignerService {
     };
     return this.withIdempotency(actorId, scope, input.idempotencyKey, normalizedInput, () => {
       if (input.requireRenderEvidence === true) {
-        this.getExactPreviewForRender(
+        this.requireStoredExactPreviewRender(
           actorId,
           designId,
           normalizedInput.previewId,
@@ -1379,7 +1466,7 @@ export class DesignerService {
       throw new DomainError("INTERNAL_ERROR", "Task preview approval requires an active immediate transaction.", 500);
     }
     this.authorizePreviewCommit(actorId, designId, input.previewId, input.taskId);
-    this.getExactPreviewForRender(actorId, designId, input.previewId, { taskId: input.taskId });
+    this.requireStoredExactPreviewRender(actorId, designId, input.previewId, { taskId: input.taskId });
     return this.commitPreviewInTransaction(actorId, designId, {
       previewId: input.previewId,
       expectedBaseVersion: input.expectedBaseVersion,
@@ -2007,6 +2094,16 @@ export class DesignerService {
     contextSource: "actor" | "workspace",
   ): Record<string, unknown> {
     const head = row.design_id ? this.requireDesign(actorId, row.design_id) : null;
+    const product = head ? this.database.sqlite.prepare(
+      "SELECT id, name, status FROM products WHERE id = ? AND organization_id = ?",
+    ).get(head.product_id, head.organization_id) as {
+      id: string;
+      name: string;
+      status: "active" | "archived";
+    } | undefined : undefined;
+    if (head && !product) {
+      throw new DomainError("INTERNAL_ERROR", "The active design Product association is unavailable.", 500);
+    }
     return {
       designId: row.design_id,
       pageId: row.page_id,
@@ -2014,7 +2111,11 @@ export class DesignerService {
       updatedAt: row.updated_at,
       contextRef: contextRefForActor(row.actor_id),
       contextSource,
-      ...(head ? { version: head.current_version, revisionId: head.current_revision_id } : {}),
+      ...(head ? {
+        product: product!,
+        version: head.current_version,
+        revisionId: head.current_revision_id,
+      } : {}),
     };
   }
 
@@ -2563,6 +2664,23 @@ export class DesignerService {
       );
     }
     return preview.renderMetadata;
+  }
+
+  private cleanupPreviewRenderArtifacts(now = Date.now()): void {
+    if (!this.previewRenderStore) return;
+    const referenced = new Set<string>();
+    const rows = this.database.sqlite.prepare(
+      "SELECT render_metadata_json FROM previews WHERE render_metadata_json IS NOT NULL",
+    ).all() as Array<{ render_metadata_json: string }>;
+    for (const row of rows) {
+      try {
+        referenced.add(parsePreviewRenderMetadata(row.render_metadata_json).sha256);
+      } catch {
+        // Invalid rows are surfaced by normal preview reads. Do not let one
+        // legacy row disable startup cleanup for all valid preview artifacts.
+      }
+    }
+    this.previewRenderStore.cleanupUnreferenced(referenced, now - 86_400_000);
   }
 
   private isDesignArchived(designId: string): boolean {

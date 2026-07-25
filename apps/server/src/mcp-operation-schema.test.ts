@@ -78,6 +78,11 @@ function temporaryIdOperations(): Array<Record<string, unknown>> {
         component_id: "tmp:button-component",
         layout: { gap: { token_id: "tmp:spacing-token" } },
         style: { color: { token_id: "tmp:text-token" } },
+        responsive_variant: {
+          group_id: "responsive_mcp_checkout_0001",
+          frame_ids: ["tmp:phone-frame", "tmp:desktop-frame"],
+          breakpoint: { min_width: 0, max_width: 600 },
+        },
       },
     },
     {

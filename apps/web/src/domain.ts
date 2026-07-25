@@ -53,6 +53,7 @@ export type NodeType = "frame" | "group" | "text" | "rectangle" | "ellipse" | "i
 
 export interface DesignProjectSummary {
   id: string;
+  productId?: string;
   name: string;
   version: number;
   revisionId?: string;

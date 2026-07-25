@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { DesignDocumentSchema, DesignOperationListSchema } from "@designer/core";
+import { DesignDocumentSchema, DesignOperationListSchema, ProductIdSchema } from "@designer/core";
 
 import {
   DEFAULT_RUNTIME_VERSIONS,
@@ -1825,6 +1825,263 @@ function addPreviewRenderMetadata(sqlite: Database.Database): void {
   `);
 }
 
+function addProductOrganizationFoundation(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY CHECK(
+        length(id) BETWEEN 16 AND 240
+        AND id GLOB 'product_*'
+      ),
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 255),
+      description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 20000),
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
+      owner_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+      canonical_specification_design_id TEXT REFERENCES designs(id) ON DELETE RESTRICT,
+      default_design_system_release_id TEXT CHECK(
+        default_design_system_release_id IS NULL
+        OR length(default_design_system_release_id) BETWEEN 8 AND 240
+      ),
+      default_locale TEXT NOT NULL DEFAULT 'en' CHECK(
+        length(default_locale) BETWEEN 2 AND 64
+        AND default_locale NOT GLOB '*[^A-Za-z0-9-]*'
+      ),
+      default_direction TEXT NOT NULL DEFAULT 'ltr' CHECK(default_direction IN ('ltr', 'rtl', 'auto')),
+      locales_json TEXT NOT NULL DEFAULT '["en"]' CHECK(
+        json_valid(locales_json) = 1
+        AND json_type(locales_json) = 'array'
+        AND json_array_length(locales_json) BETWEEN 1 AND 100
+        AND length(CAST(locales_json AS BLOB)) <= 8192
+      ),
+      metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(metadata_json) = 1
+        AND json_type(metadata_json) = 'object'
+        AND length(CAST(metadata_json AS BLOB)) <= 65536
+      ),
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      CHECK(
+        (status = 'active' AND archived_at IS NULL)
+        OR (status = 'archived' AND archived_at IS NOT NULL)
+      )
+    );
+    CREATE INDEX IF NOT EXISTS products_org_status_updated
+      ON products(organization_id, status, updated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS products_owner_status
+      ON products(owner_principal_id, status, updated_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS product_move_previews (
+      id TEXT PRIMARY KEY CHECK(
+        length(id) BETWEEN 24 AND 240
+        AND id GLOB 'product_move_*'
+      ),
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+      design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE RESTRICT,
+      source_product_id TEXT NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+      target_product_id TEXT NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+      expected_design_version INTEGER NOT NULL CHECK(expected_design_version > 0),
+      status TEXT NOT NULL CHECK(status IN ('ready', 'expired', 'committed')),
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      committed_at TEXT,
+      CHECK(source_product_id <> target_product_id),
+      CHECK(
+        (status = 'committed' AND committed_at IS NOT NULL)
+        OR (status IN ('ready', 'expired') AND committed_at IS NULL)
+      )
+    );
+    CREATE INDEX IF NOT EXISTS product_move_previews_design_status_expiry
+      ON product_move_previews(design_id, status, expires_at, id);
+  `);
+
+  addColumn(sqlite, "designs", "product_id TEXT REFERENCES products(id) ON DELETE RESTRICT");
+  addColumn(sqlite, "agent_tasks", "product_id TEXT REFERENCES products(id) ON DELETE RESTRICT");
+  addColumn(sqlite, "agent_tasks", `resolved_context_json TEXT CHECK(
+    resolved_context_json IS NULL OR (
+      json_valid(resolved_context_json) = 1
+      AND json_type(resolved_context_json) = 'object'
+      AND length(CAST(resolved_context_json AS BLOB)) BETWEEN 2 AND 131072
+    )
+  )`);
+
+  const designs = sqlite.prepare(
+    `SELECT id, organization_id, name, actor_id, created_at, updated_at
+     FROM designs ORDER BY created_at, id`,
+  ).all() as Array<{
+    id: string;
+    organization_id: string;
+    name: string;
+    actor_id: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  const insertProduct = sqlite.prepare(
+    `INSERT OR IGNORE INTO products
+     (id, organization_id, name, description, status, owner_principal_id,
+      canonical_specification_design_id, default_design_system_release_id,
+      default_locale, default_direction, locales_json, metadata_json,
+      created_by, created_at, updated_at, archived_at)
+     VALUES (?, ?, ?, '', 'active', ?, ?, NULL, 'en', 'ltr', '["en"]', ?, ?, ?, ?, NULL)`,
+  );
+  const updateDesign = sqlite.prepare("UPDATE designs SET product_id = ? WHERE id = ? AND product_id IS NULL");
+  for (const design of designs) {
+    const owner = sqlite.prepare(
+      `SELECT membership.principal_id
+       FROM memberships membership
+       JOIN principals principal ON principal.id = membership.principal_id
+         AND principal.organization_id = membership.organization_id
+       WHERE membership.organization_id = ? AND principal.disabled_at IS NULL
+       ORDER BY CASE membership.role WHEN 'organization_admin' THEN 0 WHEN 'product_manager' THEN 1 ELSE 2 END,
+                principal.created_at, principal.id
+       LIMIT 1`,
+    ).get(design.organization_id) as { principal_id: string } | undefined;
+    if (!owner) throw new Error(`Cannot assign an owner while migrating design ${design.id} to a Product.`);
+    const derivedProductId = design.id.startsWith("document_")
+      ? `product_${design.id.slice("document_".length)}`
+      : "";
+    const productId = ProductIdSchema.safeParse(derivedProductId).success
+      ? derivedProductId
+      : `product_${createHash("sha256").update(design.id).digest("hex").slice(0, 32)}`;
+    insertProduct.run(
+      productId,
+      design.organization_id,
+      design.name,
+      owner.principal_id,
+      design.id,
+      JSON.stringify({ legacyBackfill: true, sourceDesignId: design.id }),
+      owner.principal_id,
+      design.created_at,
+      design.updated_at,
+    );
+    updateDesign.run(productId, design.id);
+  }
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS designs_product_updated
+      ON designs(product_id, updated_at DESC, id DESC);
+
+    CREATE TRIGGER IF NOT EXISTS products_canonical_design_insert_integrity
+    BEFORE INSERT ON products
+    WHEN NEW.canonical_specification_design_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM designs design
+      WHERE design.id = NEW.canonical_specification_design_id
+        AND design.organization_id = NEW.organization_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'product canonical specification design must belong to the same organization'); END;
+
+    CREATE TRIGGER IF NOT EXISTS products_canonical_design_update_integrity
+    BEFORE UPDATE OF canonical_specification_design_id, organization_id ON products
+    WHEN NEW.canonical_specification_design_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM designs design
+      WHERE design.id = NEW.canonical_specification_design_id
+        AND design.organization_id = NEW.organization_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'product canonical specification design must belong to the same organization'); END;
+
+    CREATE TRIGGER IF NOT EXISTS products_identity_immutable
+    BEFORE UPDATE ON products
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.organization_id IS NOT OLD.organization_id
+      OR NEW.created_by IS NOT OLD.created_by
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN SELECT RAISE(ABORT, 'product identity is immutable'); END;
+
+    CREATE TRIGGER IF NOT EXISTS products_immutable_delete
+    BEFORE DELETE ON products
+    BEGIN SELECT RAISE(ABORT, 'products cannot be deleted'); END;
+
+    CREATE TRIGGER IF NOT EXISTS product_move_previews_identity_immutable
+    BEFORE UPDATE ON product_move_previews
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.organization_id IS NOT OLD.organization_id
+      OR NEW.design_id IS NOT OLD.design_id
+      OR NEW.source_product_id IS NOT OLD.source_product_id
+      OR NEW.target_product_id IS NOT OLD.target_product_id
+      OR NEW.expected_design_version IS NOT OLD.expected_design_version
+      OR NEW.created_by IS NOT OLD.created_by
+      OR NEW.created_at IS NOT OLD.created_at
+      OR NEW.expires_at IS NOT OLD.expires_at
+      OR OLD.status IN ('expired', 'committed')
+      OR NOT (OLD.status = 'ready' AND NEW.status IN ('expired', 'committed'))
+    BEGIN SELECT RAISE(ABORT, 'product move previews permit one terminal transition'); END;
+
+    CREATE TRIGGER IF NOT EXISTS product_move_previews_immutable_delete
+    BEFORE DELETE ON product_move_previews
+    BEGIN SELECT RAISE(ABORT, 'product move previews cannot be deleted'); END;
+
+    CREATE TRIGGER IF NOT EXISTS designs_product_insert_integrity
+    BEFORE INSERT ON designs
+    WHEN NEW.product_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM products product
+      WHERE product.id = NEW.product_id
+        AND product.organization_id = NEW.organization_id
+        AND product.status = 'active'
+    )
+    BEGIN SELECT RAISE(ABORT, 'design product must be an active product in the same organization'); END;
+
+    CREATE TRIGGER IF NOT EXISTS designs_product_default
+    AFTER INSERT ON designs
+    WHEN NEW.product_id IS NULL
+    BEGIN
+      INSERT INTO products
+       (id, organization_id, name, description, status, owner_principal_id,
+        canonical_specification_design_id, default_design_system_release_id,
+        default_locale, default_direction, locales_json, metadata_json,
+        created_by, created_at, updated_at, archived_at)
+      VALUES (
+        'product_' || substr(NEW.id, 10), NEW.organization_id, NEW.name, '', 'active',
+        (SELECT membership.principal_id
+         FROM memberships membership
+         JOIN principals principal ON principal.id = membership.principal_id
+           AND principal.organization_id = membership.organization_id
+         WHERE membership.organization_id = NEW.organization_id AND principal.disabled_at IS NULL
+         ORDER BY CASE membership.role WHEN 'organization_admin' THEN 0 WHEN 'product_manager' THEN 1 ELSE 2 END,
+                  principal.created_at, principal.id
+         LIMIT 1),
+        NEW.id, NULL, 'en', 'ltr', '["en"]',
+        json_object('autoCreated', 1, 'sourceDesignId', NEW.id),
+        NEW.actor_id, NEW.created_at, NEW.updated_at, NULL
+      );
+      UPDATE designs SET product_id = 'product_' || substr(NEW.id, 10) WHERE id = NEW.id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS designs_product_update_integrity
+    BEFORE UPDATE OF product_id, organization_id ON designs
+    WHEN NEW.product_id IS NULL OR NOT EXISTS (
+      SELECT 1 FROM products product
+      WHERE product.id = NEW.product_id
+        AND product.organization_id = NEW.organization_id
+        AND product.status = 'active'
+    )
+    BEGIN SELECT RAISE(ABORT, 'design product must be an active product in the same organization'); END;
+
+    CREATE TRIGGER IF NOT EXISTS agent_tasks_resolved_context_insert_integrity
+    BEFORE INSERT ON agent_tasks
+    WHEN NEW.product_id IS NULL
+      OR NEW.resolved_context_json IS NULL
+      OR NOT EXISTS (
+        SELECT 1 FROM designs design
+        JOIN products product ON product.id = design.product_id
+        WHERE design.id = NEW.design_id
+          AND design.organization_id = NEW.organization_id
+          AND product.id = NEW.product_id
+          AND product.organization_id = NEW.organization_id
+      )
+      OR json_extract(NEW.resolved_context_json, '$.schemaVersion') != 1
+      OR json_extract(NEW.resolved_context_json, '$.product.id') IS NOT NEW.product_id
+      OR json_extract(NEW.resolved_context_json, '$.design.id') IS NOT NEW.design_id
+      OR json_extract(NEW.resolved_context_json, '$.design.version') IS NOT NEW.base_version
+    BEGIN SELECT RAISE(ABORT, 'agent task resolved product context is required'); END;
+
+    DROP TRIGGER IF EXISTS agent_tasks_immutable_update;
+    CREATE TRIGGER agent_tasks_immutable_update
+    BEFORE UPDATE ON agent_tasks BEGIN SELECT RAISE(ABORT, 'agent tasks are immutable'); END;
+  `);
+}
+
 function canonicalizeBootstrapCredentialTrigger(sqlite: Database.Database): void {
   sqlite.exec(`
     DROP TRIGGER bootstrap_credentials_consume_once;
@@ -1849,6 +2106,7 @@ const migrations: Migration[] = [
   { version: 14, name: "browser_session_authentication", up: addBrowserSessionAuthentication },
   { version: 15, name: "preview_render_metadata", up: addPreviewRenderMetadata },
   { version: 16, name: "bootstrap_credential_trigger_canonicalization", up: canonicalizeBootstrapCredentialTrigger },
+  { version: 17, name: "product_organization_foundation", up: addProductOrganizationFoundation },
 ];
 
 const migrationNames = new Set<string>();
@@ -2416,6 +2674,130 @@ const requiredEnterpriseMigrationShapes: readonly RequiredMigrationShape[] = [
           "raise(abort",
         ],
         sqlVariants: [CANONICAL_BOOTSTRAP_CREDENTIALS_CONSUME_ONCE_SQL],
+      },
+    ],
+  },
+  {
+    version: 17,
+    tables: [
+      {
+        name: "products",
+        columns: [
+          "id", "organization_id", "name", "description", "status", "owner_principal_id",
+          "canonical_specification_design_id", "default_design_system_release_id", "default_locale",
+          "default_direction", "locales_json", "metadata_json", "created_by", "created_at",
+          "updated_at", "archived_at",
+        ],
+        sqlFragments: [
+          "status text not null default 'active' check(status in ('active', 'archived'))",
+          "json_valid(locales_json) = 1",
+          "json_valid(metadata_json) = 1",
+          "status = 'active' and archived_at is null",
+        ],
+      },
+      {
+        name: "designs",
+        columns: ["product_id"],
+      },
+      {
+        name: "agent_tasks",
+        columns: ["product_id", "resolved_context_json"],
+      },
+      {
+        name: "product_move_previews",
+        columns: [
+          "id", "organization_id", "design_id", "source_product_id", "target_product_id",
+          "expected_design_version", "status", "created_by", "created_at", "expires_at", "committed_at",
+        ],
+      },
+    ],
+    indexes: [
+      {
+        name: "products_org_status_updated",
+        table: "products",
+        columns: [
+          { name: "organization_id" },
+          { name: "status" },
+          { name: "updated_at", descending: true },
+          { name: "id", descending: true },
+        ],
+      },
+      {
+        name: "products_owner_status",
+        table: "products",
+        columns: [
+          { name: "owner_principal_id" },
+          { name: "status" },
+          { name: "updated_at", descending: true },
+          { name: "id", descending: true },
+        ],
+      },
+      {
+        name: "designs_product_updated",
+        table: "designs",
+        columns: [
+          { name: "product_id" },
+          { name: "updated_at", descending: true },
+          { name: "id", descending: true },
+        ],
+      },
+      {
+        name: "product_move_previews_design_status_expiry",
+        table: "product_move_previews",
+        columns: [
+          { name: "design_id" },
+          { name: "status" },
+          { name: "expires_at" },
+          { name: "id" },
+        ],
+      },
+    ],
+    triggers: [
+      {
+        name: "products_identity_immutable",
+        table: "products",
+        sqlFragments: ["before update on products", "new.organization_id is not old.organization_id", "raise(abort"],
+      },
+      {
+        name: "products_immutable_delete",
+        table: "products",
+        sqlFragments: ["before delete on products", "raise(abort"],
+      },
+      {
+        name: "designs_product_default",
+        table: "designs",
+        sqlFragments: ["after insert on designs", "new.product_id is null", "insert into products", "update designs set product_id"],
+      },
+      {
+        name: "designs_product_update_integrity",
+        table: "designs",
+        sqlFragments: ["before update of product_id, organization_id on designs", "product.status = 'active'", "raise(abort"],
+      },
+      {
+        name: "agent_tasks_resolved_context_insert_integrity",
+        table: "agent_tasks",
+        sqlFragments: [
+          "before insert on agent_tasks",
+          "new.resolved_context_json is null",
+          "$.product.id",
+          "$.design.version",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "product_move_previews_identity_immutable",
+        table: "product_move_previews",
+        sqlFragments: [
+          "before update on product_move_previews",
+          "old.status in ('expired', 'committed')",
+          "new.status in ('expired', 'committed')",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "product_move_previews_immutable_delete",
+        table: "product_move_previews",
+        sqlFragments: ["before delete on product_move_previews", "raise(abort"],
       },
     ],
   },

@@ -1,7 +1,7 @@
 interface:
   display_name: "FormaSpec"
-  short_description: "Design and refine products with FormaSpec"
-  default_prompt: "Use $formaspec to design this interface with FormaSpec."
+  short_description: "Senior product, UX, and engineering design"
+  default_prompt: "Use $formaspec as a senior product manager, UI/UX designer, and software engineer to design this product flow."
 dependencies:
   tools:
     - type: "mcp"

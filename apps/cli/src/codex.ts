@@ -13,12 +13,11 @@ import { findExecutable, type CommandRunner } from "./process.js";
 const MANAGED_MARKER = ".formaspec-managed.json";
 const MANAGER_ID = "formaspecctl";
 const MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024;
-const FORMASPEC_PLUGIN_VERSION = "0.2.2";
+const FORMASPEC_PLUGIN_VERSION = "0.3.0";
 
 export const FORMASPEC_CODEX_PLUGIN_ID = "formaspec@formaspec";
 export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";
-export const MINIMAL_UI_CODEX_PLUGIN_ID = "minimal-ui@formaspec";
-export const MINIMAL_UI_CODEX_MENTION = "[@Minimal UI](plugin://minimal-ui@formaspec)";
+const LEGACY_MINIMAL_UI_CODEX_PLUGIN_ID = "minimal-ui@formaspec";
 
 interface CodexMcpConfiguration {
   transport?: {
@@ -42,12 +41,11 @@ export interface ConnectCodexOptions {
 export interface ConnectCodexResult {
   codexPath: string;
   mcpUrl: string;
-  skillPath: string;
-  minimalUiSkillPath: string;
-  minimalUiSkillManaged: boolean;
   pluginPath: string;
-  minimalUiPluginPath: string;
+  pluginSkillPath: string;
   marketplacePath: string;
+  removedManagedStandaloneSkillPaths: string[];
+  removedLegacyMinimalUiPlugin: boolean;
   changedMcp: boolean;
   changedPlugin: boolean;
   changedApprovalPolicy: boolean;
@@ -91,43 +89,28 @@ function isManagedInstallTarget(target: string): boolean {
   return !fs.existsSync(target) || hasManagedMarker(target);
 }
 
-function installManagedSkill(target: string, skillName: "formaspec" | "minimal-ui"): void {
-  const displayName = skillName === "formaspec" ? "FormaSpec" : "Minimal UI";
-  const source = fileURLToPath(new URL(`../assets/skills/${skillName}`, import.meta.url));
-  if (!fs.existsSync(path.join(source, "SKILL.md"))) throw new Error(`Bundled ${displayName} skill is missing.`);
-  if (!isManagedInstallTarget(target)) {
-    throw new Error(`Refusing to overwrite the unmanaged ${displayName} Codex skill at ${target}. Move or rename it first.`);
+function assertManagedStandaloneSkillOrAbsent(target: string, displayName: string): void {
+  if (fs.existsSync(target) && !hasManagedMarker(target)) {
+    throw new Error(
+      `Unmanaged ${displayName} Codex skill collision at ${target}. FormaSpec preserved it; move or rename it before reconnecting.`,
+    );
   }
-  const parent = path.dirname(target);
-  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const stage = path.join(parent, `.formaspec-${skillName}.stage-${process.pid}`);
-  const previous = path.join(parent, `.formaspec-${skillName}.previous-${process.pid}`);
-  fs.rmSync(stage, { recursive: true, force: true });
-  fs.rmSync(previous, { recursive: true, force: true });
-  fs.cpSync(source, stage, { recursive: true, errorOnExist: true });
-  fs.writeFileSync(path.join(stage, MANAGED_MARKER), `${JSON.stringify({
-    manager: MANAGER_ID,
-    schemaVersion: 1,
-    installedAt: new Date().toISOString(),
-  }, null, 2)}\n`, { mode: 0o600 });
-  try {
-    if (fs.existsSync(target)) fs.renameSync(target, previous);
-    fs.renameSync(stage, target);
-    fs.rmSync(previous, { recursive: true, force: true });
-  } catch (error) {
-    if (!fs.existsSync(target) && fs.existsSync(previous)) fs.renameSync(previous, target);
-    throw error;
-  } finally {
-    fs.rmSync(stage, { recursive: true, force: true });
+}
+
+function removeManagedStandaloneSkill(target: string): boolean {
+  if (!fs.existsSync(target)) return false;
+  if (!hasManagedMarker(target)) {
+    throw new Error(`Refusing to remove the unmanaged Codex skill at ${target}.`);
   }
+  fs.rmSync(target, { recursive: true, force: false });
+  return true;
 }
 
 function installManagedMarketplace(target: string): void {
   const source = fileURLToPath(new URL("../assets/codex-marketplace", import.meta.url));
   if (!fs.existsSync(path.join(source, ".agents", "plugins", "marketplace.json"))
-    || !fs.existsSync(path.join(source, "plugins", "formaspec", ".codex-plugin", "plugin.json"))
-    || !fs.existsSync(path.join(source, "plugins", "minimal-ui", ".codex-plugin", "plugin.json"))) {
-    throw new Error("Bundled FormaSpec and Minimal UI Codex plugin marketplace is missing.");
+    || !fs.existsSync(path.join(source, "plugins", "formaspec", ".codex-plugin", "plugin.json"))) {
+    throw new Error("Bundled FormaSpec Codex plugin marketplace is missing.");
   }
   if (!isManagedInstallTarget(target)) {
     throw new Error(`Refusing to overwrite the unmanaged Codex marketplace at ${target}. Move or rename it first.`);
@@ -176,6 +159,17 @@ function installedPluginVersion(stdout: string, pluginId: string): string | unde
     return typeof plugin?.version === "string" ? plugin.version : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function hasInstalledPlugin(stdout: string, pluginId: string): boolean {
+  try {
+    const value = JSON.parse(stdout) as {
+      installed?: Array<{ pluginId?: unknown; installed?: unknown }>;
+    };
+    return value.installed?.some((candidate) => candidate.pluginId === pluginId && candidate.installed === true) === true;
+  } catch {
+    return false;
   }
 }
 
@@ -228,8 +222,8 @@ export async function isManagedCodexInstall(options: InspectManagedCodexOptions)
     path.join(codexHome, "skills", "minimal-ui"),
     path.join(codexHome, "formaspec-marketplace"),
   ];
-  if (!hasManagedMarker(managedTargets[0]!) || !hasManagedMarker(managedTargets[2]!)) return false;
-  if (fs.existsSync(managedTargets[1]!) && !hasManagedMarker(managedTargets[1]!)) return false;
+  if (!hasManagedMarker(managedTargets[2]!)) return false;
+  if (managedTargets.slice(0, 2).some((target) => fs.existsSync(target) && !hasManagedMarker(target))) return false;
   const existing = await options.commandRunner(codexPath, ["mcp", "get", "formaspec", "--json"], {
     env: options.environment,
     timeoutMs: 15_000,
@@ -489,6 +483,33 @@ function scanTomlTableHeaders(lines: string[]): TomlTableHeader[] {
   return headers;
 }
 
+function legacyMinimalUiPluginTableRanges(lines: string[]): Array<{ start: number; end: number }> {
+  const targetPath = ["plugins", LEGACY_MINIMAL_UI_CODEX_PLUGIN_ID];
+  const headers = scanTomlTableHeaders(lines);
+  return headers.flatMap((header, index) => header.path.length >= targetPath.length
+    && targetPath.every((segment, segmentIndex) => header.path[segmentIndex] === segment)
+    ? [{
+      start: header.line,
+      end: headers[index + 1]?.line ?? (lines.at(-1) === "" ? lines.length - 1 : lines.length),
+    }]
+    : []);
+}
+
+function removeLegacyMinimalUiPluginConfiguration(codexHome: string): boolean {
+  const config = readCodexConfigText(codexHome);
+  const ranges = legacyMinimalUiPluginTableRanges(config.lines);
+  if (ranges.length === 0) return false;
+  for (const range of [...ranges].reverse()) {
+    config.lines.splice(range.start, range.end - range.start);
+  }
+  writeCodexConfigText(codexHome, config, config.lines);
+  const verified = readCodexConfigText(codexHome);
+  if (legacyMinimalUiPluginTableRanges(verified.lines).length > 0) {
+    throw new Error("Codex configuration still contains the exact legacy Minimal UI plugin table after cleanup.");
+  }
+  return true;
+}
+
 export async function connectCodex(options: ConnectCodexOptions): Promise<ConnectCodexResult> {
   const codexPath = findExecutable("codex", options.environment);
   if (codexPath === null) throw new Error("Codex CLI was not found in a trusted absolute PATH entry.");
@@ -499,20 +520,18 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   if (version.exitCode !== 0) throw new Error("Codex CLI was found but could not run.");
 
   const codexHome = resolveCodexHome(options.environment);
-  const skillPath = path.join(codexHome, "skills", "formaspec");
-  const minimalUiSkillPath = path.join(codexHome, "skills", "minimal-ui");
+  const legacyFormaSpecSkillPath = path.join(codexHome, "skills", "formaspec");
+  const legacyMinimalUiSkillPath = path.join(codexHome, "skills", "minimal-ui");
   const marketplacePath = path.join(codexHome, "formaspec-marketplace");
   const pluginPath = path.join(marketplacePath, "plugins", "formaspec");
-  const minimalUiPluginPath = path.join(marketplacePath, "plugins", "minimal-ui");
-  if (!isManagedInstallTarget(skillPath)) {
-    throw new Error(`Refusing to overwrite the unmanaged Codex skill at ${skillPath}. Move or rename it first.`);
-  }
+  const pluginSkillPath = path.join(pluginPath, "skills", "formaspec");
+  assertManagedStandaloneSkillOrAbsent(legacyFormaSpecSkillPath, "FormaSpec");
+  assertManagedStandaloneSkillOrAbsent(legacyMinimalUiSkillPath, "legacy duplicate");
   if (!isManagedInstallTarget(marketplacePath)) {
     throw new Error(`Refusing to overwrite the unmanaged Codex marketplace at ${marketplacePath}. Move or rename it first.`);
   }
-  const minimalUiSkillManaged = isManagedInstallTarget(minimalUiSkillPath);
   if (!options.assumeYes && !await options.confirm(
-    `Allow FormaSpec to configure the 'formaspec' MCP server and install the managed FormaSpec identity plus the Minimal UI compatibility alias in ${codexHome}?`,
+    `Allow FormaSpec to configure the 'formaspec' MCP server, install the single managed FormaSpec plugin, and remove installer-owned legacy duplicate identities in ${codexHome}?`,
   )) {
     throw new Error("Codex connection was cancelled; no Codex files were changed.");
   }
@@ -555,11 +574,11 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
     pluginsBeforeMarketplaceRefresh.stdout,
     FORMASPEC_CODEX_PLUGIN_ID,
   ) !== FORMASPEC_PLUGIN_VERSION;
-  const needsMinimalUiPluginInstall = installedPluginVersion(
+  const hadLegacyMinimalUiPlugin = hasInstalledPlugin(
     pluginsBeforeMarketplaceRefresh.stdout,
-    MINIMAL_UI_CODEX_PLUGIN_ID,
-  ) !== FORMASPEC_PLUGIN_VERSION;
-  const changedPlugin = needsFormaSpecPluginInstall || needsMinimalUiPluginInstall;
+    LEGACY_MINIMAL_UI_CODEX_PLUGIN_ID,
+  );
+  let changedPlugin = needsFormaSpecPluginInstall || hadLegacyMinimalUiPlugin;
   installManagedMarketplace(marketplacePath);
   const marketplaceList = await options.commandRunner(codexPath, ["plugin", "marketplace", "list", "--json"], {
     env: options.environment,
@@ -585,26 +604,50 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
     });
     if (pluginAdded.exitCode !== 0) throw new Error("Codex could not install the managed FormaSpec plugin.");
   }
-  if (needsMinimalUiPluginInstall) {
-    const pluginAdded = await options.commandRunner(codexPath, ["plugin", "add", MINIMAL_UI_CODEX_PLUGIN_ID, "--json"], {
+  const primaryPluginVerification = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  if (primaryPluginVerification.exitCode !== 0
+    || installedPluginVersion(primaryPluginVerification.stdout, FORMASPEC_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION) {
+    throw new Error("Codex could not verify the FormaSpec 0.3.0 plugin before legacy identity removal.");
+  }
+  const hasLegacyMinimalUiPlugin = hasInstalledPlugin(
+    primaryPluginVerification.stdout,
+    LEGACY_MINIMAL_UI_CODEX_PLUGIN_ID,
+  );
+  if (hasLegacyMinimalUiPlugin) {
+    const pluginRemoved = await options.commandRunner(codexPath, ["plugin", "remove", LEGACY_MINIMAL_UI_CODEX_PLUGIN_ID, "--json"], {
       env: options.environment,
       timeoutMs: 20_000,
     });
-    if (pluginAdded.exitCode !== 0) throw new Error("Codex could not install the managed Minimal UI plugin alias.");
+    if (pluginRemoved.exitCode !== 0) {
+      throw new Error("Codex verified FormaSpec 0.3.0 but could not remove the legacy duplicate plugin; managed standalone skills were preserved for a safe retry.");
+    }
   }
-  installManagedSkill(skillPath, "formaspec");
-  if (minimalUiSkillManaged) installManagedSkill(minimalUiSkillPath, "minimal-ui");
   const verifiedPlugins = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
     env: options.environment,
     timeoutMs: 15_000,
   });
   if (verifiedPlugins.exitCode !== 0
     || installedPluginVersion(verifiedPlugins.stdout, FORMASPEC_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION
-    || installedPluginVersion(verifiedPlugins.stdout, MINIMAL_UI_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION) {
-    throw new Error("Codex could not verify the primary FormaSpec plugin and its legacy Minimal UI compatibility alias.");
+    || hasInstalledPlugin(verifiedPlugins.stdout, LEGACY_MINIMAL_UI_CODEX_PLUGIN_ID)) {
+    throw new Error("Codex could not verify a single installed FormaSpec identity after legacy cleanup.");
   }
-  // Consume the one-time ticket only after Codex configuration and both
-  // managed plugins are installed and verified. A local setup failure must
+  let removedLegacyMinimalUiPluginConfiguration: boolean;
+  try {
+    removedLegacyMinimalUiPluginConfiguration = removeLegacyMinimalUiPluginConfiguration(codexHome);
+  } catch (error) {
+    throw new Error(
+      "Codex verified the single FormaSpec plugin but the exact legacy Minimal UI plugin configuration could not be removed safely; managed standalone skills were preserved for a safe retry.",
+      { cause: error },
+    );
+  }
+  changedPlugin ||= removedLegacyMinimalUiPluginConfiguration;
+  const removedManagedStandaloneSkillPaths = [legacyFormaSpecSkillPath, legacyMinimalUiSkillPath]
+    .filter((target) => removeManagedStandaloneSkill(target));
+  // Consume the one-time ticket only after Codex configuration and the single
+  // managed plugin are installed and verified. A local setup failure must
   // leave the pending ticket retryable instead of making the server advertise
   // an active connection that Codex cannot use.
   await options.bridge.authorizeAgent(options.pairing);
@@ -619,12 +662,11 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   return {
     codexPath,
     mcpUrl,
-    skillPath,
-    minimalUiSkillPath,
-    minimalUiSkillManaged,
     pluginPath,
-    minimalUiPluginPath,
+    pluginSkillPath,
     marketplacePath,
+    removedManagedStandaloneSkillPaths,
+    removedLegacyMinimalUiPlugin: hasLegacyMinimalUiPlugin,
     changedMcp,
     changedPlugin,
     changedApprovalPolicy,

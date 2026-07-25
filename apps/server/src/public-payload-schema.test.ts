@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   AgentTaskResultSchema,
+  AgentTaskCompletionSchemas,
   AgentTaskTransitionRequestSchema,
   McpAgentTaskTransitionRequestSchema,
 } from "./agent-task-schema.js";
@@ -31,6 +32,41 @@ function nestedObject(depth: number): Record<string, unknown> {
   return value;
 }
 
+function readinessPayload() {
+  return {
+    schemaVersion: 1 as const,
+    requestClassification: "refine" as const,
+    selected: {
+      productId: "product_payloadschema0001",
+      designId: "document_payloadschema0001",
+      baseVersion: 1,
+    },
+    productSpecification: null,
+    designSystem: {
+      source: "formaspec_foundation" as const,
+      releaseId: "release_formaspec_foundation",
+      releaseVersion: 1,
+    },
+    components: { reused: [], extended: [], proposed: [] },
+    platforms: ["phone" as const],
+    repositoryMappingsConsidered: [],
+    assumptions: [],
+    blockers: [],
+    checks: {
+      hierarchy: "pass" as const,
+      visualConsistency: "pass" as const,
+      interactionStates: "pass" as const,
+      accessibility: "pass" as const,
+      touchTargets: "pass" as const,
+      rtlLocalization: "pass" as const,
+      responsiveVariants: "pass" as const,
+      prototypeCoverage: "pass" as const,
+      engineeringFeasibility: "pass" as const,
+      lint: "pass" as const,
+    },
+  };
+}
+
 describe("bounded public JSON payloads", () => {
   it("preserves JSON-object compatibility while rejecting non-JSON and structurally excessive values", () => {
     expect(BoundedJsonObjectSchema.safeParse({
@@ -58,8 +94,11 @@ describe("bounded public JSON payloads", () => {
       task_id: "task_payloadschema0001",
       expected_status: "in_progress",
       to_status: "awaiting_approval",
-      data: { previewId: "preview_payloadschema0001" },
+      data: { previewId: "preview_payloadschema0001", readiness: readinessPayload() },
     }).success).toBe(true);
+    expect(AgentTaskCompletionSchemas.design_preview.safeParse({
+      previewId: "preview_payloadschema0001",
+    }).success).toBe(false);
 
     expect(AgentTaskTransitionRequestSchema.safeParse({
       expectedStatus: "in_progress",
@@ -111,6 +150,11 @@ describe("exact task and redesign MCP result payloads", () => {
   it("rejects undeclared task fields at nested DTO boundaries", () => {
     const task = {
       id: "task_payloadschema0001",
+      product: {
+        id: "product_payloadschema0001",
+        name: "Payload schema Product",
+        status: "active",
+      },
       designId: "document_payloadschema0001",
       brief: "Create a bounded preview",
       selection: [],
@@ -121,6 +165,8 @@ describe("exact task and redesign MCP result payloads", () => {
       createdBy: "principal_local",
       createdAt: "2026-07-21T00:00:00.000Z",
       expiresAt: "2026-07-22T00:00:00.000Z",
+      resolvedContext: null,
+      readiness: null,
       transitions: [{
         id: "transition_payloadschema0001",
         fromStatus: null,

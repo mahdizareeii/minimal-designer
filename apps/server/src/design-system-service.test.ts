@@ -21,6 +21,7 @@ import { EventHub } from "./events.js";
 import { canonicalJson } from "./ids.js";
 import { DesignerService } from "./service.js";
 import { createComponentSourceRevisionFixture } from "../test-fixtures/component-source.js";
+import { moveDesignFixtureToOrganization } from "../test-fixtures/product.js";
 
 const databases: DesignerDatabase[] = [];
 const temporaryDirectories: string[] = [];
@@ -307,9 +308,10 @@ describe("persisted design-system service", () => {
       `INSERT INTO organizations (id, name, config_json, created_at, updated_at)
        VALUES ('organization_component_source_foreign', 'Foreign source organization', '{}', ?, ?)`,
     ).run(now, now);
-    database.sqlite.prepare(
-      "UPDATE designs SET organization_id = 'organization_component_source_foreign' WHERE id = ?",
-    ).run(componentSource.designId);
+    moveDesignFixtureToOrganization(database.sqlite, {
+      designId: componentSource.designId,
+      organizationId: "organization_component_source_foreign",
+    });
     expect(() => rawSystems.createComponentVersion("local", system.id, {
       expectedLatestVersion: 0,
       definition,

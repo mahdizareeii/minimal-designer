@@ -14,6 +14,7 @@ export interface ApplicationRoute {
   designId?: string;
   previewId?: string;
   taskId?: string;
+  storeId?: string;
   revisionId?: string;
   assessmentId?: string;
 }
@@ -29,11 +30,13 @@ export function applicationRoute(pathname: string, search = ""): ApplicationRout
   const review = pathname.match(/^\/design\/([^/]+)\/previews\/([^/]+)\/review$/);
   if (review?.[1] && review[2]) {
     const taskId = new URLSearchParams(search).get("task")?.trim();
+    const storeId = new URLSearchParams(search).get("store")?.trim();
     return {
       kind: "preview-review",
       designId: decodeURIComponent(review[1]),
       previewId: decodeURIComponent(review[2]),
       ...(taskId ? { taskId } : {}),
+      ...(storeId ? { storeId } : {}),
     };
   }
   const match = pathname.match(/^\/design\/([^/]+)$/);
@@ -164,7 +167,12 @@ function AuthenticatedApplication() {
   const content = route.kind === "inspect" && route.designId && route.revisionId
     ? <InspectView projectId={route.designId} revisionId={route.revisionId} />
     : route.kind === "preview-review" && route.designId && route.previewId
-      ? <PreviewReviewPage designId={route.designId} previewId={route.previewId} taskId={route.taskId ?? null} />
+      ? <PreviewReviewPage
+        designId={route.designId}
+        previewId={route.previewId}
+        taskId={route.taskId ?? null}
+        expectedDataStoreId={route.storeId ?? null}
+      />
     : route.kind === "administration"
       ? <Administration />
       : route.kind === "redesign" && route.assessmentId

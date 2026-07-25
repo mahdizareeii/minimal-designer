@@ -203,7 +203,7 @@ export function AgentPreviewPng({
 }
 
 export function agentTaskInstruction(task: AgentTaskRecord): string {
-  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim task ${task.id} with task_claim, call task_transition to move it to in_progress, and read its project context and selection. Call design_preview_changes, inspect its returned PNG in Codex, and call design_lint for that preview. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>"}. Do not commit it; the website must show the exact PNG and human Commit button.`;
+  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim task ${task.id} with task_claim and move it to in_progress. Read its immutable Product, Design/base version, selection, organization policy, product specification, effective design-system release, tokens/components/states, comparable screens, and authorized repository inventories/mappings. Decide what is reused, extended, or proposed. Call design_preview_changes with task_id ${task.id}, inspect its returned PNG in Codex, and run design_lint. Refine until applicable senior UI/UX, product, accessibility, RTL/localization, responsive, prototype, and engineering checks are resolved or explicitly reported. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>","readiness":<complete DesignReadinessReport matching the immutable task context and tool schema>}. Do not commit it; the website must show the exact PNG, readiness report, and human Commit button.`;
 }
 
 export function codexTaskLaunchUrl(task: AgentTaskRecord): string {
@@ -439,6 +439,7 @@ export function AgentPreviewReviewDialog({
   const canCommit = exactPreviewCommitAllowed(preview.canCommit
     && preview.status === "ready"
     && task.status === "awaiting_approval"
+    && Boolean(task.readiness)
     && baseMatchesHead, previewRenderStatus, Boolean(preview.renderMetadata));
   const renderPane = (version: "before" | "after") => {
     const before = version === "before";

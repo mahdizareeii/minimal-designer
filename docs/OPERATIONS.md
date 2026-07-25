@@ -2,12 +2,8 @@
 
 Last audited: 2026-07-22
 
-FormaSpec is the product name and primary agent-facing identity used by Codex
-and other MCP-capable clients.
-
-> **Backward compatibility:** Minimal UI remains a legacy alias for existing
-> prompts and integrations. Use FormaSpec for all new work. Both identities
-> share the same token-free `formaspec` MCP server.
+FormaSpec is the product name and the only supported agent-facing identity used
+by Codex and other MCP-capable clients.
 
 ## Operational status
 
@@ -63,9 +59,8 @@ Local source installer entry point:
 
 Both installers perform the available requirement checks, install the frozen
 workspace dependencies, build the CLI and local bridge, start FormaSpec, start
-the loopback bridge, detect Codex, and configure the primary managed
-version-0.2.0 FormaSpec integration plus the Minimal UI legacy compatibility
-assets when Codex is available. `--yes` grants that explicit setup
+the loopback bridge, detect Codex, and configure the managed FormaSpec 0.3.0
+plugin when Codex is available. `--yes` grants that explicit setup
 authorization without further prompts.
 
 The source installer currently needs Node.js 24 or newer and pnpm 11.9 even
@@ -162,6 +157,7 @@ APP_MODE=local \
 AUTH_MODE=session \
 HOST=127.0.0.1 \
 PUBLIC_BASE_URL=http://127.0.0.1:4310 \
+FORMASPEC_WEB_BASE_URL=http://127.0.0.1:4311 \
 pnpm dev
 ```
 
@@ -193,6 +189,7 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl --yes install local` | Prepares and starts the built local application, starts the bridge, and connects supported Codex. |
 | `pnpm formaspecctl --yes install docker` | Prepares and starts the current Compose application, starts the host bridge, and connects supported Codex. |
 | `pnpm formaspecctl doctor [auto\|local\|docker\|server] [--strict]` | Runs the compatibility launcher's platform/runtime checks, then reports Codex and bridge state. |
+| `pnpm formaspecctl ensure-running [--json]` | Fixed-purpose Codex/protocol preflight. It resumes only the recorded local, development, Docker, or server runtime, verifies its stable data-store identity and loopback bridge, and refuses to guess or fall back to another storage mode. |
 | `pnpm formaspecctl status` | Reports the compatibility launcher state and the local bridge state. |
 | `pnpm formaspecctl start [local\|docker\|server]` | Starts the requested runtime, ensures the bridge is running, and offers Codex setup. Supported options depend on the target: `--port`, `--no-open`, or `--no-build`. |
 | `pnpm formaspecctl stop` | Stops the CLI-owned bridge and the recorded application runtime while preserving application data. |
@@ -215,7 +212,7 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl audit retention preview [--json]` | Produces a 15-minute, organization-scoped, bounded dry-run using the current audit-retention policy, exact candidate counts/ranges, canonical-byte hashes, and a plan hash. |
 | `pnpm formaspecctl audit retention list [--json]` | Lists immutable retention-run evidence and SHA-256 chain hashes without exposing deleted audit contents. |
 | `pnpm formaspecctl audit retention execute --preview-id <id> --plan-hash <sha256> --yes [--idempotency-key <key>] [--json]` | Revalidates and atomically commits only the reviewed old audit/published-outbox batch, then records immutable hash-chained evidence. |
-| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts/authorizes the bridge, consumes an Administration-issued ticket in authenticated mode, installs both managed version-0.2.0 identities, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. `--connection-id` is optional but valid only with a nonce. |
+| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts or refreshes the bridge, consumes an Administration-issued ticket in authenticated mode, installs and verifies the single managed FormaSpec 0.3.0 plugin, removes only installer-owned legacy identities, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. `--connection-id` is optional but valid only with a nonce. |
 | `pnpm formaspecctl agent config generic [--format all\|json\|toml]` | Prints validated client-neutral loopback Streamable HTTP configuration and verification guidance; it never reads or modifies an unknown client file. |
 | `pnpm formaspecctl support-bundle preview [--json]` | Produces a read-only exact inventory of bounded sanitized diagnostic entries. |
 | `pnpm formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]` | Creates the reviewed deterministic archive plus an adjacent local manifest; excludes databases, assets, backups, environment values, source, and credentials. |
@@ -312,10 +309,7 @@ The resulting setup is:
 - local bridge URL: `http://127.0.0.1:4312/mcp`;
 - upstream FormaSpec MCP URL: `http://127.0.0.1:4310/mcp` by default;
 - primary Codex mention: `[@FormaSpec](plugin://formaspec@formaspec)`;
-- installed managed identity: FormaSpec version 0.2.0;
-- backward-compatibility asset: the managed Minimal UI version-0.2.0 alias,
-  including `[@Minimal UI](plugin://minimal-ui@formaspec)`, remains installed
-  for existing prompts;
+- installed managed identity: FormaSpec version 0.3.0;
 - recommended natural-language triggers: “Use FormaSpec,” “Design this with
   FormaSpec,” and “Refine this selection with FormaSpec.”
 
@@ -323,8 +317,8 @@ For a website-created task opened with **Submit to @FormaSpec**, Codex claims
 the task, previews the requested change, inspects the PNG, runs linting, and
 transitions to `awaiting_approval` with the exact `previewId`. It does not
 commit or complete the task. The human **Commit** or **Discard** action in
-FormaSpec is the approval boundary. Direct non-task MCP work may still call
-`design_commit_preview` after the client's normal write approval.
+FormaSpec is the approval boundary. Direct requests create the same task-backed
+preview and never commit from the agent.
 
 The Codex MCP configuration contains no bearer token. Administration creates
 the scoped, expiring connection and one-time nonce. The loopback bridge submits
@@ -502,8 +496,9 @@ the health probe.
 
 ### Local mode
 
-`APP_MODE=local` is the default. `HOST` and `PUBLIC_BASE_URL` must both resolve
-to loopback. Requests from non-loopback addresses are rejected, and browser
+`APP_MODE=local` is the default. `HOST`, `PUBLIC_BASE_URL`, and
+`FORMASPEC_WEB_BASE_URL` must resolve to loopback. Requests from non-loopback
+addresses are rejected, and browser
 identity/proxy headers are deliberately ignored. `AUTH_MODE=none` preserves
 the simplest no-login workflow. `AUTH_MODE=session` adds the migration-14
 browser bootstrap/login/CSRF boundary while remaining loopback-only. Direct
@@ -518,6 +513,7 @@ or untrusted container network.
 `APP_MODE=server` refuses startup unless all of these conditions are met:
 
 - `PUBLIC_BASE_URL` is HTTPS;
+- `FORMASPEC_WEB_BASE_URL` is the same credential-free HTTPS origin;
 - `AUTH_MODE=session` or `AUTH_MODE=trusted-header`;
 - `FORMASPEC_TRUSTED_PROXIES` is non-empty;
 - allowed hosts and exact browser origins are configured;
@@ -544,6 +540,7 @@ Important variables:
 | `DATA_DIR` | `./data` | SQLite and persistent application data root. |
 | `BACKUP_DIR` | sibling `backups` directory | Backup-manager destination; the image sets `/backups` and Compose mounts a named backup volume there. |
 | `PUBLIC_BASE_URL` | derived from host/port | Must be a loopback URL locally and HTTPS in server mode. |
+| `FORMASPEC_WEB_BASE_URL` | `PUBLIC_BASE_URL` | Browser origin used for task/review links. Development uses the Vite origin on `4311`; server mode requires the same HTTPS origin as `PUBLIC_BASE_URL`. Credentials, queries, fragments, and path prefixes are rejected. |
 | `AUTH_MODE` | `none` | Local supports `none` or `session`; server requires `session` or `trusted-header`. Fresh public initialization defaults to `session`. |
 | `DESIGNER_TOKEN` | unset | Minimum 16 characters and required for `token`/`trusted-header`. Session mode uses scoped Agent Connections for MCP and should normally leave this unset. Never commit it. |
 | `FORMASPEC_PROXY_SECRET` | unset | Required only in server trusted-proxy mode; 32–256 safe characters, separate from `DESIGNER_TOKEN`, injected as `x-formaspec-proxy-secret`, and never sent by browsers or agents. |
@@ -626,7 +623,13 @@ Start with:
 ```bash
 pnpm formaspecctl doctor auto
 pnpm formaspecctl status
+pnpm formaspecctl ensure-running --json
 ```
+
+`ensure-running` is the safest diagnostic for a review link or Codex invocation.
+Its JSON result identifies the recorded mode, API origin, browser origin,
+data-store ID, bridge state, and one explicit blocker. A recorded Docker/server
+runtime never falls back to native storage when Docker is unavailable.
 
 Require an installed browser for source rendering checks:
 

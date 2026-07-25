@@ -150,6 +150,8 @@ function handoffSpecificationProbe() {
 const expectedMcpSuccessFields = {
   context_get: [["context"]],
   organization_policy_read: [["organizationPolicy"], ["organizationPolicy", "filename", "yaml"]],
+  product_list: [["products", "nextCursor"]],
+  product_read: [["product"]],
   design_list: [["designs", "nextCursor"]],
   design_create: [
     ["design", "revision", "document", "schemaVersion", "diagnostics", "deepLink"],
@@ -178,9 +180,9 @@ const expectedMcpSuccessFields = {
   planning_session_save_answer: [["session"]],
   task_create: [["task", "codexLaunchUrl", "websiteTaskLink"]],
   task_list: [["tasks"]],
-  task_read: [["task", "reviewDeepLink"]],
+  task_read: [["task", "readiness", "reviewDeepLink", "reviewLaunchLink"]],
   task_claim: [["task"]],
-  task_transition: [["task", "reviewDeepLink"]],
+  task_transition: [["task", "readiness", "reviewDeepLink", "reviewLaunchLink"]],
   design_system_read: [["designSystem"]],
   design_system_list: [["designSystems"]],
   design_system_release_read: [["release"]],
@@ -245,7 +247,7 @@ describe("MCP contract matrix", () => {
       annotations?: Record<string, boolean>;
     }> } }>().result.tools;
     expect(tools.map((entry) => entry.name).sort()).toEqual(Object.keys(MCP_TOOL_CONTRACTS).sort());
-    expect(tools).toHaveLength(52);
+    expect(tools).toHaveLength(54);
     for (const advertised of tools) {
       const contract = MCP_TOOL_CONTRACTS[advertised.name as keyof typeof MCP_TOOL_CONTRACTS];
       expect(contract, advertised.name).toBeDefined();
@@ -357,7 +359,7 @@ describe("MCP contract matrix", () => {
       ...templates.map((entry) => ({ name: entry.name, uri: entry.uriTemplate, template: true })),
     ];
     expect(advertisedResources.map((entry) => entry.name).sort()).toEqual(Object.keys(MCP_RESOURCE_CONTRACTS).sort());
-    expect(advertisedResources).toHaveLength(25);
+    expect(advertisedResources).toHaveLength(26);
     for (const advertised of advertisedResources) {
       const contract = MCP_RESOURCE_CONTRACTS[advertised.name as keyof typeof MCP_RESOURCE_CONTRACTS];
       expect(advertised).toMatchObject({ uri: contract.uri, template: contract.template });
@@ -481,6 +483,8 @@ describe("MCP contract matrix", () => {
     const probes: Record<string, Record<string, unknown>> = {
       context_get: {},
       organization_policy_read: {},
+      product_list: {},
+      product_read: { product_id: "product_contract0001" },
       design_list: {},
       design_create: { name: "Denied", preset: "web", idempotency_key: "contract-design-create" },
       design_read: { design_id: "document_contract0001" },
@@ -638,6 +642,7 @@ describe("MCP contract matrix", () => {
     const token = installGrant(application, "mcp_resource_empty", []);
     const values: Record<string, string> = {
       designId: "document_contract0001",
+      productId: "product_contract0001",
       version: "1",
       nodeId: "node_contract0001",
       previewId: "preview_contract0001",
@@ -653,7 +658,7 @@ describe("MCP contract matrix", () => {
     };
     const scopedResources = Object.entries(MCP_RESOURCE_CONTRACTS)
       .filter(([, contract]) => contract.agent.mode === "all_scopes");
-    expect(scopedResources).toHaveLength(22);
+    expect(scopedResources).toHaveLength(23);
     for (const [name, contract] of scopedResources) {
       const uri = contract.uri.replace(/\{([^}]+)\}/g, (_match, key: string) => values[key] ?? `missing_${key}`);
       const response = await mcpRequest(application, {

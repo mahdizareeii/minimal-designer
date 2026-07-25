@@ -155,7 +155,7 @@ describe("password-session bootstrap authentication", () => {
 
   it("atomically creates exactly one administrator and stores only hardened credential/session hashes", async () => {
     const application = await localApplication("session");
-    expect(application.database.schemaVersion()).toBe(16);
+    expect(application.database.schemaVersion()).toBe(17);
 
     const before = await application.app.inject({ method: "GET", url: "/api/auth/status" });
     expect(before.statusCode).toBe(200);

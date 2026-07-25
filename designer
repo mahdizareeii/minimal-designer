@@ -850,6 +850,7 @@ native_environment() {
   export PORT="$api_port"
   export DATA_DIR="$PROJECT_ROOT/data"
   export PUBLIC_BASE_URL="http://127.0.0.1:$api_port"
+  export FORMASPEC_WEB_BASE_URL="http://127.0.0.1:$api_port"
   export AUTH_MODE=none
   export DESIGNER_TOKEN=""
   unset FORMASPEC_PROXY_SECRET
@@ -916,6 +917,7 @@ run_native_child() {
   local mode="$1" api_port="$2" web_port="$3"
   if [ "$DRY_RUN" = "1" ]; then
     native_environment "$api_port" "$web_port"
+    if [ "$mode" = "dev" ]; then export FORMASPEC_WEB_BASE_URL="http://127.0.0.1:$web_port"; fi
     cd "$PROJECT_ROOT"
     if [ "$mode" = "dev" ]; then run_pnpm dev; else run_pnpm --filter @designer/server start; fi
     return 0
@@ -923,6 +925,7 @@ run_native_child() {
   ensure_node || exit 1
   ensure_pnpm || exit 1
   native_environment "$api_port" "$web_port"
+  if [ "$mode" = "dev" ]; then export FORMASPEC_WEB_BASE_URL="http://127.0.0.1:$web_port"; fi
   ensure_runtime_dirs
   printf '%s\n' "$$" >"$PID_FILE"
   local child=""

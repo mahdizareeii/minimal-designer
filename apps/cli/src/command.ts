@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
@@ -10,7 +11,6 @@ import {
   connectCodex,
   FORMASPEC_CODEX_MENTION,
   isManagedCodexInstall,
-  MINIMAL_UI_CODEX_MENTION,
 } from "./codex.js";
 import {
   captureDockerRuntimeBinding,
@@ -18,6 +18,7 @@ import {
   persistDockerRuntimeBinding,
   readDockerRuntimeBinding,
   sanitizedPublicDockerBinding,
+  verifyDockerRuntimeBinding,
 } from "./docker-runtime-binding.js";
 import {
   abortDockerRestore,
@@ -133,6 +134,7 @@ function usage(): string {
 Usage:
   formaspecctl install [local|docker] [--yes]
   formaspecctl doctor [auto|local|docker|server] [--strict]
+  formaspecctl ensure-running [--json]
   formaspecctl status
   formaspecctl start [local|docker|server] [launcher options]
   formaspecctl stop
@@ -165,6 +167,32 @@ Global option:
 }
 
 type RecordedRuntimeMode = "local" | "dev" | "docker" | "server";
+
+type EnsureRunningBlockerCode =
+  | "RUNTIME_NOT_RECORDED"
+  | "RUNTIME_CONFIGURATION_INVALID"
+  | "RUNTIME_NOT_READY"
+  | "RUNTIME_START_FAILED"
+  | "RUNTIME_IDENTITY_CONFLICT"
+  | "DOCKER_CLI_REQUIRED"
+  | "DOCKER_DESKTOP_REQUIRED";
+
+export interface EnsureRunningResult {
+  schemaVersion: 1;
+  ok: boolean;
+  status: "ready" | "started" | "blocked";
+  mode: RecordedRuntimeMode | null;
+  started: boolean;
+  origin: string | null;
+  webOrigin: string | null;
+  dataStoreId: string | null;
+  bridgeReady: boolean;
+  blocker?: {
+    code: EnsureRunningBlockerCode;
+    message: string;
+    action: string;
+  };
+}
 
 function optionalRuntimeFile(
   projectRoot: string,
@@ -229,6 +257,83 @@ function runtimeHealthTarget(
     return { origin: `http://127.0.0.1:${port}`, hostHeader: publicUrl.host };
   }
   return { origin: `http://127.0.0.1:${port}` };
+}
+
+function recordedPort(
+  projectRoot: string,
+  environment: NodeJS.ProcessEnv,
+  filename: "api-port" | "web-port",
+  fallback?: number,
+): number {
+  const raw = optionalRuntimeFile(projectRoot, filename, environment);
+  if (raw === undefined && fallback !== undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`The recorded FormaSpec ${filename} is invalid.`);
+  }
+  return value;
+}
+
+function recordedWebOrigin(
+  projectRoot: string,
+  environment: NodeJS.ProcessEnv,
+  mode: RecordedRuntimeMode,
+  healthOrigin: string,
+): string {
+  const value = optionalRuntimeFile(projectRoot, "url", environment) ?? healthOrigin;
+  const url = new URL(value);
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const loopbackHttp = url.protocol === "http:" && ["127.0.0.1", "::1", "localhost"].includes(host);
+  const publicHttps = url.protocol === "https:" && host !== "" && !["127.0.0.1", "::1", "localhost"].includes(host);
+  if (url.username || url.password || url.pathname !== "/" || url.search || url.hash
+    || (mode === "server" ? !loopbackHttp && !publicHttps : !loopbackHttp)) {
+    throw new Error("The recorded FormaSpec web origin is invalid for its runtime mode.");
+  }
+  if (mode !== "server" || loopbackHttp) {
+    const expectedPort = mode === "dev"
+      ? recordedPort(projectRoot, environment, "web-port")
+      : Number(new URL(healthOrigin).port);
+    const actualPort = Number(url.port || (url.protocol === "https:" ? "443" : "80"));
+    if (actualPort !== expectedPort) {
+      throw new Error("The recorded FormaSpec web origin does not match the recorded runtime ports.");
+    }
+  }
+  return url.origin;
+}
+
+function ensureRunningBlocked(
+  mode: RecordedRuntimeMode | null,
+  code: EnsureRunningBlockerCode,
+  message: string,
+  action: string,
+  details: Partial<Pick<EnsureRunningResult, "origin" | "webOrigin" | "dataStoreId">> = {},
+): EnsureRunningResult {
+  return {
+    schemaVersion: 1,
+    ok: false,
+    status: "blocked",
+    mode,
+    started: false,
+    origin: details.origin ?? null,
+    webOrigin: details.webOrigin ?? null,
+    dataStoreId: details.dataStoreId ?? null,
+    bridgeReady: false,
+    blocker: { code, message, action },
+  };
+}
+
+function printEnsureRunningResult(result: EnsureRunningResult, json: boolean, io: CliIo): void {
+  if (json) {
+    io.stdout(JSON.stringify(result));
+    return;
+  }
+  if (result.ok) {
+    io.stdout(`FormaSpec ${result.status === "started" ? "started" : "is ready"} in recorded ${result.mode} mode at ${result.webOrigin}.`);
+    io.stdout(`Data store: ${result.dataStoreId}; bridge: ${result.bridgeReady ? "ready" : "not required"}.`);
+    return;
+  }
+  io.stdout(`FormaSpec runtime recovery is blocked: ${result.blocker?.message ?? "unknown blocker"}`);
+  io.stdout(result.blocker?.action ?? "Inspect the recorded runtime before retrying.");
 }
 
 async function verifyHealthEndpoint(
@@ -437,17 +542,57 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       });
       return result.exitCode;
     };
+    const delegateQuiet = async (
+      launcherArguments: string[],
+      environmentOverrides: NodeJS.ProcessEnv = {},
+    ): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
+      const root = projectRoot();
+      return runner(launcherPath(root), launcherArguments, {
+        cwd: root,
+        env: { ...environment, ...environmentOverrides, FORMASPEC_LEGACY_DELEGATE: "1" },
+        inherit: false,
+        timeoutMs: 180_000,
+        maxOutputBytes: 256 * 1024,
+      });
+    };
+    const startRecordedDevelopmentRuntime = async (apiPort: number, webPort: number): Promise<void> => {
+      const root = projectRoot();
+      const logDirectory = runtimePaths().logDirectory;
+      fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
+      const log = fs.openSync(path.join(logDirectory, "ensure-running-dev.log"), "a", 0o600);
+      const child = spawn(launcherPath(root), [
+        "--yes",
+        "--no-open",
+        "dev",
+        "--api-port",
+        String(apiPort),
+        "--web-port",
+        String(webPort),
+        "--skip-setup",
+      ], {
+        cwd: root,
+        detached: true,
+        env: { ...environment, FORMASPEC_LEGACY_DELEGATE: "1" },
+        shell: false,
+        stdio: ["ignore", log, log],
+      });
+      fs.closeSync(log);
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", reject);
+      });
+      child.unref();
+    };
     const reportCodexConnection = (result: Awaited<ReturnType<typeof connectCodex>>): void => {
       io.stdout(`Codex MCP 'formaspec' verified at ${result.mcpUrl}.`);
-      io.stdout(`Managed FormaSpec skill installed at ${result.skillPath}.`);
-      io.stdout(result.minimalUiSkillManaged
-        ? `Managed Minimal UI alias skill installed at ${result.minimalUiSkillPath}.`
-        : `Unmanaged Minimal UI skill preserved at ${result.minimalUiSkillPath}; the managed plugin alias remains available.`);
       io.stdout(`Managed FormaSpec plugin installed at ${result.pluginPath}.`);
-      io.stdout(`Managed Minimal UI plugin alias installed at ${result.minimalUiPluginPath}.`);
-      io.stdout(`Primary Codex mention: ${FORMASPEC_CODEX_MENTION}`);
-      io.stdout(`Compatibility alias for existing prompts: ${MINIMAL_UI_CODEX_MENTION}`);
-      io.stdout("Use FormaSpec in a new Codex task.");
+      io.stdout(`Canonical FormaSpec skill installed inside the plugin at ${result.pluginSkillPath}.`);
+      if (result.removedLegacyMinimalUiPlugin) io.stdout("Removed the installer-owned legacy duplicate plugin identity.");
+      if (result.removedManagedStandaloneSkillPaths.length > 0) {
+        io.stdout(`Removed installer-owned duplicate standalone skills: ${result.removedManagedStandaloneSkillPaths.join(", ")}.`);
+      }
+      io.stdout(`Codex mention: ${FORMASPEC_CODEX_MENTION}`);
+      io.stdout("Use FormaSpec in a new Codex task so it loads the updated single identity.");
     };
     const offerCodexConnection = async (alreadyAuthorized = false): Promise<void> => {
       if (findExecutable("codex", environment) === null) {
@@ -466,9 +611,9 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           managedRefresh = false;
         }
       }
-      if (managedRefresh) io.stdout("Refreshing the already-authorized managed Codex connection and FormaSpec skills.");
+      if (managedRefresh) io.stdout("Refreshing the already-authorized managed Codex connection and FormaSpec plugin.");
       const authorized = alreadyAuthorized || assumeYes || managedRefresh || await confirm(
-        "Allow FormaSpec to configure Codex, install the managed FormaSpec plugin plus the Minimal UI compatibility alias, and verify the loopback MCP connection?",
+        "Allow FormaSpec to configure Codex, install the single managed FormaSpec plugin, remove installer-owned legacy duplicate identities, and verify the loopback MCP connection?",
       );
       if (!authorized) {
         io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");
@@ -598,6 +743,284 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         return 1;
       }
       return exitCode === 0 && !runtimeUnavailable ? 0 : 1;
+    }
+
+    if (command === "ensure-running") {
+      const option = arguments_.shift();
+      if (option !== undefined && option !== "--json") throw new Error(`Unexpected ensure-running option: ${option}`);
+      const json = option === "--json";
+      if (arguments_.length > 0) throw new Error(`Unexpected ensure-running option: ${arguments_[0]}`);
+
+      let mode: RecordedRuntimeMode | undefined;
+      let healthTarget: { origin: string; hostHeader?: string };
+      let webOrigin: string;
+      try {
+        mode = recordedRuntimeMode(projectRoot(), environment);
+        if (mode === undefined) {
+          const result = ensureRunningBlocked(
+            null,
+            "RUNTIME_NOT_RECORDED",
+            "No runtime mode is recorded, so FormaSpec cannot choose a data store safely.",
+            "Start the intended mode explicitly once with formaspecctl start local|docker|server, then retry. FormaSpec will not guess or switch modes.",
+          );
+          printEnsureRunningResult(result, json, io);
+          return 1;
+        }
+        healthTarget = runtimeHealthTarget(projectRoot(), environment);
+        webOrigin = recordedWebOrigin(projectRoot(), environment, mode, healthTarget.origin);
+      } catch (error) {
+        const result = ensureRunningBlocked(
+          mode ?? null,
+          "RUNTIME_CONFIGURATION_INVALID",
+          error instanceof Error ? error.message : String(error),
+          "Inspect the recorded FormaSpec runtime files and run formaspecctl doctor auto; do not start a different mode.",
+        );
+        printEnsureRunningResult(result, json, io);
+        return 1;
+      }
+
+      let dockerBinding: ReturnType<typeof readDockerRuntimeBinding> | undefined;
+      let dockerEnvironment: NodeJS.ProcessEnv = {};
+      if (mode === "docker" || mode === "server") {
+        const bindingPath = dockerRuntimeBindingPath(projectRoot());
+        if (fs.existsSync(bindingPath)) {
+          try {
+            dockerBinding = readDockerRuntimeBinding(projectRoot());
+            const publicBinding = sanitizedPublicDockerBinding(dockerBinding);
+            if (publicBinding.runtimeMode !== mode
+              || publicBinding.origin !== healthTarget.origin
+              || (healthTarget.hostHeader ?? "") !== publicBinding.healthHostHeader) {
+              throw new Error("The recorded runtime and pinned Docker binding identify different modes or endpoints.");
+            }
+            dockerEnvironment = { DOCKER_CONTEXT: dockerBinding.context };
+          } catch (error) {
+            const result = ensureRunningBlocked(
+              mode,
+              "RUNTIME_CONFIGURATION_INVALID",
+              error instanceof Error ? error.message : String(error),
+              "Run formaspecctl doctor auto and repair the pinned Docker runtime binding before retrying. Do not start local mode.",
+              { origin: healthTarget.origin, webOrigin },
+            );
+            printEnsureRunningResult(result, json, io);
+            return 1;
+          }
+        }
+      }
+
+      let identity: Awaited<ReturnType<typeof verifyHealthEndpoint>> | undefined;
+      try {
+        identity = await verifyHealthEndpoint(healthTarget.origin, "/health/ready", healthTarget.hostHeader);
+      } catch {
+        identity = undefined;
+      }
+      if (identity !== undefined && !identity.ready) {
+        const result = ensureRunningBlocked(
+          mode,
+          "RUNTIME_NOT_READY",
+          `The recorded ${mode} runtime reports data store ${identity.dataStoreId} but is temporarily not ready (HTTP ${identity.status}).`,
+          "Keep the recorded runtime selected and retry after maintenance or renderer recovery; FormaSpec will not restart it while its identity is visible.",
+          { origin: healthTarget.origin, webOrigin, dataStoreId: identity.dataStoreId },
+        );
+        printEnsureRunningResult(result, json, io);
+        return 1;
+      }
+
+      let started = false;
+      if (identity === undefined) {
+        if (mode === "docker" || mode === "server") {
+          const dockerPath = findExecutable("docker", { ...environment, ...dockerEnvironment });
+          if (dockerPath === null) {
+            const result = ensureRunningBlocked(
+              mode,
+              "DOCKER_CLI_REQUIRED",
+              `The recorded ${mode} runtime requires Docker, but the Docker CLI is unavailable.`,
+              "Install Docker Desktop/Engine and its CLI, then rerun formaspecctl ensure-running --json. Do not start local mode because it uses a different data store.",
+              { origin: healthTarget.origin, webOrigin },
+            );
+            printEnsureRunningResult(result, json, io);
+            return 1;
+          }
+          const dockerInfo = await runner(
+            dockerPath,
+            [
+              ...(dockerBinding === undefined ? [] : ["--context", dockerBinding.context]),
+              "info",
+              "--format",
+              "{{.ServerVersion}}",
+            ],
+            {
+              env: { ...environment, ...dockerEnvironment },
+              timeoutMs: 15_000,
+              maxOutputBytes: 64 * 1024,
+            },
+          ).catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+          if (dockerInfo.exitCode !== 0) {
+            const result = ensureRunningBlocked(
+              mode,
+              "DOCKER_DESKTOP_REQUIRED",
+              `Docker Desktop/Engine is stopped or unreachable for the recorded ${mode} runtime.`,
+              "Start Docker Desktop/Engine, then rerun formaspecctl ensure-running --json. The recorded Docker data store remains selected; do not start local mode.",
+              { origin: healthTarget.origin, webOrigin },
+            );
+            printEnsureRunningResult(result, json, io);
+            return 1;
+          }
+        }
+
+        let startFailure: string | undefined;
+        if (mode === "dev") {
+          try {
+            await startRecordedDevelopmentRuntime(
+              recordedPort(projectRoot(), environment, "api-port", 4310),
+              recordedPort(projectRoot(), environment, "web-port"),
+            );
+          } catch (error) {
+            startFailure = error instanceof Error ? error.message : String(error);
+          }
+        } else {
+          const apiPort = recordedPort(projectRoot(), environment, "api-port", 4310);
+          const launcherArguments = mode === "local"
+            ? ["--yes", "start", "local", "--port", String(apiPort), "--no-open"]
+            : mode === "docker"
+              ? ["--yes", "start", "docker", "--port", String(apiPort), "--no-open", "--no-build"]
+              : ["--yes", "start", "server", "--no-build"];
+          try {
+            const launched = await delegateQuiet(launcherArguments, dockerEnvironment);
+            if (launched.exitCode !== 0) {
+              const detail = launched.stderr.trim() || launched.stdout.trim();
+              startFailure = detail === "" ? `launcher exited with status ${launched.exitCode}` : detail.slice(0, 2_000);
+            }
+          } catch (error) {
+            startFailure = error instanceof Error ? error.message : String(error);
+          }
+        }
+        if (startFailure !== undefined) {
+          const result = ensureRunningBlocked(
+            mode,
+            "RUNTIME_START_FAILED",
+            `The fixed FormaSpec launcher could not resume recorded ${mode} mode: ${startFailure}`,
+            `Run formaspecctl doctor ${mode === "dev" ? "local" : mode} and repair that recorded runtime. Do not start a different mode.`,
+            { origin: healthTarget.origin, webOrigin },
+          );
+          printEnsureRunningResult(result, json, io);
+          return 1;
+        }
+        started = true;
+        const attempts = mode === "dev" ? 120 : 20;
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          try {
+            identity = await verifyHealthEndpoint(healthTarget.origin, "/health/ready", healthTarget.hostHeader);
+            if (identity.ready) break;
+          } catch {
+            identity = undefined;
+          }
+          if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        if (identity === undefined || !identity.ready || identity.dataStoreId === null) {
+          const result = ensureRunningBlocked(
+            mode,
+            "RUNTIME_START_FAILED",
+            `The fixed FormaSpec launcher resumed recorded ${mode} mode, but its health endpoint did not become ready.`,
+            `Run formaspecctl doctor ${mode === "dev" ? "local" : mode} and inspect the recorded runtime logs; do not start a different mode.`,
+            { origin: healthTarget.origin, webOrigin, dataStoreId: identity?.dataStoreId ?? null },
+          );
+          printEnsureRunningResult(result, json, io);
+          return 1;
+        }
+        if (mode === "docker" || mode === "server") {
+          try {
+            if (dockerBinding === undefined) {
+              const captured = await captureDockerRuntimeBinding(projectRoot(), {
+                environment: { ...environment, ...dockerEnvironment },
+                commandRunner: runner,
+              });
+              persistDockerRuntimeBinding(projectRoot(), captured);
+            } else {
+              await verifyDockerRuntimeBinding(projectRoot(), {
+                environment: { ...environment, ...dockerEnvironment },
+                commandRunner: runner,
+                context: dockerBinding.context,
+                composeProject: dockerBinding.composeProject,
+              });
+            }
+          } catch (error) {
+            const result = ensureRunningBlocked(
+              mode,
+              "RUNTIME_IDENTITY_CONFLICT",
+              error instanceof Error ? error.message : String(error),
+              "Stop the resumed runtime and repair its pinned Docker binding before retrying. Do not switch to local mode.",
+              { origin: healthTarget.origin, webOrigin, dataStoreId: identity.dataStoreId },
+            );
+            printEnsureRunningResult(result, json, io);
+            return 1;
+          }
+        }
+      }
+
+      if (identity === undefined || !identity.ready || identity.dataStoreId === null) {
+        const result = ensureRunningBlocked(
+          mode,
+          "RUNTIME_NOT_READY",
+          `The recorded ${mode} runtime does not expose a ready data-store identity.`,
+          `Run formaspecctl doctor ${mode === "dev" ? "local" : mode}; do not start a different mode.`,
+          { origin: healthTarget.origin, webOrigin },
+        );
+        printEnsureRunningResult(result, json, io);
+        return 1;
+      }
+      const competingDocker = await concurrentDockerDataStore(
+        projectRoot(),
+        healthTarget.origin,
+        identity.dataStoreId,
+      );
+      if (competingDocker !== null) {
+        const result = ensureRunningBlocked(
+          mode,
+          "RUNTIME_IDENTITY_CONFLICT",
+          `Another FormaSpec runtime is active at ${competingDocker.origin} with data store ${competingDocker.dataStoreId}.`,
+          "Stop the unintended runtime, then retry. FormaSpec will not choose between active data stores.",
+          { origin: healthTarget.origin, webOrigin, dataStoreId: identity.dataStoreId },
+        );
+        printEnsureRunningResult(result, json, io);
+        return 1;
+      }
+
+      let bridgeReady = false;
+      if (recordedProxyServerUrl(projectRoot(), environment) === null) {
+        try {
+          const bridgeStatus = await bridge().ensureStarted();
+          if (bridgeStatus.upstreamOrigin !== healthTarget.origin
+            || bridgeStatus.dataStoreId !== identity.dataStoreId
+            || !bridgeStatus.upstreamReady) {
+            throw new Error("The local bridge resolved a different runtime or data store.");
+          }
+          bridgeReady = true;
+        } catch (error) {
+          const result = ensureRunningBlocked(
+            mode,
+            "RUNTIME_IDENTITY_CONFLICT",
+            error instanceof Error ? error.message : String(error),
+            "Stop the mismatched bridge/runtime and rerun formaspecctl ensure-running --json; FormaSpec will not retarget the bridge silently.",
+            { origin: healthTarget.origin, webOrigin, dataStoreId: identity.dataStoreId },
+          );
+          printEnsureRunningResult(result, json, io);
+          return 1;
+        }
+      }
+
+      const result: EnsureRunningResult = {
+        schemaVersion: 1,
+        ok: true,
+        status: started ? "started" : "ready",
+        mode,
+        started,
+        origin: healthTarget.origin,
+        webOrigin,
+        dataStoreId: identity.dataStoreId,
+        bridgeReady,
+      };
+      printEnsureRunningResult(result, json, io);
+      return 0;
     }
 
     if (command === "status") {
