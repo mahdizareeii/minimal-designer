@@ -212,7 +212,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
   });
   const operations = new OperationsService(service, enterprise, renderer, backups, config.backupDir);
   const policies = new OrganizationPolicyService(database);
-  const products = new ProductService(database);
+  const products = new ProductService(database, events);
 
   app.setErrorHandler((error, request, reply) => {
     let domainError: DomainError;
@@ -372,6 +372,7 @@ export async function buildApplication(config = loadConfig()): Promise<DesignerA
     renderer,
     handoffs,
     redesign,
+    webBaseUrl: config.webBaseUrl,
   });
   registerOperationsHttpRoutes(app, operations);
   registerOrganizationPolicyHttpRoutes(app, policies);

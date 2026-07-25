@@ -17,10 +17,16 @@ import {
 } from "./authorization.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
+import {
+  flushPersistedEventOutbox,
+  type DesignerEventType,
+  type EventHub,
+} from "./events.js";
 import { canonicalJson, createId, hashPayload } from "./ids.js";
 
 const PRODUCT_CURSOR_PREFIX = "product_cursor_";
 const IDEMPOTENCY_TTL_MS = 86_400_000;
+const PRODUCT_ARCHIVE_BLOCKER_LIMIT = 20;
 
 interface ProductRow {
   id: string;
@@ -186,6 +192,7 @@ function normalizedLocales(locales: readonly string[], defaultLocale: string): s
 export class ProductService {
   constructor(
     readonly database: DesignerDatabase,
+    private readonly events?: EventHub,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -393,29 +400,59 @@ export class ProductService {
   }): ProductDetail {
     const access = resolveAccess(this.database.sqlite, actorId);
     assertProductManager(access);
-    const product = this.requireProduct(access, productId);
+    const product = this.requireProduct(access, productId, true);
     const key = boundedText(input.idempotencyKey, "Idempotency key", 240);
     return this.withIdempotency(access, `product:${product.id}:archive`, key, input, () => {
-      const current = this.requireProduct(access, product.id);
+      const current = this.requireProduct(access, product.id, true);
+      if (current.status === "archived") {
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Product is already archived.", 409, {
+          details: { expectedStatus: "active", currentStatus: "archived", archivedAt: current.archived_at },
+        });
+      }
       if (current.updated_at !== input.expectedUpdatedAt) throw this.versionConflict(input.expectedUpdatedAt, current.updated_at);
       if (input.confirmationName !== current.name) {
         throw new DomainError("VALIDATION_FAILED", "Type the exact Product name to confirm archival.", 422);
       }
-      const activeDesign = this.database.sqlite.prepare(
-        `SELECT id FROM designs design
+      const activeDesignCount = (this.database.sqlite.prepare(
+        `SELECT COUNT(*) AS count FROM designs design
          WHERE design.product_id = ?
            AND NOT EXISTS (
              SELECT 1 FROM system_metadata archive
              WHERE archive.key = 'design_archive:' || design.id
-           )
-         LIMIT 1`,
-      ).get(current.id) as { id: string } | undefined;
-      if (activeDesign) {
+           )`,
+      ).get(current.id) as { count: number }).count;
+      if (activeDesignCount > 0) {
+        const activeDesigns = this.database.sqlite.prepare(
+          `SELECT design.id, design.name, design.current_version, design.updated_at
+           FROM designs design
+           WHERE design.product_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM system_metadata archive
+               WHERE archive.key = 'design_archive:' || design.id
+             )
+           ORDER BY design.updated_at DESC, design.id DESC LIMIT ?`,
+        ).all(current.id, PRODUCT_ARCHIVE_BLOCKER_LIMIT) as Array<{
+          id: string;
+          name: string;
+          current_version: number;
+          updated_at: string;
+        }>;
         throw new DomainError(
-          "VERSION_CONFLICT",
+          "PRODUCT_NOT_EMPTY",
           "Move or archive every active design before archiving its Product.",
           409,
-          { details: { designId: activeDesign.id } },
+          {
+            details: {
+              activeDesignCount,
+              activeDesigns: activeDesigns.map((design) => ({
+                id: design.id,
+                name: design.name,
+                version: design.current_version,
+                updatedAt: design.updated_at,
+              })),
+              truncated: activeDesignCount > activeDesigns.length,
+            },
+          },
         );
       }
       const now = this.now().toISOString();
@@ -426,8 +463,93 @@ export class ProductService {
       if (updated.changes !== 1) {
         throw this.versionConflict(input.expectedUpdatedAt, this.requireProduct(access, current.id, true).updated_at);
       }
-      appendAuditEvent(this.database.sqlite, access, "product.archive", "product", current.id, { archivedAt: now });
+      const auditEventId = appendAuditEvent(
+        this.database.sqlite,
+        access,
+        "product.archive",
+        "product",
+        current.id,
+        { archivedAt: now },
+      );
+      this.enqueueEvent(access, "product.updated", {
+        auditEventId,
+        productId: current.id,
+        status: "archived",
+        archived: true,
+        archivedAt: now,
+        updatedAt: now,
+      }, now);
       return this.detail(access, this.requireProduct(access, current.id, true));
+    });
+  }
+
+  restoreProduct(actorId: string, productId: string, input: {
+    expectedUpdatedAt: string;
+    expectedArchivedAt: string;
+    idempotencyKey: string;
+  }): ProductDetail {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    assertProductManager(access);
+    const product = this.requireProduct(access, productId, true);
+    const key = boundedText(input.idempotencyKey, "Idempotency key", 240);
+    return this.withIdempotency(access, `product:${product.id}:restore`, key, input, () => {
+      const current = this.requireProduct(access, product.id, true);
+      if (current.status !== "archived" || current.archived_at === null) {
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Product is active and cannot be restored.", 409, {
+          details: { expectedStatus: "archived", currentStatus: current.status },
+        });
+      }
+      if (current.updated_at !== input.expectedUpdatedAt || current.archived_at !== input.expectedArchivedAt) {
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Product archive state changed before restoration.", 409, {
+          retryable: true,
+          details: {
+            expectedUpdatedAt: input.expectedUpdatedAt,
+            currentUpdatedAt: current.updated_at,
+            expectedArchivedAt: input.expectedArchivedAt,
+            currentArchivedAt: current.archived_at,
+          },
+        });
+      }
+      const now = this.now().toISOString();
+      const updated = this.database.sqlite.prepare(
+        `UPDATE products SET status = 'active', archived_at = NULL, updated_at = ?
+         WHERE id = ? AND organization_id = ? AND status = 'archived'
+           AND updated_at = ? AND archived_at = ?`,
+      ).run(
+        now,
+        current.id,
+        access.organizationId,
+        input.expectedUpdatedAt,
+        input.expectedArchivedAt,
+      );
+      if (updated.changes !== 1) {
+        const latest = this.requireProduct(access, current.id, true);
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Product archive state changed before restoration.", 409, {
+          retryable: true,
+          details: {
+            expectedUpdatedAt: input.expectedUpdatedAt,
+            currentUpdatedAt: latest.updated_at,
+            expectedArchivedAt: input.expectedArchivedAt,
+            currentArchivedAt: latest.archived_at,
+          },
+        });
+      }
+      const auditEventId = appendAuditEvent(this.database.sqlite, access, "product.restore", "product", current.id, {
+        archivedAt: input.expectedArchivedAt,
+        restoredAt: now,
+      });
+      this.enqueueEvent(access, "product.updated", {
+        auditEventId,
+        productId: current.id,
+        status: "active",
+        archived: false,
+        archivedAt: null,
+        restoredFromArchive: true,
+        previousArchivedAt: input.expectedArchivedAt,
+        restoredAt: now,
+        updatedAt: now,
+      }, now);
+      return this.detail(access, this.requireProduct(access, current.id));
     });
   }
 
@@ -606,28 +728,28 @@ export class ProductService {
     }
     const source = this.requireProduct(access, design.product_id);
     const now = this.now().toISOString();
+    if (source.canonical_specification_design_id === design.id) {
+      const replacement = this.database.sqlite.prepare(
+        `SELECT id FROM designs design
+         WHERE design.product_id = ? AND design.id <> ?
+           AND NOT EXISTS (
+             SELECT 1 FROM system_metadata archive
+             WHERE archive.key = 'design_archive:' || design.id
+           )
+         ORDER BY design.updated_at DESC, design.id DESC LIMIT 1`,
+      ).get(source.id, design.id) as { id: string } | undefined;
+      this.database.sqlite.prepare(
+        "UPDATE products SET canonical_specification_design_id = ?, updated_at = ? WHERE id = ?",
+      ).run(replacement?.id ?? null, now, source.id);
+    } else {
+      this.database.sqlite.prepare("UPDATE products SET updated_at = ? WHERE id = ?").run(now, source.id);
+    }
     const updated = this.database.sqlite.prepare(
       `UPDATE designs SET product_id = ?, updated_at = ?
        WHERE id = ? AND organization_id = ? AND product_id = ? AND current_version = ?`,
     ).run(target.id, now, design.id, access.organizationId, source.id, input.expectedDesignVersion);
     if (updated.changes !== 1) {
       throw new DomainError("VERSION_CONFLICT", "The design changed before its Product move committed.", 409, { retryable: true });
-    }
-    if (source.canonical_specification_design_id === design.id) {
-      const replacement = this.database.sqlite.prepare(
-        `SELECT id FROM designs design
-         WHERE design.product_id = ?
-           AND NOT EXISTS (
-             SELECT 1 FROM system_metadata archive
-             WHERE archive.key = 'design_archive:' || design.id
-           )
-         ORDER BY design.created_at, design.id LIMIT 1`,
-      ).get(source.id) as { id: string } | undefined;
-      this.database.sqlite.prepare(
-        "UPDATE products SET canonical_specification_design_id = ?, updated_at = ? WHERE id = ?",
-      ).run(replacement?.id ?? null, now, source.id);
-    } else {
-      this.database.sqlite.prepare("UPDATE products SET updated_at = ? WHERE id = ?").run(now, source.id);
     }
     if (target.canonical_specification_design_id === null) {
       this.database.sqlite.prepare(
@@ -938,6 +1060,31 @@ export class ProductService {
       );
       return result;
     });
-    return transaction.immediate();
+    const result = transaction.immediate();
+    this.flushPendingEventsSafely();
+    return result;
+  }
+
+  private enqueueEvent(
+    access: AccessContext,
+    type: DesignerEventType,
+    data: Record<string, unknown>,
+    now: string,
+  ): number {
+    const inserted = this.database.sqlite.prepare(
+      `INSERT INTO event_outbox
+       (organization_id, actor_id, event_type, payload_json, workspace, created_at)
+       VALUES (?, ?, ?, ?, 1, ?)`,
+    ).run(access.organizationId, access.actorId, type, JSON.stringify(data), now);
+    return Number(inserted.lastInsertRowid);
+  }
+
+  private flushPendingEventsSafely(): void {
+    if (!this.events) return;
+    try {
+      flushPersistedEventOutbox(this.database.sqlite, this.events);
+    } catch {
+      // Product writes stay committed; the durable outbox can resume on a later request.
+    }
   }
 }

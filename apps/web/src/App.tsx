@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { Dashboard } from "./components/Dashboard";
-import { Administration } from "./components/Administration";
 import { Editor } from "./components/Editor";
 import { InspectView } from "./components/InspectView";
 import { PreviewReviewPage } from "./components/PreviewReviewPage";
@@ -9,20 +8,47 @@ import { RedesignStudio } from "./components/RedesignStudio";
 import { SessionAuthentication } from "./components/SessionAuthentication";
 import { hasUnsavedDesignerChanges, saveAllDesignerChanges, useDesignerStore } from "./store/designer-store";
 
+const Administration = lazy(async () => {
+  const module = await import("./components/Administration");
+  return { default: module.Administration };
+});
+
+const ActivityInbox = lazy(async () => {
+  const module = await import("./components/ActivityInbox");
+  return { default: module.ActivityInbox };
+});
+
+const ArchivedWorkspace = lazy(async () => {
+  const module = await import("./components/ArchivedWorkspace");
+  return { default: module.ArchivedWorkspace };
+});
+
+export type AdministrationSection = "overview" | "agents" | "design-system" | "policy" | "backups" | "imports";
+
 export interface ApplicationRoute {
-  kind: "dashboard" | "design" | "preview-review" | "inspect" | "administration" | "redesign";
+  kind: "dashboard" | "design" | "preview-review" | "inspect" | "administration" | "redesign" | "activity" | "archived";
   designId?: string;
   previewId?: string;
   taskId?: string;
   storeId?: string;
   revisionId?: string;
   assessmentId?: string;
+  administrationSection?: AdministrationSection;
 }
 
 export function applicationRoute(pathname: string, search = ""): ApplicationRoute {
-  if (pathname === "/administration" || pathname === "/administration/backups" || pathname === "/administration/agents") {
-    return { kind: "administration" };
-  }
+  const administrationRoutes: Readonly<Record<string, AdministrationSection>> = {
+    "/administration": "overview",
+    "/administration/agents": "agents",
+    "/administration/design-system": "design-system",
+    "/administration/policy": "policy",
+    "/administration/backups": "backups",
+    "/administration/imports": "imports",
+  };
+  const administrationSection = administrationRoutes[pathname];
+  if (administrationSection) return { kind: "administration", administrationSection };
+  if (pathname === "/activity") return { kind: "activity" };
+  if (pathname === "/archived") return { kind: "archived" };
   const inspect = pathname.match(/^\/projects\/([^/]+)\/revisions\/([^/]+)\/inspect$/);
   if (inspect?.[1] && inspect[2]) return { kind: "inspect", designId: decodeURIComponent(inspect[1]), revisionId: decodeURIComponent(inspect[2]) };
   const redesign = pathname.match(/^\/redesign\/([^/]+)$/);
@@ -174,7 +200,13 @@ function AuthenticatedApplication() {
         expectedDataStoreId={route.storeId ?? null}
       />
     : route.kind === "administration"
-      ? <Administration />
+      ? <Suspense fallback={<main className="administration-shell"><div className="route-loading">Loading administration…</div></main>}>
+        <Administration section={route.administrationSection ?? "overview"} />
+      </Suspense>
+      : route.kind === "activity"
+        ? <Suspense fallback={<main className="workspace-manager-shell"><div className="route-loading">Loading Activity…</div></main>}><ActivityInbox /></Suspense>
+        : route.kind === "archived"
+          ? <Suspense fallback={<main className="workspace-manager-shell"><div className="route-loading">Loading Archived workspace…</div></main>}><ArchivedWorkspace /></Suspense>
       : route.kind === "redesign" && route.assessmentId
         ? <RedesignStudio assessmentId={route.assessmentId} />
         : route.kind === "design" && route.designId

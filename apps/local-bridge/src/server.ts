@@ -181,6 +181,7 @@ interface StoredGrantAuthorizationContext {
 
 interface McpGrantProbe {
   serverName: "formaspec";
+  serverVersion: string;
   essentialTools: string[];
 }
 
@@ -316,7 +317,11 @@ async function probeMcpGrant(
     if (!toolNames.every((name): name is string => typeof name === "string" && name.length > 0)) return null;
     const available = new Set(toolNames);
     if (!REQUIRED_CODEX_MCP_TOOLS.every((name) => available.has(name))) return null;
-    return { serverName: "formaspec", essentialTools: [...REQUIRED_CODEX_MCP_TOOLS] };
+    return {
+      serverName: "formaspec",
+      serverVersion: serverInfo.version,
+      essentialTools: [...REQUIRED_CODEX_MCP_TOOLS],
+    };
   } catch {
     return null;
   }
@@ -833,6 +838,7 @@ export async function startBridgeServer(options: BridgeServerOptions): Promise<R
           verified: true,
           checks: ["initialize", "tools/list"],
           serverName: probe.serverName,
+          serverVersion: probe.serverVersion,
           essentialTools: probe.essentialTools,
           upstreamOrigin: upstreamIdentity.origin,
           dataStoreId: upstreamIdentity.dataStoreId,

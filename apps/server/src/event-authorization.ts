@@ -45,6 +45,7 @@ const administratorPolicy = (): DesignerEventAuthorizationPolicy => Object.freez
 export const DESIGNER_EVENT_AUTHORIZATION_POLICY = Object.freeze({
   "design.created": readPolicy("design:read", "project"),
   "design.updated": readPolicy("design:read", "project"),
+  "product.updated": readPolicy("design:read", "organization"),
   "asset.created": readPolicy("design:read", "optional"),
   "context.updated": readPolicy("design:read", "optional"),
   "product_spec.preview.updated": readPolicy("product_spec:read", "project"),
@@ -131,7 +132,9 @@ export function canReadDesignerEvent(
 
   const design = eventDesignBoundary(event);
   if (design.state === "invalid") return false;
-  if (policy.boundary === "organization") return design.state === "absent";
+  if (policy.boundary === "organization") {
+    return design.state === "absent" && access.projectIds.length === 0;
+  }
   if (policy.boundary === "project" && design.state !== "valid") return false;
   if (access.projectIds.length === 0) return true;
   return design.state === "valid" && access.projectIds.includes(design.designId as string);

@@ -74,6 +74,7 @@ interface DesignRow {
   created_at: string;
   updated_at: string;
   organization_id: string;
+  archived_at?: string | null;
 }
 
 interface RevisionRow {
@@ -174,13 +175,14 @@ function canonicalTimestamp(value: unknown): value is string {
   return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
-function designListAccessHash(access: AccessContext): string {
+function designListAccessHash(access: AccessContext, includeArchived: boolean): string {
   return hashPayload({
     organizationId: access.organizationId,
     principalId: access.principalId,
     role: access.role,
     scopes: [...new Set(access.scopes)].sort(),
     projectIds: [...new Set(access.projectIds)].sort(),
+    includeArchived,
   });
 }
 
@@ -293,11 +295,14 @@ export interface DesignSummary {
   name: string;
   version: number;
   revisionId: string;
+  status: "active" | "archived";
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface ArchivedDesignResult extends DesignSummary {
+  status: "archived";
   archivedAt: string;
 }
 
@@ -411,13 +416,15 @@ export interface EventReplayResult {
   hasMore: boolean;
 }
 
-function designSummary(row: DesignRow): DesignSummary {
+function designSummary(row: DesignRow, archivedAt = row.archived_at ?? null): DesignSummary {
   return {
     id: row.id,
     productId: row.product_id,
     name: row.name,
     version: row.current_version,
     revisionId: row.current_revision_id,
+    status: archivedAt === null ? "active" : "archived",
+    archivedAt,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -473,42 +480,51 @@ export class DesignerService {
     this.flushPendingEvents();
   }
 
-  listDesigns(actorId: string, limit = 50, cursor?: string): { designs: DesignSummary[]; nextCursor: string | null } {
+  listDesigns(
+    actorId: string,
+    limit = 50,
+    cursor?: string,
+    includeArchived = false,
+  ): { designs: DesignSummary[]; nextCursor: string | null } {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role === "agent") assertScope(access, "design:read");
+    const allowArchived = includeArchived && access.role !== "agent";
     const boundedLimit = Math.max(1, Math.min(limit, 100));
-    const accessHash = designListAccessHash(access);
+    const accessHash = designListAccessHash(access, allowArchived);
     const parsedCursor = cursor === undefined ? null : parseDesignListCursor(cursor, accessHash);
-    if (parsedCursor?.kind === "opaque") this.assertDesignListCursorAnchor(access, parsedCursor);
-    const conditions = [
-      "organization_id = ?",
-      `NOT EXISTS (
+    if (parsedCursor?.kind === "opaque") this.assertDesignListCursorAnchor(access, parsedCursor, allowArchived);
+    const conditions = ["designs.organization_id = ?"];
+    if (!allowArchived) {
+      conditions.push(`NOT EXISTS (
         SELECT 1 FROM system_metadata archive
         WHERE archive.key = 'design_archive:' || designs.id
-      )`,
-    ];
+      )`);
+    }
     const parameters: Array<string | number> = [access.organizationId];
     if (access.projectIds.length > 0) {
-      conditions.push(`id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      conditions.push(`designs.id IN (${access.projectIds.map(() => "?").join(", ")})`);
       parameters.push(...access.projectIds);
     }
     if (parsedCursor?.kind === "opaque") {
-      conditions.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
+      conditions.push("(designs.updated_at < ? OR (designs.updated_at = ? AND designs.id < ?))");
       parameters.push(parsedCursor.updatedAt, parsedCursor.updatedAt, parsedCursor.id);
     } else if (parsedCursor?.kind === "legacy") {
-      conditions.push("updated_at < ?");
+      conditions.push("designs.updated_at < ?");
       parameters.push(parsedCursor.updatedAt);
     }
     parameters.push(boundedLimit + 1);
     const rows = this.database.sqlite.prepare(
-      `SELECT * FROM designs
+      `SELECT designs.*,
+              (SELECT archive.updated_at FROM system_metadata archive
+               WHERE archive.key = 'design_archive:' || designs.id) AS archived_at
+       FROM designs
        WHERE ${conditions.join(" AND ")}
-       ORDER BY updated_at DESC, id DESC LIMIT ?`,
+       ORDER BY designs.updated_at DESC, designs.id DESC LIMIT ?`,
     ).all(...parameters) as DesignRow[];
     const hasMore = rows.length > boundedLimit;
     const selected = rows.slice(0, boundedLimit);
     return {
-      designs: selected.map(designSummary),
+      designs: selected.map((row) => designSummary(row)),
       nextCursor: hasMore && selected.length > 0
         ? createDesignListCursor(selected.at(-1)!, accessHash)
         : null,
@@ -518,22 +534,22 @@ export class DesignerService {
   private assertDesignListCursorAnchor(
     access: AccessContext,
     cursor: Extract<ParsedDesignListCursor, { kind: "opaque" }>,
+    includeArchived: boolean,
   ): void {
-    const conditions = [
-      "id = ?",
-      "organization_id = ?",
-      `NOT EXISTS (
+    const conditions = ["designs.id = ?", "designs.organization_id = ?"];
+    if (!includeArchived) {
+      conditions.push(`NOT EXISTS (
         SELECT 1 FROM system_metadata archive
         WHERE archive.key = 'design_archive:' || designs.id
-      )`,
-    ];
+      )`);
+    }
     const parameters: string[] = [cursor.id, access.organizationId];
     if (access.projectIds.length > 0) {
-      conditions.push(`id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      conditions.push(`designs.id IN (${access.projectIds.map(() => "?").join(", ")})`);
       parameters.push(...access.projectIds);
     }
     const anchor = this.database.sqlite.prepare(
-      `SELECT id, updated_at FROM designs WHERE ${conditions.join(" AND ")}`,
+      `SELECT designs.id, designs.updated_at FROM designs WHERE ${conditions.join(" AND ")}`,
     ).get(...parameters) as Pick<DesignRow, "id" | "updated_at"> | undefined;
     if (!anchor || anchor.updated_at !== cursor.updatedAt) {
       throw new DomainError("VERSION_CONFLICT", "Design list cursor is stale; restart pagination.", 409, {
@@ -558,7 +574,11 @@ export class DesignerService {
   authorizeDesignArchive(actorId: string, designId: string): void {
     const access = resolveAccess(this.database.sqlite, actorId);
     if (access.role !== "organization_admin" && access.role !== "product_manager") {
-      throw new DomainError("FORBIDDEN", "Organization Administrator or Product Manager permission is required to delete a project.", 403);
+      throw new DomainError(
+        "FORBIDDEN",
+        "Organization Administrator or Product Manager permission is required to archive or restore a Design.",
+        403,
+      );
     }
     this.requireDesignIncludingArchived(access, designId);
   }
@@ -609,12 +629,14 @@ export class DesignerService {
       const access = resolveAccess(this.database.sqlite, actorId);
       const design = this.requireDesignIncludingArchived(access, designId);
       if (this.isDesignArchived(design.id)) {
-        throw new DomainError("NOT_FOUND", "Design not found.", 404);
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Design is already archived.", 409, {
+          details: { expectedStatus: "active", currentStatus: "archived" },
+        });
       }
       if (input.confirmationName !== design.name) {
         throw new DomainError(
           "VALIDATION_FAILED",
-          "Type the exact project name to confirm deletion.",
+          "Type the exact Design name to confirm archival.",
           422,
           { details: { field: "confirmationName" } },
         );
@@ -624,6 +646,26 @@ export class DesignerService {
       }
 
       const archivedAt = new Date().toISOString();
+      const replacement = this.database.sqlite.prepare(
+        `SELECT candidate.id FROM designs candidate
+         WHERE candidate.product_id = ? AND candidate.id <> ?
+           AND NOT EXISTS (
+             SELECT 1 FROM system_metadata archive
+             WHERE archive.key = 'design_archive:' || candidate.id
+           )
+         ORDER BY candidate.updated_at DESC, candidate.id DESC LIMIT 1`,
+      ).get(design.product_id, design.id) as { id: string } | undefined;
+      this.database.sqlite.prepare(
+        `UPDATE products
+         SET canonical_specification_design_id = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ? AND canonical_specification_design_id = ?`,
+      ).run(
+        replacement?.id ?? null,
+        archivedAt,
+        design.product_id,
+        design.organization_id,
+        design.id,
+      );
       const tombstone = {
         schema_version: 1,
         design_id: design.id,
@@ -653,9 +695,101 @@ export class DesignerService {
         archived: true,
       }, true, archivedAt);
       return {
-        ...designSummary(design),
+        ...designSummary(design, archivedAt),
+        status: "archived" as const,
         archivedAt,
       };
+    });
+  }
+
+  restoreArchivedDesign(actorId: string, designId: string, input: {
+    expectedVersion: number;
+    expectedArchivedAt: string;
+    idempotencyKey: string;
+  }): DesignSummary {
+    this.authorizeDesignArchive(actorId, designId);
+    const scope = `design:${designId}:restore-archive`;
+    return this.withIdempotency(actorId, scope, input.idempotencyKey, input, () => {
+      const access = resolveAccess(this.database.sqlite, actorId);
+      const design = this.requireDesignIncludingArchived(access, designId);
+      const archive = this.requireDesignArchive(design);
+      if (design.current_version !== input.expectedVersion || archive.version !== input.expectedVersion) {
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The archived Design version changed before restoration.", 409, {
+          retryable: true,
+          details: {
+            expectedVersion: input.expectedVersion,
+            currentVersion: design.current_version,
+            archivedVersion: archive.version,
+          },
+        });
+      }
+      if (archive.archivedAt !== input.expectedArchivedAt) {
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Design archive state changed before restoration.", 409, {
+          retryable: true,
+          details: {
+            expectedArchivedAt: input.expectedArchivedAt,
+            currentArchivedAt: archive.archivedAt,
+          },
+        });
+      }
+      const product = this.database.sqlite.prepare(
+        `SELECT id, name, status, archived_at
+         FROM products WHERE id = ? AND organization_id = ?`,
+      ).get(design.product_id, design.organization_id) as {
+        id: string;
+        name: string;
+        status: "active" | "archived";
+        archived_at: string | null;
+      } | undefined;
+      if (!product) throw new DomainError("NOT_FOUND", "Product not found.", 404);
+      if (product.status === "archived") {
+        throw new DomainError(
+          "PRODUCT_ARCHIVED",
+          "Restore the Product before restoring its Designs.",
+          409,
+          {
+            details: {
+              productId: product.id,
+              productName: product.name,
+              archivedAt: product.archived_at,
+              recovery: "Restore the Product, then retry this Design restoration.",
+            },
+          },
+        );
+      }
+
+      const restoredAt = new Date().toISOString();
+      const removed = this.database.sqlite.prepare(
+        "DELETE FROM system_metadata WHERE key = ? AND updated_at = ?",
+      ).run(designArchiveMetadataKey(design.id), archive.archivedAt);
+      if (removed.changes !== 1) {
+        throw new DomainError("RESOURCE_STATE_CONFLICT", "The Design archive state changed before restoration.", 409, {
+          retryable: true,
+          details: { expectedArchivedAt: input.expectedArchivedAt },
+        });
+      }
+      const canonical = this.database.sqlite.prepare(
+        `UPDATE products
+         SET canonical_specification_design_id = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ? AND status = 'active'
+           AND canonical_specification_design_id IS NULL`,
+      ).run(design.id, restoredAt, design.product_id, design.organization_id);
+      appendAuditEvent(this.database.sqlite, access, "design.restore_archive", "design", design.id, {
+        productId: design.product_id,
+        version: design.current_version,
+        revisionId: design.current_revision_id,
+        archivedAt: archive.archivedAt,
+        restoredAt,
+        selectedAsCanonical: canonical.changes === 1,
+      });
+      this.enqueueEvent(actorId, "design.updated", {
+        designId: design.id,
+        version: design.current_version,
+        revisionId: design.current_revision_id,
+        archived: false,
+        restoredFromArchive: true,
+      }, true, restoredAt);
+      return designSummary(design, null);
     });
   }
 
@@ -2687,6 +2821,46 @@ export class DesignerService {
     return this.database.sqlite.prepare(
       "SELECT 1 FROM system_metadata WHERE key = ?",
     ).get(designArchiveMetadataKey(designId)) !== undefined;
+  }
+
+  private requireDesignArchive(design: DesignRow): {
+    archivedAt: string;
+    version: number;
+    revisionId: string;
+  } {
+    const row = this.database.sqlite.prepare(
+      "SELECT value, updated_at FROM system_metadata WHERE key = ?",
+    ).get(designArchiveMetadataKey(design.id)) as { value: string; updated_at: string } | undefined;
+    if (!row) {
+      throw new DomainError("RESOURCE_STATE_CONFLICT", "The Design is active and cannot be restored.", 409, {
+        details: { expectedStatus: "archived", currentStatus: "active" },
+      });
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(row.value) as unknown;
+    } catch (error) {
+      throw new DomainError("INTERNAL_ERROR", "Persisted Design archive metadata is invalid.", 500, { cause: error });
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new DomainError("INTERNAL_ERROR", "Persisted Design archive metadata is invalid.", 500);
+    }
+    const archive = value as Record<string, unknown>;
+    if (archive.schema_version !== 1
+      || archive.design_id !== design.id
+      || archive.organization_id !== design.organization_id
+      || !Number.isSafeInteger(archive.version)
+      || typeof archive.revision_id !== "string"
+      || archive.revision_id !== design.current_revision_id
+      || !canonicalTimestamp(archive.archived_at)
+      || archive.archived_at !== row.updated_at) {
+      throw new DomainError("INTERNAL_ERROR", "Persisted Design archive metadata is invalid.", 500);
+    }
+    return {
+      archivedAt: archive.archived_at,
+      version: archive.version as number,
+      revisionId: archive.revision_id,
+    };
   }
 
   private requireDesignIncludingArchived(

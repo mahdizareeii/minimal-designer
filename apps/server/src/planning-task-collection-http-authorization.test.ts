@@ -706,7 +706,8 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     expect(websiteTaskLink.origin).toBe(PUBLIC_ORIGIN);
     expect(websiteTaskLink.pathname).toBe(`/design/${fixture.allowed.id}`);
     expect(websiteTaskLink.searchParams.get("task")).toBe(createdTask.task.id);
-    expect([...websiteTaskLink.searchParams.keys()]).toEqual(["task"]);
+    expect(websiteTaskLink.searchParams.get("store")).toBe(fixture.application.database.dataStoreId());
+    expect([...websiteTaskLink.searchParams.keys()]).toEqual(["task", "store"]);
     for (const marker of fixture.hidden) expect(createdTaskResponse.body).not.toContain(marker);
     const taskRetry = await application.app.inject({
       method: "POST",

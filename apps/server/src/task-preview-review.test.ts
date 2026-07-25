@@ -77,6 +77,21 @@ function installAgent(application: DesignerApplication, designId: string, id = "
   return { actorId, principalId, token };
 }
 
+function selectionConfirmation(application: DesignerApplication, designId: string, baseVersion: number) {
+  const target = application.database.sqlite.prepare(
+    `SELECT design.id AS design_id, design.name AS design_name,
+            product.id AS product_id, product.name AS product_name
+     FROM designs design JOIN products product ON product.id = design.product_id
+     WHERE design.id = ?`,
+  ).get(designId) as {
+    design_id: string;
+    design_name: string;
+    product_id: string;
+    product_name: string;
+  };
+  return { source: "user_confirmed" as const, ...target, base_version: baseVersion };
+}
+
 function captureThrown(callback: () => unknown): unknown {
   try {
     callback();
@@ -244,9 +259,32 @@ describe("task-scoped agent preview review", () => {
 
     expect(await callMcpInputError(application, agent.token, "design_preview_changes", previewArgs))
       .toContain("task_id");
+    expect(await callMcpInputError(application, agent.token, "task_create", {
+      design_id: designId,
+      brief: "Missing direct selection confirmation",
+      selection: [frameId],
+      base_version: 1,
+      expected_output: "design_preview",
+      idempotency_key: "direct-mcp-review-missing-confirmation-0001",
+    })).toContain("selection_confirmation");
+    expect(await callMcpToolError(application, agent.token, "task_create", {
+      design_id: designId,
+      brief: "Stale direct selection confirmation",
+      selection: [frameId],
+      base_version: 1,
+      selection_confirmation: {
+        ...selectionConfirmation(application, designId, 1),
+        design_name: "A different Design",
+      },
+      expected_output: "design_preview",
+      idempotency_key: "direct-mcp-review-stale-confirmation-0001",
+    })).toMatchObject({
+      code: "VALIDATION_FAILED",
+      details: { requiredAction: "reconfirm_product_and_design" },
+    });
 
     const createdTask = await callMcpTool<{
-      task: { id: string; designId: string; status: string; resolvedContext: unknown };
+      task: { id: string; designId: string; status: string; expiresAt: string; resolvedContext: unknown };
       codexLaunchUrl: string;
       websiteTaskLink: string;
     }>(application, agent.token, "task_create", {
@@ -254,6 +292,7 @@ describe("task-scoped agent preview review", () => {
       brief: "Create a direct task-backed proposal",
       selection: [frameId],
       base_version: 1,
+      selection_confirmation: selectionConfirmation(application, designId, 1),
       expected_output: "design_preview",
       idempotency_key: "direct-mcp-review-task-0001",
     });
@@ -262,11 +301,13 @@ describe("task-scoped agent preview review", () => {
     const websiteTaskLink = new URL(createdTask.output.websiteTaskLink);
     expect(websiteTaskLink.pathname).toBe(`/design/${designId}`);
     expect(websiteTaskLink.searchParams.get("task")).toBe(createdTask.output.task.id);
+    expect(websiteTaskLink.searchParams.get("store")).toBe(application.database.dataStoreId());
     expect(await callMcpToolError(application, agent.token, "task_create", {
       design_id: designId,
       brief: "A second proposal must focus the active task instead",
       selection: [frameId],
       base_version: 1,
+      selection_confirmation: selectionConfirmation(application, designId, 1),
       expected_output: "design_preview",
       idempotency_key: "direct-mcp-review-task-conflict-0001",
     })).toMatchObject({
@@ -286,6 +327,17 @@ describe("task-scoped agent preview review", () => {
       { task_id: createdTask.output.task.id, expected_status: "claimed", to_status: "in_progress" },
     );
     expect(inProgress.output).toMatchObject({ task: { status: "in_progress" }, reviewDeepLink: null });
+    const inProgressTransitionCount = application.enterprise
+      .readAgentTask("local", createdTask.output.task.id).transitions.length;
+    const replayedInProgress = await callMcpTool<{ task: { status: string } }>(
+      application,
+      agent.token,
+      "task_transition",
+      { task_id: createdTask.output.task.id, expected_status: "claimed", to_status: "in_progress" },
+    );
+    expect(replayedInProgress.output.task.status).toBe("in_progress");
+    expect(application.enterprise.readAgentTask("local", createdTask.output.task.id).transitions)
+      .toHaveLength(inProgressTransitionCount);
 
     const visibleProjects = JSON.stringify([designId, other.document.id]);
     application.database.sqlite.prepare(
@@ -312,10 +364,12 @@ describe("task-scoped agent preview review", () => {
     const previewed = await callMcpTool<{
       preview: {
         id: string;
+        expiresAt: string;
         projectDeepLink: string;
         reviewDeepLink: string | null;
         canCommit: boolean;
       };
+      taskWebsiteLink: string;
     }>(application, agent.token, "design_preview_changes", {
       ...previewArgs,
       task_id: createdTask.output.task.id,
@@ -324,8 +378,12 @@ describe("task-scoped agent preview review", () => {
       expect.objectContaining({ type: "image", mimeType: "image/png" }),
     ]));
     expect(previewed.output.preview).toMatchObject({ canCommit: true, reviewDeepLink: null });
+    expect(previewed.output.preview.expiresAt).toBe(createdTask.output.task.expiresAt);
     expect(new URL(previewed.output.preview.projectDeepLink).pathname).toBe(`/design/${designId}`);
     expect(previewed.output.preview.projectDeepLink).not.toContain(previewed.output.preview.id);
+    const previewTaskLink = new URL(previewed.output.taskWebsiteLink);
+    expect(previewTaskLink.searchParams.get("task")).toBe(createdTask.output.task.id);
+    expect(previewTaskLink.searchParams.get("store")).toBe(application.database.dataStoreId());
     expect(application.service.getDesign("local", designId).revision.version).toBe(1);
 
     const awaiting = await callMcpTool<{
@@ -369,6 +427,26 @@ describe("task-scoped agent preview review", () => {
     expect(awaiting.content).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "image", mimeType: "image/png" }),
     ]));
+    const awaitingTransitionCount = application.enterprise
+      .readAgentTask("local", createdTask.output.task.id).transitions.length;
+    const replayedAwaiting = await callMcpTool<{
+      task: { status: string };
+      reviewDeepLink: string | null;
+    }>(application, agent.token, "task_transition", {
+      task_id: createdTask.output.task.id,
+      expected_status: "in_progress",
+      to_status: "awaiting_approval",
+      data: {
+        previewId: previewed.output.preview.id,
+        readiness: awaiting.output.readiness,
+      },
+    });
+    expect(replayedAwaiting.output).toMatchObject({
+      task: { status: "awaiting_approval" },
+      reviewDeepLink: awaiting.output.reviewDeepLink,
+    });
+    expect(application.enterprise.readAgentTask("local", createdTask.output.task.id).transitions)
+      .toHaveLength(awaitingTransitionCount);
     const reread = await callMcpTool<{
       task: { status: string; readiness: unknown };
       readiness: unknown;
@@ -412,6 +490,49 @@ describe("task-scoped agent preview review", () => {
       task: { status: "completed" },
       version: 2,
     });
+    const completedRead = await callMcpTool<{
+      task: { status: string };
+      reviewDeepLink: string | null;
+      reviewLaunchLink: string | null;
+    }>(application, agent.token, "task_read", { task_id: createdTask.output.task.id });
+    expect(completedRead.output).toMatchObject({
+      task: { status: "completed" },
+      reviewDeepLink: awaiting.output.reviewDeepLink,
+      reviewLaunchLink: awaiting.output.reviewLaunchLink,
+    });
+    const completedWebsiteTask = await application.app.inject({
+      method: "GET",
+      url: `/api/agent-tasks/${createdTask.output.task.id}`,
+    });
+    expect(completedWebsiteTask.statusCode, completedWebsiteTask.body).toBe(200);
+    expect(completedWebsiteTask.json()).toMatchObject({
+      task: { status: "completed" },
+      reviewDeepLink: awaiting.output.reviewDeepLink,
+      reviewLaunchLink: awaiting.output.reviewLaunchLink,
+    });
+    const completedDesignTasks = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${designId}/agent-tasks`,
+    });
+    expect(completedDesignTasks.statusCode, completedDesignTasks.body).toBe(200);
+    const completedDesignTask = completedDesignTasks.json<{ tasks: Array<{
+      id: string;
+      status: string;
+      launchUrl: string;
+      websiteTaskLink: string;
+      reviewDeepLink: string | null;
+      reviewLaunchLink: string | null;
+    }> }>().tasks[0]!;
+    expect(completedDesignTask).toMatchObject({
+      id: createdTask.output.task.id,
+      status: "completed",
+      reviewDeepLink: awaiting.output.reviewDeepLink,
+      reviewLaunchLink: awaiting.output.reviewLaunchLink,
+    });
+    expect(new URL(completedDesignTask.launchUrl).protocol).toBe("codex:");
+    const completedTaskLink = new URL(completedDesignTask.websiteTaskLink);
+    expect(completedTaskLink.searchParams.get("task")).toBe(createdTask.output.task.id);
+    expect(completedTaskLink.searchParams.get("store")).toBe(application.database.dataStoreId());
   });
 
   it("previews a reciprocal responsive-frame operation batch atomically through MCP", async () => {
@@ -464,6 +585,7 @@ describe("task-scoped agent preview review", () => {
       brief: "Refine the linked phone, tablet, and desktop breakpoints",
       selection: frameIds,
       base_version: 2,
+      selection_confirmation: selectionConfirmation(application, designId, 2),
       expected_output: "design_preview",
       idempotency_key: "responsive-mcp-task-0001",
     });
@@ -685,12 +807,17 @@ describe("task-scoped agent preview review", () => {
       url: `/api/designs/${designId}/agent-tasks`,
     });
     expect(listed.statusCode).toBe(200);
-    expect(listed.json<{ tasks: Array<{
+    const listedTask = listed.json<{ tasks: Array<{
       id: string;
       status: string;
       claimedBy: string | null;
+      launchUrl: string;
+      websiteTaskLink: string;
+      reviewDeepLink: string | null;
+      reviewLaunchLink: string | null;
       transitions: Array<{ toStatus: string; data: Record<string, unknown> }>;
-    }> }>().tasks[0]).toMatchObject({
+    }> }>().tasks[0]!;
+    expect(listedTask).toMatchObject({
       id: task.id,
       status: "awaiting_approval",
       claimedBy: expect.stringMatching(/^principal_/),
@@ -701,6 +828,19 @@ describe("task-scoped agent preview review", () => {
         }),
       ]),
     });
+    expect(new URL(listedTask.launchUrl).protocol).toBe("codex:");
+    const listedTaskLink = new URL(listedTask.websiteTaskLink);
+    expect(listedTaskLink.searchParams.get("task")).toBe(task.id);
+    expect(listedTaskLink.searchParams.get("store")).toBe(application.database.dataStoreId());
+    const listedReviewLink = new URL(listedTask.reviewDeepLink as string);
+    expect(listedReviewLink.pathname).toBe(`/design/${designId}/previews/${preview.id}/review`);
+    expect(listedReviewLink.searchParams.get("task")).toBe(task.id);
+    expect(listedReviewLink.searchParams.get("store")).toBe(application.database.dataStoreId());
+    const listedReviewLaunchLink = new URL(listedTask.reviewLaunchLink as string);
+    expect(listedReviewLaunchLink.searchParams.get("design")).toBe(designId);
+    expect(listedReviewLaunchLink.searchParams.get("preview")).toBe(preview.id);
+    expect(listedReviewLaunchLink.searchParams.get("task")).toBe(task.id);
+    expect(listedReviewLaunchLink.searchParams.get("store")).toBe(application.database.dataStoreId());
     expect(application.database.sqlite.prepare(
       `SELECT event_type, payload_json FROM event_outbox
        WHERE event_type = 'agent_task.transitioned' ORDER BY id DESC LIMIT 1`,
@@ -1027,7 +1167,7 @@ describe("task-scoped agent preview review", () => {
       expect(application.service.getDesign("local", designId).revision.version).toBe(1);
       expect(application.database.sqlite.prepare(
         "SELECT status, committed_revision_id FROM previews WHERE id = ?",
-      ).get(preview.id)).toEqual({ status: "ready", committed_revision_id: null });
+      ).get(preview.id)).toEqual({ status: "expired", committed_revision_id: null });
       const expiredTask = application.enterprise.readAgentTask("local", taskId);
       expect(expiredTask.status).toBe("expired");
       expect(expiredTask.transitions.at(-1)).toMatchObject({
@@ -1493,7 +1633,7 @@ describe("task-scoped agent preview review", () => {
     expect(firstPageId).not.toBe(secondPageId);
   });
 
-  it("terminalizes a task when its exact preview expires and allows a replacement task", () => {
+  it("returns a valid task to in_progress when its exact preview expires and requires regeneration on that task", () => {
     const created = application.service.createDesign("local", {
       name: "Preview TTL replacement",
       preset: "phone",
@@ -1535,25 +1675,41 @@ describe("task-scoped agent preview review", () => {
     expect(captureThrown(() => application.enterprise.transitionAgentTask(agent.actorId, task.id, {
       expectedStatus: "awaiting_approval",
       toStatus: "in_progress",
-      message: "Expired previews cannot be resumed",
+      message: "Resume after preview expiry",
     }))).toMatchObject({ code: "PREVIEW_EXPIRED", statusCode: 410 });
     expect(application.enterprise.readAgentTask("local", task.id)).toMatchObject({
-      status: "expired",
+      status: "in_progress",
       transitions: expect.arrayContaining([
-        expect.objectContaining({ toStatus: "expired", data: expect.objectContaining({ previewId: preview.id }) }),
+        expect.objectContaining({
+          fromStatus: "awaiting_approval",
+          toStatus: "in_progress",
+          data: expect.objectContaining({ previousPreviewId: preview.id, reason: "preview_unavailable" }),
+        }),
       ]),
     });
 
-    const replacement = application.enterprise.createAgentTask("local", {
+    expect(captureThrown(() => application.enterprise.createAgentTask("local", {
       designId,
-      brief: "Regenerate after preview expiry",
+      brief: "A replacement task must not displace the resumable task",
       selection: [frameId],
       baseVersion: 1,
       expectedOutput: "design_preview",
       idempotencyKey: "preview-ttl-replacement-task-0002",
       expiresInSeconds: 3_600,
+    }))).toMatchObject({ code: "TASK_STATE_CONFLICT", statusCode: 409 });
+
+    const regenerated = application.service.createPreview(agent.actorId, designId, {
+      baseVersion: 1,
+      operations: [{ type: "update_node", node_id: frameId, patch: { name: "Regenerated proposal" } }],
+      taskId: task.id,
     });
-    expect(replacement).toMatchObject({ status: "queued", baseVersion: 1 });
+    persistExactRender(application, agent.actorId, designId, regenerated.id, pageId, frameId, task.id);
+    const awaitingAgain = application.enterprise.transitionAgentTask(agent.actorId, task.id, {
+      expectedStatus: "in_progress",
+      toStatus: "awaiting_approval",
+      data: { previewId: regenerated.id, readiness: designReadinessFixture(task.resolvedContext) },
+    });
+    expect(awaitingAgain).toMatchObject({ status: "awaiting_approval" });
   });
 
   it("atomically expires a discarded task preview so its creating agent cannot commit it later", () => {

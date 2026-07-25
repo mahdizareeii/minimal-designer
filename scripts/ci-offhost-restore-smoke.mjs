@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const IMAGE = "formaspec/server:local";
-const EXPECTED_SCHEMA_VERSION = 16;
+const EXPECTED_SCHEMA_VERSION = 18;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 const MAX_BACKUP_BUNDLE_BYTES = 512 * 1024 * 1024;
 const MAX_EVIDENCE_BYTES = 2 * 1024 * 1024;

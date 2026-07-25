@@ -1,4 +1,5 @@
 import {
+  Archive,
   ArrowLeft,
   Check,
   ChevronDown,
@@ -307,11 +308,11 @@ export function Editor({ designId }: { designId: string }) {
       return (
         <div className="loading-screen archived-design-screen">
           <div>
-            <Trash2 size={30} />
-            <strong>“{archivedDesignState.name}” was deleted</strong>
+            <Archive size={30} />
+            <strong>“{archivedDesignState.name}” was archived</strong>
             <span>{archivedDesignState.hadUnsavedChanges
-              ? "The active project was archived elsewhere. Your local canvas and product-brief draft were captured before the editor closed."
-              : "The project was archived elsewhere and removed from the active workspace. Immutable server history remains retained for administrators."}</span>
+              ? "The active Design was archived elsewhere. Your local canvas and product-brief draft were captured before the editor closed."
+              : "The Design was archived elsewhere and removed from the active workspace. Immutable server history remains retained for administrators."}</span>
             <div>
               {archivedDesignState.recoveryJson && (
                 <button className="button button-secondary" onClick={() => downloadTextFile(

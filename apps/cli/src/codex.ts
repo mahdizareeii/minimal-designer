@@ -13,7 +13,8 @@ import { findExecutable, type CommandRunner } from "./process.js";
 const MANAGED_MARKER = ".formaspec-managed.json";
 const MANAGER_ID = "formaspecctl";
 const MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024;
-const FORMASPEC_PLUGIN_VERSION = "0.3.0";
+export const FORMASPEC_MCP_CONTRACT_VERSION = "0.4.0";
+const FORMASPEC_PLUGIN_VERSION = FORMASPEC_MCP_CONTRACT_VERSION;
 
 export const FORMASPEC_CODEX_PLUGIN_ID = "formaspec@formaspec";
 export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";
@@ -54,6 +55,12 @@ export interface ConnectCodexResult {
 export interface InspectManagedCodexOptions {
   environment: NodeJS.ProcessEnv;
   commandRunner: CommandRunner;
+}
+
+export interface ManagedCodexContractInspection {
+  managed: boolean;
+  installedPluginVersion: string | null;
+  expectedVersion: string;
 }
 
 function resolveCodexHome(environment: NodeJS.ProcessEnv): string {
@@ -236,6 +243,36 @@ export async function isManagedCodexInstall(options: InspectManagedCodexOptions)
   if (marketplaceList.exitCode !== 0) return false;
   const configuredRoot = parseMarketplaceRoot(marketplaceList.stdout, "formaspec");
   return configuredRoot === undefined || configuredRoot === path.normalize(managedTargets[2]!);
+}
+
+export async function inspectManagedCodexContract(
+  options: InspectManagedCodexOptions,
+): Promise<ManagedCodexContractInspection> {
+  const unavailable = (managed: boolean): ManagedCodexContractInspection => ({
+    managed,
+    installedPluginVersion: null,
+    expectedVersion: FORMASPEC_MCP_CONTRACT_VERSION,
+  });
+  const codexPath = findExecutable("codex", options.environment);
+  if (codexPath === null) return unavailable(false);
+  let codexHome: string;
+  try {
+    codexHome = resolveCodexHome(options.environment);
+  } catch {
+    return unavailable(false);
+  }
+  const marketplacePath = path.join(codexHome, "formaspec-marketplace");
+  if (!hasManagedMarker(marketplacePath)) return unavailable(false);
+  const plugins = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  if (plugins.exitCode !== 0) return unavailable(true);
+  return {
+    managed: true,
+    installedPluginVersion: installedPluginVersion(plugins.stdout, FORMASPEC_CODEX_PLUGIN_ID) ?? null,
+    expectedVersion: FORMASPEC_MCP_CONTRACT_VERSION,
+  };
 }
 
 interface CodexConfigText {
@@ -610,7 +647,7 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
   });
   if (primaryPluginVerification.exitCode !== 0
     || installedPluginVersion(primaryPluginVerification.stdout, FORMASPEC_CODEX_PLUGIN_ID) !== FORMASPEC_PLUGIN_VERSION) {
-    throw new Error("Codex could not verify the FormaSpec 0.3.0 plugin before legacy identity removal.");
+    throw new Error(`Codex could not verify the FormaSpec ${FORMASPEC_PLUGIN_VERSION} plugin before legacy identity removal.`);
   }
   const hasLegacyMinimalUiPlugin = hasInstalledPlugin(
     primaryPluginVerification.stdout,
@@ -622,7 +659,7 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
       timeoutMs: 20_000,
     });
     if (pluginRemoved.exitCode !== 0) {
-      throw new Error("Codex verified FormaSpec 0.3.0 but could not remove the legacy duplicate plugin; managed standalone skills were preserved for a safe retry.");
+      throw new Error(`Codex verified FormaSpec ${FORMASPEC_PLUGIN_VERSION} but could not remove the legacy duplicate plugin; managed standalone skills were preserved for a safe retry.`);
     }
   }
   const verifiedPlugins = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
@@ -656,8 +693,9 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
     || !verification.checks.includes("initialize")
     || !verification.checks.includes("tools/list")
     || verification.serverName !== "formaspec"
+    || verification.serverVersion !== FORMASPEC_MCP_CONTRACT_VERSION
     || !FORMASPEC_ESSENTIAL_MCP_TOOLS.every((tool) => verification.essentialTools.includes(tool))) {
-    throw new Error("The authorized FormaSpec MCP connection did not identify FormaSpec and expose its essential design-preview tools.");
+    throw new Error(`The authorized FormaSpec MCP connection did not expose the expected ${FORMASPEC_MCP_CONTRACT_VERSION} contract and essential design-preview tools.`);
   }
   return {
     codexPath,

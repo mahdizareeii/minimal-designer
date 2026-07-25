@@ -17,10 +17,11 @@ import {
 export const MACOS_RUNTIME_SMOKE_CONTRACT = Object.freeze({
   nodeVersion: "v24.14.0",
   playwrightRevision: "1228",
-  schemaVersion: 16,
+  schemaVersion: 18,
   mcpProtocolVersion: "2025-06-18",
-  mcpToolCount: 52,
-  mcpResourceCount: 25,
+  mcpContractVersion: "0.4.0",
+  mcpToolCount: 55,
+  mcpResourceCount: 26,
   maximumPackageBytes: 8 * 1024 * 1024 * 1024,
   maximumCommandOutputBytes: 16 * 1024 * 1024,
   maximumHttpResponseBytes: 16 * 1024 * 1024,
@@ -60,6 +61,8 @@ export const EXPECTED_MCP_TOOL_NAMES = Object.freeze([
   "implementation_mapping_read",
   "node_search",
   "organization_policy_read",
+  "product_list",
+  "product_read",
   "planning_session_create",
   "planning_session_list",
   "planning_session_read",
@@ -68,6 +71,7 @@ export const EXPECTED_MCP_TOOL_NAMES = Object.freeze([
   "product_spec_preview",
   "product_spec_read",
   "redesign_assessment_create",
+  "redesign_assessment_list",
   "redesign_assessment_read",
   "redesign_stage_artifact_read",
   "redesign_stage_artifact_write",
@@ -92,6 +96,7 @@ export const EXPECTED_FIXED_RESOURCES = Object.freeze([
 
 export const EXPECTED_RESOURCE_TEMPLATES = Object.freeze([
   Object.freeze({ name: "agent-task", uri: "formaspec://tasks/{taskId}" }),
+  Object.freeze({ name: "product", uri: "formaspec://products/{productId}" }),
   Object.freeze({ name: "design-head", uri: "formaspec://designs/{designId}/head" }),
   Object.freeze({ name: "design-history", uri: "formaspec://designs/{designId}/history" }),
   Object.freeze({ name: "design-node-subtree", uri: "formaspec://designs/{designId}/versions/{version}/nodes/{nodeId}" }),
@@ -432,7 +437,7 @@ export function inspectBrowserPayload(browserRoot, expectedRevision, architectur
 
 export function inspectManagedCodexAssets(assetsRoot) {
   const root = requireContainedDirectory(assetsRoot, assetsRoot, "Packaged FormaSpec Codex asset root");
-  const pluginVersion = "0.3.0";
+  const pluginVersion = "0.4.0";
   const identities = [
     {
       skillName: "formaspec",
@@ -1116,7 +1121,8 @@ export async function runMacPackageRuntimeSmoke(options) {
       capabilities: {},
       clientInfo: { name: "formaspec-macos-pkg-runtime-smoke", version: "1.0.0" },
     });
-    if (initialized.serverInfo?.name !== "formaspec" || initialized.serverInfo?.version !== packageMetadata.version) {
+    if (initialized.serverInfo?.name !== "formaspec"
+      || initialized.serverInfo?.version !== MACOS_RUNTIME_SMOKE_CONTRACT.mcpContractVersion) {
       throw new Error("Extracted MCP server identity or version is incorrect.");
     }
     if (

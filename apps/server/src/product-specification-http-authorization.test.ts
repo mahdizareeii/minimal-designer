@@ -301,7 +301,7 @@ function mcpTool(
 }
 
 describe("product-specification HTTP authorization", () => {
-  it("covers all four routes with trusted-header roles and creator-isolated previews", async () => {
+  it("covers specification history and preview routes with trusted-header roles and creator-isolated previews", async () => {
     const fixture = await setup("roles");
     const { application } = fixture;
     const seed = application.enterprise.previewProductSpecification("local", {
@@ -326,6 +326,29 @@ describe("product-specification HTTP authorization", () => {
     expect(read.json<{ version: number; naturalLanguageBrief: string }>()).toMatchObject({
       version: 1,
       naturalLanguageBrief: "COMMITTED_PRODUCT_SPEC_MARKER_20ca91",
+    });
+
+    const history = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${fixture.allowed.id}/product-specification/history?limit=1`,
+      remoteAddress: "127.0.0.1",
+      headers: headers(VIEWER),
+    });
+    expect(history.statusCode, history.body).toBe(200);
+    expect(history.json<{
+      versions: Array<{
+        version: number;
+        naturalLanguageBrief: string;
+        counts: Record<string, number>;
+      }>;
+      nextBeforeVersion: number | null;
+    }>()).toMatchObject({
+      versions: [{
+        version: 1,
+        naturalLanguageBrief: "COMMITTED_PRODUCT_SPEC_MARKER_20ca91",
+        counts: { roles: 0, flows: 0, business_rules: 0, acceptance_criteria: 0 },
+      }],
+      nextBeforeVersion: null,
     });
 
     const beforeViewerPreview = state(application);
@@ -402,6 +425,29 @@ describe("product-specification HTTP authorization", () => {
       version: 2,
       specificationHash: preview.specificationHash,
       naturalLanguageBrief: "PM_HTTP_PREVIEW_MARKER_b84e02",
+    });
+
+    const newestHistory = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${fixture.allowed.id}/product-specification/history?limit=1`,
+      remoteAddress: "127.0.0.1",
+      headers: headers(VIEWER),
+    });
+    expect(newestHistory.statusCode, newestHistory.body).toBe(200);
+    expect(newestHistory.json<{ versions: Array<{ version: number }>; nextBeforeVersion: number | null }>()).toMatchObject({
+      versions: [{ version: 2 }],
+      nextBeforeVersion: 2,
+    });
+    const previousHistory = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${fixture.allowed.id}/product-specification/history?limit=1&beforeVersion=2`,
+      remoteAddress: "127.0.0.1",
+      headers: headers(VIEWER),
+    });
+    expect(previousHistory.statusCode, previousHistory.body).toBe(200);
+    expect(previousHistory.json<{ versions: Array<{ version: number }>; nextBeforeVersion: number | null }>()).toMatchObject({
+      versions: [{ version: 1 }],
+      nextBeforeVersion: null,
     });
   });
 
@@ -528,6 +574,12 @@ describe("product-specification HTTP authorization", () => {
         headers: headers(),
       }),
       await application.app.inject({
+        method: "GET",
+        url: `/api/designs/${fixture.foreign.id}/product-specification/history`,
+        remoteAddress: "127.0.0.1",
+        headers: headers(),
+      }),
+      await application.app.inject({
         method: "POST",
         url: `/api/designs/${fixture.foreign.id}/product-specification/previews`,
         remoteAddress: "127.0.0.1",
@@ -573,7 +625,7 @@ describe("product-specification HTTP authorization", () => {
     });
   });
 
-  it("enforces project-restricted grants and immediate revocation across the four backing operations", async () => {
+  it("enforces project-restricted grants and immediate revocation across the five backing operations", async () => {
     const fixture = await setup("scoped-agent");
     const { application } = fixture;
     const deniedPreview = application.enterprise.previewProductSpecification("local", {
@@ -613,6 +665,10 @@ describe("product-specification HTTP authorization", () => {
       idempotencyKey: "product-spec-scoped-agent-commit-0001",
     });
     expect(application.enterprise.readProductSpecification(actorId, fixture.allowed.id)).toEqual(committed);
+    expect(application.enterprise.listProductSpecificationHistory(actorId, fixture.allowed.id)).toMatchObject({
+      versions: [{ version: 1, specificationHash: committed.specificationHash }],
+      nextBeforeVersion: null,
+    });
 
     const allowedMcp = await mcpTool(application, paired.grant.token, "product_spec_read", {
       design_id: fixture.allowed.id,
@@ -634,6 +690,7 @@ describe("product-specification HTTP authorization", () => {
     ];
     const deniedCallbacks = [
       () => application.enterprise.readProductSpecification(actorId, fixture.denied.id),
+      () => application.enterprise.listProductSpecificationHistory(actorId, fixture.denied.id),
       () => application.enterprise.previewProductSpecification(actorId, {
         designId: fixture.denied.id,
         baseVersion: 0,
@@ -651,6 +708,7 @@ describe("product-specification HTTP authorization", () => {
         idempotencyKey: "product-spec-scoped-denied-commit-0001",
       }),
       () => application.enterprise.readProductSpecification(actorId, fixture.foreign.id),
+      () => application.enterprise.listProductSpecificationHistory(actorId, fixture.foreign.id),
       () => application.enterprise.previewProductSpecification(actorId, {
         designId: fixture.foreign.id,
         baseVersion: 0,
@@ -692,6 +750,7 @@ describe("product-specification HTTP authorization", () => {
     const beforeRevoked = state(application);
     const revokedCallbacks = [
       () => application.enterprise.readProductSpecification(actorId, fixture.allowed.id),
+      () => application.enterprise.listProductSpecificationHistory(actorId, fixture.allowed.id),
       () => application.enterprise.previewProductSpecification(actorId, {
         designId: fixture.allowed.id,
         baseVersion: 1,

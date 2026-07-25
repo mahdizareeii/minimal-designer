@@ -137,7 +137,7 @@ function editEveryPolicySection(policy: OrganizationPolicy): OrganizationPolicy 
 afterEach(() => vi.restoreAllMocks());
 
 describe("form-based organization policy administration", () => {
-  it("renders all 12 guided sections, accessible groups, YAML export, Expert JSON, and optimistic lock metadata", () => {
+  it("renders 12 focused category choices, one visible guided section, YAML export, Expert JSON, and optimistic lock metadata", () => {
     const html = renderToStaticMarkup(<OrganizationPolicyEditor
       record={createRecord()}
       loading={false}
@@ -164,13 +164,13 @@ describe("form-based organization policy administration", () => {
 
     expect(html).toContain("Guided settings");
     expect(html).toContain("Expert JSON");
+    expect(html).toContain('aria-label="Policy categories"');
+    expect(html).toContain('aria-current="page"');
+    expect(html).toContain("Default locale");
+    expect(html).not.toContain("Allowed adapters");
     expect(html).toContain('href="/api/organization/configuration"');
     expect(html).toContain("Export YAML");
     expect(html).toContain(`Configuration lock: <code>${CONFIGURATION_HASH}</code>`);
-    expect(html).toContain("<fieldset");
-    expect(html).toContain("<legend>Allowed adapters</legend>");
-    expect(html).toContain('min="300"');
-    expect(html).toContain('max="2592000"');
     expect(html).toContain("No passwords, bearer grants, Keychain values");
   });
 

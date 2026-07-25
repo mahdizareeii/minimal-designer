@@ -35,9 +35,18 @@ function formaspecWebsiteUrl(publicBaseUrl: string, pathname: string): URL {
   return url;
 }
 
-export function agentTaskWebsiteLink(publicBaseUrl: string, designId: string, taskId: string): string {
+export function agentTaskWebsiteLink(
+  publicBaseUrl: string,
+  designId: string,
+  taskId: string,
+  dataStoreId?: string,
+): string {
   const url = formaspecWebsiteUrl(publicBaseUrl, `/design/${encodeURIComponent(designId)}`);
   url.searchParams.set("task", taskId);
+  if (dataStoreId !== undefined) {
+    if (!DATA_STORE_ID.test(dataStoreId)) throw new Error("FormaSpec data-store ID is invalid.");
+    url.searchParams.set("store", dataStoreId);
+  }
   return url.toString();
 }
 

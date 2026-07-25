@@ -324,7 +324,7 @@ export function PreviewReviewPage({
         setState(null);
         stateAvailable.current = false;
         setLoading(false);
-        setError("This project was deleted from the active workspace while the preview was open. No preview was committed.");
+        setError("This Design was archived while the preview was open. No preview was committed.");
         return;
       }
       if (event.designId === designId && (event.type === "agent_task.transitioned" || event.type === "design.updated")) {

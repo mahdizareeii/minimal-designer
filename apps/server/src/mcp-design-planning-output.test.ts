@@ -152,6 +152,21 @@ function nestedObject(depth: number): Record<string, unknown> {
   return value;
 }
 
+function selectionConfirmation(built: DesignerApplication, designId: string, baseVersion: number) {
+  const target = built.database.sqlite.prepare(
+    `SELECT design.id AS design_id, design.name AS design_name,
+            product.id AS product_id, product.name AS product_name
+     FROM designs design JOIN products product ON product.id = design.product_id
+     WHERE design.id = ?`,
+  ).get(designId) as {
+    design_id: string;
+    design_name: string;
+    product_id: string;
+    product_name: string;
+  };
+  return { source: "user_confirmed" as const, ...target, base_version: baseVersion };
+}
+
 describe("exact core-design and planning MCP results", () => {
   it("accepts real read/preview/commit/archive/restore and planning outputs", async () => {
     const built = await application();
@@ -200,6 +215,7 @@ describe("exact core-design and planning MCP results", () => {
       brief: "Create an exact task-backed component proposal",
       selection: [frameId],
       base_version: 1,
+      selection_confirmation: selectionConfirmation(built, design.id, 1),
       expected_output: "design_preview",
       idempotency_key: "exact-output-preview-task-create",
     }, agent.token);
@@ -370,6 +386,7 @@ describe("exact core-design and planning MCP results", () => {
       brief: "Archive the proposed card with human approval",
       selection: [cardId],
       base_version: 2,
+      selection_confirmation: selectionConfirmation(built, design.id, 2),
       expected_output: "design_preview",
       idempotency_key: "exact-output-archive-task-create",
     }, agent.token);

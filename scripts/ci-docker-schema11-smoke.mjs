@@ -7,7 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const MAX_COMMAND_OUTPUT = 32 * 1024 * 1024;
-const EXPECTED_SCHEMA_VERSION = 16;
+const EXPECTED_SCHEMA_VERSION = 18;
 const EXPECTED_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
 const EXPECTED_NANO_CPUS = 2_000_000_000;
 const EXPECTED_PIDS_LIMIT = 256;

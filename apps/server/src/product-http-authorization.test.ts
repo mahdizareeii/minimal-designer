@@ -59,7 +59,11 @@ function serviceFixture() {
   const designer = new DesignerService(database, events, 900);
   const enterprise = new EnterpriseService(database, events, { designerService: designer });
   let productNow: Date | null = null;
-  const products = new ProductService(database, () => productNow === null ? new Date() : new Date(productNow));
+  const products = new ProductService(
+    database,
+    events,
+    () => productNow === null ? new Date() : new Date(productNow),
+  );
   return {
     database,
     events,
@@ -277,7 +281,44 @@ describe("Product organization service and HTTP authorization", () => {
       },
     });
     expect(archiveSource.statusCode, archiveSource.body).toBe(200);
-    expect(archiveSource.json()).toMatchObject({ product: { id: sourceProductId, status: "archived" } });
+    const archivedSource = archiveSource.json<{
+      product: { id: string; status: string; updatedAt: string; archivedAt: string };
+    }>();
+    expect(archivedSource).toMatchObject({ product: { id: sourceProductId, status: "archived" } });
+
+    const hiddenArchivedSource = await app.inject({
+      method: "GET",
+      url: `/api/products/${sourceProductId}?includeArchived=false`,
+    });
+    expect(hiddenArchivedSource.statusCode, hiddenArchivedSource.body).toBe(404);
+    const visibleArchivedSource = await app.inject({
+      method: "GET",
+      url: `/api/products/${sourceProductId}?includeArchived=true`,
+    });
+    expect(visibleArchivedSource.statusCode, visibleArchivedSource.body).toBe(200);
+    expect(visibleArchivedSource.json()).toMatchObject({ product: { id: sourceProductId, status: "archived" } });
+
+    const restoreSourceInput = {
+      expectedUpdatedAt: archivedSource.product.updatedAt,
+      expectedArchivedAt: archivedSource.product.archivedAt,
+      idempotencyKey: "product-http-restore-source-0001",
+    };
+    const restoreSource = await app.inject({
+      method: "POST",
+      url: `/api/products/${sourceProductId}/restore`,
+      payload: restoreSourceInput,
+    });
+    expect(restoreSource.statusCode, restoreSource.body).toBe(200);
+    expect(restoreSource.json()).toMatchObject({
+      product: { id: sourceProductId, status: "active", archivedAt: null },
+    });
+    const restoreSourceReplay = await app.inject({
+      method: "POST",
+      url: `/api/products/${sourceProductId}/restore`,
+      payload: restoreSourceInput,
+    });
+    expect(restoreSourceReplay.statusCode, restoreSourceReplay.body).toBe(200);
+    expect(restoreSourceReplay.json()).toEqual(restoreSource.json());
 
     const activeArchive = await app.inject({
       method: "POST",
@@ -289,7 +330,21 @@ describe("Product organization service and HTTP authorization", () => {
       },
     });
     expect(activeArchive.statusCode, activeArchive.body).toBe(409);
-    expect(activeArchive.json()).toMatchObject({ error: { code: "VERSION_CONFLICT" } });
+    expect(activeArchive.json()).toMatchObject({
+      error: {
+        code: "PRODUCT_NOT_EMPTY",
+        details: {
+          activeDesignCount: 1,
+          activeDesigns: [{
+            id: secondDesign.document.id,
+            name: secondDesign.design.name,
+            version: secondDesign.design.version,
+            updatedAt: secondDesign.design.updatedAt,
+          }],
+          truncated: false,
+        },
+      },
+    });
 
     const viewer = resolveAccess(fixture.database.sqlite, "product-http-viewer");
     fixture.database.sqlite.prepare(
@@ -352,6 +407,7 @@ describe("Product organization service and HTTP authorization", () => {
     });
     expect(new ProductService(
       fixture.database,
+      fixture.events,
       () => new Date("2026-07-20T00:00:30.000Z"),
     ).readDesignMovePreview("local", persisted.id)).toEqual(persisted);
 
@@ -393,6 +449,266 @@ describe("Product organization service and HTTP authorization", () => {
     expect(captureThrown(() => fixture.products.commitDesignMovePreview("local", persisted.id, {
       idempotencyKey: "product-move-second-commit-0001",
     }))).toMatchObject({ code: "PREVIEW_ALREADY_COMMITTED", statusCode: 409 });
+  });
+
+  it("restores Products before Designs and maintains an active canonical Design", () => {
+    const fixture = serviceFixture();
+    const publishedProductEvents: Array<{ id: number; type: string; data: Record<string, unknown> }> = [];
+    fixture.events.subscribe("product-event-test-listener", (event) => {
+      if (event.type === "product.updated") publishedProductEvents.push(event);
+    });
+    const first = fixture.designer.createDesign("local", {
+      name: "Canonical primary",
+      preset: "web",
+      idempotencyKey: "archive-restore-canonical-primary-0001",
+    });
+    const productId = first.design.productId;
+    const second = fixture.designer.createDesign("local", {
+      name: "Canonical fallback",
+      preset: "phone",
+      productId,
+      idempotencyKey: "archive-restore-canonical-fallback-0001",
+    });
+    expect(fixture.products.readProduct("local", productId).product.canonicalSpecificationDesignId)
+      .toBe(first.design.id);
+
+    const firstArchived = fixture.designer.archiveDesign("local", first.design.id, {
+      expectedVersion: first.design.version,
+      confirmationName: first.design.name,
+      idempotencyKey: "archive-restore-canonical-primary-archive-0001",
+    });
+    expect(fixture.products.readProduct("local", productId).product.canonicalSpecificationDesignId)
+      .toBe(second.design.id);
+    const secondArchived = fixture.designer.archiveDesign("local", second.design.id, {
+      expectedVersion: second.design.version,
+      confirmationName: second.design.name,
+      idempotencyKey: "archive-restore-canonical-fallback-archive-0001",
+    });
+    const empty = fixture.products.readProduct("local", productId);
+    expect(empty.product.canonicalSpecificationDesignId).toBeNull();
+    expect(empty.designs).toEqual([]);
+
+    const archiveProductInput = {
+      expectedUpdatedAt: empty.product.updatedAt,
+      confirmationName: empty.product.name,
+      idempotencyKey: "archive-restore-product-archive-0001",
+    };
+    const archivedProduct = fixture.products.archiveProduct("local", productId, archiveProductInput);
+    expect(archivedProduct.product).toMatchObject({ status: "archived" });
+    expect(fixture.products.archiveProduct("local", productId, archiveProductInput)).toEqual(archivedProduct);
+    expect(captureThrown(() => fixture.designer.restoreArchivedDesign("local", first.design.id, {
+      expectedVersion: first.design.version,
+      expectedArchivedAt: firstArchived.archivedAt,
+      idempotencyKey: "archive-restore-design-before-product-0001",
+    }))).toMatchObject({
+      code: "PRODUCT_ARCHIVED",
+      statusCode: 409,
+      details: { productId, productName: empty.product.name },
+    });
+    expect(captureThrown(() => fixture.products.restoreProduct("local", productId, {
+      expectedUpdatedAt: archivedProduct.product.updatedAt,
+      expectedArchivedAt: "2026-01-01T00:00:00.000Z",
+      idempotencyKey: "archive-restore-product-stale-0001",
+    }))).toMatchObject({ code: "RESOURCE_STATE_CONFLICT", statusCode: 409 });
+
+    fixture.database.sqlite.exec(`
+      CREATE TRIGGER reject_product_restore_audit
+      BEFORE INSERT ON audit_events
+      WHEN NEW.action = 'product.restore'
+      BEGIN SELECT RAISE(ABORT, 'injected Product restore audit failure'); END;
+    `);
+    expect(() => fixture.products.restoreProduct("local", productId, {
+      expectedUpdatedAt: archivedProduct.product.updatedAt,
+      expectedArchivedAt: archivedProduct.product.archivedAt!,
+      idempotencyKey: "archive-restore-product-atomic-failure-0001",
+    })).toThrow("injected Product restore audit failure");
+    expect(fixture.products.readProduct("local", productId, true).product.status).toBe("archived");
+    expect(fixture.database.sqlite.prepare(
+      "SELECT key FROM idempotency WHERE scope = ? AND key = ?",
+    ).get(`product:${productId}:restore`, "archive-restore-product-atomic-failure-0001")).toBeUndefined();
+    fixture.database.sqlite.exec("DROP TRIGGER reject_product_restore_audit");
+
+    fixture.database.sqlite.exec(`
+      CREATE TRIGGER reject_product_restore_outbox
+      BEFORE INSERT ON event_outbox
+      WHEN NEW.event_type = 'product.updated'
+        AND json_extract(NEW.payload_json, '$.restoredFromArchive') = 1
+      BEGIN SELECT RAISE(ABORT, 'injected Product restore outbox failure'); END;
+    `);
+    expect(() => fixture.products.restoreProduct("local", productId, {
+      expectedUpdatedAt: archivedProduct.product.updatedAt,
+      expectedArchivedAt: archivedProduct.product.archivedAt!,
+      idempotencyKey: "archive-restore-product-outbox-failure-0001",
+    })).toThrow("injected Product restore outbox failure");
+    expect(fixture.products.readProduct("local", productId, true).product.status).toBe("archived");
+    expect(fixture.database.sqlite.prepare(
+      "SELECT key FROM idempotency WHERE scope = ? AND key = ?",
+    ).get(`product:${productId}:restore`, "archive-restore-product-outbox-failure-0001")).toBeUndefined();
+    expect(fixture.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'product.restore' AND target_id = ?",
+    ).get(productId)).toEqual({ count: 0 });
+    fixture.database.sqlite.exec("DROP TRIGGER reject_product_restore_outbox");
+
+    const restoreProductInput = {
+      expectedUpdatedAt: archivedProduct.product.updatedAt,
+      expectedArchivedAt: archivedProduct.product.archivedAt!,
+      idempotencyKey: "archive-restore-product-restore-0001",
+    };
+    const restoredProduct = fixture.products.restoreProduct("local", productId, restoreProductInput);
+    expect(restoredProduct.product).toMatchObject({ status: "active", archivedAt: null });
+    expect(fixture.products.restoreProduct("local", productId, restoreProductInput)).toEqual(restoredProduct);
+    const restoredFirst = fixture.designer.restoreArchivedDesign("local", first.design.id, {
+      expectedVersion: first.design.version,
+      expectedArchivedAt: firstArchived.archivedAt,
+      idempotencyKey: "archive-restore-canonical-primary-restore-0001",
+    });
+    expect(restoredFirst).toMatchObject({ status: "active", archivedAt: null });
+    expect(fixture.products.readProduct("local", productId).product.canonicalSpecificationDesignId)
+      .toBe(first.design.id);
+    fixture.designer.restoreArchivedDesign("local", second.design.id, {
+      expectedVersion: second.design.version,
+      expectedArchivedAt: secondArchived.archivedAt,
+      idempotencyKey: "archive-restore-canonical-fallback-restore-0001",
+    });
+    expect(fixture.products.readProduct("local", productId).product.canonicalSpecificationDesignId)
+      .toBe(first.design.id);
+    expect(fixture.designer.listDesigns("local", 100, undefined, true).designs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: first.design.id, status: "active", archivedAt: null }),
+        expect.objectContaining({ id: second.design.id, status: "active", archivedAt: null }),
+      ]),
+    );
+    expect(fixture.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM revisions WHERE design_id IN (?, ?)",
+    ).get(first.design.id, second.design.id)).toEqual({ count: 2 });
+    expect(fixture.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE action IN ('product.restore', 'design.restore_archive')",
+    ).get()).toEqual({ count: 3 });
+    expect(fixture.database.sqlite.prepare(
+      `SELECT COUNT(*) AS count FROM event_outbox
+       WHERE event_type = 'design.updated'
+         AND json_extract(payload_json, '$.restoredFromArchive') = 1`,
+    ).get()).toEqual({ count: 2 });
+
+    const productOutboxRows = fixture.database.sqlite.prepare(
+      `SELECT event.id, event.payload_json, event.workspace, event.created_at, event.published_at,
+              audit.action AS audit_action
+       FROM event_outbox event
+       JOIN audit_events audit ON audit.id = json_extract(event.payload_json, '$.auditEventId')
+       WHERE event.event_type = 'product.updated'
+         AND json_extract(event.payload_json, '$.productId') = ?
+       ORDER BY event.id`,
+    ).all(productId) as Array<{
+      id: number;
+      payload_json: string;
+      workspace: number;
+      created_at: string;
+      published_at: string | null;
+      audit_action: string;
+    }>;
+    expect(productOutboxRows).toHaveLength(2);
+    const archivePayload = JSON.parse(productOutboxRows[0]!.payload_json) as Record<string, unknown>;
+    const restorePayload = JSON.parse(productOutboxRows[1]!.payload_json) as Record<string, unknown>;
+    expect(productOutboxRows[0]).toMatchObject({
+      workspace: 1,
+      created_at: archivedProduct.product.updatedAt,
+      published_at: expect.any(String),
+      audit_action: "product.archive",
+    });
+    expect(archivePayload).toEqual({
+      auditEventId: expect.any(Number),
+      productId,
+      status: "archived",
+      archived: true,
+      archivedAt: archivedProduct.product.archivedAt,
+      updatedAt: archivedProduct.product.updatedAt,
+    });
+    expect(productOutboxRows[1]).toMatchObject({
+      workspace: 1,
+      created_at: restoredProduct.product.updatedAt,
+      published_at: expect.any(String),
+      audit_action: "product.restore",
+    });
+    expect(restorePayload).toEqual({
+      auditEventId: expect.any(Number),
+      productId,
+      status: "active",
+      archived: false,
+      archivedAt: null,
+      restoredFromArchive: true,
+      previousArchivedAt: archivedProduct.product.archivedAt,
+      restoredAt: restoredProduct.product.updatedAt,
+      updatedAt: restoredProduct.product.updatedAt,
+    });
+    expect(publishedProductEvents).toEqual([
+      expect.objectContaining({ id: productOutboxRows[0]!.id, type: "product.updated", data: archivePayload }),
+      expect.objectContaining({ id: productOutboxRows[1]!.id, type: "product.updated", data: restorePayload }),
+    ]);
+  });
+
+  it("migration 18 normalizes invalid canonical pointers and enforces archive integrity", async () => {
+    const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "formaspec-product-archive-migration-"));
+    temporaryDirectories.push(directory);
+    const filename = path.join(directory, "designer.sqlite");
+    const historical = new Database(filename);
+    historical.pragma("foreign_keys = ON");
+    applyDatabaseMigrationPrefixForTesting(historical, 17);
+    const now = "2026-07-20T00:00:00.000Z";
+    const firstDesignId = "document_archiveintegrityfirst0001";
+    const secondDesignId = "document_archiveintegritysecond001";
+    const firstProductId = `product_${firstDesignId.slice("document_".length)}`;
+    const secondProductId = `product_${secondDesignId.slice("document_".length)}`;
+    const insertDesign = historical.prepare(
+      `INSERT INTO designs
+       (id, actor_id, name, current_version, current_revision_id, created_at, updated_at, organization_id)
+       VALUES (?, 'local', ?, 1, ?, ?, ?, 'organization_legacy')`,
+    );
+    insertDesign.run(firstDesignId, "Migration first", "revision_archiveintegrityfirst01", now, now);
+    insertDesign.run(secondDesignId, "Migration second", "revision_archiveintegritysecond1", now, now);
+    historical.prepare(
+      "UPDATE products SET canonical_specification_design_id = ? WHERE id = ?",
+    ).run(secondDesignId, firstProductId);
+    historical.prepare(
+      "INSERT INTO system_metadata (key, value, updated_at) VALUES (?, '{}', ?)",
+    ).run(`design_archive:${secondDesignId}`, now);
+    historical.close();
+
+    const migrated = new DesignerDatabase(filename);
+    databases.push(migrated);
+    expect(migrated.schemaVersion()).toBe(18);
+    expect(migrated.sqlite.prepare(
+      "SELECT canonical_specification_design_id FROM products WHERE id = ?",
+    ).get(firstProductId)).toEqual({ canonical_specification_design_id: firstDesignId });
+    expect(migrated.sqlite.prepare(
+      "SELECT canonical_specification_design_id FROM products WHERE id = ?",
+    ).get(secondProductId)).toEqual({ canonical_specification_design_id: null });
+    expect(migrated.sqlite.prepare(
+      "SELECT version, name FROM schema_migrations WHERE version = 18",
+    ).get()).toEqual({ version: 18, name: "product_archive_restore_integrity" });
+
+    expect(() => migrated.sqlite.prepare(
+      "INSERT INTO system_metadata (key, value, updated_at) VALUES (?, '{}', ?)",
+    ).run(`design_archive:${firstDesignId}`, now)).toThrow(/canonical design must be replaced before archival/);
+    expect(() => migrated.sqlite.prepare(
+      "UPDATE designs SET product_id = ? WHERE id = ?",
+    ).run(secondProductId, firstDesignId)).toThrow(/canonical design must be replaced before moving/);
+    migrated.sqlite.prepare("DELETE FROM system_metadata WHERE key = ?")
+      .run(`design_archive:${secondDesignId}`);
+    expect(() => migrated.sqlite.prepare(
+      "UPDATE products SET canonical_specification_design_id = ? WHERE id = ?",
+    ).run(secondDesignId, firstProductId)).toThrow(/active in the same product/);
+
+    const thirdDesignId = "document_archiveintegritythird0001";
+    migrated.sqlite.prepare(
+      `INSERT INTO designs
+       (id, actor_id, name, current_version, current_revision_id, created_at, updated_at, organization_id)
+       VALUES (?, 'local', 'Migration third', 1, 'revision_archiveintegritythird01', ?, ?, 'organization_legacy')`,
+    ).run(thirdDesignId, now, now);
+    expect(migrated.sqlite.prepare(
+      `SELECT product.canonical_specification_design_id
+       FROM products product JOIN designs design ON design.product_id = product.id
+       WHERE design.id = ?`,
+    ).get(thirdDesignId)).toEqual({ canonical_specification_design_id: thirdDesignId });
   });
 
   it("paginates equal timestamps without duplicates and binds cursors to the exact authorization", () => {
@@ -567,7 +883,7 @@ describe("Product-bound immutable agent context", () => {
 
     const migrated = new DesignerDatabase(filename);
     databases.push(migrated);
-    expect(migrated.schemaVersion()).toBe(17);
+    expect(migrated.schemaVersion()).toBe(18);
     const productId = `product_${designId.slice("document_".length)}`;
     expect(migrated.sqlite.prepare("SELECT product_id FROM designs WHERE id = ?").get(designId))
       .toEqual({ product_id: productId });

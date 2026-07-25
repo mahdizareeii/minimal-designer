@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ArchiveProjectDialog, DashboardProjectCard } from "../components/Dashboard";
 import type { DesignProjectSummary } from "../domain";
-import { archiveDesign } from "../lib/api";
+import { archiveDesign, archiveProduct, restoreProduct, type ProductSummary } from "../lib/api";
 import { useDesignerStore } from "../store/designer-store";
 
 const project: DesignProjectSummary = {
@@ -16,9 +16,11 @@ const project: DesignProjectSummary = {
 
 const archivedResponse = {
   id: project.id,
+  productId: "product_archive_web_001",
   name: project.name,
   version: project.version,
   revisionId: project.revisionId!,
+  status: "archived" as const,
   createdAt: "2026-07-20T08:00:00.000Z",
   updatedAt: project.updatedAt,
   archivedAt: "2026-07-22T10:00:00.000Z",
@@ -46,6 +48,54 @@ afterEach(() => {
 });
 
 describe("confirmed project archival", () => {
+  it("uses Product archive and restore CAS fields and unwraps Product detail responses", async () => {
+    const product: ProductSummary = {
+      id: "product_archive_web_001",
+      name: "Courier operations",
+      description: "",
+      status: "active",
+      ownerPrincipalId: "principal_local",
+      defaultDesignSystemReleaseId: null,
+      defaultLocale: "fa",
+      defaultDirection: "rtl",
+      locales: ["fa", "en"],
+      canonicalSpecificationDesignId: project.id,
+      designCount: 0,
+      createdAt: "2026-07-20T08:00:00.000Z",
+      updatedAt: "2026-07-22T10:00:00.000Z",
+      archivedAt: null,
+    };
+    const archivedProduct = {
+      ...product,
+      status: "archived" as const,
+      updatedAt: "2026-07-22T10:01:00.000Z",
+      archivedAt: "2026-07-22T10:01:00.000Z",
+    };
+    const restoredProduct = {
+      ...archivedProduct,
+      status: "active" as const,
+      updatedAt: "2026-07-22T10:02:00.000Z",
+      archivedAt: null,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse({ product: archivedProduct, designs: [] }))
+      .mockResolvedValueOnce(jsonResponse({ product: restoredProduct, designs: [] }));
+
+    await expect(archiveProduct(product, "product_archive_request_0001")).resolves.toEqual(archivedProduct);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      expectedUpdatedAt: product.updatedAt,
+      confirmationName: product.name,
+      idempotencyKey: "product_archive_request_0001",
+    });
+
+    await expect(restoreProduct(archivedProduct, "product_restore_request_0001")).resolves.toEqual(restoredProduct);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      expectedUpdatedAt: archivedProduct.updatedAt,
+      expectedArchivedAt: archivedProduct.archivedAt,
+      idempotencyKey: "product_restore_request_0001",
+    });
+  });
+
   it("sends the exact archive command and strictly validates the direct server result", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse(archivedResponse))
@@ -107,7 +157,7 @@ describe("confirmed project archival", () => {
     });
   });
 
-  it("keeps deletion disabled until the project name matches exactly and explains retained records", () => {
+  it("keeps Design archival disabled until the name matches exactly and explains retained records", () => {
     const mismatch = renderToStaticMarkup(
       <ArchiveProjectDialog
         project={project}
@@ -119,8 +169,10 @@ describe("confirmed project archival", () => {
         onConfirm={noOp}
       />,
     );
-    expect(mismatch).toContain("The project disappears from the active workspace");
+    expect(mismatch).toContain("Move “Customer portal” out of the active workspace");
     expect(mismatch).toContain("revision history and stored assets remain on your server");
+    expect(mismatch).toContain("Archive Design");
+    expect(mismatch).not.toContain("Delete project");
     expect(mismatch).toMatch(/class="button button-danger" type="button" disabled=""/);
 
     const exact = renderToStaticMarkup(
@@ -157,5 +209,6 @@ describe("confirmed project archival", () => {
     expect(openButton).toBeGreaterThan(-1);
     expect(openButtonEnd).toBeGreaterThan(openButton);
     expect(archiveButton).toBeGreaterThan(openButtonEnd);
+    expect(card).toContain("Archive Design Customer portal");
   });
 });

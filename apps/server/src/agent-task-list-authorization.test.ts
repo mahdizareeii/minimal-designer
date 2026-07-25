@@ -192,6 +192,38 @@ describe("EnterpriseService.listAgentTasks project authorization", () => {
 });
 
 describe("agent-task list HTTP project authorization", () => {
+  it("returns organization activity entries with Design identity and durable navigation links", async () => {
+    const fixture = taskListFixture();
+    const app = await taskListHttpApp(fixture);
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agent-tasks?status=queued&limit=25",
+      headers: { "x-test-actor-id": fixture.actorId },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    const entries = response.json<{
+      tasks: Array<{
+        task: AgentTaskResult;
+        design: { id: string; name: string };
+        launchUrl: string;
+        websiteTaskLink: string;
+        reviewDeepLink: string | null;
+        reviewLaunchLink: string | null;
+      }>;
+    }>().tasks;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      task: { id: fixture.allowedTask.id },
+      design: { id: fixture.allowedDesignId, name: "Allowed task-list project" },
+      reviewDeepLink: null,
+      reviewLaunchLink: null,
+    });
+    expect(new URL(entries[0]!.launchUrl).protocol).toBe("codex:");
+    expect(new URL(entries[0]!.websiteTaskLink).searchParams.get("task")).toBe(fixture.allowedTask.id);
+    expect(response.body).not.toContain(fixture.deniedTask.id);
+    expect(response.body).not.toContain(fixture.deniedMarker);
+  });
+
   it("returns the allowed list and the normal hidden-project 404 for missing and restricted project IDs", async () => {
     const fixture = taskListFixture();
     const app = await taskListHttpApp(fixture);

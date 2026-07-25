@@ -1,6 +1,7 @@
 import {
   AgentTaskResolvedContextSchema,
   NodeIdSchema,
+  ProductIdSchema,
   ProductIdentitySchema,
 } from "@designer/core";
 import { z } from "zod";
@@ -31,6 +32,14 @@ export type AgentTaskStatus = (typeof AGENT_TASK_STATUSES)[number];
 export const AgentTaskExpectedOutputSchema = z.enum(AGENT_TASK_EXPECTED_OUTPUTS);
 export const AgentTaskStatusSchema = z.enum(AGENT_TASK_STATUSES);
 export const AgentTaskSelectionSchema = z.array(NodeIdSchema).max(500);
+export const McpAgentTaskSelectionConfirmationSchema = z.object({
+  source: z.enum(["user_confirmed", "exact_project_link"]),
+  product_id: ProductIdSchema,
+  product_name: z.string().trim().min(1).max(255),
+  design_id: z.string().trim().min(1).max(240),
+  design_name: z.string().trim().min(1).max(255),
+  base_version: z.number().int().positive().max(1_000_000_000),
+}).strict();
 
 const taskArtifactIdentifier = z.string().trim().min(1).max(240);
 const transitionMessage = z.string().trim().max(4_000).optional();

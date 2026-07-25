@@ -550,7 +550,7 @@ describe("one-shot restore worker", () => {
       status: "verified",
       backupId: fixture.targetBackupId,
       organizationId: "organization_legacy",
-      databaseSchemaVersion: 17,
+      databaseSchemaVersion: 18,
       documentSchemaVersion: 2,
     });
     expect(result.sizeBytes).toBeGreaterThan(0);
@@ -800,7 +800,7 @@ describe("one-shot restore worker", () => {
       status: "restored",
       backupId: fixture.targetBackupId,
       operationId: fixture.operationId,
-      schemaVersion: 17,
+      schemaVersion: 18,
       renderedDesignId: fixture.retainedDesignId,
       revoked: { grants: 1, connections: 1, nonces: 1, sessions: 1 },
       maintenancePhase: "verification",
@@ -855,7 +855,7 @@ describe("one-shot restore worker", () => {
           operationId: fixture.operationId,
           targetBackupId: fixture.targetBackupId,
           safetyBackupId: result.safetyBackupId,
-          schemaVersion: 17,
+          schemaVersion: 18,
           revokedGrants: 1,
           revokedConnections: 1,
           revokedNonces: 1,

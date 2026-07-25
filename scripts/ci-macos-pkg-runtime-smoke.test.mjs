@@ -40,23 +40,24 @@ test("pins the current extracted native runtime contract", () => {
   assert.deepEqual(MACOS_RUNTIME_SMOKE_CONTRACT, {
     nodeVersion: "v24.14.0",
     playwrightRevision: "1228",
-    schemaVersion: 16,
+    schemaVersion: 18,
     mcpProtocolVersion: "2025-06-18",
-    mcpToolCount: 52,
-    mcpResourceCount: 25,
+    mcpContractVersion: "0.4.0",
+    mcpToolCount: 55,
+    mcpResourceCount: 26,
     maximumPackageBytes: 8 * 1024 * 1024 * 1024,
     maximumCommandOutputBytes: 16 * 1024 * 1024,
     maximumHttpResponseBytes: 16 * 1024 * 1024,
     startupTimeoutMs: 120_000,
     commandTimeoutMs: 180_000,
   });
-  assert.equal(EXPECTED_MCP_TOOL_NAMES.length, 52);
-  assert.equal(new Set(EXPECTED_MCP_TOOL_NAMES).size, 52);
+  assert.equal(EXPECTED_MCP_TOOL_NAMES.length, 55);
+  assert.equal(new Set(EXPECTED_MCP_TOOL_NAMES).size, 55);
   assert.equal(EXPECTED_FIXED_RESOURCES.length, 4);
-  assert.equal(EXPECTED_RESOURCE_TEMPLATES.length, 21);
+  assert.equal(EXPECTED_RESOURCE_TEMPLATES.length, 22);
   assert.equal(
     new Set([...EXPECTED_FIXED_RESOURCES, ...EXPECTED_RESOURCE_TEMPLATES].map((entry) => entry.name)).size,
-    25,
+    26,
   );
   assert.ok([...EXPECTED_FIXED_RESOURCES, ...EXPECTED_RESOURCE_TEMPLATES]
     .every((entry) => entry.uri.startsWith("formaspec://")));
@@ -148,7 +149,7 @@ function managedCodexAssetsFixture() {
     ].join("\n");
     writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/.codex-plugin/plugin.json`, `${JSON.stringify({
       name: identity.pluginName,
-      version: "0.3.0",
+      version: "0.4.0",
       interface: { displayName: identity.displayName },
     })}\n`);
     writeManagedCodexAsset(root, `codex-marketplace/plugins/${identity.pluginName}/skills/${identity.skillName}/SKILL.md`, skill);
@@ -162,7 +163,7 @@ test("packaged Codex assets expose exactly one FormaSpec agent identity", () => 
   assert.deepEqual(inspectManagedCodexAssets(root), {
     marketplaceName: "formaspec",
     marketplaceDisplayName: "FormaSpec",
-    pluginVersion: "0.3.0",
+    pluginVersion: "0.4.0",
     identities: [
       {
         skillName: "formaspec",

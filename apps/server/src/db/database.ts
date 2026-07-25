@@ -2089,6 +2089,134 @@ function canonicalizeBootstrapCredentialTrigger(sqlite: Database.Database): void
   `);
 }
 
+function strengthenProductArchiveRestoreIntegrity(sqlite: Database.Database): void {
+  sqlite.exec(`
+    UPDATE products
+    SET canonical_specification_design_id = CASE
+      WHEN status = 'active' THEN (
+        SELECT candidate.id
+        FROM designs candidate
+        WHERE candidate.product_id = products.id
+          AND candidate.organization_id = products.organization_id
+          AND NOT EXISTS (
+            SELECT 1 FROM system_metadata archive
+            WHERE archive.key = 'design_archive:' || candidate.id
+          )
+        ORDER BY candidate.updated_at DESC, candidate.id DESC
+        LIMIT 1
+      )
+      ELSE NULL
+    END
+    WHERE canonical_specification_design_id IS NOT NULL
+      AND (
+        status <> 'active'
+        OR NOT EXISTS (
+          SELECT 1 FROM designs canonical
+          WHERE canonical.id = products.canonical_specification_design_id
+            AND canonical.product_id = products.id
+            AND canonical.organization_id = products.organization_id
+            AND NOT EXISTS (
+              SELECT 1 FROM system_metadata archive
+              WHERE archive.key = 'design_archive:' || canonical.id
+            )
+        )
+      );
+
+    DROP TRIGGER IF EXISTS products_canonical_design_insert_integrity;
+    CREATE TRIGGER products_canonical_design_insert_integrity
+    BEFORE INSERT ON products
+    WHEN NEW.canonical_specification_design_id IS NOT NULL AND (
+      NEW.status <> 'active'
+      OR NOT EXISTS (
+        SELECT 1 FROM designs design
+        WHERE design.id = NEW.canonical_specification_design_id
+          AND design.product_id = NEW.id
+          AND design.organization_id = NEW.organization_id
+          AND NOT EXISTS (
+            SELECT 1 FROM system_metadata archive
+            WHERE archive.key = 'design_archive:' || design.id
+          )
+      )
+    )
+    BEGIN SELECT RAISE(ABORT, 'product canonical specification design must be active in the same product'); END;
+
+    DROP TRIGGER IF EXISTS products_canonical_design_update_integrity;
+    CREATE TRIGGER products_canonical_design_update_integrity
+    BEFORE UPDATE OF canonical_specification_design_id, organization_id, status ON products
+    WHEN NEW.canonical_specification_design_id IS NOT NULL AND (
+      NEW.status <> 'active'
+      OR NOT EXISTS (
+        SELECT 1 FROM designs design
+        WHERE design.id = NEW.canonical_specification_design_id
+          AND design.product_id = NEW.id
+          AND design.organization_id = NEW.organization_id
+          AND NOT EXISTS (
+            SELECT 1 FROM system_metadata archive
+            WHERE archive.key = 'design_archive:' || design.id
+          )
+      )
+    )
+    BEGIN SELECT RAISE(ABORT, 'product canonical specification design must be active in the same product'); END;
+
+    DROP TRIGGER IF EXISTS designs_product_default;
+    CREATE TRIGGER designs_product_default
+    AFTER INSERT ON designs
+    WHEN NEW.product_id IS NULL
+    BEGIN
+      INSERT INTO products
+       (id, organization_id, name, description, status, owner_principal_id,
+        canonical_specification_design_id, default_design_system_release_id,
+        default_locale, default_direction, locales_json, metadata_json,
+        created_by, created_at, updated_at, archived_at)
+      VALUES (
+        'product_' || substr(NEW.id, 10), NEW.organization_id, NEW.name, '', 'active',
+        (SELECT membership.principal_id
+         FROM memberships membership
+         JOIN principals principal ON principal.id = membership.principal_id
+           AND principal.organization_id = membership.organization_id
+         WHERE membership.organization_id = NEW.organization_id AND principal.disabled_at IS NULL
+         ORDER BY CASE membership.role WHEN 'organization_admin' THEN 0 WHEN 'product_manager' THEN 1 ELSE 2 END,
+                  principal.created_at, principal.id
+         LIMIT 1),
+        NULL, NULL, 'en', 'ltr', '["en"]',
+        json_object('autoCreated', 1, 'sourceDesignId', NEW.id),
+        NEW.actor_id, NEW.created_at, NEW.updated_at, NULL
+      );
+      UPDATE designs SET product_id = 'product_' || substr(NEW.id, 10) WHERE id = NEW.id;
+      UPDATE products
+      SET canonical_specification_design_id = NEW.id
+      WHERE id = 'product_' || substr(NEW.id, 10);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS designs_canonical_product_update_integrity
+    BEFORE UPDATE OF product_id, organization_id ON designs
+    WHEN (NEW.product_id IS NOT OLD.product_id OR NEW.organization_id IS NOT OLD.organization_id)
+      AND EXISTS (
+        SELECT 1 FROM products product
+        WHERE product.canonical_specification_design_id = OLD.id
+      )
+    BEGIN SELECT RAISE(ABORT, 'canonical design must be replaced before moving it to another product'); END;
+
+    CREATE TRIGGER IF NOT EXISTS design_archive_canonical_insert_integrity
+    BEFORE INSERT ON system_metadata
+    WHEN NEW.key GLOB 'design_archive:*'
+      AND EXISTS (
+        SELECT 1 FROM products product
+        WHERE product.canonical_specification_design_id = substr(NEW.key, length('design_archive:') + 1)
+      )
+    BEGIN SELECT RAISE(ABORT, 'canonical design must be replaced before archival'); END;
+
+    CREATE TRIGGER IF NOT EXISTS design_archive_canonical_update_integrity
+    BEFORE UPDATE OF key ON system_metadata
+    WHEN NEW.key GLOB 'design_archive:*'
+      AND EXISTS (
+        SELECT 1 FROM products product
+        WHERE product.canonical_specification_design_id = substr(NEW.key, length('design_archive:') + 1)
+      )
+    BEGIN SELECT RAISE(ABORT, 'canonical design must be replaced before archival'); END;
+  `);
+}
+
 const migrations: Migration[] = [
   { version: 1, name: "baseline_v1", up: (sqlite) => sqlite.exec(baselineSql) },
   { version: 2, name: "content_addressed_persistence", up: addPersistenceIntegrity },
@@ -2107,6 +2235,7 @@ const migrations: Migration[] = [
   { version: 15, name: "preview_render_metadata", up: addPreviewRenderMetadata },
   { version: 16, name: "bootstrap_credential_trigger_canonicalization", up: canonicalizeBootstrapCredentialTrigger },
   { version: 17, name: "product_organization_foundation", up: addProductOrganizationFoundation },
+  { version: 18, name: "product_archive_restore_integrity", up: strengthenProductArchiveRestoreIntegrity },
 ];
 
 const migrationNames = new Set<string>();
@@ -2798,6 +2927,75 @@ const requiredEnterpriseMigrationShapes: readonly RequiredMigrationShape[] = [
         name: "product_move_previews_immutable_delete",
         table: "product_move_previews",
         sqlFragments: ["before delete on product_move_previews", "raise(abort"],
+      },
+    ],
+  },
+  {
+    version: 18,
+    tables: [],
+    indexes: [],
+    triggers: [
+      {
+        name: "products_canonical_design_insert_integrity",
+        table: "products",
+        sqlFragments: [
+          "before insert on products",
+          "new.status <> 'active'",
+          "design.product_id = new.id",
+          "archive.key = 'design_archive:' || design.id",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "products_canonical_design_update_integrity",
+        table: "products",
+        sqlFragments: [
+          "before update of canonical_specification_design_id, organization_id, status on products",
+          "new.status <> 'active'",
+          "design.product_id = new.id",
+          "archive.key = 'design_archive:' || design.id",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "designs_product_default",
+        table: "designs",
+        sqlFragments: [
+          "after insert on designs",
+          "new.product_id is null",
+          "canonical_specification_design_id",
+          "update designs set product_id",
+          "update products set canonical_specification_design_id = new.id",
+        ],
+      },
+      {
+        name: "designs_canonical_product_update_integrity",
+        table: "designs",
+        sqlFragments: [
+          "before update of product_id, organization_id on designs",
+          "product.canonical_specification_design_id = old.id",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "design_archive_canonical_insert_integrity",
+        table: "system_metadata",
+        sqlFragments: [
+          "before insert on system_metadata",
+          "new.key glob 'design_archive:*'",
+          "product.canonical_specification_design_id",
+          "raise(abort",
+        ],
+      },
+      {
+        name: "design_archive_canonical_update_integrity",
+        table: "system_metadata",
+        sqlFragments: [
+          "before update of key on system_metadata",
+          "new.key glob 'design_archive:*'",
+          "product.canonical_specification_design_id",
+          "raise(abort",
+        ],
       },
     ],
   },

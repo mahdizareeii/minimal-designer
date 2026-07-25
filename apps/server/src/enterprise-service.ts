@@ -242,6 +242,22 @@ export interface ProductSpecificationResult {
   createdAt: string;
 }
 
+export interface ProductSpecificationHistoryItem {
+  version: number;
+  specificationHash: string;
+  message: string;
+  actorId: string;
+  createdAt: string;
+  naturalLanguageBrief: string;
+  summary: string;
+  counts: Record<string, number>;
+}
+
+export interface ProductSpecificationHistoryPage {
+  versions: ProductSpecificationHistoryItem[];
+  nextBeforeVersion: number | null;
+}
+
 export interface ProductSpecificationPreviewResult {
   id: string;
   designId: string;
@@ -598,6 +614,59 @@ export class EnterpriseService {
     return this.productSpecificationResult(this.requireProductSpecificationRow(design.id, requestedVersion));
   }
 
+  listProductSpecificationHistory(
+    actorId: string,
+    designId: string,
+    limit = 50,
+    beforeVersion?: number,
+  ): ProductSpecificationHistoryPage {
+    const { design } = this.requireDesign(actorId, designId, "product_spec:read");
+    const boundedLimit = Math.max(1, Math.min(limit, 100));
+    const rows = this.database.sqlite.prepare(
+      `SELECT * FROM product_specifications
+       WHERE design_id = ? AND (? IS NULL OR version < ?)
+       ORDER BY version DESC LIMIT ?`,
+    ).all(design.id, beforeVersion ?? null, beforeVersion ?? null, boundedLimit + 1) as ProductSpecificationRow[];
+    const hasMore = rows.length > boundedLimit;
+    const visibleRows = rows.slice(0, boundedLimit);
+    const collectionKeys = [
+      "goals",
+      "non_goals",
+      "audiences",
+      "roles",
+      "entities",
+      "flows",
+      "business_rules",
+      "permissions",
+      "validations",
+      "screen_states",
+      "integrations",
+      "analytics_events",
+      "accessibility_requirements",
+      "non_functional_requirements",
+      "acceptance_criteria",
+      "assumptions",
+      "open_questions",
+    ] as const;
+    const versions = visibleRows.map((row): ProductSpecificationHistoryItem => {
+      const persisted = this.productSpecificationResult(row);
+      return {
+        version: persisted.version,
+        specificationHash: persisted.specificationHash,
+        message: persisted.message ?? "Update product specification",
+        actorId: persisted.actorId,
+        createdAt: persisted.createdAt,
+        naturalLanguageBrief: persisted.specification.natural_language_brief,
+        summary: persisted.specification.summary,
+        counts: Object.fromEntries(collectionKeys.map((key) => [key, persisted.specification[key].length])),
+      };
+    });
+    return {
+      versions,
+      nextBeforeVersion: hasMore ? versions.at(-1)?.version ?? null : null,
+    };
+  }
+
   authorizePlanningSessionList(actorId: string, designId: string): void {
     this.requireDesign(actorId, designId, "planning:read");
   }
@@ -869,6 +938,40 @@ export class EnterpriseService {
     }
   }
 
+  alignAgentTaskPreviewExpiry(
+    actorId: string,
+    input: {
+      taskId: string;
+      designId: string;
+      previewId: string;
+      baseVersion: number;
+    },
+  ): string {
+    this.authorizeAgentTaskDesignPreviewWork(actorId, {
+      taskId: input.taskId,
+      designId: input.designId,
+      baseVersion: input.baseVersion,
+    });
+    const access = resolveAccess(this.database.sqlite, actorId);
+    const task = this.requireAgentTaskRow(access, input.taskId);
+    const preview = this.database.sqlite.prepare(
+      `SELECT id, actor_id FROM previews
+       WHERE id = ? AND design_id = ? AND root_base_version = ? AND status IN ('ready', 'blocked')`,
+    ).get(input.previewId, input.designId, input.baseVersion) as {
+      id: string;
+      actor_id: string;
+    } | undefined;
+    if (!preview
+      || previewTaskId(this.database.sqlite, input.previewId) !== task.id
+      || !this.taskArtifactBelongsToClaimedAgent(task.id, preview.actor_id)) {
+      throw new DomainError("NOT_FOUND", "Agent task preview not found.", 404);
+    }
+    this.database.sqlite.prepare(
+      "UPDATE previews SET expires_at = ? WHERE id = ? AND status IN ('ready', 'blocked')",
+    ).run(task.expires_at, preview.id);
+    return task.expires_at;
+  }
+
   createAgentTask(actorId: string, input: {
     designId: string;
     brief: string;
@@ -992,15 +1095,18 @@ export class EnterpriseService {
       : this.requireDesignForAccess(access, input.designId);
     if (design !== undefined) {
       this.materializeDesignPreviewTaskStates(access, design.id, design.current_version, this.nowIso());
+    } else {
+      this.materializeVisibleDesignPreviewTaskStates(access, this.nowIso());
     }
     const designId = design?.id;
     const limit = Math.max(1, Math.min(input.limit ?? 50, 100));
     const filters = [
       "task.organization_id = ?",
       `EXISTS (
-        SELECT 1 FROM designs active_design
-        WHERE active_design.id = task.design_id
-          AND ${activeDesignSqlPredicate("active_design")}
+        SELECT 1 FROM designs visible_design
+        WHERE visible_design.id = task.design_id
+          AND visible_design.organization_id = task.organization_id
+          AND ${activeDesignSqlPredicate("visible_design")}
       )`,
     ];
     const parameters: Array<string | number> = [access.organizationId];
@@ -1104,7 +1210,7 @@ export class EnterpriseService {
     };
     const idempotencyRequestHash = hashPayload(idempotencyRequest);
     let expired = false;
-    let previewExpired = false;
+    let previewNeedsRegeneration = false;
     let staleCurrentVersion: number | null = null;
     const transaction = this.database.sqlite.transaction(() => {
       if (idempotencyKey !== null) {
@@ -1123,6 +1229,13 @@ export class EnterpriseService {
       }
       const row = this.requireAgentTaskRow(access, taskId);
       const current = this.currentTaskTransition(row.id);
+      const now = this.nowIso();
+      if (!AGENT_TASK_STATUSES.slice(4).includes(current.to_status) && row.expires_at <= now) {
+        this.appendTaskTransition(access, row.id, current.to_status, "expired", "Task expired", {}, now);
+        appendAuditEvent(this.database.sqlite, access, "agent_task.expire", "agent_task", row.id, { fromStatus: current.to_status });
+        expired = true;
+        return this.agentTaskResult(row);
+      }
       if (row.expected_output === "design_preview" && current.to_status === "awaiting_approval") {
         const currentData = jsonObject(current.data_json, "task transition");
         const previewId = typeof currentData.previewId === "string" ? currentData.previewId : null;
@@ -1138,30 +1251,28 @@ export class EnterpriseService {
           || previewId === null
           || previewTaskId(this.database.sqlite, previewId) !== row.id
           || preview.status !== "ready"
-          || preview.expires_at <= this.nowIso()
+          || preview.expires_at <= now
           || preview.render_metadata_json === null) {
-          const now = this.nowIso();
-          this.materializeTaskTerminalState(
+          this.returnTaskToInProgressForPreviewRegeneration(
             access,
             row,
             current,
-            "expired",
-            "Task expired because its exact design preview is no longer reviewable.",
             now,
             { reason: "preview_unavailable", ...(previewId === null ? {} : { previewId }) },
           );
-          previewExpired = true;
+          previewNeedsRegeneration = true;
           return this.agentTaskResult(row);
         }
       }
-      if (current.to_status !== input.expectedStatus) throw this.taskStateConflict(input.expectedStatus, current.to_status);
-      const now = this.nowIso();
-      if (!AGENT_TASK_STATUSES.slice(4).includes(current.to_status) && row.expires_at <= now) {
-        this.appendTaskTransition(access, row.id, current.to_status, "expired", "Task expired", {}, now);
-        appendAuditEvent(this.database.sqlite, access, "agent_task.expire", "agent_task", row.id, { fromStatus: current.to_status });
-        expired = true;
+      const currentData = jsonObject(current.data_json, "task transition");
+      if (current.to_status === input.toStatus
+        && current.from_status === input.expectedStatus
+        && current.actor_id === access.principalId
+        && current.message === message
+        && canonicalJson(currentData) === canonicalJson(data)) {
         return this.agentTaskResult(row);
       }
+      if (current.to_status !== input.expectedStatus) throw this.taskStateConflict(input.expectedStatus, current.to_status);
       if (input.toStatus === "expired" && row.expires_at > now) {
         throw new DomainError("VALIDATION_FAILED", "An agent task cannot expire before its configured expiry time.", 422, {
           details: { expiresAt: row.expires_at },
@@ -1218,16 +1329,7 @@ export class EnterpriseService {
             && row.expected_output === "design_preview"
             && input.toStatus === "awaiting_approval"
             && typeof data.previewId === "string") {
-            this.materializeTaskTerminalState(
-              access,
-              row,
-              current,
-              "expired",
-              "Task expired because its exact design preview expired before approval.",
-              now,
-              { reason: "preview_expired", previewId: data.previewId },
-            );
-            previewExpired = true;
+            previewNeedsRegeneration = true;
             return this.agentTaskResult(row);
           }
           throw error;
@@ -1266,9 +1368,10 @@ export class EnterpriseService {
     const result = transaction.immediate();
     this.flushPendingEventsSafely();
     if (expired) throw new DomainError("TASK_EXPIRED", "The agent task expired.", 410);
-    if (previewExpired) {
-      throw new DomainError("PREVIEW_EXPIRED", "The exact task preview expired before approval; create a new task.", 410, {
+    if (previewNeedsRegeneration) {
+      throw new DomainError("PREVIEW_EXPIRED", "The exact task preview is no longer reviewable; regenerate it with the same task.", 410, {
         retryable: true,
+        details: { taskId, requiredStatus: "in_progress", requiredAction: "regenerate_preview" },
       });
     }
     if (staleCurrentVersion !== null) throw this.versionConflict(result.baseVersion, staleCurrentVersion, "design");
@@ -1303,10 +1406,19 @@ export class EnterpriseService {
       throw new DomainError("VALIDATION_FAILED", "Only a design-preview task can use exact preview approval.", 422);
     }
     const approvalNow = this.nowIso();
-    if (this.expireAwaitingTaskPreviewApproval(access, task, previewId, approvalNow)) {
+    const expiryDisposition = this.expireAwaitingTaskPreviewApproval(access, task, previewId, approvalNow);
+    if (expiryDisposition === "task_expired") {
       throw new DomainError("TASK_EXPIRED", "The agent task expired before its preview could be approved.", 410, {
         retryable: true,
       });
+    }
+    if (expiryDisposition === "preview_regeneration") {
+      throw new DomainError(
+        "PREVIEW_EXPIRED",
+        "The exact preview is no longer reviewable; the task was returned to in_progress for regeneration.",
+        410,
+        { retryable: true, details: { taskId: task.id, requiredAction: "regenerate_preview" } },
+      );
     }
 
     return this.withIdempotency(access, `task:${task.id}:approve-design-preview`, key, {
@@ -1895,6 +2007,34 @@ export class EnterpriseService {
     ).all(designId) as ActiveAgentTaskRow[];
   }
 
+  private materializeVisibleDesignPreviewTaskStates(access: AccessContext, now: string): void {
+    const filters = [
+      "design.organization_id = ?",
+      "task.expected_output = 'design_preview'",
+      "current.to_status IN ('queued', 'claimed', 'in_progress', 'awaiting_approval')",
+    ];
+    const parameters: string[] = [access.organizationId];
+    if (access.projectIds.length > 0) {
+      filters.push(`design.id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      parameters.push(...access.projectIds);
+    }
+    const rows = this.database.sqlite.prepare(
+      `SELECT design.id, design.current_version
+       FROM designs design
+       JOIN agent_tasks task ON task.design_id = design.id
+       JOIN agent_task_transitions current ON current.rowid = (
+         SELECT latest.rowid FROM agent_task_transitions latest
+         WHERE latest.task_id = task.id ORDER BY latest.rowid DESC LIMIT 1
+       )
+       WHERE ${filters.join(" AND ")}
+       GROUP BY design.id, design.current_version
+       ORDER BY MAX(task.created_at) DESC, design.id DESC LIMIT 100`,
+    ).all(...parameters) as Array<{ id: string; current_version: number }>;
+    for (const row of rows) {
+      this.materializeDesignPreviewTaskStates(access, row.id, row.current_version, now);
+    }
+  }
+
   private materializeDesignPreviewTaskStates(
     access: AccessContext,
     designId: string,
@@ -1927,12 +2067,10 @@ export class EnterpriseService {
             || preview.status !== "ready"
             || preview.expires_at <= now
             || preview.render_metadata_json === null) {
-            this.materializeTaskTerminalState(
+            this.returnTaskToInProgressForPreviewRegeneration(
               access,
               task,
               current,
-              "expired",
-              "Task expired because its exact design preview is no longer reviewable.",
               now,
               { reason: "preview_unavailable", ...(previewId === null ? {} : { previewId }) },
             );
@@ -1992,6 +2130,50 @@ export class EnterpriseService {
       "agent_task",
       task.id,
       { fromStatus: current.to_status, expectedOutput: task.expected_output, ...transitionData },
+    );
+  }
+
+  private returnTaskToInProgressForPreviewRegeneration(
+    access: AccessContext,
+    task: AgentTaskRow,
+    current: AgentTaskTransitionRow,
+    now: string,
+    details: Record<string, unknown>,
+  ): void {
+    if (current.to_status !== "awaiting_approval"
+      || !taskTransitionGraph[current.to_status].includes("in_progress")) return;
+    const currentData = jsonObject(current.data_json, "task transition");
+    const previewId = typeof currentData.previewId === "string"
+      ? currentData.previewId
+      : typeof details.previewId === "string"
+        ? details.previewId
+        : null;
+    if (previewId !== null) {
+      this.database.sqlite.prepare(
+        `UPDATE previews SET status = 'expired', expires_at = ?
+         WHERE id = ? AND design_id = ? AND root_base_version = ? AND status IN ('ready', 'blocked')`,
+      ).run(now, previewId, task.design_id, task.base_version);
+    }
+    const transitionData = {
+      ...details,
+      ...(previewId === null ? {} : { previousPreviewId: previewId }),
+    };
+    this.appendTaskTransition(
+      access,
+      task.id,
+      "awaiting_approval",
+      "in_progress",
+      "The exact preview is no longer reviewable; regenerate it with this task.",
+      transitionData,
+      now,
+    );
+    appendAuditEvent(
+      this.database.sqlite,
+      access,
+      "agent_task.preview_regenerate",
+      "agent_task",
+      task.id,
+      { fromStatus: "awaiting_approval", expectedOutput: task.expected_output, ...transitionData },
     );
   }
 
@@ -2513,12 +2695,17 @@ export class EnterpriseService {
     task: AgentTaskRow,
     previewId: string,
     now: string,
-  ): boolean {
+  ): "task_expired" | "preview_regeneration" | null {
     const transaction = this.database.sqlite.transaction(() => {
       const current = this.currentTaskTransition(task.id);
       const currentData = jsonObject(current.data_json, "task transition");
-      if (current.to_status === "expired") return currentData.previewId === previewId;
-      if (current.to_status !== "awaiting_approval") return false;
+      if (current.to_status === "expired") {
+        return currentData.previewId === previewId ? "task_expired" as const : null;
+      }
+      if (current.to_status === "in_progress" && currentData.previousPreviewId === previewId) {
+        return "preview_regeneration" as const;
+      }
+      if (current.to_status !== "awaiting_approval") return null;
       if (currentData.previewId !== previewId) {
         throw new DomainError("VALIDATION_FAILED", "The preview does not match the expired task proposal.", 422);
       }
@@ -2534,27 +2721,31 @@ export class EnterpriseService {
         || previewTaskId(this.database.sqlite, previewId) !== task.id
         || preview.status !== "ready"
         || preview.expires_at <= now;
-      if (!taskExpired && !previewExpired) return false;
-      this.appendTaskTransition(
+      if (!taskExpired && !previewExpired) return null;
+      if (taskExpired) {
+        this.materializeTaskTerminalState(
+          access,
+          task,
+          current,
+          "expired",
+          "Task expired before its exact preview was approved.",
+          now,
+          { previewId, reason: "task_expired" },
+        );
+        return "task_expired" as const;
+      }
+      this.returnTaskToInProgressForPreviewRegeneration(
         access,
-        task.id,
-        "awaiting_approval",
-        "expired",
-        previewExpired
-          ? "Task expired because its exact preview was no longer reviewable."
-          : "Task expired before its exact preview was approved.",
-        { previewId, reason: previewExpired ? "preview_expired" : "task_expired" },
+        task,
+        current,
         now,
+        { previewId, reason: "preview_expired" },
       );
-      appendAuditEvent(this.database.sqlite, access, "agent_task.expire", "agent_task", task.id, {
-        fromStatus: "awaiting_approval",
-        expectedOutput: task.expected_output,
-      });
-      return true;
+      return "preview_regeneration" as const;
     });
-    const expired = transaction.immediate();
-    if (expired) this.flushPendingEventsSafely();
-    return expired;
+    const disposition = transaction.immediate();
+    if (disposition !== null) this.flushPendingEventsSafely();
+    return disposition;
   }
 
   private assertTaskSelection(designId: string, version: number, selection: string[]): void {

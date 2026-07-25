@@ -13,6 +13,10 @@ const productParams = z.object({ productId: ProductIdSchema }).strict();
 const previewParams = z.object({ previewId: z.string().regex(/^product_move_[a-f0-9]{32}$/) }).strict();
 const timestamp = z.string().datetime({ offset: true });
 const metadata = z.record(z.unknown());
+const booleanQuerySchema = z.union([
+  z.boolean(),
+  z.enum(["true", "false"]).transform((value) => value === "true"),
+]);
 
 const createProductSchema = z.object({
   name: z.string().trim().min(1).max(255),
@@ -46,6 +50,12 @@ const archiveProductSchema = z.object({
   idempotencyKey,
 }).strict();
 
+const restoreProductSchema = z.object({
+  expectedUpdatedAt: timestamp,
+  expectedArchivedAt: timestamp,
+  idempotencyKey,
+}).strict();
+
 const movePreviewSchema = z.object({
   designId: z.string().trim().min(1).max(240),
   expectedSourceProductId: ProductIdSchema,
@@ -61,7 +71,7 @@ export function registerProductHttpRoutes(app: FastifyInstance, products: Produc
     const query = z.object({
       limit: z.coerce.number().int().min(1).max(100).optional(),
       cursor: z.string().max(4_096).optional(),
-      includeArchived: z.coerce.boolean().optional(),
+      includeArchived: booleanQuerySchema.optional(),
     }).strict().parse(request.query);
     return products.listProducts(request.actorId, query);
   });
@@ -73,7 +83,7 @@ export function registerProductHttpRoutes(app: FastifyInstance, products: Produc
 
   app.get("/api/products/:productId", async (request) => {
     const { productId } = productParams.parse(request.params);
-    const query = z.object({ includeArchived: z.coerce.boolean().optional() }).strict().parse(request.query);
+    const query = z.object({ includeArchived: booleanQuerySchema.optional() }).strict().parse(request.query);
     return products.readProduct(request.actorId, productId, query.includeArchived);
   });
 
@@ -85,6 +95,11 @@ export function registerProductHttpRoutes(app: FastifyInstance, products: Produc
   app.post("/api/products/:productId/archive", async (request) => {
     const { productId } = productParams.parse(request.params);
     return products.archiveProduct(request.actorId, productId, archiveProductSchema.parse(request.body));
+  });
+
+  app.post("/api/products/:productId/restore", async (request) => {
+    const { productId } = productParams.parse(request.params);
+    return products.restoreProduct(request.actorId, productId, restoreProductSchema.parse(request.body));
   });
 
   app.post("/api/products/:productId/design-move-previews", async (request, reply) => {

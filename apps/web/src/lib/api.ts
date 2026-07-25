@@ -154,16 +154,28 @@ function asProjectSummary(input: unknown): DesignProjectSummary {
     version: Number(value.version ?? value.revision ?? 1),
     ...(value.revisionId || value.revision_id ? { revisionId: String(value.revisionId ?? value.revision_id) } : {}),
     ...(value.preset ? { preset: value.preset as DevicePreset } : {}),
+    status: value.status === "archived" ? "archived" : "active",
+    archivedAt: value.archivedAt == null && value.archived_at == null
+      ? null
+      : String(value.archivedAt ?? value.archived_at),
     updatedAt: String(value.updatedAt ?? value.updated_at ?? new Date().toISOString()),
     ...(value.thumbnailUrl || value.thumbnail_url ? { thumbnailUrl: String(value.thumbnailUrl ?? value.thumbnail_url) } : {}),
   };
 }
 
-export async function listDesigns(): Promise<DesignProjectSummary[]> {
-  const result = await request<unknown>("/designs");
-  const value = result as { designs?: unknown[]; data?: unknown[] };
-  const rows = Array.isArray(result) ? result : value.designs ?? value.data ?? [];
-  return rows.map(asProjectSummary);
+export async function listDesigns(includeArchived = false): Promise<DesignProjectSummary[]> {
+  const designs: DesignProjectSummary[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 10; page += 1) {
+    const search = new URLSearchParams({ limit: "100" });
+    if (includeArchived) search.set("includeArchived", "true");
+    if (cursor) search.set("cursor", cursor);
+    const result = await request<{ designs?: unknown[]; data?: unknown[]; nextCursor?: string | null }>(`/designs?${search}`);
+    designs.push(...(result.designs ?? result.data ?? []).map(asProjectSummary));
+    cursor = result.nextCursor ?? null;
+    if (!cursor) return designs;
+  }
+  throw new Error("Design list exceeds the dashboard's bounded 1,000-design limit.");
 }
 
 export interface ProductSummary {
@@ -209,11 +221,12 @@ function asProductSummary(input: unknown): ProductSummary {
   };
 }
 
-export async function listProducts(): Promise<ProductSummary[]> {
+export async function listProducts(includeArchived = false): Promise<ProductSummary[]> {
   const products: ProductSummary[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < 10; page += 1) {
     const search = new URLSearchParams({ limit: "100" });
+    if (includeArchived) search.set("includeArchived", "true");
     if (cursor) search.set("cursor", cursor);
     const result = await request<{ products?: unknown[]; nextCursor?: string | null }>(`/products?${search}`);
     products.push(...(result.products ?? []).map(asProductSummary));
@@ -244,9 +257,11 @@ export async function createDesign(
 
 export interface ArchivedProjectResult {
   id: string;
+  productId: string;
   name: string;
   version: number;
   revisionId: string;
+  status: "archived";
   createdAt: string;
   updatedAt: string;
   archivedAt: string;
@@ -263,7 +278,7 @@ export async function archiveDesign(
       method: "POST",
       body: JSON.stringify({ expectedVersion, idempotencyKey, confirmationName }),
     }),
-    ["id", "name", "version", "revisionId", "createdAt", "updatedAt", "archivedAt"],
+    ["id", "productId", "name", "version", "revisionId", "status", "createdAt", "updatedAt", "archivedAt"],
     "Project archive response",
   );
   const archivedId = requiredOpaqueId(result.id, "Archived project ID");
@@ -272,15 +287,81 @@ export async function archiveDesign(
   if (archivedId !== id || archivedName !== confirmationName || archivedVersion !== expectedVersion) {
     throw new ApiError("Project archive response does not match the requested project.", { code: "INVALID_RESPONSE" });
   }
+  if (result.status !== "archived") {
+    throw new ApiError("Archived project status must be archived.", { code: "INVALID_RESPONSE" });
+  }
   return {
     id: archivedId,
+    productId: requiredOpaqueId(result.productId, "Archived project Product ID"),
     name: archivedName,
     version: archivedVersion,
     revisionId: requiredOpaqueId(result.revisionId, "Archived project revision ID"),
+    status: result.status,
     createdAt: requiredIsoTimestamp(result.createdAt, "Archived project creation time"),
     updatedAt: requiredIsoTimestamp(result.updatedAt, "Archived project update time"),
     archivedAt: requiredIsoTimestamp(result.archivedAt, "Archived project archive time"),
   };
+}
+
+export interface ProductArchiveDependency {
+  id: string;
+  name: string;
+  version: number;
+  updatedAt: string;
+}
+
+export interface ArchivedProductBlocker {
+  activeDesignCount: number;
+  activeDesigns: ProductArchiveDependency[];
+  truncated: boolean;
+}
+
+export async function archiveProduct(
+  product: Pick<ProductSummary, "id" | "name" | "updatedAt">,
+  idempotencyKey: string,
+): Promise<ProductSummary> {
+  const result = await request<unknown>(`/products/${encodeURIComponent(product.id)}/archive`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedUpdatedAt: product.updatedAt,
+      confirmationName: product.name,
+      idempotencyKey,
+    }),
+  });
+  const envelope = result as { product?: unknown };
+  return asProductSummary(envelope.product ?? result);
+}
+
+export async function restoreProduct(
+  product: Pick<ProductSummary, "id" | "updatedAt" | "archivedAt">,
+  idempotencyKey: string,
+): Promise<ProductSummary> {
+  if (!product.archivedAt) throw new ApiError("The Product has no archive timestamp.", { code: "RESOURCE_STATE_CONFLICT" });
+  const result = await request<unknown>(`/products/${encodeURIComponent(product.id)}/restore`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedUpdatedAt: product.updatedAt,
+      expectedArchivedAt: product.archivedAt,
+      idempotencyKey,
+    }),
+  });
+  const envelope = result as { product?: unknown };
+  return asProductSummary(envelope.product ?? result);
+}
+
+export async function restoreArchivedDesign(
+  design: Pick<DesignProjectSummary, "id" | "version" | "archivedAt">,
+  idempotencyKey: string,
+): Promise<DesignProjectSummary> {
+  if (!design.archivedAt) throw new ApiError("The Design has no archive timestamp.", { code: "RESOURCE_STATE_CONFLICT" });
+  return asProjectSummary(await request<unknown>(`/designs/${encodeURIComponent(design.id)}/restore-archive`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedArchivedAt: design.archivedAt,
+      expectedVersion: design.version,
+      idempotencyKey,
+    }),
+  }));
 }
 
 export async function readDesign(id: string, version?: number): Promise<DesignDocument> {
@@ -1018,10 +1099,60 @@ function asProductSpecificationRecord(input: unknown): ProductSpecificationRecor
   };
 }
 
-export async function readProductSpecification(designId: string): Promise<ProductSpecificationRecord> {
+export async function readProductSpecification(designId: string, version?: number): Promise<ProductSpecificationRecord> {
+  const suffix = version === undefined ? "" : `?version=${encodeURIComponent(version)}`;
   return asProductSpecificationRecord(await request<unknown>(
-    `/designs/${encodeURIComponent(designId)}/product-specification`,
+    `/designs/${encodeURIComponent(designId)}/product-specification${suffix}`,
   ));
+}
+
+export interface ProductSpecificationHistoryItem {
+  version: number;
+  specificationHash: string;
+  message: string;
+  actorId: string;
+  createdAt: string;
+  naturalLanguageBrief: string;
+  summary: string;
+  counts: Record<string, number>;
+}
+
+export interface ProductSpecificationHistoryPage {
+  versions: ProductSpecificationHistoryItem[];
+  nextBeforeVersion: number | null;
+}
+
+function asProductSpecificationHistoryItem(input: unknown): ProductSpecificationHistoryItem {
+  const value = input as Record<string, unknown>;
+  const rawCounts = value.counts && typeof value.counts === "object" && !Array.isArray(value.counts)
+    ? value.counts as Record<string, unknown>
+    : {};
+  return {
+    version: Number(value.version ?? 0),
+    specificationHash: String(value.specificationHash ?? value.specification_hash ?? ""),
+    message: String(value.message ?? "Update product specification"),
+    actorId: String(value.actorId ?? value.actor_id ?? ""),
+    createdAt: String(value.createdAt ?? value.created_at ?? ""),
+    naturalLanguageBrief: String(value.naturalLanguageBrief ?? value.natural_language_brief ?? ""),
+    summary: String(value.summary ?? ""),
+    counts: Object.fromEntries(Object.entries(rawCounts).map(([key, count]) => [key, Number(count ?? 0)])),
+  };
+}
+
+export async function listProductSpecificationHistory(
+  designId: string,
+  limit = 50,
+  beforeVersion?: number,
+): Promise<ProductSpecificationHistoryPage> {
+  const search = new URLSearchParams({ limit: String(limit) });
+  if (beforeVersion !== undefined) search.set("beforeVersion", String(beforeVersion));
+  const result = await request<{ versions?: unknown[]; nextBeforeVersion?: number | null }>(
+    `/designs/${encodeURIComponent(designId)}/product-specification/history?${search}`,
+  );
+  return {
+    versions: (result.versions ?? []).map(asProductSpecificationHistoryItem),
+    nextBeforeVersion: result.nextBeforeVersion ?? null,
+  };
 }
 
 export interface ProductSpecificationPreview extends ProductSpecificationRecord {
@@ -1052,11 +1183,33 @@ export async function previewProductSpecification(
   };
 }
 
+export async function previewTypedProductSpecification(
+  designId: string,
+  baseVersion: number,
+  specification: Record<string, unknown>,
+): Promise<ProductSpecificationPreview> {
+  const result = await request<Record<string, unknown>>(
+    `/designs/${encodeURIComponent(designId)}/product-specification/previews`,
+    {
+      method: "POST",
+      body: JSON.stringify({ baseVersion, specification }),
+    },
+  );
+  return {
+    ...asProductSpecificationRecord(result),
+    previewId: String(result.previewId ?? result.id),
+    expiresAt: String(result.expiresAt ?? ""),
+    canCommit: Boolean(result.canCommit),
+    diagnostics: Array.isArray(result.diagnostics) ? result.diagnostics : [],
+  };
+}
+
 export async function commitProductSpecification(
   designId: string,
   previewId: string,
   expectedBaseVersion: number,
   idempotencyKey: string,
+  message = "Update product brief",
 ): Promise<ProductSpecificationRecord> {
   return asProductSpecificationRecord(await request<unknown>(
     `/designs/${encodeURIComponent(designId)}/product-specification/previews/${encodeURIComponent(previewId)}/commit`,
@@ -1065,7 +1218,7 @@ export async function commitProductSpecification(
       body: JSON.stringify({
         expectedBaseVersion,
         idempotencyKey,
-        message: "Update product brief",
+        message,
       }),
     },
   ));
@@ -1330,6 +1483,49 @@ export async function listAgentTasks(designId: string, limit = 25): Promise<Agen
     `/designs/${encodeURIComponent(designId)}/agent-tasks?limit=${encodeURIComponent(limit)}&expectedOutput=design_preview`,
   );
   return (result.tasks ?? []).map((task) => asAgentTaskRecord(task));
+}
+
+export interface ActivityAgentTask {
+  task: AgentTaskRecord;
+  design: {
+    id: string;
+    name: string;
+    status: "active" | "archived";
+    archivedAt: string | null;
+  };
+}
+
+export async function listOrganizationAgentTasks(limit = 50): Promise<ActivityAgentTask[]> {
+  const result = await request<{ tasks?: unknown[] }>(`/agent-tasks?limit=${encodeURIComponent(limit)}`);
+  return (result.tasks ?? []).map((input) => {
+    const envelope = input as Record<string, unknown>;
+    const rawTask = envelope.task && typeof envelope.task === "object" ? envelope.task : envelope;
+    const design = envelope.design && typeof envelope.design === "object"
+      ? envelope.design as Record<string, unknown>
+      : {};
+    return {
+      task: asAgentTaskRecord(
+        rawTask,
+        String(envelope.launchUrl ?? envelope.launch_url ?? "") || undefined,
+        String(envelope.websiteTaskLink ?? envelope.website_task_link ?? "") || undefined,
+        envelope.reviewDeepLink === null || envelope.review_deep_link === null
+          ? null
+          : String(envelope.reviewDeepLink ?? envelope.review_deep_link ?? "") || undefined,
+        envelope.reviewLaunchLink === null || envelope.review_launch_link === null
+          ? null
+          : String(envelope.reviewLaunchLink ?? envelope.review_launch_link ?? "") || undefined,
+        envelope.readiness,
+      ),
+      design: {
+        id: String(design.id ?? (rawTask as Record<string, unknown>).designId ?? ""),
+        name: String(design.name ?? "Untitled design"),
+        status: design.status === "archived" ? "archived" : "active",
+        archivedAt: design.archivedAt == null && design.archived_at == null
+          ? null
+          : String(design.archivedAt ?? design.archived_at),
+      },
+    };
+  });
 }
 
 export async function transitionAgentTask(input: {
@@ -2821,6 +3017,42 @@ export async function readRedesignAssessment(assessmentId: string): Promise<Rede
     `/redesign-assessments/${encodeURIComponent(assessmentId)}`,
   );
   return result.assessment;
+}
+
+export interface ActivityRedesignAssessment {
+  assessment: RedesignAssessmentRecord;
+  design: {
+    id: string;
+    name: string;
+    status: "active" | "archived";
+    archivedAt: string | null;
+  } | null;
+  websiteDeepLink: string;
+}
+
+export async function listRedesignAssessments(limit = 50): Promise<ActivityRedesignAssessment[]> {
+  const result = await request<{ assessments?: unknown[] }>(`/redesign-assessments?limit=${encodeURIComponent(limit)}`);
+  return (result.assessments ?? []).map((input) => {
+    const envelope = input as Record<string, unknown>;
+    const assessment = (envelope.assessment && typeof envelope.assessment === "object"
+      ? envelope.assessment
+      : envelope) as unknown as RedesignAssessmentRecord;
+    const rawDesign = envelope.design && typeof envelope.design === "object"
+      ? envelope.design as Record<string, unknown>
+      : null;
+    return {
+      assessment,
+      design: rawDesign === null ? null : {
+        id: String(rawDesign.id ?? assessment.designId ?? ""),
+        name: String(rawDesign.name ?? "Untitled design"),
+        status: rawDesign.status === "archived" ? "archived" : "active",
+        archivedAt: rawDesign.archivedAt == null && rawDesign.archived_at == null
+          ? null
+          : String(rawDesign.archivedAt ?? rawDesign.archived_at),
+      },
+      websiteDeepLink: String(envelope.websiteDeepLink ?? envelope.website_deep_link ?? `/redesign/${encodeURIComponent(assessment.id)}`),
+    };
+  });
 }
 
 export async function readRedesignStageArtifact(

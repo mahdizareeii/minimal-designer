@@ -50,6 +50,15 @@ const ENTERPRISE_DOMAIN_CAPABILITIES = Object.freeze({
   handoffStatuses: Object.freeze([...HANDOFF_STATUSES]),
   redesignStages: Object.freeze([...REDESIGN_STAGES]),
 });
+
+function redesignWebsiteDeepLink(webBaseUrl: string, assessmentId: string): string {
+  const url = new URL(webBaseUrl);
+  const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
+  url.pathname = `${basePath}/redesign/${encodeURIComponent(assessmentId)}`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
 const componentSourceReference = z.object({
   designId: identifier,
   revisionId: identifier,
@@ -106,13 +115,14 @@ export interface EnterpriseDomainHttpDependencies {
   renderer: PngRenderer;
   handoffs: WorkspaceHandoffService;
   redesign: RedesignStudioService;
+  webBaseUrl: string;
 }
 
 export function registerEnterpriseDomainHttpRoutes(
   app: FastifyInstance,
   dependencies: EnterpriseDomainHttpDependencies,
 ): void {
-  const { designSystems, componentInsertions, designer, renderer, handoffs, redesign } = dependencies;
+  const { designSystems, componentInsertions, designer, renderer, handoffs, redesign, webBaseUrl } = dependencies;
 
   app.get("/api/design-systems", async (request) => {
     designSystems.authorizeCatalogRead(request.actorId);
@@ -472,19 +482,61 @@ export function registerEnterpriseDomainHttpRoutes(
     return { handoff: handoffs.cancelHandoff(request.actorId, handoffId, body) };
   });
 
+  app.get("/api/redesign-assessments", async (request) => {
+    const query = z.object({
+      status: z.enum(["active", "completed", "cancelled"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }).strict().parse(request.query);
+    const assessments = redesign.listAssessments(request.actorId, query);
+    return {
+      assessments: assessments.map((assessment) => {
+        const design = assessment.designId === null
+          ? null
+          : redesign.database.sqlite.prepare(
+            `SELECT design.id, design.name,
+                    CASE WHEN archive.key IS NULL THEN 'active' ELSE 'archived' END AS status,
+                    archive.updated_at AS archivedAt
+             FROM designs design
+             LEFT JOIN system_metadata archive ON archive.key = 'design_archive:' || design.id
+             WHERE design.id = ?`,
+          ).get(assessment.designId) as {
+            id: string;
+            name: string;
+            status: "active" | "archived";
+            archivedAt: string | null;
+          } | undefined;
+        return {
+          assessment,
+          design: design ?? null,
+          websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessment.id),
+        };
+      }),
+    };
+  });
+
   app.post("/api/redesign-assessments", async (request, reply) => {
     const body = RedesignAssessmentCreateRequestSchema.parse(request.body);
-    return reply.code(201).send({ assessment: redesign.createOneClickAssessment(request.actorId, body) });
+    const assessment = redesign.createOneClickAssessment(request.actorId, body);
+    return reply.code(201).send({
+      assessment,
+      websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessment.id),
+    });
   });
 
   app.get("/api/redesign-assessments/:assessmentId", async (request) => {
     const { assessmentId } = assessmentParams.parse(request.params);
-    return { assessment: redesign.getAssessment(request.actorId, assessmentId) };
+    return {
+      assessment: redesign.getAssessment(request.actorId, assessmentId),
+      websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessmentId),
+    };
   });
 
   app.get("/api/redesign-assessments/:assessmentId/stages/:stage/artifact", async (request) => {
     const { assessmentId, stage } = assessmentStageParams.parse(request.params);
-    return { stageArtifact: redesign.getStageArtifact(request.actorId, assessmentId, stage) };
+    return {
+      stageArtifact: redesign.getStageArtifact(request.actorId, assessmentId, stage),
+      websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessmentId),
+    };
   });
 
   app.put("/api/redesign-assessments/:assessmentId/stages/:stage/artifact", async (request) => {
@@ -499,19 +551,26 @@ export function registerEnterpriseDomainHttpRoutes(
         ...body,
         stage,
       }),
+      websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessmentId),
     };
   });
 
   app.patch("/api/redesign-assessments/:assessmentId/current-stage", async (request) => {
     const { assessmentId } = assessmentParams.parse(request.params);
     const body = RedesignStageRevisionRequestSchema.parse(request.body);
-    return { assessment: redesign.reviseCurrentStage(request.actorId, assessmentId, body) };
+    return {
+      assessment: redesign.reviseCurrentStage(request.actorId, assessmentId, body),
+      websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessmentId),
+    };
   });
 
   app.post("/api/redesign-assessments/:assessmentId/transition", async (request) => {
     const { assessmentId } = assessmentParams.parse(request.params);
     const body = RedesignStageTransitionRequestSchema.parse(request.body);
-    return { assessment: redesign.transition(request.actorId, assessmentId, body) };
+    return {
+      assessment: redesign.transition(request.actorId, assessmentId, body),
+      websiteDeepLink: redesignWebsiteDeepLink(webBaseUrl, assessmentId),
+    };
   });
 
   app.get("/api/enterprise-domain-capabilities", async (request) => {

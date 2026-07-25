@@ -1,5 +1,7 @@
 import {
+  Archive,
   ArrowRight,
+  BellRing,
   Bot,
   Check,
   Clock3,
@@ -18,19 +20,25 @@ import {
   Smartphone,
   Sparkles,
   Tablet,
-  Trash2,
   WandSparkles,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { navigate } from "../App";
-import { DEVICE_PRESETS, type DesignProjectSummary, type DevicePreset } from "../domain";
+import { createClientKey, DEVICE_PRESETS, type DesignProjectSummary, type DevicePreset } from "../domain";
 import {
+  ApiError,
+  archiveProduct,
   createRedesignAssessment,
+  listAgentConnections,
+  listOrganizationAgentTasks,
   listProducts,
   listRepositoryInventories,
   renderUrl,
+  type ActivityAgentTask,
+  type AgentConnectionRecord,
+  type ArchivedProductBlocker,
   type ProductSummary,
   type RepositoryInventorySummary,
 } from "../lib/api";
@@ -277,12 +285,12 @@ export function DashboardProjectCard({
       <button
         type="button"
         className="project-archive-action"
-        aria-label={`Delete ${project.name}`}
-        title="Delete project"
+        aria-label={`Archive Design ${project.name}`}
+        title="Archive Design"
         disabled={archiveDisabled}
         onClick={onArchive}
       >
-        <Trash2 size={14} />
+        <Archive size={14} />
       </button>
     </article>
   );
@@ -312,10 +320,10 @@ export function ArchiveProjectDialog({
     <section className="create-modal archive-project-modal" role="dialog" aria-modal="true" aria-labelledby="archive-project-title" aria-describedby="archive-project-description">
       <div className="modal-heading">
         <div>
-          <span className="modal-icon is-danger"><Trash2 size={18} /></span>
+          <span className="modal-icon is-danger"><Archive size={18} /></span>
           <div>
-            <h2 id="archive-project-title">Delete project</h2>
-            <p id="archive-project-description">Remove “{project.name}” from the active workspace.</p>
+            <h2 id="archive-project-title">Archive Design</h2>
+            <p id="archive-project-description">Move “{project.name}” out of the active workspace without deleting its history.</p>
           </div>
         </div>
         <button className="icon-button" type="button" disabled={archiving} onClick={onClose} aria-label="Close"><X size={18} /></button>
@@ -325,7 +333,7 @@ export function ArchiveProjectDialog({
         <ShieldCheck size={17} />
         <div>
           <strong>Immutable records remain retained</strong>
-          <span>The project disappears from the active workspace, but its revision history and stored assets remain on your server for audit and recovery.</span>
+          <span>The Design disappears from the active workspace, but its revision history and stored assets remain on your server for audit and recovery.</span>
         </div>
       </div>
 
@@ -349,11 +357,75 @@ export function ArchiveProjectDialog({
       <div className="modal-actions">
         <button className="button button-secondary" type="button" disabled={archiving} onClick={onClose}>Cancel</button>
         <button className="button button-danger" type="button" disabled={!confirmed || archiving} onClick={onConfirm}>
-          {archiving ? <><LoaderCircle size={15} className="spin" /> Deleting…</> : <><Trash2 size={15} /> Delete project</>}
+          {archiving ? <><LoaderCircle size={15} className="spin" /> Archiving…</> : <><Archive size={15} /> Archive Design</>}
         </button>
       </div>
     </section>
   );
+}
+
+function ArchiveProductDialog({
+  product,
+  confirmationName,
+  archiving,
+  error,
+  blocker,
+  onConfirmationNameChange,
+  onClose,
+  onConfirm,
+}: {
+  product: ProductSummary;
+  confirmationName: string;
+  archiving: boolean;
+  error: string | null;
+  blocker: ArchivedProductBlocker | null;
+  onConfirmationNameChange: (value: string) => void;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const confirmed = confirmationName === product.name;
+  return <section className="create-modal archive-project-modal archive-product-modal" role="dialog" aria-modal="true" aria-labelledby="archive-product-title">
+    <div className="modal-heading">
+      <div><span className="modal-icon is-danger"><Archive size={18} /></span><div>
+        <h2 id="archive-product-title">Archive Product</h2>
+        <p>Archive “{product.name}” only after all of its active Designs have been archived.</p>
+      </div></div>
+      <button className="icon-button" type="button" disabled={archiving} onClick={onClose} aria-label="Close"><X size={18} /></button>
+    </div>
+    <div className="archive-retention-note"><ShieldCheck size={17} /><div><strong>Recoverable and non-destructive</strong><span>Restore the Product first, then restore its Designs from the Archived workspace.</span></div></div>
+    {blocker && <div className="product-archive-blocker" role="alert">
+      <strong>{blocker.activeDesignCount} active {blocker.activeDesignCount === 1 ? "Design blocks" : "Designs block"} this archive</strong>
+      <span>Archive these Designs first:</span>
+      <ul>{blocker.activeDesigns.map((design) => <li key={design.id}><span dir="auto">{design.name}</span><code>{design.id}</code><small>v{design.version}</small></li>)}</ul>
+      {blocker.truncated && <small>Only the first {blocker.activeDesigns.length} blockers are shown.</small>}
+    </div>}
+    <label className="field-label" htmlFor="archive-product-confirmation">Type <code>{product.name}</code> to confirm
+      <input
+        id="archive-product-confirmation"
+        className="text-input"
+        autoFocus
+        autoComplete="off"
+        spellCheck={false}
+        value={confirmationName}
+        disabled={archiving}
+        onChange={(event) => onConfirmationNameChange(event.target.value)}
+        onKeyDown={(event) => { if (event.key === "Enter" && confirmed && !archiving) onConfirm(); }}
+      />
+    </label>
+    {error && <div className="modal-note is-error" role="alert"><CloudOff size={14} /> {error}</div>}
+    <div className="modal-actions">
+      <button className="button button-secondary" type="button" disabled={archiving} onClick={onClose}>Cancel</button>
+      <button className="button button-danger" type="button" disabled={!confirmed || archiving} onClick={onConfirm}>
+        {archiving ? <><LoaderCircle size={15} className="spin" /> Archiving…</> : <><Archive size={15} /> Archive Product</>}
+      </button>
+    </div>
+  </section>;
+}
+
+function openLocalLink(value: string): void {
+  const url = new URL(value, window.location.origin);
+  if (url.origin !== window.location.origin) throw new Error("The workspace link belongs to another server.");
+  navigate(`${url.pathname}${url.search}${url.hash}`);
 }
 
 export function Dashboard() {
@@ -372,6 +444,9 @@ export function Dashboard() {
   const [products, setProducts] = useState<ProductSummary[]>([]);
   const [productsLoading, setProductsLoading] = useState(true);
   const [productsError, setProductsError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<ActivityAgentTask[]>([]);
+  const [agentConnections, setAgentConnections] = useState<AgentConnectionRecord[]>([]);
+  const [workflowStateLoading, setWorkflowStateLoading] = useState(true);
   const [redesignOpen, setRedesignOpen] = useState(false);
   const [redesignInventories, setRedesignInventories] = useState<RepositoryInventorySummary[]>([]);
   const [ineligibleActiveInventoryCount, setIneligibleActiveInventoryCount] = useState(0);
@@ -386,6 +461,11 @@ export function Dashboard() {
   const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null);
   const [archiveConfirmationName, setArchiveConfirmationName] = useState("");
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveProductTargetId, setArchiveProductTargetId] = useState<string | null>(null);
+  const [archiveProductConfirmationName, setArchiveProductConfirmationName] = useState("");
+  const [archiveProductBusy, setArchiveProductBusy] = useState(false);
+  const [archiveProductError, setArchiveProductError] = useState<string | null>(null);
+  const [archiveProductBlocker, setArchiveProductBlocker] = useState<ArchivedProductBlocker | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const projectsRef = useRef<HTMLDivElement>(null);
 
@@ -408,6 +488,21 @@ export function Dashboard() {
 
   useEffect(() => {
     void refreshProducts();
+  }, []);
+
+  const refreshWorkflowState = async () => {
+    setWorkflowStateLoading(true);
+    const [tasks, connections] = await Promise.allSettled([
+      listOrganizationAgentTasks(20),
+      listAgentConnections(),
+    ]);
+    setActivity(tasks.status === "fulfilled" ? tasks.value : []);
+    setAgentConnections(connections.status === "fulfilled" ? connections.value : []);
+    setWorkflowStateLoading(false);
+  };
+
+  useEffect(() => {
+    void refreshWorkflowState();
   }, []);
 
   const loadRedesignInventories = async (isCurrent: () => boolean = () => true) => {
@@ -470,7 +565,66 @@ export function Dashboard() {
     return { groups, ungrouped };
   }, [products, projects, query]);
   const archiveTarget = projects.find((project) => project.id === archiveTargetId) ?? null;
+  const archiveProductTarget = products.find((product) => product.id === archiveProductTargetId) ?? null;
   const createTargetProduct = products.find((product) => product.id === createProductId) ?? null;
+  const activeConnection = agentConnections.some((connection) => connection.adapter === "codex" && connection.status === "active"
+    && (connection.expiresAt === null || new Date(connection.expiresAt).getTime() > Date.now()));
+  const awaitingReview = activity.find(({ task, design }) => design.status === "active" && task.status === "awaiting_approval");
+  const resumableTask = activity.find(({ task, design }) => design.status === "active" && ["queued", "claimed", "in_progress"].includes(task.status));
+  const mostRecentProject = [...projects].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+  const firstDesignProduct = [...products].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+
+  const startHere = products.length === 0
+    ? {
+        eyebrow: "Create your workspace",
+        title: "Create the first Product and Design",
+        detail: "FormaSpec will keep the Product context and immutable Design history together.",
+        action: "Create Product",
+        run: () => openCreateDialog(),
+      }
+    : projects.length === 0 && firstDesignProduct
+      ? {
+          eyebrow: "Complete your workspace",
+          title: `Add the first Design to ${firstDesignProduct.name}`,
+          detail: "Keep the existing Product context and start its first immutable Design history.",
+          action: "Add Design",
+          run: () => openCreateDialog(firstDesignProduct.id),
+        }
+    : !activeConnection
+      ? {
+          eyebrow: "Repair the agent connection",
+          title: "Connect Codex before submitting work",
+          detail: "The Design is safe. Reconnect once, then queued work can resume from Activity.",
+          action: "Open agent settings",
+          run: () => navigate("/administration/agents"),
+        }
+      : awaitingReview
+        ? {
+            eyebrow: "Preview ready",
+            title: `Review ${awaitingReview.design.name}`,
+            detail: `Task ${awaitingReview.task.id} returned an exact persisted preview for website approval.`,
+            action: "Review preview",
+            run: () => awaitingReview.task.reviewDeepLink
+              ? openLocalLink(awaitingReview.task.reviewDeepLink)
+              : navigate(`/design/${encodeURIComponent(awaitingReview.design.id)}?task=${encodeURIComponent(awaitingReview.task.id)}`),
+          }
+        : resumableTask
+          ? {
+              eyebrow: "Continue active work",
+              title: `Resume ${resumableTask.design.name}`,
+              detail: `Task ${resumableTask.task.id} is ${resumableTask.task.status.replaceAll("_", " ")} and remains recoverable from Activity.`,
+              action: "Resume task",
+              run: () => navigate(`/design/${encodeURIComponent(resumableTask.design.id)}?task=${encodeURIComponent(resumableTask.task.id)}`),
+            }
+          : mostRecentProject
+            ? {
+                eyebrow: "Continue designing",
+                title: `Open ${mostRecentProject.name}`,
+                detail: `Continue from immutable Design version ${mostRecentProject.version}.`,
+                action: "Open Design",
+                run: () => navigate(`/design/${encodeURIComponent(mostRecentProject.id)}`),
+              }
+            : null;
 
   const openCreateDialog = (productId: string | null = null) => {
     setCreateProductId(productId);
@@ -513,7 +667,78 @@ export function Dashboard() {
       setArchiveConfirmationName("");
       setArchiveError(null);
     } catch (cause) {
-      setArchiveError(cause instanceof Error ? cause.message : "Could not delete the project.");
+      if (cause instanceof ApiError && ["VERSION_CONFLICT", "RESOURCE_STATE_CONFLICT"].includes(cause.code)) {
+        await loadProjects();
+        setArchiveConfirmationName("");
+        setArchiveError("The Design changed while this confirmation was open. Its current summary was reloaded; type the name again to confirm.");
+        return;
+      }
+      setArchiveError(cause instanceof Error ? cause.message : "Could not archive the Design.");
+    }
+  };
+
+  const openArchiveProductDialog = (productId: string) => {
+    setArchiveProductTargetId(productId);
+    setArchiveProductConfirmationName("");
+    setArchiveProductError(null);
+    setArchiveProductBlocker(null);
+  };
+
+  const closeArchiveProductDialog = () => {
+    if (archiveProductBusy) return;
+    setArchiveProductTargetId(null);
+    setArchiveProductConfirmationName("");
+    setArchiveProductError(null);
+    setArchiveProductBlocker(null);
+  };
+
+  const confirmProductArchive = async () => {
+    if (!archiveProductTarget
+      || archiveProductConfirmationName !== archiveProductTarget.name
+      || archiveProductBusy) return;
+    setArchiveProductBusy(true);
+    setArchiveProductError(null);
+    setArchiveProductBlocker(null);
+    try {
+      await archiveProduct(archiveProductTarget, createClientKey("product_archive"));
+      await Promise.all([refreshProducts(), loadProjects()]);
+      setArchiveProductTargetId(null);
+      setArchiveProductConfirmationName("");
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.code === "PRODUCT_NOT_EMPTY") {
+        const details = cause.details && typeof cause.details === "object" && !Array.isArray(cause.details)
+          ? cause.details as Record<string, unknown>
+          : {};
+        const activeDesigns = Array.isArray(details.activeDesigns)
+          ? details.activeDesigns.flatMap((item) => {
+              const value = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : null;
+              return value && typeof value.id === "string" && typeof value.name === "string"
+                ? [{
+                    id: value.id,
+                    name: value.name,
+                    version: Number(value.version ?? 0),
+                    updatedAt: String(value.updatedAt ?? ""),
+                  }]
+                : [];
+            })
+          : [];
+        setArchiveProductBlocker({
+          activeDesignCount: Number(details.activeDesignCount ?? activeDesigns.length),
+          activeDesigns,
+          truncated: details.truncated === true,
+        });
+        setArchiveProductError("Archive the listed Designs first. No Product state was changed.");
+        return;
+      }
+      if (cause instanceof ApiError && ["VERSION_CONFLICT", "RESOURCE_STATE_CONFLICT"].includes(cause.code)) {
+        await refreshProducts();
+        setArchiveProductConfirmationName("");
+        setArchiveProductError("The Product changed while this confirmation was open. Its current summary was reloaded; type the name again to confirm.");
+        return;
+      }
+      setArchiveProductError(cause instanceof Error ? cause.message : "Could not archive the Product.");
+    } finally {
+      setArchiveProductBusy(false);
     }
   };
 
@@ -560,12 +785,22 @@ export function Dashboard() {
             {offline ? <CloudOff size={14} /> : <Server size={14} />}
             {offline ? "Server unavailable" : "Self-hosted"}
           </div>
+          <button className="icon-button" aria-label="Open Activity" title="Activity" onClick={() => navigate("/activity")}><BellRing size={15} /></button>
+          <button className="icon-button" aria-label="Open Archived workspace" title="Archived" onClick={() => navigate("/archived")}><Archive size={15} /></button>
           <button className="icon-button" aria-label="Open administration" title="Administration" onClick={() => navigate("/administration")}><Settings size={15} /></button>
           <button className="avatar-button" aria-label="Workspace account">MZ</button>
         </div>
       </header>
 
       <section className="dashboard-main">
+        {startHere && <section className="dashboard-start-here" aria-labelledby="dashboard-start-title">
+          <div className="dashboard-start-icon">{workflowStateLoading ? <LoaderCircle size={20} className="spin" /> : awaitingReview ? <BellRing size={20} /> : <Sparkles size={20} />}</div>
+          <div><span>{workflowStateLoading ? "Checking workspace state" : startHere.eyebrow}</span><h2 id="dashboard-start-title">{startHere.title}</h2><p>{startHere.detail}</p></div>
+          <div className="dashboard-start-actions">
+            <button className="button button-primary" disabled={workflowStateLoading} onClick={startHere.run}>{startHere.action}<ArrowRight size={14} /></button>
+            <button className="button button-secondary" onClick={() => navigate("/activity")}>Activity</button>
+          </div>
+        </section>}
         <div className="hero-row">
           <div>
             <div className="eyebrow"><Bot size={14} /> AI-first product design and specification</div>
@@ -626,7 +861,11 @@ export function Dashboard() {
                       <p>{product.description || `${product.designCount} ${product.designCount === 1 ? "Design" : "Designs"} · ${product.defaultLocale.toUpperCase()} · ${product.defaultDirection.toUpperCase()}`}</p>
                     </div>
                   </div>
-                  <button className="button button-secondary" onClick={() => openCreateDialog(product.id)}><Plus size={14} /> Add design</button>
+                  <div className="product-section-actions">
+                    <button className="button button-secondary" onClick={() => navigate("/archived")}><Archive size={14} /> Archived</button>
+                    <button className="button button-secondary" disabled={archiveProductBusy} onClick={() => openArchiveProductDialog(product.id)}><Archive size={14} /> Archive Product</button>
+                    <button className="button button-secondary" onClick={() => openCreateDialog(product.id)}><Plus size={14} /> Add design</button>
+                  </div>
                 </header>
                 <div className="project-grid">
                   {designs.map((project, index) => (
@@ -688,7 +927,7 @@ export function Dashboard() {
 
       <footer className="dashboard-footer">
         <span><Check size={13} /> Your design data stays on your server</span>
-        <span>FormaSpec 0.3 · @FormaSpec agent</span>
+          <span>FormaSpec 0.4 · @FormaSpec agent</span>
       </footer>
 
       {modalOpen && (
@@ -738,6 +977,27 @@ export function Dashboard() {
             onConfirmationNameChange={(value) => { setArchiveConfirmationName(value); setArchiveError(null); }}
             onClose={closeArchiveDialog}
             onConfirm={() => void confirmArchive()}
+          />
+        </div>
+      )}
+
+      {archiveProductTarget && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.currentTarget === event.target) closeArchiveProductDialog();
+        }}>
+          <ArchiveProductDialog
+            product={archiveProductTarget}
+            confirmationName={archiveProductConfirmationName}
+            archiving={archiveProductBusy}
+            error={archiveProductError}
+            blocker={archiveProductBlocker}
+            onConfirmationNameChange={(value) => {
+              setArchiveProductConfirmationName(value);
+              setArchiveProductError(null);
+              setArchiveProductBlocker(null);
+            }}
+            onClose={closeArchiveProductDialog}
+            onConfirm={() => void confirmProductArchive()}
           />
         </div>
       )}

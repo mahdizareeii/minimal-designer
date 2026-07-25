@@ -21,6 +21,7 @@ const ENGINEER = "redesign-engineer@example.test";
 const VIEWER = "redesign-viewer@example.test";
 
 const REDESIGN_ROUTE_KEYS = [
+  "GET /api/redesign-assessments",
   "POST /api/redesign-assessments",
   "GET /api/redesign-assessments/:assessmentId",
   "GET /api/redesign-assessments/:assessmentId/stages/:stage/artifact",
@@ -377,7 +378,7 @@ function mcpTool(
 }
 
 describe("Redesign Studio HTTP authorization", () => {
-  it("exercises all six routes with shared project ownership and immutable stage history", async () => {
+  it("exercises all seven routes with shared project ownership and immutable stage history", async () => {
     const fixture = await setup("happy");
     const { application } = fixture;
     const registered = [...PROTECTED_NON_MCP_ROUTE_CONTRACTS.keys()]
@@ -404,6 +405,27 @@ describe("Redesign Studio HTTP authorization", () => {
       currentVersion: 1,
       sourceMutation: "none",
     });
+
+    const listed = await application.app.inject({
+      method: "GET",
+      url: "/api/redesign-assessments?status=active&limit=25",
+      remoteAddress: "127.0.0.1",
+      headers: trustedHeaders(VIEWER),
+    });
+    expect(listed.statusCode, listed.body).toBe(200);
+    expect(listed.json<{
+      assessments: Array<{
+        assessment: RedesignAssessmentResult;
+        design: { id: string; name: string } | null;
+        websiteDeepLink: string;
+      }>;
+    }>().assessments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        assessment: expect.objectContaining({ id: assessment.id }),
+        design: expect.objectContaining({ id: fixture.allowed.id }),
+        websiteDeepLink: `https://design.example.test/redesign/${assessment.id}`,
+      }),
+    ]));
 
     const read = await application.app.inject({
       method: "GET",
@@ -685,6 +707,8 @@ describe("Redesign Studio HTTP authorization", () => {
       fixture.allowedAssessment.id,
       "connect_inspect",
     ).assessmentId).toBe(fixture.allowedAssessment.id);
+    expect(application.redesign.listAssessments(actorId).map((assessment) => assessment.id))
+      .toEqual([fixture.allowedAssessment.id]);
     let revised = application.redesign.reviseCurrentStage(actorId, fixture.allowedAssessment.id, {
       expectedVersion: 1,
       expectedDesignVersion: 1,
@@ -703,11 +727,35 @@ describe("Redesign Studio HTTP authorization", () => {
     });
     expect(allowedMcp.statusCode, allowedMcp.body).toBe(200);
     expect(allowedMcp.json<{
-      result: { structuredContent: { ok: boolean; assessment: { id: string; designId: string } } };
+      result: {
+        structuredContent: {
+          ok: boolean;
+          assessment: { id: string; designId: string };
+          websiteDeepLink: string;
+        };
+      };
     }>().result.structuredContent).toMatchObject({
       ok: true,
       assessment: { id: revised.id, designId: fixture.allowed.id },
+      websiteDeepLink: `https://design.example.test/redesign/${revised.id}`,
     });
+    const listedMcp = await mcpTool(application, paired.grant.token, "redesign_assessment_list", {});
+    expect(listedMcp.statusCode, listedMcp.body).toBe(200);
+    expect(listedMcp.json<{
+      result: {
+        structuredContent: {
+          assessments: Array<{
+            assessment: { id: string };
+            design: { id: string; name: string } | null;
+            websiteDeepLink: string;
+          }>;
+        };
+      };
+    }>().result.structuredContent.assessments).toEqual([expect.objectContaining({
+      assessment: expect.objectContaining({ id: revised.id }),
+      design: expect.objectContaining({ id: fixture.allowed.id }),
+      websiteDeepLink: `https://design.example.test/redesign/${revised.id}`,
+    })]);
 
     const hidden = [
       ...fixture.markers,

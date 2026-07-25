@@ -65,6 +65,7 @@ export interface AgentVerification {
   verified: true;
   checks: string[];
   serverName: "formaspec";
+  serverVersion: string;
   essentialTools: string[];
   upstreamOrigin: string;
   dataStoreId: string;
@@ -538,6 +539,7 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         verified?: unknown;
         checks?: unknown;
         serverName?: unknown;
+        serverVersion?: unknown;
         essentialTools?: unknown;
         upstreamOrigin?: unknown;
         dataStoreId?: unknown;
@@ -549,6 +551,8 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
       if (body.verified !== true || !Array.isArray(body.checks)
         || !body.checks.every((check) => typeof check === "string")
         || body.serverName !== "formaspec"
+        || typeof body.serverVersion !== "string"
+        || !/^\d+\.\d+\.\d+$/.test(body.serverVersion)
         || essentialTools === null
         || typeof body.upstreamOrigin !== "string"
         || body.upstreamOrigin !== new URL(state.upstreamMcpUrl ?? "http://invalid.local/mcp").origin
@@ -562,6 +566,7 @@ export function createBridgeController(projectRoot: string, environment: NodeJS.
         verified: true,
         checks: body.checks,
         serverName: "formaspec",
+        serverVersion: body.serverVersion,
         essentialTools,
         upstreamOrigin: body.upstreamOrigin,
         dataStoreId: body.dataStoreId,

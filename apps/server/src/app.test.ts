@@ -980,8 +980,10 @@ describe("designer server", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json<{ result: { serverInfo: { name: string; version: string }; instructions: string } }>();
     expect(body.result.serverInfo.name).toBe("formaspec");
-    expect(body.result.serverInfo.version).toBe("0.3.0");
+    expect(body.result.serverInfo.version).toBe("0.4.0");
     expect(body.result.instructions).toContain("one exact Product and Design");
+    expect(body.result.instructions).toContain("context_get is informational only");
+    expect(body.result.instructions).toContain("task_create.selection_confirmation");
     expect(body.result.instructions).toContain("frozen product specification");
     expect(body.result.instructions).toContain("effective design-system release");
     expect(body.result.instructions).toContain("repository inventory/mappings");
@@ -991,7 +993,7 @@ describe("designer server", () => {
     expect(body.result.instructions).toContain("Only a human may Commit or Discard");
     expect(body.result.instructions).toContain("agents never commit");
     expect(body.result.instructions).toContain("tmp:<label>");
-    expect(body.result.instructions.length).toBeLessThanOrEqual(512);
+    expect(body.result.instructions.length).toBeLessThanOrEqual(1_024);
 
     const toolsResponse = await mcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     expect(toolsResponse.statusCode).toBe(200);
@@ -1019,11 +1021,14 @@ describe("designer server", () => {
       "implementation_mapping_read",
       "implementation_mapping_create",
       "handoff_read",
+      "redesign_assessment_list",
       "redesign_assessment_create",
       "redesign_stage_artifact_read",
       "redesign_stage_artifact_write",
       "redesign_stage_transition",
     ]));
+    expect(tools.find((tool) => tool.name === "task_create")?.inputSchema?.properties)
+      .toHaveProperty("selection_confirmation");
     expect(tools.find((tool) => tool.name === "redesign_stage_transition")?.description).toContain("review-ready");
     expect(tools.find((tool) => tool.name === "design_read")?.inputSchema?.properties).toMatchObject({
       node_id: expect.any(Object),
@@ -1210,6 +1215,17 @@ describe("designer server", () => {
       expiresInSeconds: 3_600,
     });
     mcpToken = application.enterprise.pairAgentConnection(previewConnection.nonce).grant.token;
+    const confirmedTarget = application.database.sqlite.prepare(
+      `SELECT design.id AS design_id, design.name AS design_name,
+              product.id AS product_id, product.name AS product_name
+       FROM designs design JOIN products product ON product.id = design.product_id
+       WHERE design.id = ?`,
+    ).get(created.result.structuredContent.document.id) as {
+      design_id: string;
+      design_name: string;
+      product_id: string;
+      product_name: string;
+    };
     const taskResponse = await mcpRequest({
       jsonrpc: "2.0",
       id: 51,
@@ -1221,6 +1237,11 @@ describe("designer server", () => {
           brief: "Create the MCP card as an exact proposal",
           selection: [rootNodeId],
           base_version: 1,
+          selection_confirmation: {
+            source: "user_confirmed",
+            ...confirmedTarget,
+            base_version: 1,
+          },
           expected_output: "design_preview",
           idempotency_key: "mcp-preview-task-create-0001",
         },
@@ -1370,6 +1391,11 @@ describe("designer server", () => {
           brief: "Archive the MCP card after human review",
           selection: [createdCardId],
           base_version: 2,
+          selection_confirmation: {
+            source: "user_confirmed",
+            ...confirmedTarget,
+            base_version: 2,
+          },
           expected_output: "design_preview",
           idempotency_key: "mcp-archive-task-create-0001",
         },

@@ -32,6 +32,7 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["GET", "/api/products/:productId"],
     ["PATCH", "/api/products/:productId"],
     ["POST", "/api/products/:productId/archive"],
+    ["POST", "/api/products/:productId/restore"],
     ["POST", "/api/products/:productId/design-move-previews"],
     ["GET", "/api/product-move-previews/:previewId"],
     ["POST", "/api/product-move-previews/:previewId/commit"],
@@ -44,6 +45,9 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["POST", "/api/agent-tasks/:taskId/claim"],
     ["POST", "/api/agent-tasks/:taskId/transition"],
   ]),
+  ...evidence("apps/server/src/agent-task-list-authorization.test.ts", [
+    ["GET", "/api/agent-tasks"],
+  ]),
   ...evidence("apps/server/src/design-system-opaque-id-http.test.ts", [
     ["GET", "/api/design-system-releases/:releaseId"],
     ["GET", "/api/design-system-upgrade-previews/:previewId"],
@@ -54,6 +58,7 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
   ]),
   ...evidence("apps/server/src/product-specification-http-authorization.test.ts", [
     ["GET", "/api/designs/:id/product-specification"],
+    ["GET", "/api/designs/:id/product-specification/history"],
     ["POST", "/api/designs/:id/product-specification/previews"],
     ["GET", "/api/designs/:id/product-specification/previews/:previewId"],
     ["POST", "/api/designs/:id/product-specification/previews/:previewId/commit"],
@@ -73,6 +78,7 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["POST", "/api/handoffs/:handoffId/cancel"],
   ]),
   ...evidence("apps/server/src/redesign-studio-http-authorization.test.ts", [
+    ["GET", "/api/redesign-assessments"],
     ["POST", "/api/redesign-assessments"],
     ["GET", "/api/redesign-assessments/:assessmentId"],
     ["GET", "/api/redesign-assessments/:assessmentId/stages/:stage/artifact"],
@@ -119,6 +125,7 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
   ]),
   ...evidence("apps/server/src/design-archive-http.test.ts", [
     ["POST", "/api/designs/:id/archive"],
+    ["POST", "/api/designs/:id/restore-archive"],
   ]),
   ...evidence("apps/server/src/core-preview-http-authorization.test.ts", [
     ["POST", "/api/designs/:id/previews"],

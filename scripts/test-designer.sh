@@ -276,12 +276,11 @@ run_static_contract_tests() {
     fail_test "launcher is executable (run: chmod +x designer)"
   fi
 
-  local menu_input="$TMP_ROOT/menu-input.txt"
-  printf '5\n' >"$menu_input"
-  capture bash -c 'bash "$1" <"$2"' _ "$LAUNCHER" "$menu_input"
-  expect_status 0 "no-argument guided menu works on Bash with nounset enabled"
-  expect_contains "guided launcher" "no-argument invocation displays the guided menu"
-  expect_contains "FormaSpec launcher" "guided menu can select help"
+  capture bash "$LAUNCHER"
+  expect_status 0 "no-argument start guidance works on Bash with nounset enabled"
+  expect_contains "Next action:" "no-argument invocation displays one actionable start step"
+  expect_contains "Website:" "no-argument invocation displays the website URL"
+  expect_not_contains "Choose [1-5]" "no-argument invocation does not show the old mode-selection menu"
 
   capture bash "$LAUNCHER" help
   expect_status 0 "help exits successfully"
@@ -353,6 +352,14 @@ EOF
   expect_contains "guard=1" "ensure-running delegation sets the recursion guard"
   expect_contains "apps/cli/dist/index.js" "ensure-running delegation selects the compiled CLI entry"
   expect_contains $'argc=2\narg=ensure-running\narg=--json' "ensure-running delegation preserves the exact argument vector"
+
+  capture env \
+    PATH="$delegated_bin:/usr/bin:/bin" \
+    FORMASPEC_LEGACY_DELEGATE=0 \
+    bash "$delegated_launcher"
+  expect_status 0 "compatibility launcher delegates no-argument guidance to formaspecctl"
+  expect_contains "guard=1" "no-argument delegation sets the recursion guard"
+  expect_contains $'argc=0' "no-argument delegation preserves an empty argument vector"
 }
 
 run_location_and_read_only_tests() {

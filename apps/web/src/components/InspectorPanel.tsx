@@ -349,9 +349,12 @@ function DesignInspector({ node, tab }: { node: DesignNode; tab: PrimaryInspecto
       {tab === "logic" && (
         <>
           <div className="inspector-section">
-            <div className="inspector-section-title"><span>Business logic</span><span>Structured handoff</span></div>
+            <div className="inspector-section-title"><span>Node logic — saved with design revisions</span><span>Structured handoff</span></div>
             <label className="inspector-field textarea-field wide"><textarea value={metadataText("business_logic")} placeholder="Describe conditions, permissions, validation, and outcomes for this entity." onChange={(event) => setMetadataText("business_logic", event.target.value)} /></label>
             <label className="inspector-field textarea-field wide" style={{ marginTop: 7 }}><textarea value={metadataText("acceptance_notes")} placeholder="Acceptance notes linked to this design entity." onChange={(event) => setMetadataText("acceptance_notes", event.target.value)} /></label>
+            <button className="button button-secondary inspector-product-history-link" onClick={() => {
+              window.dispatchEvent(new Event("formaspec:open-product-logic-history"));
+            }}><Clock3 size={11} /> Open canonical Product logic history</button>
           </div>
           <div className="inspector-section">
             <div className="inspector-section-title"><span>Tags</span><span>{node.tags?.length ?? 0}</span></div>

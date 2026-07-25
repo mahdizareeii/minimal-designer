@@ -31,6 +31,10 @@ import type { EnterpriseService } from "./enterprise-service.js";
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
 const designIdParams = z.object({ id: z.string().min(1).max(200) });
 const dataStoreIdSchema = z.string().regex(/^store_[a-f0-9]{32}$/);
+const booleanQuerySchema = z.union([
+  z.boolean(),
+  z.enum(["true", "false"]).transform((value) => value === "true"),
+]);
 
 const createDesignSchema = z.object({
   name: z.string().trim().min(1).max(255),
@@ -43,6 +47,12 @@ const archiveDesignSchema = z.object({
   expectedVersion: z.number().int().positive(),
   idempotencyKey: idempotencyKeySchema,
   confirmationName: z.string().min(1).max(255),
+}).strict();
+
+const restoreArchivedDesignSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  expectedArchivedAt: z.string().datetime({ offset: true }),
+  idempotencyKey: idempotencyKeySchema,
 }).strict();
 
 const previewSchema = z.object({
@@ -365,8 +375,9 @@ export function registerHttpRoutes(
     const query = z.object({
       limit: z.coerce.number().int().min(1).max(100).optional(),
       cursor: z.string().max(4_096).optional(),
+      includeArchived: booleanQuerySchema.optional(),
     }).parse(request.query);
-    return service.listDesigns(request.actorId, query.limit, query.cursor);
+    return service.listDesigns(request.actorId, query.limit, query.cursor, query.includeArchived);
   });
 
   app.post("/api/designs", async (request, reply) => {
@@ -388,6 +399,12 @@ export function registerHttpRoutes(
     const { id } = designIdParams.parse(request.params);
     const input = archiveDesignSchema.parse(request.body);
     return service.archiveDesign(request.actorId, id, input);
+  });
+
+  app.post("/api/designs/:id/restore-archive", async (request) => {
+    service.authorizeDesignArchive(request.actorId, rawRequestField(request.params, "id"));
+    const { id } = designIdParams.parse(request.params);
+    return service.restoreArchivedDesign(request.actorId, id, restoreArchivedDesignSchema.parse(request.body));
   });
 
   app.post("/api/designs/:id/previews", async (request, reply) => {

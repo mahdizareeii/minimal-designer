@@ -183,7 +183,7 @@ describe("confirmed project archival", () => {
     expectDomainError(() => service.archiveDesign(actorId, created.design.id, {
       ...input,
       idempotencyKey: "archive-new-key-after-delete-0001",
-    }), "NOT_FOUND");
+    }), "RESOURCE_STATE_CONFLICT");
   });
 
   it("rolls back the tombstone and idempotency record when a later transaction write fails", () => {
@@ -220,6 +220,38 @@ describe("confirmed project archival", () => {
     ).get()).toBeUndefined();
     expect(service.getDesign("local", created.design.id).design.id).toBe(created.design.id);
     expect(service.getContext("local")).toMatchObject({ designId: created.design.id });
+
+    database.sqlite.exec("DROP TRIGGER reject_design_archive_audit");
+    const archived = service.archiveDesign("local", created.design.id, {
+      expectedVersion: created.design.version,
+      idempotencyKey: "archive-before-atomic-restore-0001",
+      confirmationName: created.design.name,
+    });
+    database.sqlite.exec(`
+      CREATE TRIGGER reject_design_restore_audit
+      BEFORE INSERT ON audit_events
+      WHEN NEW.action = 'design.restore_archive'
+      BEGIN SELECT RAISE(ABORT, 'injected restore audit failure'); END;
+    `);
+    expect(() => service.restoreArchivedDesign("local", created.design.id, {
+      expectedVersion: created.design.version,
+      expectedArchivedAt: archived.archivedAt,
+      idempotencyKey: "restore-archive-atomic-failure-0001",
+    })).toThrow("injected restore audit failure");
+    expect(database.sqlite.prepare(
+      "SELECT key FROM system_metadata WHERE key = ?",
+    ).get(`design_archive:${created.design.id}`)).toEqual({ key: `design_archive:${created.design.id}` });
+    expect(database.sqlite.prepare(
+      "SELECT key FROM idempotency WHERE actor_id = 'local' AND scope = ?",
+    ).get(`design:${created.design.id}:restore-archive`)).toBeUndefined();
+    expect(database.sqlite.prepare(
+      `SELECT id FROM event_outbox
+       WHERE json_extract(payload_json, '$.restoredFromArchive') = 1`,
+    ).get()).toBeUndefined();
+    expect(database.sqlite.prepare(
+      "SELECT canonical_specification_design_id FROM products WHERE id = ?",
+    ).get(created.design.productId)).toEqual({ canonical_specification_design_id: null });
+    expectDomainError(() => service.getDesign("local", created.design.id), "NOT_FOUND");
   });
 
   it("exposes one strict confirmed-archive REST endpoint and filters subsequent list/read requests", async () => {
@@ -262,16 +294,31 @@ describe("confirmed project archival", () => {
       },
     });
     expect(response.statusCode, response.body).toBe(200);
-    expect(response.json()).toMatchObject({
+    const archived = response.json<{
+      id: string;
+      name: string;
+      version: number;
+      revisionId: string;
+      status: string;
+      archivedAt: string;
+    }>();
+    expect(archived).toMatchObject({
       id: created.design.id,
       name: created.design.name,
       version: created.design.version,
       revisionId: created.design.revisionId,
+      status: "archived",
     });
 
     const list = await application.app.inject({ method: "GET", url: "/api/designs" });
     expect(list.statusCode, list.body).toBe(200);
     expect(list.json()).toEqual({ designs: [], nextCursor: null });
+    const explicitActiveList = await application.app.inject({
+      method: "GET",
+      url: "/api/designs?includeArchived=false",
+    });
+    expect(explicitActiveList.statusCode, explicitActiveList.body).toBe(200);
+    expect(explicitActiveList.json()).toEqual({ designs: [], nextCursor: null });
     const read = await application.app.inject({ method: "GET", url: `/api/designs/${created.design.id}` });
     expect(read.statusCode).toBe(404);
     expect(read.json<{ error: { code: string } }>().error.code).toBe("NOT_FOUND");
@@ -280,5 +327,77 @@ describe("confirmed project archival", () => {
     expect(assetRead.json<{ error: { code: string } }>().error.code).toBe("NOT_FOUND");
     expect(application.database.sqlite.prepare("SELECT size_bytes FROM assets WHERE id = ?").get(asset.id))
       .toEqual({ size_bytes: asset.sizeBytes });
+
+    const archivedList = await application.app.inject({
+      method: "GET",
+      url: "/api/designs?includeArchived=true",
+    });
+    expect(archivedList.statusCode, archivedList.body).toBe(200);
+    expect(archivedList.json()).toEqual({
+      designs: [{
+        id: created.design.id,
+        productId: created.design.productId,
+        name: created.design.name,
+        version: created.design.version,
+        revisionId: created.design.revisionId,
+        status: "archived",
+        archivedAt: archived.archivedAt,
+        createdAt: created.design.createdAt,
+        updatedAt: created.design.updatedAt,
+      }],
+      nextCursor: null,
+    });
+
+    const staleRestore = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${created.design.id}/restore-archive`,
+      payload: {
+        expectedVersion: created.design.version,
+        expectedArchivedAt: "2026-01-01T00:00:00.000Z",
+        idempotencyKey: "restore-archive-http-stale-0001",
+      },
+    });
+    expect(staleRestore.statusCode, staleRestore.body).toBe(409);
+    expect(staleRestore.json()).toMatchObject({ error: { code: "RESOURCE_STATE_CONFLICT" } });
+
+    const restoreInput = {
+      expectedVersion: created.design.version,
+      expectedArchivedAt: archived.archivedAt,
+      idempotencyKey: "restore-archive-through-http-0001",
+    };
+    const restoredResponse = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${created.design.id}/restore-archive`,
+      payload: restoreInput,
+    });
+    expect(restoredResponse.statusCode, restoredResponse.body).toBe(200);
+    const restored = restoredResponse.json();
+    expect(restored).toEqual({
+      id: created.design.id,
+      productId: created.design.productId,
+      name: created.design.name,
+      version: created.design.version,
+      revisionId: created.design.revisionId,
+      status: "active",
+      archivedAt: null,
+      createdAt: created.design.createdAt,
+      updatedAt: created.design.updatedAt,
+    });
+    const restoreReplay = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${created.design.id}/restore-archive`,
+      payload: restoreInput,
+    });
+    expect(restoreReplay.statusCode, restoreReplay.body).toBe(200);
+    expect(restoreReplay.json()).toEqual(restored);
+    expect(application.database.sqlite.prepare(
+      "SELECT value FROM system_metadata WHERE key = ?",
+    ).get(`design_archive:${created.design.id}`)).toBeUndefined();
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM revisions WHERE design_id = ?",
+    ).get(created.design.id)).toEqual({ count: 1 });
+    expect(application.database.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM assets WHERE id = ? AND design_id = ?",
+    ).get(asset.id, created.design.id)).toEqual({ count: 1 });
   });
 });

@@ -468,7 +468,7 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
       throw error;
     }
     if (current.archivingProjectId !== null) {
-      const error = new ApiError("Another project deletion is already in progress.", {
+      const error = new ApiError("Another Design archive is already in progress.", {
         code: "ARCHIVE_IN_PROGRESS",
       });
       set({ error: error.message });
@@ -500,14 +500,14 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         archivingProjectId: state.archivingProjectId === projectId ? null : state.archivingProjectId,
         offline: false,
         error: null,
-        notice: `Deleted “${project.name}” from the active workspace. Immutable history and assets remain retained.`,
+        notice: `Archived Design “${project.name}”. Immutable history and assets remain retained.`,
       }));
     } catch (error) {
       manualMutationIdempotency.fail(attemptScope, attemptFingerprint, error);
       set((state) => state.archivingProjectId !== projectId ? {} : {
         archivingProjectId: null,
         offline: error instanceof ApiError && error.code === "NETWORK_ERROR",
-        error: error instanceof Error ? error.message : "Could not delete the project.",
+        error: error instanceof Error ? error.message : "Could not archive the Design.",
       });
       throw error;
     }
@@ -1417,8 +1417,8 @@ export const useDesignerStore = create<DesignerState>((set, get) => ({
         offline: false,
         error: null,
         notice: hadUnsavedChanges
-          ? "This project was deleted elsewhere. Download the protected local recovery before leaving."
-          : "This project was deleted elsewhere and removed from the active workspace.",
+          ? "This Design was archived elsewhere. Download the protected local recovery before leaving."
+          : "This Design was archived elsewhere and removed from the active workspace.",
       });
       return;
     }

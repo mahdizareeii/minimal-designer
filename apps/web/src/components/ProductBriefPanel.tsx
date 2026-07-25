@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clipboard,
+  Clock3,
   ExternalLink,
   FileCheck2,
   LoaderCircle,
@@ -24,6 +25,7 @@ import {
   listAgentConnections,
   listAgentTasks,
   previewProductSpecification,
+  previewTypedProductSpecification,
   readDesignPreview,
   readAgentTask,
   readProductSpecification,
@@ -40,6 +42,7 @@ import { createClientKey } from "../domain";
 import type { ActivityPanelTab } from "../lib/editor-information-architecture";
 import { PlanningInterview } from "./PlanningInterview";
 import { EngineeringHandoffPanel } from "./EngineeringHandoffPanel";
+import { ProductSpecificationHistory } from "./ProductSpecificationHistory";
 import {
   AgentTaskWorkflowCard,
   PreviewDiagnosticsSummary,
@@ -51,7 +54,7 @@ import {
   type PreviewRenderStatus,
 } from "./AgentPreviewReview";
 
-type SpecView = "brief" | "structured";
+type SpecView = "brief" | "structured" | "history";
 
 export interface CodexConnectionSummary {
   state: AgentConnectionViewState;
@@ -189,7 +192,7 @@ export function agentPreviewReadFailureDisposition(cause: unknown): AgentPreview
     return {
       clearReview: true,
       closeDialog: true,
-      message: "This FormaSpec preview expired and can no longer be committed. Refresh the task, then ask Codex to create a new preview.",
+      message: "This preview expired. The durable task can be reopened in Codex to generate a new preview with an exact persisted render.",
     };
   }
   if (cause instanceof ApiError && cause.code === "TASK_EXPIRED") {
@@ -332,6 +335,8 @@ export function ProductBriefPanel() {
   const [brief, setBrief] = useState("");
   const [loadedBrief, setLoadedBrief] = useState("");
   const [specification, setSpecification] = useState<ProductSpecificationRecord | null>(null);
+  const [structuredDraft, setStructuredDraft] = useState<Record<string, unknown> | null>(null);
+  const [structuredDraftSourceVersion, setStructuredDraftSourceVersion] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [savingSpec, setSavingSpec] = useState(false);
   const [startingAgent, setStartingAgent] = useState(false);
@@ -377,11 +382,24 @@ export function ProductBriefPanel() {
   useEffect(() => {
     setSubmissionFeedback(idleSubmissionFeedback);
     setLatestTask(null);
+    setStructuredDraft(null);
+    setStructuredDraftSourceVersion(null);
     setReviewError(null);
     setConnectionLoading(true);
     setConnectionError(null);
     clearAgentReview();
   }, [clearAgentReview, designId]);
+
+  useEffect(() => {
+    const openHistory = () => {
+      setCollapsed(false);
+      setPanelTab("activity");
+      setSpecView("history");
+      window.requestAnimationFrame(() => window.document.getElementById("product-specification-workspace")?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+    };
+    window.addEventListener("formaspec:open-product-logic-history", openHistory);
+    return () => window.removeEventListener("formaspec:open-product-logic-history", openHistory);
+  }, []);
 
   useEffect(() => {
     if (!designId) return;
@@ -497,8 +515,12 @@ export function ProductBriefPanel() {
     };
   }, [designId, refreshAgentActivity]);
 
-  const counts = useMemo(() => specificationCounts(specification?.specification ?? null), [specification]);
-  const briefChanged = brief !== loadedBrief;
+  const effectiveSpecification = structuredDraft ?? specification?.specification ?? null;
+  const counts = useMemo(() => specificationCounts(effectiveSpecification), [effectiveSpecification]);
+  const briefChanged = brief !== loadedBrief || structuredDraft !== null;
+  const resumableLatestTask = latestTask !== null
+    && ["queued", "claimed", "in_progress"].includes(latestTask.status)
+    && !briefChanged;
   const connectionSummary = useMemo(
     () => summarizeCodexConnection(agentConnections, connectionError, connectionLoading, designId ?? null),
     [agentConnections, connectionError, connectionLoading, designId],
@@ -514,7 +536,12 @@ export function ProductBriefPanel() {
     setError(null);
     try {
       const currentVersion = specification?.version ?? 0;
-      const fingerprint = `${designId}\u0000${currentVersion}\u0000${normalizedBrief}`;
+      const nextStructuredSpecification = structuredDraft === null ? null : {
+        ...structuredDraft,
+        version: currentVersion + 1,
+        natural_language_brief: normalizedBrief,
+      };
+      const fingerprint = `${designId}\u0000${currentVersion}\u0000${normalizedBrief}\u0000${nextStructuredSpecification === null ? "brief" : JSON.stringify(nextStructuredSpecification)}`;
       let attempt = specificationCommitAttempt.current;
       if (!attempt || attempt.fingerprint !== fingerprint) {
         attempt = { fingerprint, previewId: null, idempotencyKey: createClientKey("product_spec") };
@@ -522,7 +549,9 @@ export function ProductBriefPanel() {
       }
       if (!attempt.previewId) {
         const preview = await withSubmissionTimeout(
-          previewProductSpecification(designId, currentVersion, normalizedBrief),
+          nextStructuredSpecification === null
+            ? previewProductSpecification(designId, currentVersion, normalizedBrief)
+            : previewTypedProductSpecification(designId, currentVersion, nextStructuredSpecification),
           "Product specification preview",
         );
         if (!preview.canCommit) throw new Error("The product specification preview contains validation errors.");
@@ -533,27 +562,45 @@ export function ProductBriefPanel() {
         attempt.previewId,
         currentVersion,
         attempt.idempotencyKey,
+        structuredDraftSourceVersion === null
+          ? "Update product brief"
+          : `Edit product specification version ${structuredDraftSourceVersion} as a new immutable version`,
       ), "Product specification commit");
       specificationCommitAttempt.current = null;
       setSpecification(committed);
       setBrief(committed.naturalLanguageBrief);
       setLoadedBrief(committed.naturalLanguageBrief);
+      setStructuredDraft(null);
+      setStructuredDraftSourceVersion(null);
       setNotice(`Product specification version ${committed.version} saved.`);
       return committed;
     } catch (cause) {
       if (cause instanceof ApiError && ["PREVIEW_EXPIRED", "NOT_FOUND", "VERSION_CONFLICT"].includes(cause.code)) {
         specificationCommitAttempt.current = null;
       }
+      if (cause instanceof ApiError && cause.code === "VERSION_CONFLICT") {
+        try {
+          const latest = await readProductSpecification(designId);
+          setSpecification(latest);
+          setLoadedBrief(latest.naturalLanguageBrief);
+          throw new Error(`Product logic advanced to version ${latest.version} while you were editing. Your draft is preserved. Review it against the refreshed current version, then press Save specification again to explicitly create version ${latest.version + 1}.`);
+        } catch (refreshCause) {
+          if (!(refreshCause instanceof ApiError)) throw refreshCause;
+          throw new Error("Product logic changed concurrently. Your draft is preserved; reload the current version and reconcile it explicitly before saving again.");
+        }
+      }
       throw cause;
     } finally {
       setSavingSpec(false);
     }
-  }, [brief, briefChanged, designId, setNotice, specification]);
+  }, [brief, briefChanged, designId, setNotice, specification, structuredDraft, structuredDraftSourceVersion]);
 
   useEffect(() => {
     if (!designId) return;
     const discard = () => {
       setBrief(loadedBrief);
+      setStructuredDraft(null);
+      setStructuredDraftSourceVersion(null);
       setError(null);
       specificationCommitAttempt.current = null;
     };
@@ -667,6 +714,26 @@ export function ProductBriefPanel() {
       setNotice(successMessage);
       void refreshAgentActivity();
     } catch (cause) {
+      if (cause instanceof ApiError && cause.code === "TASK_STATE_CONFLICT") {
+        const details = cause.details && typeof cause.details === "object" && !Array.isArray(cause.details)
+          ? cause.details as Record<string, unknown>
+          : {};
+        const activeTaskId = typeof details.activeTaskId === "string" ? details.activeTaskId : null;
+        if (activeTaskId) {
+          try {
+            const existing = await readAgentTask(activeTaskId);
+            setLatestTask(existing);
+            setCollapsed(false);
+            setPanelTab("activity");
+            const message = `Project already has task ${existing.id} in ${existing.status.replaceAll("_", " ")}. Resume that durable task instead of creating a duplicate.`;
+            setSubmissionFeedback({ phase: "success", message, task: existing });
+            setNotice(message);
+            return;
+          } catch {
+            // Preserve the original conflict when the referenced task cannot be read safely.
+          }
+        }
+      }
       const message = cause instanceof Error ? cause.message : "Could not create the FormaSpec task.";
       setSubmissionFeedback({ phase: "error", message, task: null });
     } finally {
@@ -677,6 +744,22 @@ export function ProductBriefPanel() {
   const appendAction = (action: string) => {
     setBrief((current) => `${current.trim()}${current.trim() ? "\n\n" : ""}${action}`);
     setSpecView("brief");
+  };
+
+  const editHistoricalSpecification = (record: ProductSpecificationRecord, sourceVersion: number) => {
+    if (!record.specification) {
+      setError(`Version ${sourceVersion} has no structured Product specification to copy.`);
+      return;
+    }
+    const copy = JSON.parse(JSON.stringify(record.specification)) as Record<string, unknown>;
+    copy.version = (specification?.version ?? 0) + 1;
+    copy.natural_language_brief = record.naturalLanguageBrief;
+    setStructuredDraft(copy);
+    setStructuredDraftSourceVersion(sourceVersion);
+    setBrief(record.naturalLanguageBrief);
+    setSpecView("structured");
+    setError(null);
+    setNotice(`Copied Product logic version ${sourceVersion} into a new draft. Saving will create version ${(specification?.version ?? 0) + 1}; version ${sourceVersion} remains unchanged.`);
   };
 
   const copyAgentInstruction = async () => {
@@ -714,6 +797,17 @@ export function ProductBriefPanel() {
     if (!designId || !reviewTask || !reviewPreview) {
       setReviewError("No exact persisted preview is ready for review yet.");
       return;
+    }
+    if (reviewTask.reviewDeepLink) {
+      try {
+        const link = new URL(reviewTask.reviewDeepLink, window.location.origin);
+        if (link.origin === window.location.origin) {
+          navigate(`${link.pathname}${link.search}${link.hash}`);
+          return;
+        }
+      } catch {
+        // Fall back to the validated local route below.
+      }
     }
     navigate(designPreviewReviewPath(designId, reviewPreview.previewId, reviewTask.id));
   };
@@ -788,7 +882,7 @@ export function ProductBriefPanel() {
   if (!document) return null;
 
   return (
-    <section className={`product-workspace-panel ${collapsed ? "is-collapsed" : ""} ${latestTask ? "has-agent-task" : ""} ${reviewPreview ? "has-agent-preview" : ""}`} aria-label="Product specification and agent activity">
+    <section id="product-specification-workspace" className={`product-workspace-panel ${collapsed ? "is-collapsed" : ""} ${latestTask ? "has-agent-task" : ""} ${reviewPreview ? "has-agent-preview" : ""}`} aria-label="Product specification and agent activity">
       <header className="product-panel-header">
         <nav aria-label="Workspace activity panels">
           <button className={panelTab === "activity" ? "is-active" : ""} aria-pressed={panelTab === "activity"} onClick={() => setPanelTab("activity")}><Sparkles size={11} /> Agent activity</button>
@@ -807,6 +901,7 @@ export function ProductBriefPanel() {
               <div className="spec-view-toggle">
                 <button className={specView === "brief" ? "is-active" : ""} onClick={() => setSpecView("brief")}><MessageSquareText size={10} /> Brief</button>
                 <button className={specView === "structured" ? "is-active" : ""} onClick={() => setSpecView("structured")}><Braces size={10} /> Structured</button>
+                <button className={specView === "history" ? "is-active" : ""} onClick={() => setSpecView("history")}><Clock3 size={10} /> History</button>
               </div>
             </div>
 
@@ -818,15 +913,18 @@ export function ProductBriefPanel() {
                 placeholder="Example: Build an internal courier operations dashboard. Dispatchers assign orders, couriers update delivery states, finance can view but not edit payouts, Persian and English are required, and sensitive actions need confirmation…"
                 aria-label="Describe the product, business logic, and constraints"
               />
-            ) : (
+            ) : specView === "structured" ? (
               <div className="structured-spec-summary">
+                {structuredDraftSourceVersion !== null && <p className="structured-spec-draft-note">Editing immutable version {structuredDraftSourceVersion} as new version {(specification?.version ?? 0) + 1}. The historical version will not change.</p>}
                 {counts.length > 0 ? counts.map(([label, count]) => <span key={label}><strong>{count}</strong>{label}</span>) : <p>Save the brief to create the first typed specification proposal. Agents refine this through preview and commit, never through executable business-rule text.</p>}
               </div>
-            )}
+            ) : designId ? (
+              <ProductSpecificationHistory designId={designId} current={specification} onEditAsNew={editHistoricalSpecification} />
+            ) : null}
 
-            <div className="contextual-agent-actions">
+            {specView !== "history" && <div className="contextual-agent-actions">
               {contextualActions.map((action) => <button key={action} onClick={() => appendAction(action)}>{action}</button>)}
-            </div>
+            </div>}
 
             <AgentSubmissionStatus feedback={submissionFeedback} onOpenCodex={openTaskInCodex} />
 
@@ -835,7 +933,11 @@ export function ProductBriefPanel() {
                 {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Task {latestTask.id} · {latestTask.status}</span> : <span>Agent mention: <code>{FORMASPEC_AGENT_MENTION}</code></span>}
               </div>
               <button className="button button-secondary" disabled={!productSpecificationRequiresCommit(specification, briefChanged) || savingSpec || startingAgent || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
-              <button className="button button-primary" disabled={savingSpec || startingAgent} onClick={() => void startWithCodex()}>{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} Submit to @FormaSpec</button>
+              <button
+                className="button button-primary"
+                disabled={savingSpec || startingAgent}
+                onClick={() => resumableLatestTask ? openTaskInCodex(latestTask) : void startWithCodex()}
+              >{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} {resumableLatestTask ? "Resume in Codex" : "Submit to @FormaSpec"}</button>
             </div>
           </div>
 

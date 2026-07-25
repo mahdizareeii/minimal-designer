@@ -163,8 +163,8 @@ const expectedMcpSuccessFields = {
     ["design", "revision", "document", "compatibilityDocument", "schemaVersion", "diagnostics"],
   ],
   node_search: [["nodes"]],
-  design_preview_changes: [["preview", "render"]],
-  design_preview_archive_nodes: [["preview", "render"]],
+  design_preview_changes: [["preview", "render", "taskWebsiteLink"]],
+  design_preview_archive_nodes: [["preview", "render", "taskWebsiteLink"]],
   design_render: [["render"]],
   design_lint: [["diagnostics"]],
   design_commit_preview: [["design", "revision", "diagnostics", "createdIds", "deepLink"]],
@@ -188,7 +188,7 @@ const expectedMcpSuccessFields = {
   design_system_release_read: [["release"]],
   design_system_revision_release_read: [["revisionRelease"]],
   design_system_project_pin_read: [["pin"]],
-  design_system_component_insert_preview: [["preview", "component", "render"]],
+  design_system_component_insert_preview: [["preview", "component", "render", "taskWebsiteLink"]],
   design_system_upgrade_preview: [["preview", "resourceUri", "deepLink"]],
   design_system_upgrade_commit: [["preview", "pin"]],
   repository_inventory_list: [["inventories"]],
@@ -203,12 +203,13 @@ const expectedMcpSuccessFields = {
   handoff_create: [["handoff", "resourceUri", "deepLink"]],
   handoff_update: [["handoff"]],
   handoff_submit_review: [["handoff"]],
-  redesign_assessment_create: [["assessment", "resourceUri"]],
-  redesign_assessment_read: [["assessment"]],
-  redesign_stage_revise: [["assessment"]],
-  redesign_stage_artifact_read: [["stageArtifact"]],
-  redesign_stage_artifact_write: [["assessment", "stageArtifact"]],
-  redesign_stage_transition: [["assessment"]],
+  redesign_assessment_list: [["assessments"]],
+  redesign_assessment_create: [["assessment", "resourceUri", "websiteDeepLink"]],
+  redesign_assessment_read: [["assessment", "websiteDeepLink"]],
+  redesign_stage_revise: [["assessment", "websiteDeepLink"]],
+  redesign_stage_artifact_read: [["stageArtifact", "websiteDeepLink"]],
+  redesign_stage_artifact_write: [["assessment", "stageArtifact", "websiteDeepLink"]],
+  redesign_stage_transition: [["assessment", "websiteDeepLink"]],
 } as const satisfies Record<keyof typeof MCP_TOOL_CONTRACTS, readonly (readonly string[])[]>;
 
 interface AdvertisedOutputBranch {
@@ -225,6 +226,47 @@ interface AdvertisedOutputBranch {
 }
 
 describe("MCP contract matrix", () => {
+  it("makes built-in direct-request prompts wait for exact Product and Design confirmation", async () => {
+    const application = await localApplication();
+    const promptText = async (name: string, args: Record<string, string>): Promise<string> => {
+      const response = await mcpRequest(application, {
+        jsonrpc: "2.0",
+        id: name,
+        method: "prompts/get",
+        params: { name, arguments: args },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const result = response.json<{
+        result: { messages: Array<{ content: { type: string; text?: string } }> };
+      }>().result;
+      expect(result.messages[0]?.content.type).toBe("text");
+      return result.messages[0]?.content.text ?? "";
+    };
+
+    const prompts = [
+      await promptText("create_screen_from_brief", {
+        design_id: "document_prompt_confirmation_0001",
+        brief: "Create a courier login screen.",
+        platform: "phone",
+      }),
+      await promptText("refine_current_selection", {
+        request: "Improve the selected sign-in form.",
+      }),
+    ];
+    for (const text of prompts) {
+      expect(text).toContain("context_get as informational only");
+      expect(text).toContain("never authorizes a Product or Design selection");
+      expect(text).toContain("exact Product name and ID, Design name and ID, and base version");
+      expect(text).toContain("wait for explicit confirmation");
+      expect(text).toContain("selection_confirmation.source must be exact_project_link");
+      expect(text).toContain("otherwise use user_confirmed only after the user confirms");
+      expect(text).toContain("task_create.selection_confirmation");
+      for (const field of ["product_id", "product_name", "design_id", "design_name", "base_version"]) {
+        expect(text).toContain(field);
+      }
+    }
+  });
+
   it("covers every advertised tool and resource with strict top-level schemas", async () => {
     const application = await localApplication();
     const toolsResponse = await mcpRequest(application, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
@@ -247,7 +289,7 @@ describe("MCP contract matrix", () => {
       annotations?: Record<string, boolean>;
     }> } }>().result.tools;
     expect(tools.map((entry) => entry.name).sort()).toEqual(Object.keys(MCP_TOOL_CONTRACTS).sort());
-    expect(tools).toHaveLength(54);
+    expect(tools).toHaveLength(55);
     for (const advertised of tools) {
       const contract = MCP_TOOL_CONTRACTS[advertised.name as keyof typeof MCP_TOOL_CONTRACTS];
       expect(contract, advertised.name).toBeDefined();
@@ -546,6 +588,14 @@ describe("MCP contract matrix", () => {
         brief: "Denied",
         selection: [],
         base_version: 1,
+        selection_confirmation: {
+          source: "user_confirmed",
+          product_id: `product_${"a".repeat(32)}`,
+          product_name: "Contract Product",
+          design_id: "document_contract0001",
+          design_name: "Contract Design",
+          base_version: 1,
+        },
         expected_output: "design_preview",
         idempotency_key: "contract-task-create",
       },
@@ -593,6 +643,7 @@ describe("MCP contract matrix", () => {
       },
       handoff_update: { handoff_id: `handoff_${"a".repeat(32)}`, expected_version: 1, specification: handoffSpecification },
       handoff_submit_review: { handoff_id: `handoff_${"a".repeat(32)}`, expected_version: 1, summary: "Denied" },
+      redesign_assessment_list: {},
       redesign_assessment_create: { design_id: "document_contract0001", expected_design_version: 1, brief: "Denied" },
       redesign_assessment_read: { assessment_id: assessment.id },
       redesign_stage_artifact_read: { assessment_id: assessment.id, stage: "connect_inspect" },

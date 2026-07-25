@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { applicationRoute } from "../App";
 import {
   Administration,
   agentConnectionDisplayName,
@@ -12,23 +13,86 @@ import {
   managedBackupRestoreCommand,
 } from "../components/Administration";
 import { TextTypographyEditor } from "../components/InspectorPanel";
+import { compareProductSpecifications } from "../components/ProductSpecificationHistory";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("FormaSpec browser usability", () => {
-  it("exposes portable import and managed recovery without a server-path input", () => {
-    const markup = renderToStaticMarkup(<Administration />);
+  it("routes focused administration sections and keeps recovery/import workflows separate", () => {
+    const overview = renderToStaticMarkup(<Administration section="overview" />);
+    const backups = renderToStaticMarkup(<Administration section="backups" />);
+    const imports = renderToStaticMarkup(<Administration section="imports" />);
 
-    expect(markup).toContain("FormaSpec Administration");
-    expect(markup).toContain("Managed backups &amp; recovery");
-    expect(markup).toContain("Load a full server backup");
-    expect(markup).toContain("Import one editable project");
-    expect(markup).toContain("Project import is different from full restore");
-    expect(markup).toContain("never accepts or sends an arbitrary server filesystem path");
-    expect(markup).toContain('type="file"');
-    expect(markup).toContain(".formaspec.zip");
+    expect(overview).toContain("FormaSpec Administration");
+    expect(overview).toContain("Workspace overview");
+    expect(overview).toContain("Recommended next action");
+    for (const route of [
+      "/administration",
+      "/administration/agents",
+      "/administration/design-system",
+      "/administration/policy",
+      "/administration/backups",
+      "/administration/imports",
+    ]) expect(overview).toContain(`href="${route}"`);
+
+    expect(backups).toContain("Managed backups &amp; recovery");
+    expect(backups).toContain("Load a full server backup");
+    expect(backups).not.toContain("Import one editable project");
+    expect(imports).toContain("Import one editable project");
+    expect(imports).toContain("Project import is different from full restore");
+    expect(imports).toContain("never accepts or sends an arbitrary server filesystem path");
+    expect(imports).toContain('type="file"');
+    expect(imports).toContain(".formaspec.zip");
+
+    expect(applicationRoute("/administration")).toMatchObject({ kind: "administration", administrationSection: "overview" });
+    expect(applicationRoute("/administration/agents")).toMatchObject({ kind: "administration", administrationSection: "agents" });
+    expect(applicationRoute("/administration/design-system")).toMatchObject({ kind: "administration", administrationSection: "design-system" });
+    expect(applicationRoute("/administration/policy")).toMatchObject({ kind: "administration", administrationSection: "policy" });
+    expect(applicationRoute("/administration/backups")).toMatchObject({ kind: "administration", administrationSection: "backups" });
+    expect(applicationRoute("/administration/imports")).toMatchObject({ kind: "administration", administrationSection: "imports" });
+    expect(applicationRoute("/activity")).toEqual({ kind: "activity" });
+    expect(applicationRoute("/archived")).toEqual({ kind: "archived" });
+  });
+
+  it("compares immutable Product logic collections by stable item ID", () => {
+    const record = (version: number, specification: Record<string, unknown>) => ({
+      version,
+      naturalLanguageBrief: `Version ${version}`,
+      specification,
+    });
+    const diffs = compareProductSpecifications(
+      record(1, {
+        roles: [{ id: "role_dispatcher", title: "Dispatcher" }],
+        flows: [{ id: "flow_assign", title: "Assign order", steps: [] }],
+        business_rules: [{ id: "rule_capacity", title: "Capacity", priority: "normal" }],
+      }),
+      record(2, {
+        roles: [{ id: "role_dispatcher", title: "Senior dispatcher" }, { id: "role_courier", title: "Courier" }],
+        flows: [],
+        business_rules: [{ id: "rule_capacity", title: "Capacity", priority: "high" }],
+      }),
+    );
+    expect(diffs.find((item) => item.key === "roles")).toMatchObject({
+      added: 1,
+      removed: 0,
+      changed: 1,
+      addedItems: ["Courier"],
+      changedItems: ["Senior dispatcher"],
+    });
+    expect(diffs.find((item) => item.key === "flows")).toMatchObject({
+      added: 0,
+      removed: 1,
+      changed: 0,
+      removedItems: ["Assign order"],
+    });
+    expect(diffs.find((item) => item.key === "business_rules")).toMatchObject({
+      added: 0,
+      removed: 0,
+      changed: 1,
+      changedItems: ["Capacity"],
+    });
   });
 
   it("builds a restore command only from a bounded opaque backup ID", () => {

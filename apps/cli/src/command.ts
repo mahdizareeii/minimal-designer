@@ -10,6 +10,8 @@ import { createBridgeController, type BridgeController } from "./bridge-lifecycl
 import {
   connectCodex,
   FORMASPEC_CODEX_MENTION,
+  FORMASPEC_MCP_CONTRACT_VERSION,
+  inspectManagedCodexContract,
   isManagedCodexInstall,
 } from "./codex.js";
 import {
@@ -370,6 +372,74 @@ async function verifyHealthEndpoint(
   return { dataStoreId: null, ready: true, status: response.status };
 }
 
+interface RecordedRuntimeMigrationStatus {
+  source: "runtime";
+  mode: "docker" | "server";
+  origin: string;
+  dataStoreId: string;
+  databasePath: null;
+  latestAppliedVersion: number;
+  supportedVersion: number;
+  state: "current" | "behind" | "newer";
+  migrations: [];
+}
+
+async function readRecordedRuntimeMigrationStatus(
+  mode: "docker" | "server",
+  target: { origin: string; hostHeader?: string },
+  expectedDataStoreId?: string,
+): Promise<RecordedRuntimeMigrationStatus> {
+  let response: Response;
+  try {
+    response = await fetch(`${target.origin}/health/ready`, {
+      headers: { accept: "application/json", ...(target.hostHeader === undefined ? {} : { host: target.hostHeader }) },
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (cause) {
+    throw new Error(`The recorded ${mode} runtime is stopped or unreachable at ${target.origin}. Run 'formaspecctl ensure-running' and retry; the inactive local SQLite file was not inspected.`, { cause });
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > 65_536) {
+    await response.body?.cancel();
+    throw new Error("The recorded runtime health response was too large.");
+  }
+  const text = await response.text();
+  if (Buffer.byteLength(text, "utf8") > 65_536) throw new Error("The recorded runtime health response was too large.");
+  let body: { ok?: unknown; dataStoreId?: unknown; migrations?: unknown };
+  try {
+    body = JSON.parse(text) as { ok?: unknown; dataStoreId?: unknown; migrations?: unknown };
+  } catch (cause) {
+    throw new Error("The recorded runtime did not return valid migration status JSON.", { cause });
+  }
+  if (!response.ok || body.ok !== true) {
+    throw new Error(`The recorded ${mode} runtime is not ready for migration inspection (HTTP ${response.status}). Run 'formaspecctl ensure-running --json' and retry; the inactive local SQLite file was not inspected.`);
+  }
+  if (typeof body.dataStoreId !== "string" || !/^store_[a-f0-9]{32}$/.test(body.dataStoreId)) {
+    throw new Error("The recorded runtime did not report a valid data-store identity.");
+  }
+  if (expectedDataStoreId !== undefined && body.dataStoreId !== expectedDataStoreId) {
+    throw new Error(`Migration inspection is blocked: the live ${mode} runtime at ${target.origin} reports data store ${body.dataStoreId}, but the currently owned FormaSpec bridge is pinned to ${expectedDataStoreId}. Run 'formaspecctl ensure-running --json' and repair the bridge/runtime identity before retrying; the inactive local SQLite file was not inspected.`);
+  }
+  if (!Number.isSafeInteger(body.migrations) || Number(body.migrations) < 0) {
+    throw new Error("The recorded runtime did not report a valid database migration version.");
+  }
+  const latestAppliedVersion = Number(body.migrations);
+  return {
+    source: "runtime",
+    mode,
+    origin: target.origin,
+    dataStoreId: body.dataStoreId,
+    databasePath: null,
+    latestAppliedVersion,
+    supportedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+    state: latestAppliedVersion === CLI_SUPPORTED_DATABASE_VERSION
+      ? "current"
+      : latestAppliedVersion < CLI_SUPPORTED_DATABASE_VERSION ? "behind" : "newer",
+    migrations: [],
+  };
+}
+
 async function concurrentDockerDataStore(
   projectRoot: string,
   primaryOrigin: string,
@@ -503,7 +573,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
 
   try {
     const command = arguments_.shift();
-    if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+    if (command === "help" || command === "--help" || command === "-h") {
       io.stdout(usage());
       return 0;
     }
@@ -555,6 +625,41 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
         maxOutputBytes: 256 * 1024,
       });
     };
+    if (command === undefined) {
+      let mode: RecordedRuntimeMode | undefined;
+      try {
+        mode = recordedRuntimeMode(projectRoot(), environment);
+      } catch (cause) {
+        io.stdout(`Next action: Repair the recorded runtime configuration, then run 'formaspecctl ensure-running'. ${cause instanceof Error ? cause.message : String(cause)}`);
+        io.stdout("Website: unavailable until the runtime record is repaired");
+        return 0;
+      }
+      if (mode === undefined) {
+        io.stdout("Next action: Run 'formaspecctl install docker' to create and start your first FormaSpec workspace.");
+        io.stdout("Website: http://127.0.0.1:4310 (available after startup)");
+        return 0;
+      }
+      try {
+        const healthTarget = runtimeHealthTarget(projectRoot(), environment);
+        const webOrigin = recordedWebOrigin(projectRoot(), environment, mode, healthTarget.origin);
+        const health = await verifyHealthEndpoint(healthTarget.origin, "/health/ready", healthTarget.hostHeader);
+        io.stdout(health.ready
+          ? "Next action: Open the ready FormaSpec workspace and choose a Product and Design."
+          : `Next action: Run 'formaspecctl ensure-running' to recover the recorded ${mode} workspace.`);
+        io.stdout(`Website: ${webOrigin}`);
+      } catch {
+        let website = "unavailable until the recorded runtime is repaired";
+        try {
+          const healthTarget = runtimeHealthTarget(projectRoot(), environment);
+          website = recordedWebOrigin(projectRoot(), environment, mode, healthTarget.origin);
+        } catch {
+          // The actionable line above remains valid even when the recorded URL is malformed.
+        }
+        io.stdout(`Next action: Run 'formaspecctl ensure-running' to recover the recorded ${mode} workspace.`);
+        io.stdout(`Website: ${website}`);
+      }
+      return 0;
+    }
     const startRecordedDevelopmentRuntime = async (apiPort: number, webPort: number): Promise<void> => {
       const root = projectRoot();
       const logDirectory = runtimePaths().logDirectory;
@@ -737,7 +842,22 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           io.stdout("Codex MCP authorization: unavailable (the verified MCP upstream changed during diagnostics; restart FormaSpec and retry)");
           return 1;
         }
-        io.stdout(`Codex MCP authorization: verified as ${verification.serverName} (${verification.checks.join(" + ")}; ${verification.essentialTools.length} essential tools)`);
+        if (verification.serverVersion !== FORMASPEC_MCP_CONTRACT_VERSION) {
+          io.stdout(`FormaSpec MCP contract mismatch: the recorded server reports ${verification.serverVersion}, but this formaspecctl expects ${FORMASPEC_MCP_CONTRACT_VERSION}. Update and restart the recorded runtime before reconnecting Codex.`);
+          return 1;
+        }
+        const managedContract = await inspectManagedCodexContract({ environment, commandRunner: runner });
+        if (managedContract.managed
+          && managedContract.installedPluginVersion !== verification.serverVersion) {
+          io.stdout(`FormaSpec MCP/plugin contract mismatch: server ${verification.serverVersion}; managed plugin ${managedContract.installedPluginVersion ?? "missing or unreadable"}. Run 'formaspecctl --yes agent connect codex' to install the matching ${managedContract.expectedVersion} plugin, then start a new Codex task.`);
+          return 1;
+        }
+        if (managedContract.managed) {
+          io.stdout(`FormaSpec MCP/plugin contract: verified ${verification.serverVersion}.`);
+        } else {
+          io.stdout(`FormaSpec MCP contract: server ${verification.serverVersion}; no formaspecctl-managed plugin installation was detected.`);
+        }
+        io.stdout(`Codex MCP authorization: verified as ${verification.serverName} ${verification.serverVersion} (${verification.checks.join(" + ")}; ${verification.essentialTools.length} essential tools)`);
       } catch (error) {
         io.stdout(`Codex MCP authorization: unavailable (${error instanceof Error ? error.message : String(error)})`);
         return 1;
@@ -1121,10 +1241,48 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (option !== undefined && option !== "--json") throw new Error(`Unexpected migrate status option: ${option}`);
       const json = option === "--json";
       if (arguments_.length > 0) throw new Error(`Unexpected migrate status option: ${arguments_[0]}`);
+      const mode = recordedRuntimeMode(projectRoot(), environment);
+      if (mode === undefined) {
+        throw new Error("FormaSpec has no recorded runtime mode. Run 'formaspecctl ensure-running' before checking migrations; no local SQLite file was inspected.");
+      }
+      if (mode === "docker" || mode === "server") {
+        const target = runtimeHealthTarget(projectRoot(), environment);
+        let expectedDataStoreId: string | undefined;
+        if (recordedProxyServerUrl(projectRoot(), environment) === null) {
+          let bridgeStatus: Awaited<ReturnType<BridgeController["status"]>>;
+          try {
+            bridgeStatus = await bridge().status();
+          } catch (cause) {
+            throw new Error(`Migration inspection is blocked because the currently owned FormaSpec bridge identity is unavailable. Run 'formaspecctl ensure-running --json' and retry; the inactive local SQLite file was not inspected.`, { cause });
+          }
+          if (!bridgeStatus.running
+            || !bridgeStatus.owned
+            || !bridgeStatus.upstreamReady
+            || bridgeStatus.upstreamOrigin !== target.origin
+            || bridgeStatus.dataStoreId === null) {
+            throw new Error(`Migration inspection is blocked because no currently owned FormaSpec bridge pins the recorded ${mode} runtime at ${target.origin} to an available data-store identity. Run 'formaspecctl ensure-running --json' and reconnect the managed bridge before retrying; the inactive local SQLite file was not inspected.`);
+          }
+          expectedDataStoreId = bridgeStatus.dataStoreId;
+        }
+        const status = await readRecordedRuntimeMigrationStatus(
+          mode,
+          target,
+          expectedDataStoreId,
+        );
+        if (json) io.stdout(JSON.stringify(status));
+        else {
+          io.stdout(`Runtime: ${status.mode} at ${status.origin}`);
+          io.stdout(`Data store: ${status.dataStoreId}`);
+          io.stdout(`Migration schema: ${status.latestAppliedVersion}/${status.supportedVersion} (${status.state})`);
+          io.stdout("Source: live recorded runtime; local SQLite was not inspected.");
+        }
+        return 0;
+      }
       const database = defaultDatabasePath(projectRoot(), environment);
-      if (!fs.existsSync(database)) throw new Error(`Database is not available at ${database}. Docker volume databases must be verified through a FormaSpec backup.`);
+      if (!fs.existsSync(database)) throw new Error(`The recorded ${mode} database is not available at ${database}. Start that runtime or restore its managed data before retrying.`);
       const status = readMigrationStatus(database);
-      if (json) io.stdout(JSON.stringify(status));
+      const result = { source: "database" as const, mode, ...status };
+      if (json) io.stdout(JSON.stringify(result));
       else {
         io.stdout(`Database: ${status.databasePath}`);
         io.stdout(`Migration ledger: ${status.latestAppliedVersion}/${status.supportedVersion} (${status.state})`);

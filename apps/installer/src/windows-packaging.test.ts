@@ -114,7 +114,7 @@ function applicationPayloadFixture(root: string, architecture: "x64" | "arm64" =
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/.codex-plugin/plugin.json", `${JSON.stringify({
     name: "formaspec",
-    version: "0.3.0",
+    version: "0.4.0",
     interface: { displayName: "FormaSpec" },
   }, null, 2)}\n`);
   writeFixture(payload, "app/apps/cli/assets/codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md", [

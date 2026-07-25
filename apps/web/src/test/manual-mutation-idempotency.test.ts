@@ -66,9 +66,11 @@ describe("manual mutation retry idempotency", () => {
     };
     const archived = {
       id: project.id,
+      productId: "product_archive_retry_0001",
       name: project.name,
       version: project.version,
       revisionId: project.revisionId,
+      status: "archived" as const,
       createdAt: "2026-07-20T10:00:00.000Z",
       updatedAt: project.updatedAt,
       archivedAt: "2026-07-22T10:05:00.000Z",
@@ -103,9 +105,11 @@ describe("manual mutation retry idempotency", () => {
     };
     const archived = {
       id: project.id,
+      productId: "product_archive_rejected_0001",
       name: project.name,
       version: project.version,
       revisionId: project.revisionId,
+      status: "archived" as const,
       createdAt: "2026-07-20T10:00:00.000Z",
       updatedAt: project.updatedAt,
       archivedAt: "2026-07-22T10:05:00.000Z",
@@ -136,9 +140,11 @@ describe("manual mutation retry idempotency", () => {
     };
     const archived = {
       id: project.id,
+      productId: "product_archive_unknown_0001",
       name: project.name,
       version: project.version,
       revisionId: project.revisionId,
+      status: "archived" as const,
       createdAt: "2026-07-20T10:00:00.000Z",
       updatedAt: project.updatedAt,
       archivedAt: "2026-07-22T10:05:00.000Z",

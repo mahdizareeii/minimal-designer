@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BackupVerification } from "./backup.js";
 import { FORMASPEC_ESSENTIAL_MCP_TOOLS, type BridgeController } from "./bridge-lifecycle.js";
+import { FORMASPEC_MCP_CONTRACT_VERSION } from "./codex.js";
 import { runCli, type CliIo, type EnsureRunningResult } from "./command.js";
 import {
   persistDockerRuntimeBinding,
@@ -38,6 +39,7 @@ function fakeBridge(): BridgeController & {
   upstreamOrigin: string;
   upstreamReady: boolean;
   dataStoreId: string;
+  serverVersion: string;
   verificationError?: Error;
   pairingTickets: Array<{ nonce: string; connectionId?: string } | undefined>;
 } {
@@ -49,6 +51,7 @@ function fakeBridge(): BridgeController & {
     upstreamOrigin: "http://127.0.0.1:4310",
     upstreamReady: true,
     dataStoreId: TEST_DATA_STORE_ID,
+    serverVersion: FORMASPEC_MCP_CONTRACT_VERSION,
     pairingTickets: [],
     async ensureStarted() {
       this.starts += 1;
@@ -73,6 +76,7 @@ function fakeBridge(): BridgeController & {
         verified: true as const,
         checks: ["initialize", "tools/list"],
         serverName: "formaspec" as const,
+        serverVersion: this.serverVersion,
         essentialTools: [...FORMASPEC_ESSENTIAL_MCP_TOOLS],
         upstreamOrigin: this.upstreamOrigin,
         dataStoreId: this.dataStoreId,
@@ -274,15 +278,15 @@ if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "add" ]; then
   if [ -f "$FAKE_CODEX_PLUGIN_STATE" ] && grep -q 'minimal-ui@formaspec' "$FAKE_CODEX_PLUGIN_STATE"; then
-    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.3.0","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.2","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.4.0","installed":true,"enabled":true},{"pluginId":"minimal-ui@formaspec","version":"0.2.2","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
   else
-    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.3.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+    printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.4.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
   fi
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then
   [ "$FAKE_CODEX_FAIL_PLUGIN_REMOVE" = "1" ] && exit 9
-  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.3.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
+  printf '{"installed":[{"pluginId":"formaspec@formaspec","version":"0.4.0","installed":true,"enabled":true}]}\n' > "$FAKE_CODEX_PLUGIN_STATE"
   exit 0
 fi
 exit 2
@@ -303,6 +307,179 @@ function fakeEnvironment(root: string, bin: string, log: string, state: string):
 }
 
 describe("formaspecctl", () => {
+  it("prints one state-aware start action instead of the full command reference with no arguments", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+
+    expect(await runCli([], { projectRoot: root, environment: {}, io })).toBe(0);
+    expect(io.errors).toEqual([]);
+    expect(io.output).toEqual([
+      "Next action: Run 'formaspecctl install docker' to create and start your first FormaSpec workspace.",
+      "Website: http://127.0.0.1:4310 (available after startup)",
+    ]);
+    expect(io.output.join("\n")).not.toContain("Usage:");
+  });
+
+  it("points no-argument users to the ready recorded workspace", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    recordRuntime(root, "docker", 4310, 4310, "http://127.0.0.1:4310");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      dataStoreId: TEST_DATA_STORE_ID,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    expect(await runCli([], { projectRoot: root, environment: {}, io })).toBe(0);
+    expect(io.errors).toEqual([]);
+    expect(io.output).toEqual([
+      "Next action: Open the ready FormaSpec workspace and choose a Product and Design.",
+      "Website: http://127.0.0.1:4310",
+    ]);
+  });
+
+  it("reads migration status from the recorded local database only in local or dev mode", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    recordRuntime(root, "local", 4310, 4311, "http://127.0.0.1:4311");
+    writeMigrationDatabase(path.join(root, "data", "designer.sqlite"), CLI_SUPPORTED_DATABASE_VERSION);
+
+    expect(await runCli(["migrate", "status", "--json"], { projectRoot: root, environment: {}, io })).toBe(0);
+    expect(io.errors).toEqual([]);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      source: "database",
+      mode: "local",
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      state: "current",
+    });
+  });
+
+  it("queries the live recorded Docker runtime and never opens an inactive local SQLite file", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    const bridge = fakeBridge();
+    bridge.running = true;
+    recordRuntime(root, "docker", 4310, 4310, "http://127.0.0.1:4310");
+    writeMigrationDatabase(path.join(root, "data", "designer.sqlite"), 1);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      dataStoreId: TEST_DATA_STORE_ID,
+      migrations: CLI_SUPPORTED_DATABASE_VERSION,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    expect(await runCli(["migrate", "status", "--json"], {
+      projectRoot: root,
+      bridge,
+      environment: {},
+      io,
+    })).toBe(0);
+    expect(io.errors).toEqual([]);
+    expect(JSON.parse(io.output[0]!)).toEqual({
+      source: "runtime",
+      mode: "docker",
+      origin: "http://127.0.0.1:4310",
+      dataStoreId: TEST_DATA_STORE_ID,
+      databasePath: null,
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      supportedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+      state: "current",
+      migrations: [],
+    });
+  });
+
+  it("blocks Docker migration inspection when the recorded runtime is stopped even if local SQLite exists", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    const bridge = fakeBridge();
+    bridge.running = true;
+    recordRuntime(root, "docker", 4310, 4310, "http://127.0.0.1:4310");
+    writeMigrationDatabase(path.join(root, "data", "designer.sqlite"), CLI_SUPPORTED_DATABASE_VERSION);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connection refused"));
+
+    expect(await runCli(["migrate", "status"], {
+      projectRoot: root,
+      bridge,
+      environment: {},
+      io,
+    })).toBe(1);
+    expect(io.output).toEqual([]);
+    expect(io.errors.join("\n")).toContain("recorded docker runtime is stopped or unreachable");
+    expect(io.errors.join("\n")).toContain("inactive local SQLite file was not inspected");
+  });
+
+  it("blocks Docker migration inspection when no owned bridge pins the expected store", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    const bridge = fakeBridge();
+    recordRuntime(root, "docker", 4310, 4310, "http://127.0.0.1:4310");
+    writeMigrationDatabase(path.join(root, "data", "designer.sqlite"), CLI_SUPPORTED_DATABASE_VERSION);
+    const fetch = vi.spyOn(globalThis, "fetch");
+
+    expect(await runCli(["migrate", "status"], {
+      projectRoot: root,
+      bridge,
+      environment: {},
+      io,
+    })).toBe(1);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(io.output).toEqual([]);
+    expect(io.errors.join("\n")).toContain("no currently owned FormaSpec bridge pins");
+    expect(io.errors.join("\n")).toContain("formaspecctl ensure-running --json");
+    expect(io.errors.join("\n")).toContain("inactive local SQLite file was not inspected");
+  });
+
+  it("blocks Docker migration inspection when live and bridge-pinned stores differ", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    const bridge = fakeBridge();
+    bridge.running = true;
+    recordRuntime(root, "docker", 4310, 4310, "http://127.0.0.1:4310");
+    writeMigrationDatabase(path.join(root, "data", "designer.sqlite"), CLI_SUPPORTED_DATABASE_VERSION);
+    const unexpectedDataStoreId = `store_${"b".repeat(32)}`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      dataStoreId: unexpectedDataStoreId,
+      migrations: CLI_SUPPORTED_DATABASE_VERSION,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    expect(await runCli(["migrate", "status"], {
+      projectRoot: root,
+      bridge,
+      environment: {},
+      io,
+    })).toBe(1);
+    expect(io.output).toEqual([]);
+    expect(io.errors.join("\n")).toContain(`reports data store ${unexpectedDataStoreId}`);
+    expect(io.errors.join("\n")).toContain(`bridge is pinned to ${TEST_DATA_STORE_ID}`);
+    expect(io.errors.join("\n")).toContain("inactive local SQLite file was not inspected");
+  });
+
+  it("queries a recorded proxy-server runtime without requiring the intentionally disabled local bridge", async () => {
+    const root = temporaryDirectory();
+    const io = collectingIo();
+    const bridge = fakeBridge();
+    recordProxyServerRuntime(root);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      dataStoreId: TEST_DATA_STORE_ID,
+      migrations: CLI_SUPPORTED_DATABASE_VERSION,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    expect(await runCli(["migrate", "status", "--json"], {
+      projectRoot: root,
+      bridge,
+      environment: {},
+      io,
+    })).toBe(0);
+    expect(bridge.running).toBe(false);
+    expect(JSON.parse(io.output[0]!)).toMatchObject({
+      source: "runtime",
+      mode: "server",
+      origin: "http://127.0.0.1:7443",
+      dataStoreId: TEST_DATA_STORE_ID,
+      latestAppliedVersion: CLI_SUPPORTED_DATABASE_VERSION,
+    });
+  });
+
   it("requires authorization before changing Codex", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
@@ -387,13 +564,13 @@ describe("formaspecctl", () => {
     });
     expect(JSON.parse(fs.readFileSync(path.join(marketplace, "plugins", "formaspec", ".codex-plugin", "plugin.json"), "utf8"))).toMatchObject({
       name: "formaspec",
-      version: "0.3.0",
+      version: "0.4.0",
       interface: { displayName: "FormaSpec" },
     });
     expect(fs.existsSync(path.join(marketplace, "plugins", "minimal-ui"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.4.0", installed: true, enabled: true },
       ],
     });
     expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
@@ -555,7 +732,7 @@ describe("formaspecctl", () => {
     expect(calls).not.toContain("plugin add minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.4.0", installed: true, enabled: true },
       ],
     });
   });
@@ -635,7 +812,7 @@ describe("formaspecctl", () => {
     expect(calls).toContain("plugin remove minimal-ui@formaspec --json");
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.4.0", installed: true, enabled: true },
       ],
     });
   });
@@ -668,7 +845,7 @@ describe("formaspecctl", () => {
     fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
     fs.writeFileSync(`${state}.plugins`, JSON.stringify({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.4.0", installed: true, enabled: true },
       ],
     }));
     const environment = fakeEnvironment(root, bin, log, state);
@@ -699,7 +876,7 @@ describe("formaspecctl", () => {
     expect(fs.readFileSync(log, "utf8")).not.toContain("plugin remove minimal-ui@formaspec --json");
   });
 
-  it("installs and verifies FormaSpec 0.3.0 before removing installer-owned legacy identities", async () => {
+  it("installs and verifies FormaSpec 0.4.0 before removing installer-owned legacy identities", async () => {
     const root = makeProject(temporaryDirectory());
     const bin = path.join(root, "bin");
     const log = path.join(root, "codex.log");
@@ -740,7 +917,7 @@ describe("formaspecctl", () => {
       .toBeLessThan(calls.indexOf("plugin remove minimal-ui@formaspec --json"));
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.4.0", installed: true, enabled: true },
       ],
     });
     expect(io.output.join("\n")).toContain("Removed the installer-owned legacy duplicate plugin identity.");
@@ -827,7 +1004,7 @@ describe("formaspecctl", () => {
     expect(fs.existsSync(legacyMinimalUiSkill)).toBe(true);
     expect(fs.readFileSync(configPath, "utf8")).toBe(originalConfig);
     expect(bridge.authorizations).toBe(0);
-    expect(io.errors.join("\n")).toContain("verified FormaSpec 0.3.0 but could not remove the legacy duplicate plugin");
+    expect(io.errors.join("\n")).toContain("verified FormaSpec 0.4.0 but could not remove the legacy duplicate plugin");
   });
 
   it("prints generic MCP configuration without starting, authorizing, or modifying an unknown client", async () => {
@@ -1134,6 +1311,99 @@ describe("formaspecctl", () => {
     expect(io.output.join("\n")).toContain("Renderer health: verified");
     expect(io.output.join("\n")).toContain("verified as formaspec");
     expect(io.output.join("\n")).toContain(`${FORMASPEC_ESSENTIAL_MCP_TOOLS.length} essential tools`);
+  });
+
+  it("fails doctor when the recorded server exposes an older MCP contract", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bridge = fakeBridge();
+    bridge.running = true;
+    bridge.serverVersion = "0.3.0";
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: { HOME: root, PATH: "/usr/bin:/bin" },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("recorded server reports 0.3.0");
+    expect(io.output.join("\n")).toContain(`expects ${FORMASPEC_MCP_CONTRACT_VERSION}`);
+    expect(io.output.join("\n")).toContain("Update and restart the recorded runtime");
+  });
+
+  it("fails doctor when a formaspecctl-managed plugin is older than the server contract", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [
+        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+      ],
+    }));
+    const bridge = fakeBridge();
+    bridge.running = true;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain(`server ${FORMASPEC_MCP_CONTRACT_VERSION}; managed plugin 0.3.0`);
+    expect(io.output.join("\n")).toContain("formaspecctl --yes agent connect codex");
+  });
+
+  it("passes doctor when the server and formaspecctl-managed plugin contracts match", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [
+        {
+          pluginId: "formaspec@formaspec",
+          version: FORMASPEC_MCP_CONTRACT_VERSION,
+          installed: true,
+          enabled: true,
+        },
+      ],
+    }));
+    const bridge = fakeBridge();
+    bridge.running = true;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(await runCli(["doctor", "local"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    })).toBe(0);
+    expect(io.output.join("\n")).toContain(`FormaSpec MCP/plugin contract: verified ${FORMASPEC_MCP_CONTRACT_VERSION}.`);
   });
 
   it("rejects healthy UI and bridge processes when their upstream origin or data store differs", async () => {
@@ -1761,7 +2031,7 @@ describe("formaspecctl", () => {
     expect(fs.existsSync(path.join(root, ".codex", "formaspec-marketplace", "plugins", "minimal-ui"))).toBe(false);
     expect(JSON.parse(fs.readFileSync(`${state}.plugins`, "utf8"))).toEqual({
       installed: [
-        { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
+        { pluginId: "formaspec@formaspec", version: "0.4.0", installed: true, enabled: true },
       ],
     });
   });
@@ -1907,6 +2177,7 @@ describe("formaspecctl", () => {
 
   it("reports a read-only contiguous migration ledger", async () => {
     const root = makeProject(temporaryDirectory());
+    recordRuntime(root, "local", 4310, 4311, "http://127.0.0.1:4311");
     fs.mkdirSync(path.join(root, "data"));
     const sqlite = new Database(path.join(root, "data", "designer.sqlite"));
     sqlite.exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
@@ -1934,6 +2205,11 @@ describe("formaspecctl", () => {
       17,
       "product_organization_foundation",
       "2026-01-17T00:00:00.000Z",
+    );
+    sqlite.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?)").run(
+      18,
+      "product_archive_restore_integrity",
+      "2026-01-18T00:00:00.000Z",
     );
     sqlite.close();
     const io = collectingIo();
@@ -2351,6 +2627,12 @@ describe("formaspecctl", () => {
     const state = path.join(root, "native-user-state");
     const database = path.join(state, "data", "designer.sqlite");
     writeMigrationDatabase(database, CLI_SUPPORTED_DATABASE_VERSION);
+    const runDirectory = path.join(state, "runtime", "run");
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, "mode"), "local\n");
+    fs.writeFileSync(path.join(runDirectory, "api-port"), "4310\n");
+    fs.writeFileSync(path.join(runDirectory, "web-port"), "4311\n");
+    fs.writeFileSync(path.join(runDirectory, "url"), "http://127.0.0.1:4311\n");
     const io = collectingIo();
 
     const result = await runCli(["migrate", "status", "--json"], {

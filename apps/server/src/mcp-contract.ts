@@ -157,6 +157,7 @@ export const MCP_TOOL_CONTRACTS = {
   handoff_create: tool("write", denied, handoffWriters, "required", "WorkspaceHandoffService.createHandoff"),
   handoff_update: tool("write", denied, handoffWriters, "required", "WorkspaceHandoffService.updateHandoff"),
   handoff_submit_review: tool("write", denied, handoffWriters, "required", "WorkspaceHandoffService.submitHandoffForReview"),
+  redesign_assessment_list: tool("read", scopes("redesign:read"), allHumanRoles, "filtered", "RedesignStudioService.listAssessments"),
   redesign_assessment_create: tool("write", scopes("redesign:assessment"), redesignWriters, "dynamic", "RedesignStudioService.createOneClickAssessment"),
   redesign_assessment_read: tool("read", scopes("redesign:read"), allHumanRoles, "dynamic", "RedesignStudioService.getAssessment"),
   redesign_stage_revise: tool("write", {

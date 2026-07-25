@@ -19,12 +19,13 @@ import { z } from "zod";
 
 import {
   appendAuditEvent,
+  assertProjectAccess,
   assertScope,
   resolveAccess,
   type AccessContext,
   type OrganizationRole,
 } from "./authorization.js";
-import { requireActiveDesign } from "./active-design.js";
+import { activeDesignSqlPredicate, requireActiveDesign } from "./active-design.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { BoundedJsonObjectSchema } from "./bounded-json-schema.js";
 import { DomainError } from "./errors.js";
@@ -429,6 +430,39 @@ export class RedesignStudioService {
 
   constructor(readonly database: DesignerDatabase, options: RedesignStudioServiceOptions = {}) {
     this.#now = options.now ?? (() => new Date());
+  }
+
+  listAssessments(actorId: string, input: {
+    status?: RedesignStatus;
+    limit?: number;
+  } = {}): RedesignAssessmentResult[] {
+    const access = resolveAccess(this.database.sqlite, actorId);
+    this.assertAction(access, "redesign:read");
+    const limit = Math.max(1, Math.min(input.limit ?? 50, 100));
+    const filters = [
+      "assessment.organization_id = ?",
+      `(assessment.design_id IS NULL OR EXISTS (
+        SELECT 1 FROM designs visible_design
+        WHERE visible_design.id = assessment.design_id
+          AND visible_design.organization_id = assessment.organization_id
+          AND ${activeDesignSqlPredicate("visible_design")}
+      ))`,
+    ];
+    const parameters: Array<string | number> = [access.organizationId];
+    if (access.projectIds.length > 0) {
+      filters.push(`assessment.design_id IN (${access.projectIds.map(() => "?").join(", ")})`);
+      parameters.push(...access.projectIds);
+    }
+    if (input.status !== undefined) {
+      filters.push("assessment.status = ?");
+      parameters.push(input.status);
+    }
+    const rows = this.database.sqlite.prepare(
+      `SELECT assessment.* FROM redesign_assessments assessment
+       WHERE ${filters.join(" AND ")}
+       ORDER BY assessment.updated_at DESC, assessment.id DESC LIMIT ?`,
+    ).all(...parameters, limit) as AssessmentRow[];
+    return rows.map((row) => this.result(access, row));
   }
 
   createOneClickAssessment(actorId: string, input: {
@@ -1307,7 +1341,9 @@ export class RedesignStudioService {
   }
 
   private result(access: AccessContext, row: AssessmentRow): RedesignAssessmentResult {
-    if (row.design_id) requireActiveDesign(this.database.sqlite, access, row.design_id);
+    if (row.design_id) {
+      requireActiveDesign(this.database.sqlite, access, row.design_id);
+    }
     const versionRows = this.database.sqlite.prepare(
       "SELECT * FROM redesign_assessment_versions WHERE assessment_id = ? ORDER BY version",
     ).all(row.id) as VersionRow[];

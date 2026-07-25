@@ -28,6 +28,8 @@ export const DesignSummaryResultSchema = z.object({
   name: z.string().trim().min(1).max(255),
   version: positiveVersion,
   revisionId,
+  status: z.enum(["active", "archived"]),
+  archivedAt: timestamp.nullable(),
   createdAt: timestamp,
   updatedAt: timestamp,
 }).strict();

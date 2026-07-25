@@ -18,9 +18,9 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 
-import { navigate } from "../App";
+import { navigate, type AdministrationSection } from "../App";
 import { DesignSystemComponentAuthoring } from "./DesignSystemComponentAuthoring";
 import { DesignSystemProjectPins } from "./DesignSystemProjectPins";
 import { OrganizationPolicyEditor } from "./OrganizationPolicyEditor";
@@ -83,6 +83,60 @@ function assertSafePairingChallenge(challenge: AgentPairingChallenge): void {
   }
 }
 
+interface AdministrationRuntimeHealth {
+  ok: boolean;
+  status: "ready" | "maintenance" | "unavailable";
+  dataStoreId: string;
+  migrationVersion: number;
+}
+
+const ADMINISTRATION_NAVIGATION: ReadonlyArray<{
+  section: AdministrationSection;
+  href: string;
+  label: string;
+  description: string;
+}> = [
+  { section: "overview", href: "/administration", label: "Overview", description: "Health and next action" },
+  { section: "agents", href: "/administration/agents", label: "Connections", description: "Codex and agent access" },
+  { section: "design-system", href: "/administration/design-system", label: "Design system", description: "Libraries and project pins" },
+  { section: "policy", href: "/administration/policy", label: "Policy", description: "Organization boundaries" },
+  { section: "backups", href: "/administration/backups", label: "Backups", description: "Verified recovery points" },
+  { section: "imports", href: "/administration/imports", label: "Import", description: "Portable projects" },
+];
+
+const ADMINISTRATION_SECTION_COPY: Record<AdministrationSection, { title: string; description: string }> = {
+  overview: { title: "Workspace overview", description: "Live runtime identity, recovery readiness, and the next safe action." },
+  agents: { title: "Connections", description: "Connect, renew, or revoke Codex and other scoped agent access." },
+  "design-system": { title: "Design system", description: "Manage organization libraries, reusable components, and project release pins." },
+  policy: { title: "Organization policy", description: "Edit one focused policy category at a time with optimistic-lock protection." },
+  backups: { title: "Backups and recovery", description: "Create, verify, download, and register managed recovery points." },
+  imports: { title: "Project import", description: "Validate a portable project before making a bounded, non-destructive import." },
+};
+
+async function readAdministrationRuntimeHealth(): Promise<AdministrationRuntimeHealth> {
+  const response = await fetch("/health/ready", {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  const body = await response.json() as {
+    ok?: unknown;
+    status?: unknown;
+    dataStoreId?: unknown;
+    migrations?: unknown;
+  };
+  if (typeof body.dataStoreId !== "string" || !/^store_[a-f0-9]{32}$/.test(body.dataStoreId)
+    || !Number.isSafeInteger(body.migrations) || Number(body.migrations) < 1) {
+    throw new Error("The live runtime returned incomplete identity or migration information.");
+  }
+  return {
+    ok: response.ok && body.ok === true,
+    status: response.ok && body.ok === true ? "ready" : body.status === "maintenance" ? "maintenance" : "unavailable",
+    dataStoreId: body.dataStoreId,
+    migrationVersion: Number(body.migrations),
+  };
+}
+
 export function codexPairingCommand(challenge: AgentPairingChallenge): string {
   assertSafePairingChallenge(challenge);
   return `formaspecctl --yes agent connect codex --pairing-nonce ${challenge.nonce} --connection-id ${challenge.connection.id}`;
@@ -123,7 +177,7 @@ export function groupAgentConnections(connections: readonly AgentConnectionRecor
   };
 }
 
-export function Administration() {
+export function Administration({ section = "overview" }: { section?: AdministrationSection }) {
   const [backups, setBackups] = useState<BackupRecord[]>([]);
   const [connections, setConnections] = useState<AgentConnectionRecord[]>([]);
   const [designSystems, setDesignSystems] = useState<DesignSystemRecord[]>([]);
@@ -141,45 +195,125 @@ export function Administration() {
   const [pairingCommand, setPairingCommand] = useState<string | null>(null);
   const [organizationPolicy, setOrganizationPolicy] = useState<OrganizationPolicyRecord | null>(null);
   const [canAdministerOrganization, setCanAdministerOrganization] = useState<boolean | null>(null);
+  const [runtimeHealth, setRuntimeHealth] = useState<AdministrationRuntimeHealth | null>(null);
+  const [runtimeHealthError, setRuntimeHealthError] = useState<string | null>(null);
+  const [policyDirty, setPolicyDirty] = useState(false);
   const connectionGroups = useMemo(() => groupAgentConnections(connections), [connections]);
+  const activeConnection = useMemo(() => connectionGroups.current.find((connection) => connection.status === "active") ?? null, [connectionGroups]);
+  const latestVerifiedBackup = useMemo(() => backups.find((backup) => backup.status === "valid") ?? null, [backups]);
+  const sectionCopy = ADMINISTRATION_SECTION_COPY[section];
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setRuntimeHealthError(null);
     try {
-      const [backupsResult, connectionsResult, systemsResult, policyResult] = await Promise.allSettled([
-        listBackups(),
-        listAgentConnections(),
-        listDesignSystems(),
-        readOrganizationPolicy(),
-      ]);
-      if (systemsResult.status === "rejected") throw systemsResult.reason;
-      setDesignSystems(systemsResult.value);
-      const administrativeResults = [backupsResult, connectionsResult, policyResult];
-      const restricted = administrativeResults.some((result) => result.status === "rejected"
-        && result.reason instanceof ApiError
-        && result.reason.status === 403);
-      setCanAdministerOrganization(!restricted);
-      if (restricted) {
+      if (section === "overview") {
+        const [backupsResult, connectionsResult, systemsResult, policyResult, healthResult] = await Promise.allSettled([
+          listBackups(),
+          listAgentConnections(),
+          listDesignSystems(),
+          readOrganizationPolicy(),
+          readAdministrationRuntimeHealth(),
+        ]);
+        if (systemsResult.status === "rejected") throw systemsResult.reason;
+        setDesignSystems(systemsResult.value);
+        if (healthResult.status === "fulfilled") setRuntimeHealth(healthResult.value);
+        else {
+          setRuntimeHealth(null);
+          setRuntimeHealthError(healthResult.reason instanceof Error ? healthResult.reason.message : "Runtime health is unavailable.");
+        }
+        const administrativeResults = [backupsResult, connectionsResult, policyResult];
+        const restricted = administrativeResults.some((result) => result.status === "rejected"
+          && result.reason instanceof ApiError
+          && result.reason.status === 403);
+        setCanAdministerOrganization(!restricted);
+        if (restricted) {
+          setBackups([]);
+          setConnections([]);
+          setOrganizationPolicy(null);
+        } else {
+          if (backupsResult.status === "rejected") throw backupsResult.reason;
+          if (connectionsResult.status === "rejected") throw connectionsResult.reason;
+          if (policyResult.status === "rejected") throw policyResult.reason;
+          setBackups(backupsResult.value);
+          setConnections(connectionsResult.value);
+          setOrganizationPolicy(policyResult.value);
+        }
+      } else if (section === "design-system") {
+        const [systemsResult, policyResult] = await Promise.allSettled([listDesignSystems(), readOrganizationPolicy()]);
+        if (systemsResult.status === "rejected") throw systemsResult.reason;
+        setDesignSystems(systemsResult.value);
+        if (policyResult.status === "rejected") {
+          if (policyResult.reason instanceof ApiError && policyResult.reason.status === 403) {
+            setCanAdministerOrganization(false);
+            setOrganizationPolicy(null);
+          } else throw policyResult.reason;
+        } else {
+          setCanAdministerOrganization(true);
+          setOrganizationPolicy(policyResult.value);
+        }
+      } else if (section === "backups") {
+        setBackups(await listBackups());
+        setCanAdministerOrganization(true);
+      } else if (section === "agents") {
+        setConnections(await listAgentConnections());
+        setCanAdministerOrganization(true);
+      } else if (section === "policy" || section === "imports") {
+        setOrganizationPolicy(await readOrganizationPolicy());
+        setCanAdministerOrganization(true);
+      }
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 403) {
+        setCanAdministerOrganization(false);
         setBackups([]);
         setConnections([]);
         setOrganizationPolicy(null);
       } else {
-        if (backupsResult.status === "rejected") throw backupsResult.reason;
-        if (connectionsResult.status === "rejected") throw connectionsResult.reason;
-        if (policyResult.status === "rejected") throw policyResult.reason;
-        setBackups(backupsResult.value);
-        setConnections(connectionsResult.value);
-        setOrganizationPolicy(policyResult.value);
+        setError(cause instanceof Error ? cause.message : "Administration data could not be loaded.");
       }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Administration data could not be loaded.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [section]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    if (!policyDirty) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const guardHistoryNavigation = (event: PopStateEvent) => {
+      if (window.location.pathname === "/administration/policy") return;
+      if (window.confirm("Leave Organization policy and discard its unsaved changes?")) {
+        setPolicyDirty(false);
+        return;
+      }
+      event.stopImmediatePropagation();
+      window.history.pushState({}, "", "/administration/policy");
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    window.addEventListener("popstate", guardHistoryNavigation, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      window.removeEventListener("popstate", guardHistoryNavigation, true);
+    };
+  }, [policyDirty]);
+
+  const navigateFromAdministration = (event: ReactMouseEvent<HTMLAnchorElement>, destination: string) => {
+    event.preventDefault();
+    if (policyDirty && !window.confirm("Leave Organization policy and discard its unsaved changes?")) return;
+    setPolicyDirty(false);
+    navigate(destination);
+  };
+
+  const refreshAdministration = () => {
+    if (policyDirty && !window.confirm("Reload Organization policy and discard its unsaved changes?")) return;
+    setPolicyDirty(false);
+    void refresh();
+  };
 
   const reportNotice = useCallback((message: string) => {
     setError(null);
@@ -245,18 +379,89 @@ export function Administration() {
   return (
     <main className="administration-shell">
       <header className="administration-header">
-        <button className="button button-secondary" onClick={() => navigate("/")}><ArrowLeft size={14} /> Projects</button>
-        <div className="administration-brand"><span><Sparkles size={16} /></span><div><strong>FormaSpec Administration</strong><small>Backups, portable validation, and agent authorization</small></div></div>
-        <button className="icon-button" onClick={() => void refresh()} aria-label="Refresh administration" disabled={loading}><RefreshCcw size={16} className={loading ? "spin" : ""} /></button>
+        <a className="button button-secondary" href="/" onClick={(event) => navigateFromAdministration(event, "/")}><ArrowLeft size={14} /> Projects</a>
+        <div className="administration-brand"><span><Sparkles size={16} /></span><div><strong>FormaSpec Administration</strong><small>{sectionCopy.title}</small></div></div>
+        <button className="icon-button" onClick={refreshAdministration} aria-label="Refresh administration" disabled={loading}><RefreshCcw size={16} className={loading ? "spin" : ""} /></button>
       </header>
 
-      <section className="administration-content">
+      <div className="administration-layout">
+        <aside className="administration-sidebar">
+          <nav aria-label="Administration sections">
+            {ADMINISTRATION_NAVIGATION.map((item) => <a
+              href={item.href}
+              key={item.section}
+              className={section === item.section ? "is-active" : ""}
+              aria-current={section === item.section ? "page" : undefined}
+              onClick={(event) => {
+                if (section === item.section) {
+                  event.preventDefault();
+                  return;
+                }
+                navigateFromAdministration(event, item.href);
+              }}
+            >
+              <strong>{item.label}</strong>
+              <small>{item.description}</small>
+            </a>)}
+          </nav>
+        </aside>
+
+        <section className="administration-content">
+        <header className="administration-route-heading">
+          <div><span>{ADMINISTRATION_NAVIGATION.find((item) => item.section === section)?.label}</span><h1>{sectionCopy.title}</h1></div>
+          <p>{sectionCopy.description}</p>
+        </header>
         {error && <div className="administration-alert is-error"><XCircle size={16} /><span>{error}</span></div>}
         {notice && <div className="administration-alert"><CheckCircle2 size={16} /><span>{notice}</span></div>}
         {canAdministerOrganization === false && <div className="administration-alert"><ShieldCheck size={16} /><span>Limited organization access: Administrator-only policy, backup, agent, import, and system-creation controls are hidden. The server reports your available component-catalog actions below.</span></div>}
 
-        <div className="administration-grid">
-          {canAdministerOrganization !== false && <section className="administration-card">
+        {section === "overview" && <section className="administration-overview" aria-label="Workspace health overview">
+          <div className="administration-overview-grid">
+            <article>
+              <span><Sparkles size={17} /></span>
+              <div><small>Runtime</small><strong>{runtimeHealth?.ok ? "Ready" : loading ? "Checking…" : "Needs attention"}</strong><code>{typeof window === "undefined" ? "Current FormaSpec origin" : window.location.origin}</code></div>
+            </article>
+            <article>
+              <span><ShieldCheck size={17} /></span>
+              <div><small>Data store</small><strong>{runtimeHealth ? "Identity verified" : "Identity unavailable"}</strong><code>{runtimeHealth?.dataStoreId ?? runtimeHealthError ?? "Waiting for live runtime"}</code></div>
+            </article>
+            <article>
+              <span><DatabaseBackup size={17} /></span>
+              <div><small>Database migration</small><strong>{runtimeHealth ? `Schema ${runtimeHealth.migrationVersion}` : "Not reported"}</strong><span>{runtimeHealth?.status === "maintenance" ? "Runtime is in maintenance" : runtimeHealth?.ok ? "Reported by the live runtime" : "Run CLI diagnostics before migration"}</span></div>
+            </article>
+            <article>
+              <span><Bot size={17} /></span>
+              <div><small>Codex connection</small><strong>{activeConnection ? "Connected" : "Not connected"}</strong><span>{activeConnection ? `Expires ${dateTime(activeConnection.expiresAt)}` : "Connect Codex before submitting agent work"}</span></div>
+            </article>
+            <article>
+              <span><FileArchive size={17} /></span>
+              <div><small>Latest verified backup</small><strong>{latestVerifiedBackup?.filename ?? "No verified backup"}</strong><span>{latestVerifiedBackup ? `Verified ${dateTime(latestVerifiedBackup.verifiedAt)}` : "Create one before migrations or important changes"}</span></div>
+            </article>
+          </div>
+          <div className="administration-next-action">
+            <div><strong>Recommended next action</strong><span>{!runtimeHealth?.ok
+              ? "Recover or inspect the recorded runtime before changing organization data."
+              : !activeConnection
+                ? "Connect Codex so design tasks can return durable review links."
+                : !latestVerifiedBackup
+                  ? "Create and download a verified recovery point before deployment."
+                  : "Administration is healthy. Continue to your Products and Designs."}</span></div>
+            <a className="button button-primary" href={!runtimeHealth?.ok
+              ? "/administration/agents"
+              : !activeConnection
+                ? "/administration/agents"
+                : !latestVerifiedBackup ? "/administration/backups" : "/"}
+              onClick={(event) => navigateFromAdministration(event, !runtimeHealth?.ok
+                ? "/administration/agents"
+                : !activeConnection
+                  ? "/administration/agents"
+                  : !latestVerifiedBackup ? "/administration/backups" : "/")}
+            >{!runtimeHealth?.ok ? "Check connections" : !activeConnection ? "Connect Codex" : !latestVerifiedBackup ? "Create backup" : "Open projects"}</a>
+          </div>
+        </section>}
+
+        {section !== "overview" && <div className="administration-grid">
+          {section === "backups" && canAdministerOrganization !== false && <section className="administration-card">
             <div className="administration-card-heading">
               <div><span><DatabaseBackup size={18} /></span><div><h2>Managed backups &amp; recovery</h2><p>Verified SQLite snapshots, assets, manifests, and checksums. Restore uses an opaque backup ID, never a server path.</p></div></div>
               <button className="button button-primary" disabled={busy !== null} onClick={() => void run("create-backup", async () => {
@@ -328,7 +533,7 @@ export function Administration() {
             </div>
           </section>}
 
-          {canAdministerOrganization !== false && <section className="administration-card">
+          {section === "agents" && canAdministerOrganization !== false && <section className="administration-card">
             <div className="administration-card-heading">
               <div><span><Bot size={18} /></span><div><h2>Agent Connections</h2><p>Scoped, expiring, revocable machine identities.</p></div></div>
               <button className="button button-primary" disabled={busy !== null} onClick={() => void connectCodex()}>{busy === "connect-codex" ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />} Connect Codex to FormaSpec</button>
@@ -353,7 +558,7 @@ export function Administration() {
             </div>
           </section>}
 
-          <section className="administration-card">
+          {section === "design-system" && <section className="administration-card">
             <div className="administration-card-heading">
               <div><span><Palette size={18} /></span><div><h2>Design systems</h2><p>Versioned organization tokens, components, releases, and project pins.</p></div></div>
             </div>
@@ -384,21 +589,22 @@ export function Administration() {
                 </article>
               ))}
             </div>
-          </section>
+          </section>}
 
-          <DesignSystemProjectPins
+          {section === "design-system" && <DesignSystemProjectPins
             designSystems={designSystems}
             canAdminister={canAdministerOrganization !== false}
             onNotice={reportNotice}
             onError={reportError}
-          />
+          />}
 
-          {canAdministerOrganization !== false && <OrganizationPolicyEditor
+          {section === "policy" && canAdministerOrganization !== false && <OrganizationPolicyEditor
             record={organizationPolicy}
             loading={loading}
             disabled={busy !== null}
             saving={busy === "save-organization-policy"}
             onError={reportError}
+            onDirtyChange={setPolicyDirty}
             onSave={async (expectedConfigurationHash, policy) => {
               await run("save-organization-policy", async () => {
                 const updated = await updateOrganizationPolicy(expectedConfigurationHash, policy);
@@ -407,11 +613,11 @@ export function Administration() {
               });
             }}
           />}
-        </div>
+        </div>}
 
-        <DesignSystemComponentAuthoring designSystems={designSystems.filter((system) => system.status === "active")} />
+        {section === "design-system" && <DesignSystemComponentAuthoring designSystems={designSystems.filter((system) => system.status === "active")} />}
 
-        {canAdministerOrganization !== false && <section className="administration-card import-validator-card" id="project-import" aria-labelledby="project-recovery-title">
+        {section === "imports" && canAdministerOrganization !== false && <section className="administration-card import-validator-card" id="project-import" aria-labelledby="project-recovery-title">
           <div className="administration-card-heading">
             <div><span><Upload size={18} /></span><div><h2 id="project-recovery-title">Import one editable project</h2><p>Non-destructive V1 or V2 project import: choose a local .formaspec.zip bundle, validate it without mutation, then preserve IDs or create a deterministic clone.</p></div></div>
             <label className={`button button-secondary ${busy ? "is-disabled" : ""}`}><Upload size={14} /> Select .formaspec.zip<input type="file" accept=".zip,.formaspec.zip,application/zip" hidden disabled={busy !== null} onChange={(event) => {
@@ -451,7 +657,8 @@ export function Administration() {
             })}>{busy === "commit-import" ? <LoaderCircle size={14} className="spin" /> : <Upload size={14} />} Import project</button>
           </div>}
         </section>}
-      </section>
+        </section>
+      </div>
     </main>
   );
 }

@@ -33,7 +33,7 @@ describe("packaged FormaSpec Codex identity", () => {
     expect(inspectManagedCodexAssets(sourceAssets)).toEqual(FORMASPEC_CODEX_ASSET_INVENTORY);
     expect(FORMASPEC_CODEX_ASSET_INVENTORY.identities).toEqual([FORMASPEC_CODEX_IDENTITY]);
     expect(FORMASPEC_CODEX_IDENTITY.mention).toBe("[@FormaSpec](plugin://formaspec@formaspec)");
-    expect(FORMASPEC_CODEX_ASSET_INVENTORY.pluginVersion).toBe("0.3.0");
+    expect(FORMASPEC_CODEX_ASSET_INVENTORY.pluginVersion).toBe("0.4.0");
     const skill = fs.readFileSync(path.join(
       sourceAssets,
       "codex-marketplace/plugins/formaspec/skills/formaspec/SKILL.md",
@@ -83,7 +83,7 @@ describe("packaged FormaSpec Codex identity", () => {
     const versionedPlugin = JSON.parse(fs.readFileSync(staleVersionManifest, "utf8")) as { version: string };
     versionedPlugin.version = "0.2.2";
     fs.writeFileSync(staleVersionManifest, `${JSON.stringify(versionedPlugin, null, 2)}\n`);
-    expect(() => inspectManagedCodexAssets(staleVersion)).toThrow(/formaspec at 0\.3\.0/u);
+    expect(() => inspectManagedCodexAssets(staleVersion)).toThrow(/formaspec at 0\.4\.0/u);
 
     const extraIdentity = copiedAssets();
     const extraMarketplaceManifest = path.join(extraIdentity, "codex-marketplace/.agents/plugins/marketplace.json");

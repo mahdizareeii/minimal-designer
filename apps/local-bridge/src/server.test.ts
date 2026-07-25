@@ -359,6 +359,7 @@ describe("FormaSpec local bridge", () => {
       verified: true,
       checks: ["initialize", "tools/list"],
       serverName: "formaspec",
+      serverVersion: "0.2.0",
       essentialTools: essentialTools.map(({ name }) => name),
       upstreamOrigin: new URL(upstream.url).origin,
       dataStoreId: `store_${"a".repeat(32)}`,

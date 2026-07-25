@@ -54,6 +54,7 @@ interface OrganizationPolicyEditorProps {
     policy: OrganizationPolicy | Record<string, unknown>,
   ) => Promise<void>;
   onError: (message: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 interface PolicySectionProps {
@@ -273,6 +274,21 @@ const agentScopeGroups = [
   },
 ] as const;
 
+const POLICY_SECTION_NAVIGATION: ReadonlyArray<{ key: OrganizationPolicySectionKey; label: string }> = [
+  { key: "localization", label: "Localization" },
+  { key: "platforms", label: "Platforms" },
+  { key: "designSystem", label: "Design-system policy" },
+  { key: "assets", label: "Assets" },
+  { key: "naming", label: "Naming" },
+  { key: "accessibility", label: "Accessibility" },
+  { key: "agents", label: "Agents and scopes" },
+  { key: "repositories", label: "Repositories" },
+  { key: "backups", label: "Backups and retention" },
+  { key: "identity", label: "Identity mappings" },
+  { key: "audit", label: "Audit" },
+  { key: "exports", label: "Exports" },
+];
+
 export function OrganizationPolicyEditor({
   record,
   loading,
@@ -280,8 +296,10 @@ export function OrganizationPolicyEditor({
   saving,
   onSave,
   onError,
+  onDirtyChange,
 }: OrganizationPolicyEditorProps) {
   const [mode, setMode] = useState<EditorMode>("guided");
+  const [activeSection, setActiveSection] = useState<OrganizationPolicySectionKey>("localization");
   const [draft, setDraft] = useState<OrganizationPolicy | null>(() => record ? cloneOrganizationPolicy(record.policy) : null);
   const [rawText, setRawText] = useState(() => record ? JSON.stringify(record.policy, null, 2) : "");
 
@@ -299,6 +317,8 @@ export function OrganizationPolicyEditor({
   const draftText = useMemo(() => draft ? JSON.stringify(draft, null, 2) : "", [draft]);
   const validationIssues = useMemo(() => draft ? validateOrganizationPolicyDraft(draft) : [], [draft]);
   const dirty = mode === "guided" ? draftText !== baselineText : rawText !== baselineText;
+
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
   function replaceSection<K extends OrganizationPolicySectionKey>(
     section: K,
@@ -394,8 +414,18 @@ export function OrganizationPolicyEditor({
           <div><strong>{validationIssues.length} policy issue{validationIssues.length === 1 ? "" : "s"}</strong><ul>{validationIssues.slice(0, 5).map((issue) => <li key={issue}>{issue}</li>)}</ul></div>
         </div>}
 
+        <nav className="organization-policy-section-navigation" aria-label="Policy categories">
+          {POLICY_SECTION_NAVIGATION.map((item) => <button
+            type="button"
+            key={item.key}
+            className={activeSection === item.key ? "is-active" : ""}
+            aria-current={activeSection === item.key ? "page" : undefined}
+            onClick={() => setActiveSection(item.key)}
+          >{item.label}</button>)}
+        </nav>
+
         <div className="organization-policy-guided">
-          <PolicySection title="Localization" description="Locale coverage, default writing direction, and explicit RTL behavior.">
+          {activeSection === "localization" && <PolicySection title="Localization" description="Locale coverage, default writing direction, and explicit RTL behavior.">
             <div className="organization-policy-fields">
               <label className="organization-policy-field">
                 <span>Default locale</span>
@@ -428,9 +458,9 @@ export function OrganizationPolicyEditor({
                 onChange={(rtlLocales) => replaceSection("localization", { ...draft.localization, rtlLocales })}
               />
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Platforms" description="Allowed product targets and frame presets offered by the editor.">
+          {activeSection === "platforms" && <PolicySection title="Platforms" description="Allowed product targets and frame presets offered by the editor.">
             <PolicyChoiceSet
               label="Enabled product platforms"
               description="At least one platform is required."
@@ -447,9 +477,9 @@ export function OrganizationPolicyEditor({
               disabled={disabled}
               onChange={(framePresets) => replaceSection("platforms", { ...draft.platforms, framePresets })}
             />
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Design-system policy" description="Release discipline, reusable templates, fonts, and deterministic icons.">
+          {activeSection === "designSystem" && <PolicySection title="Design-system policy" description="Release discipline, reusable templates, fonts, and deterministic icons.">
             <div className="organization-policy-toggle-grid">
               <PolicyToggle
                 label="Require a published release"
@@ -482,9 +512,9 @@ export function OrganizationPolicyEditor({
               disabled={disabled}
               onChange={(approvedIconSets) => replaceSection("designSystem", { ...draft.designSystem, approvedIconSets })}
             />
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Assets" description="Upload allowlist, decoded-size limits, and fixed safe ingestion rules.">
+          {activeSection === "assets" && <PolicySection title="Assets" description="Upload allowlist, decoded-size limits, and fixed safe ingestion rules.">
             <PolicyToggle
               label="Enable asset uploads"
               description="When off, new portable and UI image uploads are rejected."
@@ -528,9 +558,9 @@ export function OrganizationPolicyEditor({
               <FixedSecurityRule label="Remote URL fetching rejected" description="Assets must arrive through authenticated uploads." />
               <FixedSecurityRule label="SVG uploads rejected" description="Unsanitized vector markup never enters the renderer." />
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Naming" description="Canonical conventions for projects, components, and design tokens.">
+          {activeSection === "naming" && <PolicySection title="Naming" description="Canonical conventions for projects, components, and design tokens.">
             <div className="organization-policy-fields">
               <PolicySelect
                 label="Project names"
@@ -554,9 +584,9 @@ export function OrganizationPolicyEditor({
                 onChange={(tokenConvention) => replaceSection("naming", { ...draft.naming, tokenConvention })}
               />
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Accessibility" description="Lint and acceptance thresholds applied across every design.">
+          {activeSection === "accessibility" && <PolicySection title="Accessibility" description="Lint and acceptance thresholds applied across every design.">
             <div className="organization-policy-fields">
               <PolicyNumberField
                 label="Normal-text contrast"
@@ -593,9 +623,9 @@ export function OrganizationPolicyEditor({
               <PolicyToggle label="Require focus state" description="Interactive component contracts must define keyboard focus." checked={draft.accessibility.requireFocusState} disabled={disabled} onChange={(requireFocusState) => replaceSection("accessibility", { ...draft.accessibility, requireFocusState })} />
               <PolicyToggle label="Require high-contrast context" description="Design systems must publish a high-contrast token context." checked={draft.accessibility.requireHighContrastContext} disabled={disabled} onChange={(requireHighContrastContext) => replaceSection("accessibility", { ...draft.accessibility, requireHighContrastContext })} />
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Agents and scopes" description="Adapter allowlist, grant lifetime, project boundaries, and every MCP capability." wide>
+          {activeSection === "agents" && <PolicySection title="Agents and scopes" description="Adapter allowlist, grant lifetime, project boundaries, and every MCP capability." wide>
             <div className="organization-policy-toggle-grid columns-3">
               <PolicyToggle label="Enable agent connections" description="Allow scoped, expiring machine identities." checked={draft.agents.enabled} disabled={disabled} onChange={(enabled) => replaceSection("agents", { ...draft.agents, enabled })} />
               <PolicyToggle label="Allow legacy environment token" description="Compatibility only; managed Codex pairing does not export a bearer token." checked={draft.agents.allowLegacyEnvironmentToken} disabled={disabled} onChange={(allowLegacyEnvironmentToken) => replaceSection("agents", { ...draft.agents, allowLegacyEnvironmentToken })} />
@@ -631,9 +661,9 @@ export function OrganizationPolicyEditor({
                 </label>)}
               </fieldset>)}
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Repositories" description="Local Workspace Bridge inventory boundaries and mandatory safety defaults." wide>
+          {activeSection === "repositories" && <PolicySection title="Repositories" description="Local Workspace Bridge inventory boundaries and mandatory safety defaults." wide>
             <div className="organization-policy-toggle-grid columns-3">
               <PolicyToggle label="Enable repository inventories" description="Allow explicitly granted local bridges to upload bounded inventories." checked={draft.repositories.enabled} disabled={disabled} onChange={(enabled) => replaceSection("repositories", { ...draft.repositories, enabled })} />
               <PolicyToggle label="Explicit grant required" description="Fixed on: each repository must be selected by a human." checked={draft.repositories.requireExplicitGrant} disabled onChange={() => undefined} />
@@ -669,9 +699,9 @@ export function OrganizationPolicyEditor({
                 onChange={(excludedPatterns) => replaceSection("repositories", { ...draft.repositories, excludedPatterns })}
               />
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Backups and retention" description="Verified migration gates, UTC schedule, off-host policy, and 7/4/12-style retention.">
+          {activeSection === "backups" && <PolicySection title="Backups and retention" description="Verified migration gates, UTC schedule, off-host policy, and 7/4/12-style retention.">
             <div className="organization-policy-toggle-grid">
               <PolicyToggle label="Enable managed backups" description="Allow verified online backup and restore operations." checked={draft.backups.enabled} disabled={disabled} onChange={(enabled) => replaceSection("backups", { ...draft.backups, enabled })} />
               <PolicyToggle label="Require off-host copy" description="Require an independently stored copy before backup policy is satisfied." checked={draft.backups.requireOffHostCopy} disabled={disabled} onChange={(requireOffHostCopy) => replaceSection("backups", { ...draft.backups, requireOffHostCopy })} />
@@ -687,9 +717,9 @@ export function OrganizationPolicyEditor({
               <PolicyNumberField label="Weekly copies" value={draft.backups.retention.weekly} min={1} max={520} disabled={disabled} onChange={(weekly) => replaceSection("backups", { ...draft.backups, retention: { ...draft.backups.retention, weekly } })} />
               <PolicyNumberField label="Monthly copies" value={draft.backups.retention.monthly} min={1} max={120} disabled={disabled} onChange={(monthly) => replaceSection("backups", { ...draft.backups, retention: { ...draft.backups.retention, monthly } })} />
             </div>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Identity mappings" description="Map trusted reverse-proxy identity claims to organization roles." wide>
+          {activeSection === "identity" && <PolicySection title="Identity mappings" description="Map trusted reverse-proxy identity claims to organization roles." wide>
             <div className="organization-policy-identity-list">
               {draft.identity.roleMappings.length === 0 ? <div className="organization-policy-inline-empty"><ShieldCheck size={18} /><span><strong>No explicit identity mappings</strong><small>Local mode remains the local organization administrator. Server mode requires configured trusted mappings.</small></span></div> : draft.identity.roleMappings.map((mapping, index) => <div className="organization-policy-identity-row" key={index}>
                 <PolicySelect
@@ -714,16 +744,16 @@ export function OrganizationPolicyEditor({
               </div>)}
             </div>
             <button className="button button-secondary organization-policy-add-mapping" disabled={disabled || draft.identity.roleMappings.length >= 100} onClick={() => replaceSection("identity", { roleMappings: [...draft.identity.roleMappings, { claim: "identity", value: "", role: "viewer" }] })}><Plus size={14} /> Add identity mapping</button>
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Audit" description="Append-only event retention and optional read-event volume.">
+          {activeSection === "audit" && <PolicySection title="Audit" description="Append-only event retention and optional read-event volume.">
             <div className="organization-policy-fields">
               <PolicyNumberField label="Audit retention" description="30 days through 10 years." value={draft.audit.retentionDays} min={30} max={3_650} suffix="days" disabled={disabled} onChange={(retentionDays) => replaceSection("audit", { ...draft.audit, retentionDays })} />
             </div>
             <PolicyToggle label="Include read events" description="Record bounded read operations as well as writes and security decisions." checked={draft.audit.includeReadEvents} disabled={disabled} onChange={(includeReadEvents) => replaceSection("audit", { ...draft.audit, includeReadEvents })} />
-          </PolicySection>
+          </PolicySection>}
 
-          <PolicySection title="Exports" description="Portable project bundles, generated token targets, and preview defaults.">
+          {activeSection === "exports" && <PolicySection title="Exports" description="Portable project bundles, generated token targets, and preview defaults.">
             <div className="organization-policy-toggle-grid">
               <PolicyToggle label="Allow portable bundles" description="Permit bounded, checksummed .formaspec.zip import and export." checked={draft.exports.allowPortableBundles} disabled={disabled} onChange={(allowPortableBundles) => replaceSection("exports", { ...draft.exports, allowPortableBundles })} />
               <PolicyToggle label="Include previews by default" description="Portable exports include deterministic PNG previews unless explicitly omitted." checked={draft.exports.includePreviewsByDefault} disabled={disabled} onChange={(includePreviewsByDefault) => replaceSection("exports", { ...draft.exports, includePreviewsByDefault })} />
@@ -736,7 +766,7 @@ export function OrganizationPolicyEditor({
               disabled={disabled}
               onChange={(allowedTokenFormats) => replaceSection("exports", { ...draft.exports, allowedTokenFormats })}
             />
-          </PolicySection>
+          </PolicySection>}
         </div>
       </>}
 

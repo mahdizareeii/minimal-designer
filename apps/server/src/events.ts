@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 export const DESIGNER_EVENT_TYPES = [
   "design.created",
   "design.updated",
+  "product.updated",
   "asset.created",
   "context.updated",
   "product_spec.preview.updated",

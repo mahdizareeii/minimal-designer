@@ -58,6 +58,8 @@ export interface DesignProjectSummary {
   version: number;
   revisionId?: string;
   preset?: DevicePreset;
+  status?: "active" | "archived";
+  archivedAt?: string | null;
   updatedAt: string;
   thumbnailUrl?: string;
 }

@@ -8,7 +8,7 @@ import {
   hasDesignerEventReadAccess,
   type EventProjectBoundary,
 } from "./event-authorization.js";
-import { DESIGNER_EVENT_TYPES, type DesignerEventType } from "./events.js";
+import { DESIGNER_EVENT_TYPES, EventHub, type DesignerEventType } from "./events.js";
 
 const ALL_HUMAN_ROLES: OrganizationRole[] = [
   "organization_admin",
@@ -41,11 +41,12 @@ function event(type: DesignerEventType, designId?: unknown) {
 describe("designer event authorization policy", () => {
   it("is runtime-exhaustive and pins every event family to its scope and boundary", () => {
     expect(Object.keys(DESIGNER_EVENT_AUTHORIZATION_POLICY)).toEqual([...DESIGNER_EVENT_TYPES]);
-    expect(DESIGNER_EVENT_TYPES).toHaveLength(18);
+    expect(DESIGNER_EVENT_TYPES).toHaveLength(19);
 
     const expected: Record<DesignerEventType, { agentScope: string | null; boundary: EventProjectBoundary }> = {
       "design.created": { agentScope: "design:read", boundary: "project" },
       "design.updated": { agentScope: "design:read", boundary: "project" },
+      "product.updated": { agentScope: "design:read", boundary: "organization" },
       "asset.created": { agentScope: "design:read", boundary: "optional" },
       "context.updated": { agentScope: "design:read", boundary: "optional" },
       "product_spec.preview.updated": { agentScope: "product_spec:read", boundary: "project" },
@@ -86,10 +87,13 @@ describe("designer event authorization policy", () => {
     expect(canReadDesignerEvent(designReader, event("agent_task.transitioned", "document_allowed"))).toBe(false);
     expect(canReadDesignerEvent(designReader, event("asset.created", "document_allowed"))).toBe(true);
     expect(canReadDesignerEvent(designReader, event("asset.created"))).toBe(false);
+    expect(canReadDesignerEvent(designReader, event("product.updated"))).toBe(false);
 
     const unrestrictedDesignReader = access({ role: "agent", scopes: ["design:read"] });
     expect(canReadDesignerEvent(unrestrictedDesignReader, event("asset.created"))).toBe(true);
     expect(canReadDesignerEvent(unrestrictedDesignReader, event("asset.created", 42))).toBe(false);
+    expect(canReadDesignerEvent(unrestrictedDesignReader, event("product.updated"))).toBe(true);
+    expect(canReadDesignerEvent(unrestrictedDesignReader, event("product.updated", "document_injected"))).toBe(false);
 
     const policyReader = access({ role: "agent", scopes: ["organization_policy:read"] });
     expect(canReadDesignerEvent(policyReader, event("organization_policy.changed"))).toBe(true);
@@ -144,5 +148,42 @@ describe("designer event authorization policy", () => {
       projectIds: ["document_allowed"],
     }));
     expect(deniedVisibility).toEqual({ sql: "0", parameters: [] });
+
+    const unrestrictedProductVisibility = designerEventSqlVisibility(access({
+      role: "agent",
+      scopes: ["design:read"],
+    }));
+    expect(unrestrictedProductVisibility.parameters).toContain("product.updated");
+    const restrictedProductVisibility = designerEventSqlVisibility(access({
+      role: "agent",
+      scopes: ["design:read"],
+      projectIds: ["document_allowed"],
+    }));
+    expect(restrictedProductVisibility.parameters).not.toContain("product.updated");
+  });
+
+  it("keeps organization Product updates out of project-filtered live streams", () => {
+    const events = new EventHub();
+    const unrestricted: string[] = [];
+    const projectRestricted: string[] = [];
+    events.subscribe("unrestricted", (published) => unrestricted.push(published.type), "organization_legacy");
+    events.subscribe(
+      "project-restricted",
+      (published) => projectRestricted.push(published.type),
+      "organization_legacy",
+      ["document_allowed"],
+    );
+
+    events.publishPersisted({
+      id: 1,
+      type: "product.updated",
+      actorId: "local",
+      organizationId: "organization_legacy",
+      timestamp: "2026-07-25T00:00:00.000Z",
+      data: { productId: "product_00000000000000000000000000000001", status: "archived" },
+    }, true);
+
+    expect(unrestricted).toEqual(["product.updated"]);
+    expect(projectRestricted).toEqual([]);
   });
 });

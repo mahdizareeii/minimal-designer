@@ -757,7 +757,7 @@ describe("verified FormaSpec backups", () => {
     const currentSchema = await createVerifiedBundle(root);
     await expect(verifyBackupBundle(currentSchema)).resolves.toMatchObject({
       valid: true,
-      manifest: { databaseSchemaVersion: 17 },
+      manifest: { databaseSchemaVersion: 18 },
     });
     for (const sourceVersion of [7, 8, 9, 10, 11, 12] as const) {
       const historical = await createHistoricalVerifiedBundle(root, sourceVersion);
@@ -776,8 +776,8 @@ describe("verified FormaSpec backups", () => {
       });
       const upgraded = new DesignerDatabase(path.join(restored, "designer.sqlite"));
       try {
-        expect(upgraded.schemaVersion()).toBe(17);
-        expect(upgraded.metadata("database_schema_version")).toBe("17");
+        expect(upgraded.schemaVersion()).toBe(18);
+        expect(upgraded.metadata("database_schema_version")).toBe("18");
         expect(upgraded.sqlite.prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_retention_runs'",
         ).get()).toEqual({ name: "audit_retention_runs" });
@@ -1330,9 +1330,9 @@ describe("verified FormaSpec backups", () => {
           DROP TRIGGER schema_migrations_immutable_update;
           DROP TRIGGER schema_migrations_immutable_delete;
           INSERT INTO schema_migrations(version, name, applied_at)
-          VALUES (18, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
+          VALUES (19, 'unsupported_future_migration', '2026-07-20T00:00:00.000Z');
         `);
-        manifest.databaseSchemaVersion = 17;
+        manifest.databaseSchemaVersion = 18;
       },
     ];
     for (const mutation of mutations) {
@@ -1347,7 +1347,7 @@ describe("verified FormaSpec backups", () => {
       manifest.databaseSchemaVersion = 7;
       rewriteManifest(entries, manifest);
     });
-    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 17/);
+    await expect(verifyBackupBundle(mismatchedManifest)).rejects.toThrow(/does not match its migration ledger 18/);
   });
 
   it("rejects snapshot, revision-chain, and project-head integrity tampering", async () => {
