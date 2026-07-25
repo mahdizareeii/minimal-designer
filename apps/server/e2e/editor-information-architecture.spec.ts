@@ -1,6 +1,8 @@
 import { createId, createTextNode } from "@designer/core";
 import { expect, test, type APIRequestContext, type Locator } from "playwright/test";
 
+import { designReadinessFixture } from "../test-fixtures/product.js";
+
 interface CreatedDesign {
   version: number;
   document: {
@@ -553,126 +555,45 @@ test("pinned components preview exactly and commit through the ordinary revision
   expect(Object.values(committed.document.nodes).some((node) => node.type === "instance" && !node.archived)).toBe(true);
 });
 
-test("product brief submission shows progress, persists the specification, queues a task, and keeps failures visible", async ({ page, request }) => {
+test("product brief saves independently and browser task creation remains unavailable", async ({ page, request }) => {
   const fixture = await createEditorFixture(request);
-  await page.addInitScript(() => {
-    const originalClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function click() {
-      if (this.protocol === "codex:") {
-        (window as unknown as { __formaspecSubmitLink?: string }).__formaspecSubmitLink = this.href;
-        return;
-      }
-      originalClick.call(this);
-    };
-  });
   await page.goto(
     `/design/${encodeURIComponent(fixture.designId)}?page=${encodeURIComponent(fixture.pageId)}&node=${encodeURIComponent(fixture.frameId)}`,
   );
 
   const workspace = page.getByRole("region", { name: "Product specification and agent activity" });
   const textbox = workspace.getByRole("textbox", { name: "Describe the product, business logic, and constraints" });
-  const submit = workspace.getByRole("button", { name: "Submit to @FormaSpec" });
   await expect(textbox).toBeEnabled();
-  await expect(submit).toBeEnabled();
-
-  await submit.click();
-  const submitStatus = workspace.getByTestId("formaspec-submit-status");
-  await expect(submitStatus).toHaveAttribute("role", "alert");
-  await expect(submitStatus).toContainText("Describe the product, business logic, and constraints");
-  await expect(submit).toBeEnabled();
 
   const brief = "Design an accessible bilingual dispatch dashboard with clear urgent-order states and audited assignment rules.";
-  await page.getByRole("navigation", { name: "Project structure" }).getByRole("button", { name: "pages", exact: true }).click();
-  await page.getByRole("button", { name: "Add page" }).click();
   await textbox.fill(brief);
-  await submit.click();
-  await expect(submitStatus).toHaveAttribute("role", "alert");
-  await expect(submitStatus).toContainText("Save / Commit the design first");
-  const focusedSave = page.getByTitle("Save now");
-  await expect(focusedSave).toBeFocused();
-  const dirtyHeadResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
-  expect(dirtyHeadResponse.ok(), await dirtyHeadResponse.text()).toBe(true);
-  expect(await dirtyHeadResponse.json()).toMatchObject({ version: 1 });
-  const noTaskResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`);
-  expect(noTaskResponse.ok(), await noTaskResponse.text()).toBe(true);
-  expect(await noTaskResponse.json()).toMatchObject({ tasks: [] });
-  await focusedSave.click();
-  await expect(page.locator(".save-status")).toContainText("Saved", { timeout: 15_000 });
-  const savedHeadResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
-  expect(savedHeadResponse.ok(), await savedHeadResponse.text()).toBe(true);
-  expect(await savedHeadResponse.json()).toMatchObject({ version: 2 });
+  await workspace.getByRole("button", { name: "Save specification" }).click();
 
-  const taskEndpoint = `**/api/designs/${fixture.designId}/agent-tasks`;
-  let releaseTaskRequest!: () => void;
-  let markTaskRequestSeen!: () => void;
-  const taskRequestGate = new Promise<void>((resolve) => { releaseTaskRequest = resolve; });
-  const taskRequestSeen = new Promise<void>((resolve) => { markTaskRequestSeen = resolve; });
-  await page.route(taskEndpoint, async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-    markTaskRequestSeen();
-    await taskRequestGate;
-    await route.continue();
-  });
-
-  await submit.click();
-  await expect(submitStatus).toHaveAttribute("role", "status");
-  await expect(submitStatus).toContainText("Submitting to @FormaSpec");
-  await expect(submit).toBeDisabled();
-  await taskRequestSeen;
-  await expect(submitStatus).toContainText("Creating an immutable design task and direct Codex launch action");
-  releaseTaskRequest();
-
-  await expect(submitStatus).toContainText("Task ready for Codex");
-  await expect(submitStatus).toContainText("is queued");
-  const directOpen = submitStatus.getByRole("button", { name: "Open task in Codex" });
-  await expect(directOpen).toBeVisible();
-  await directOpen.click();
-  const launchUrl = await page.evaluate(() => (window as unknown as { __formaspecSubmitLink?: string }).__formaspecSubmitLink);
-  expect(launchUrl).toBeTruthy();
-  expect(new URL(launchUrl!).searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
+  await expect.poll(async () => {
+    const response = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/product-specification`);
+    return response.ok() ? ((await response.json() as { version: number }).version) : 0;
+  }).toBe(1);
 
   const specificationResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/product-specification`);
   expect(specificationResponse.ok(), await specificationResponse.text()).toBe(true);
   expect(await specificationResponse.json()).toMatchObject({ version: 1, naturalLanguageBrief: brief });
+
+  const removedTaskCreate = await request.post(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`, {
+    data: {
+      brief,
+      selection: [],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "removed-browser-editor-task-0001",
+    },
+  });
+  expect(removedTaskCreate.status()).toBe(404);
   const tasksResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`);
   expect(tasksResponse.ok(), await tasksResponse.text()).toBe(true);
-  const tasks = await tasksResponse.json() as { tasks: Array<{ id: string; status: string; brief: string }> };
-  expect(tasks.tasks[0]).toMatchObject({ status: "queued", brief });
-  await page.unroute(taskEndpoint);
-
-  let releaseFailure!: () => void;
-  let markFailureSeen!: () => void;
-  const failureGate = new Promise<void>((resolve) => { releaseFailure = resolve; });
-  const failureSeen = new Promise<void>((resolve) => { markFailureSeen = resolve; });
-  await page.route(taskEndpoint, async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-    markFailureSeen();
-    await failureGate;
-    await route.fulfill({
-      status: 503,
-      contentType: "application/json",
-      body: JSON.stringify({ error: { code: "TEMPORARY_UNAVAILABLE", message: "Injected task queue failure for visible feedback." } }),
-    });
-  });
-  await textbox.fill(`${brief} Include a permission-denied state.`);
-  await submit.click();
-  await failureSeen;
-  await expect(submitStatus).toContainText("Creating an immutable design task and direct Codex launch action");
-  releaseFailure();
-  await expect(submitStatus).toHaveAttribute("role", "alert");
-  await expect(submitStatus).toContainText("Submission failed");
-  await expect(submitStatus).toContainText("Injected task queue failure for visible feedback.");
-  await expect(submit).toBeEnabled();
-  await expect(submitStatus).toBeVisible();
+  expect(await tasksResponse.json()).toMatchObject({ tasks: [] });
 });
 
-test("website design commands capture the Codex launch URL and simulate the MCP preview workflow with approval actions", async ({ page, request }) => {
+test("Codex/MCP design commands return to the website for preview approval", async ({ page, request }) => {
   const fixture = await createEditorFixture(request);
   // This browser suite captures the generated protocol URL and drives the
   // authenticated MCP contract directly. Coverage of OS protocol handling,
@@ -692,7 +613,7 @@ test("website design commands capture the Codex launch URL and simulate the MCP 
     data: {
       adapter: "codex",
       displayName: "Editor workflow Codex",
-      scopes: ["design:read", "design:preview", "design:write", "task:read", "task:claim", "task:update"],
+      scopes: ["design:read", "design:preview", "design:write", "task:create", "task:read", "task:claim", "task:update"],
       projectIds: [fixture.designId],
       expiresInSeconds: 3_600,
     },
@@ -731,18 +652,45 @@ test("website design commands capture the Codex launch URL and simulate the MCP 
   const productWorkspace = page.getByRole("region", { name: "Product specification and agent activity" });
   const workflow = productWorkspace.getByRole("complementary", { name: "Agent task workflow" });
   await expect(workflow.getByText("active", { exact: true })).toBeVisible();
-  await expect(workflow.getByText("Connected and ready to claim tasks.", { exact: true })).toBeVisible();
+  await expect(workflow.getByText("MCP connected. Start FormaSpec work from Codex or the CLI.", { exact: true })).toBeVisible();
 
-  await productWorkspace.getByRole("textbox", { name: "Describe the product, business logic, and constraints" }).fill(
-    "Design a professional dispatch overview with a clear urgent-order state, accessible actions, and RTL-safe content.",
-  );
-  await productWorkspace.getByRole("button", { name: "Submit to @FormaSpec" }).click();
-  await expect(workflow.getByText("Task created. Click Open task in Codex below so @FormaSpec can claim it.", { exact: true })).toBeVisible();
+  const taskBrief = "Design a professional dispatch overview with a clear urgent-order state, accessible actions, and RTL-safe content.";
+  await productWorkspace.getByRole("textbox", { name: "Describe the product, business logic, and constraints" }).fill(taskBrief);
+  await productWorkspace.getByRole("button", { name: "Save specification" }).click();
+  await expect.poll(async () => {
+    const response = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/product-specification`);
+    return response.ok() ? ((await response.json() as { version: number }).version) : 0;
+  }).toBe(1);
+
+  const designResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}`);
+  expect(designResponse.ok(), await designResponse.text()).toBe(true);
+  const design = await designResponse.json() as { productId: string; version: number; document: { name: string } };
+  const productResponse = await request.get(`/api/products/${encodeURIComponent(design.productId)}`);
+  expect(productResponse.ok(), await productResponse.text()).toBe(true);
+  const product = await productResponse.json() as { product: { id: string; name: string } };
+  const createdTask = await callTool<{
+    task: { id: string; status: string; resolvedContext: Parameters<typeof designReadinessFixture>[0] };
+  }>("task_create", {
+    design_id: fixture.designId,
+    brief: taskBrief,
+    selection: [fixture.frameId],
+    base_version: design.version,
+    selection_confirmation: {
+      source: "exact_project_link",
+      product_id: product.product.id,
+      product_name: product.product.name,
+      design_id: fixture.designId,
+      design_name: design.document.name,
+      base_version: design.version,
+    },
+    expected_output: "design_preview",
+  });
+  await expect(workflow.getByText("This Codex/CLI task is queued and waiting for an authorized FormaSpec agent to claim it.", { exact: true })).toBeVisible();
 
   const tasksResponse = await request.get(`/api/designs/${encodeURIComponent(fixture.designId)}/agent-tasks`);
   expect(tasksResponse.ok(), await tasksResponse.text()).toBe(true);
   const tasks = await tasksResponse.json() as { tasks: Array<{ id: string; status: string }> };
-  const task = tasks.tasks[0]!;
+  const task = tasks.tasks.find((candidate) => candidate.id === createdTask.task.id)!;
   expect(task.status).toBe("queued");
   expect(await page.evaluate(() => (window as unknown as { __formaspecExternalLink?: string }).__formaspecExternalLink)).toBeUndefined();
   const openTask = workflow.getByRole("button", { name: "Open task in Codex" });
@@ -755,8 +703,6 @@ test("website design commands capture the Codex launch URL and simulate the MCP 
   expect(parsedCodexLink.hostname).toBe("new");
   expect(parsedCodexLink.searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
   expect(parsedCodexLink.searchParams.get("prompt")).toContain(task.id);
-  await expect(workflow.getByRole("button", { name: "Copy Codex instruction" })).toBeVisible();
-
   const claimed = await callTool<{ task: { status: string } }>("task_claim", { task_id: task.id });
   expect(claimed.task.status).toBe("claimed");
   const progressed = await callTool<{ task: { status: string } }>("task_transition", {
@@ -771,7 +717,7 @@ test("website design commands capture the Codex launch URL and simulate the MCP 
   const previewed = await callTool<{ preview: { id: string; canCommit: boolean } }>("design_preview_changes", {
     design_id: fixture.designId,
     task_id: task.id,
-    base_version: 1,
+    base_version: design.version,
     max_size: 720,
     operations: [{
       type: "update_node",
@@ -785,7 +731,7 @@ test("website design commands capture the Codex launch URL and simulate the MCP 
     expected_status: "in_progress",
     to_status: "awaiting_approval",
     message: "Rendered preview is ready for product-manager approval.",
-    data: { previewId: previewed.preview.id },
+    data: { previewId: previewed.preview.id, readiness: designReadinessFixture(createdTask.task.resolvedContext) },
   });
   expect(approval.task.status).toBe("awaiting_approval");
 

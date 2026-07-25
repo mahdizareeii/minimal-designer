@@ -1420,6 +1420,7 @@ show_codex_config() {
 url = "${public_url%/}/mcp"
 required = true
 bearer_token_env_var = "FORMASPEC_MCP_TOKEN"
+# Remote proxy connections intentionally retain per-write confirmation.
 default_tools_approval_mode = "writes"
 tool_timeout_sec = 60
 EOF
@@ -1449,6 +1450,8 @@ EOF
 [mcp_servers.formaspec]
 url = "http://127.0.0.1:$port/mcp"
 required = true
+# Legacy direct-MCP output retains per-write confirmation. Use the managed
+# loopback bridge connection for one-time server-scoped approval.
 default_tools_approval_mode = "writes"
 tool_timeout_sec = 60
 EOF

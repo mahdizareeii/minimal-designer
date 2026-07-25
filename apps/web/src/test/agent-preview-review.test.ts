@@ -7,14 +7,11 @@ import {
   AgentPreviewPng,
   AgentTaskWorkflowCard,
   agentTaskBriefSummary,
-  agentTaskInstruction,
   agentTaskStatusMessage,
   changedNodeSummaries,
-  codexTaskLaunchUrl,
   exactPreviewCommitAllowed,
 } from "../components/AgentPreviewReview";
 import {
-  AgentSubmissionStatus,
   agentPreviewReadFailureDisposition,
   commitInlineAgentPreviewWhenAllowed,
   productSpecificationRequiresCommit,
@@ -123,48 +120,7 @@ describe("agent before/after review", () => {
     expect(productSpecificationRequiresCommit(committed, true)).toBe(true);
   });
 
-  it("renders durable progress, success with direct Codex launch, and fail-visible errors", () => {
-    const progress = renderToStaticMarkup(createElement(AgentSubmissionStatus, {
-      feedback: {
-        phase: "saving_specification",
-        message: "Creating or updating the versioned product specification…",
-        task: null,
-      },
-      onOpenCodex: () => undefined,
-    }));
-    expect(progress).toContain('role="status"');
-    expect(progress).toContain("Submitting to @FormaSpec");
-    expect(progress).toContain("Creating or updating the versioned product specification");
-    expect(progress).not.toContain("Open task in Codex");
-
-    const queuedTask = task({ status: "queued" });
-    const success = renderToStaticMarkup(createElement(AgentSubmissionStatus, {
-      feedback: {
-        phase: "success",
-        message: `Task ${queuedTask.id} is queued.`,
-        task: queuedTask,
-      },
-      onOpenCodex: () => undefined,
-    }));
-    expect(success).toContain('role="status"');
-    expect(success).toContain("Task ready for Codex");
-    expect(success).toContain(queuedTask.id);
-    expect(success).toContain("Open task in Codex");
-
-    const failure = renderToStaticMarkup(createElement(AgentSubmissionStatus, {
-      feedback: {
-        phase: "error",
-        message: "The latest design revision could not be saved.",
-        task: null,
-      },
-      onOpenCodex: () => undefined,
-    }));
-    expect(failure).toContain('role="alert"');
-    expect(failure).toContain("Submission failed");
-    expect(failure).toContain("The latest design revision could not be saved.");
-  });
-
-  it("turns connection and task lifecycle state into actionable website guidance", () => {
+  it("turns connection and externally-created task lifecycle state into read-only website guidance", () => {
     const activeConnection = {
       id: "connection_codex_0001",
       adapter: "codex" as const,
@@ -181,7 +137,7 @@ describe("agent before/after review", () => {
     const now = Date.parse("2026-07-20T09:00:00.000Z");
     expect(summarizeCodexConnection([activeConnection], null, false, "document_review_0001", now)).toEqual({
       state: "active",
-      message: "Connected and ready to claim tasks.",
+      message: "MCP connected. Start FormaSpec work from Codex or the CLI.",
     });
     expect(summarizeCodexConnection([{
       ...activeConnection,
@@ -205,27 +161,39 @@ describe("agent before/after review", () => {
       message: expect.stringContaining("pairing is not complete"),
     });
     expect(summarizeCodexConnection([], new ApiError("Forbidden", { status: 403, code: "FORBIDDEN" }), false, "document_review_0001").state).toBe("restricted");
-    expect(agentTaskStatusMessage(task({ status: "queued" }))).toContain("Click Open task in Codex");
-    expect(agentTaskInstruction(task())).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
-    expect(agentTaskInstruction(task())).toContain("Use FormaSpec.");
-    expect(agentTaskInstruction(task())).toContain("Claim task task_review_0001 with task_claim");
-    expect(agentTaskInstruction(task())).toContain("design_preview_changes");
-    expect(agentTaskInstruction(task())).toContain("returned PNG in Codex");
-    expect(agentTaskInstruction(task())).toContain("design_lint");
-    expect(agentTaskInstruction(task())).toContain("immutable Product");
-    expect(agentTaskInstruction(task())).toContain("reused, extended, or proposed");
-    expect(agentTaskInstruction(task())).toContain('task_transition to awaiting_approval with data {"previewId":"<preview id>","readiness":');
-    expect(agentTaskInstruction(task())).toContain("DesignReadinessReport");
-    expect(agentTaskInstruction(task())).toContain("Do not commit it");
-    const launchUrl = new URL(codexTaskLaunchUrl(task()));
-    expect(launchUrl.protocol).toBe("codex:");
-    expect(launchUrl.hostname).toBe("new");
-    expect([...launchUrl.searchParams.keys()]).toEqual(["prompt"]);
-    expect(launchUrl.searchParams.get("prompt")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
-    expect(launchUrl.searchParams.get("prompt")).toContain("task_review_0001");
-    expect(codexTaskLaunchUrl(task())).toContain("%40FormaSpec");
+    expect(agentTaskStatusMessage(task({ status: "queued" }))).toContain("Codex/CLI task is queued");
+    expect(agentTaskStatusMessage(null)).toContain("Codex or the CLI");
     expect(agentTaskBriefSummary("  Build   a checkout\nflow  ")).toBe("Build a checkout flow");
     expect(agentTaskBriefSummary("x".repeat(400))).toHaveLength(320);
+  });
+
+  it("directs new agent work to Codex or the CLI and exposes only the MCP setup action", () => {
+    const markup = renderToStaticMarkup(createElement(AgentTaskWorkflowCard, {
+      connectionState: "unavailable",
+      connectionMessage: "FormaSpec MCP is not connected.",
+      task: null,
+      preview: null,
+      busy: false,
+      actionError: null,
+      canCommit: false,
+      canDiscard: false,
+      previewRenderStatus: "loading",
+      previewRenderRetryKey: 0,
+      onOpenCodex: () => undefined,
+      onConnect: () => undefined,
+      onRetry: () => undefined,
+      onOpenReview: () => undefined,
+      onCommit: () => undefined,
+      onDiscard: () => undefined,
+      onPreviewRenderStatusChange: () => undefined,
+      onRetryPreviewRender: () => undefined,
+      onOpenPlanning: () => undefined,
+    }));
+    expect(markup).toContain("Start agent work in Codex or the CLI");
+    expect(markup).toContain("website does not create agent tasks");
+    expect(markup).toContain("Connect / install FormaSpec MCP");
+    expect(markup).not.toContain("Submit to @FormaSpec");
+    expect(markup).not.toContain("Open task in Codex");
   });
 
   it("renders the returned PNG with Commit and Discard directly beneath it", () => {
@@ -262,7 +230,6 @@ describe("agent before/after review", () => {
       canDiscard: true,
       previewRenderStatus: "available",
       previewRenderRetryKey: 0,
-      onCopyInstruction: () => undefined,
       onOpenCodex: () => undefined,
       onConnect: () => undefined,
       onRetry: () => undefined,
@@ -274,7 +241,7 @@ describe("agent before/after review", () => {
       onOpenPlanning: () => undefined,
     }));
     expect(markup).toContain("FormaSpec rendered preview");
-    expect(markup).toContain("Submitted to @FormaSpec");
+    expect(markup).toContain("Task brief from Codex / CLI");
     expect(markup).toContain("Refine checkout");
     expect(markup).toContain("Agent preview approval actions");
     expect(markup).toContain("Commit exact preview");
@@ -282,7 +249,7 @@ describe("agent before/after review", () => {
     expect(markup.indexOf("FormaSpec rendered preview")).toBeLessThan(markup.indexOf("Commit exact preview"));
   });
 
-  it("keeps task launch available when connection visibility is restricted", () => {
+  it("recovers an existing Codex task without offering website task creation controls", () => {
     const markup = renderToStaticMarkup(createElement(AgentTaskWorkflowCard, {
       connectionState: "restricted",
       connectionMessage: "Connection details require an administrator.",
@@ -294,7 +261,6 @@ describe("agent before/after review", () => {
       canDiscard: false,
       previewRenderStatus: "loading",
       previewRenderRetryKey: 0,
-      onCopyInstruction: () => undefined,
       onOpenCodex: () => undefined,
       onConnect: () => undefined,
       onRetry: () => undefined,
@@ -305,10 +271,11 @@ describe("agent before/after review", () => {
       onRetryPreviewRender: () => undefined,
       onOpenPlanning: () => undefined,
     }));
+    expect(markup).toContain("Codex/CLI task is queued");
+    expect(markup).toContain("Connect / install FormaSpec MCP");
     expect(markup).toContain("Open task in Codex");
-    expect(markup).toContain("Click Open task in Codex below");
-    expect(markup).toContain("Connect or repair @FormaSpec");
-    expect(markup).toContain("Copy Codex instruction");
+    expect(markup).not.toContain("Copy Codex instruction");
+    expect(markup).not.toContain("Submit to @FormaSpec");
   });
 
   it("does not offer Codex launch or instruction copy for terminal tasks", () => {
@@ -324,7 +291,6 @@ describe("agent before/after review", () => {
         canDiscard: false,
         previewRenderStatus: "loading",
         previewRenderRetryKey: 0,
-        onCopyInstruction: () => undefined,
         onOpenCodex: () => undefined,
         onConnect: () => undefined,
         onRetry: () => undefined,
@@ -375,7 +341,6 @@ describe("agent before/after review", () => {
       canDiscard: true,
       previewRenderStatus: "unavailable",
       previewRenderRetryKey: 2,
-      onCopyInstruction: () => undefined,
       onOpenCodex: () => undefined,
       onConnect: () => undefined,
       onRetry: () => undefined,

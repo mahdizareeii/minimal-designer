@@ -110,8 +110,8 @@ url = ${JSON.stringify(url)}`;
       "Confirm the single natural-language identity is recognized: 'Use FormaSpec'.",
       "List MCP resources and confirm formaspec://schema/v1 and formaspec://schema/v2 are readable.",
       connectionMode === "loopback_bridge"
-        ? "Keep write-tool approval enabled. Do not add a bearer token or Authorization header; the loopback bridge holds the scoped upstream grant."
-        : "Keep write-tool approval enabled and store any public-server authorization only in the client's supported secret store.",
+        ? "If the client supports server-scoped trust, approve this credential-free local FormaSpec MCP once instead of prompting for every tool call. Preserve the client's global approval and sandbox policy, and do not add a bearer token or Authorization header; the loopback bridge holds the scoped upstream grant."
+        : "Keep per-write approval enabled and store any public-server authorization only in the client's supported secret store.",
     ],
   };
 }

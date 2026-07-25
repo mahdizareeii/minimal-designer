@@ -418,7 +418,7 @@ function expectHiddenDomainError(error: DomainError, statusCode: number, code: s
 }
 
 describe("planning-session and agent-task collection HTTP authorization", () => {
-  it("authorizes all four routes before malformed path, query, body, cleanup, or deeper service work", async () => {
+  it("authorizes the three browser collection routes and keeps browser task creation unavailable", async () => {
     const fixture = await createFixture("ordering");
     const { application } = fixture;
     seedExpiredIdempotency(application, "ordering");
@@ -432,7 +432,6 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       { method: "GET", url: `/api/designs/%20/planning-sessions?limit=${PRIVATE_MARKER}` },
       { method: "POST", url: "/api/designs/%20/planning-sessions", payload: { privateMarker: PRIVATE_MARKER } },
       { method: "GET", url: `/api/designs/%20/agent-tasks?status=${PRIVATE_MARKER}` },
-      { method: "POST", url: "/api/designs/%20/agent-tasks", payload: { privateMarker: PRIVATE_MARKER } },
     ] as const;
     for (const request of unauthenticated) {
       const response = await application.app.inject({
@@ -444,23 +443,14 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     }
 
     const viewerHeaders = serverHeaders(VIEWER_IDENTITY);
-    const roleDenied = await Promise.all([
-      application.app.inject({
-        method: "POST",
-        url: "/api/designs/%20/planning-sessions",
-        remoteAddress: "127.0.0.1",
-        headers: viewerHeaders,
-        payload: { privateMarker: PRIVATE_MARKER },
-      }),
-      application.app.inject({
-        method: "POST",
-        url: "/api/designs/%20/agent-tasks",
-        remoteAddress: "127.0.0.1",
-        headers: viewerHeaders,
-        payload: { privateMarker: PRIVATE_MARKER },
-      }),
-    ]);
-    for (const response of roleDenied) expectHiddenError(response, 403, "FORBIDDEN", fixture.hidden);
+    const roleDenied = await application.app.inject({
+      method: "POST",
+      url: "/api/designs/%20/planning-sessions",
+      remoteAddress: "127.0.0.1",
+      headers: viewerHeaders,
+      payload: { privateMarker: PRIVATE_MARKER },
+    });
+    expectHiddenError(roleDenied, 403, "FORBIDDEN", fixture.hidden);
 
     const projectDenied = await Promise.all([
       application.app.inject({
@@ -481,13 +471,6 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
         url: `/api/designs/${fixture.foreign.id}/agent-tasks?status=${PRIVATE_MARKER}&limit=${PRIVATE_MARKER}`,
         remoteAddress: "127.0.0.1",
         headers: serverHeaders(),
-      }),
-      application.app.inject({
-        method: "POST",
-        url: `/api/designs/${fixture.foreign.id}/agent-tasks`,
-        remoteAddress: "127.0.0.1",
-        headers: serverHeaders(),
-        payload: { privateMarker: PRIVATE_MARKER },
       }),
     ]);
     for (const response of projectDenied) expectHiddenError(response, 404, "NOT_FOUND", fixture.hidden);
@@ -515,6 +498,16 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       headers: grantHeaders(fixture.scopedAgent.token),
     });
     expectHiddenError(restGrant, 401, "AUTH_REQUIRED", fixture.hidden);
+
+    const removedBrowserTaskCreate = await application.app.inject({
+      method: "POST",
+      url: `/api/designs/${fixture.allowed.id}/agent-tasks`,
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(),
+      payload: { privateMarker: PRIVATE_MARKER },
+    });
+    expect(removedBrowserTaskCreate.statusCode, removedBrowserTaskCreate.body).toBe(404);
+    for (const marker of fixture.hidden) expect(removedBrowserTaskCreate.body).not.toContain(marker);
 
     expect(planningList).not.toHaveBeenCalled();
     expect(planningCreate).not.toHaveBeenCalled();
@@ -668,34 +661,53 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       selection: [],
       baseVersion: fixture.allowed.version,
       expectedOutput: "design_preview",
-      idempotencyKey: "planning-task-http-task-create-0001",
+      idempotencyKey: "planning-task-service-task-create-0001",
       expiresInSeconds: 3_600,
     } as const;
-    const createdTaskResponse = await application.app.inject({
+    const removedBrowserTaskCreate = await application.app.inject({
       method: "POST",
       url: `/api/designs/${fixture.allowed.id}/agent-tasks`,
       remoteAddress: "127.0.0.1",
       headers: serverHeaders(),
       payload: taskPayload,
     });
-    expect(createdTaskResponse.statusCode, createdTaskResponse.body).toBe(201);
-    const createdTask = createdTaskResponse.json<{
-      task: AgentTaskResult;
-      launchUrl: string;
-      websiteTaskLink: string;
-    }>();
-    expect(createdTask.task).toMatchObject({
+    expect(removedBrowserTaskCreate.statusCode, removedBrowserTaskCreate.body).toBe(404);
+
+    const createdTaskRecord = application.enterprise.createAgentTask(`trusted:${PRODUCT_MANAGER_IDENTITY}`, {
+      designId: fixture.allowed.id,
+      ...taskPayload,
+    });
+    expect(createdTaskRecord).toMatchObject({
       designId: fixture.allowed.id,
       status: "queued",
       selection: [],
       baseVersion: fixture.allowed.version,
       expectedOutput: "design_preview",
     });
+    const taskRetry = application.enterprise.createAgentTask(`trusted:${PRODUCT_MANAGER_IDENTITY}`, {
+      designId: fixture.allowed.id,
+      ...taskPayload,
+    });
+    expect(taskRetry.id).toBe(createdTaskRecord.id);
+
+    const queuedTasks = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${fixture.allowed.id}/agent-tasks?status=queued&limit=100`,
+      remoteAddress: "127.0.0.1",
+      headers: serverHeaders(VIEWER_IDENTITY),
+    });
+    expect(queuedTasks.statusCode, queuedTasks.body).toBe(200);
+    const queuedTaskRecords = queuedTasks.json<{ tasks: Array<AgentTaskResult & {
+      launchUrl: string;
+      websiteTaskLink: string;
+    }> }>().tasks;
+    const createdTask = queuedTaskRecords.find((task) => task.id === createdTaskRecord.id)!;
+    expect(createdTask).toBeDefined();
     const taskLaunch = new URL(createdTask.launchUrl);
     expect(taskLaunch.protocol).toBe("codex:");
     expect(taskLaunch.hostname).toBe("new");
     expect([...taskLaunch.searchParams.keys()]).toEqual(["prompt"]);
-    expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${createdTask.task.id} with task_claim`);
+    expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${createdTask.id} with task_claim`);
     expect(taskLaunch.searchParams.get("prompt")).toContain("design_preview_changes");
     expect(taskLaunch.searchParams.get("prompt")).toContain("returned PNG in Codex");
     expect(taskLaunch.searchParams.get("prompt")).toContain("immutable Product");
@@ -705,29 +717,11 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     const websiteTaskLink = new URL(createdTask.websiteTaskLink);
     expect(websiteTaskLink.origin).toBe(PUBLIC_ORIGIN);
     expect(websiteTaskLink.pathname).toBe(`/design/${fixture.allowed.id}`);
-    expect(websiteTaskLink.searchParams.get("task")).toBe(createdTask.task.id);
+    expect(websiteTaskLink.searchParams.get("task")).toBe(createdTask.id);
     expect(websiteTaskLink.searchParams.get("store")).toBe(fixture.application.database.dataStoreId());
     expect([...websiteTaskLink.searchParams.keys()]).toEqual(["task", "store"]);
-    for (const marker of fixture.hidden) expect(createdTaskResponse.body).not.toContain(marker);
-    const taskRetry = await application.app.inject({
-      method: "POST",
-      url: `/api/designs/${fixture.allowed.id}/agent-tasks`,
-      remoteAddress: "127.0.0.1",
-      headers: serverHeaders(),
-      payload: taskPayload,
-    });
-    expect(taskRetry.statusCode, taskRetry.body).toBe(201);
-    expect(taskRetry.json<{ task: AgentTaskResult }>().task.id).toBe(createdTask.task.id);
-
-    const queuedTasks = await application.app.inject({
-      method: "GET",
-      url: `/api/designs/${fixture.allowed.id}/agent-tasks?status=queued&limit=100`,
-      remoteAddress: "127.0.0.1",
-      headers: serverHeaders(VIEWER_IDENTITY),
-    });
-    expect(queuedTasks.statusCode, queuedTasks.body).toBe(200);
-    const queuedIds = queuedTasks.json<{ tasks: AgentTaskResult[] }>().tasks.map((task) => task.id);
-    expect(queuedIds).toContain(createdTask.task.id);
+    const queuedIds = queuedTaskRecords.map((task) => task.id);
+    expect(queuedIds).toContain(createdTask.id);
     expect(queuedIds).not.toContain(fixture.allowedTask.id);
     for (const marker of fixture.hidden) expect(queuedTasks.body).not.toContain(marker);
 
@@ -742,13 +736,6 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
       }),
       application.app.inject({
         method: "POST",
-        url: `/api/designs/${fixture.allowed.id}/agent-tasks`,
-        remoteAddress: "127.0.0.1",
-        headers: serverHeaders(VIEWER_IDENTITY),
-        payload: { ...taskPayload, idempotencyKey: "planning-task-viewer-task-denied-0001" },
-      }),
-      application.app.inject({
-        method: "POST",
         url: `/api/designs/${fixture.allowed.id}/planning-sessions`,
         remoteAddress: "127.0.0.1",
         headers: serverHeaders(DESIGN_EDITOR_IDENTITY),
@@ -758,23 +745,16 @@ describe("planning-session and agent-task collection HTTP authorization", () => 
     for (const response of viewerWrites) expectHiddenError(response, 403, "FORBIDDEN", fixture.hidden);
     expect(workflowState(application)).toEqual(beforeViewerWrites);
 
-    const editorTask = await application.app.inject({
-      method: "POST",
-      url: `/api/designs/${fixture.allowed.id}/agent-tasks`,
-      remoteAddress: "127.0.0.1",
-      headers: serverHeaders(DESIGN_EDITOR_IDENTITY),
-      payload: { ...taskPayload, idempotencyKey: "planning-task-editor-task-create-0001" },
-    });
-    expect(editorTask.statusCode, editorTask.body).toBe(409);
-    expect(editorTask.json<{ error: { code: string; details: Record<string, unknown> } }>().error).toMatchObject({
-      code: "TASK_STATE_CONFLICT",
-      details: {
-        designId: fixture.allowed.id,
-        expectedOutput: "design_preview",
-        activeTaskId: createdTask.task.id,
-        activeStatus: "queued",
-      },
-    });
-    for (const marker of fixture.hidden) expect(editorTask.body).not.toContain(marker);
+    for (const identity of [VIEWER_IDENTITY, DESIGN_EDITOR_IDENTITY]) {
+      const removedRoleTaskCreate = await application.app.inject({
+        method: "POST",
+        url: `/api/designs/${fixture.allowed.id}/agent-tasks`,
+        remoteAddress: "127.0.0.1",
+        headers: serverHeaders(identity),
+        payload: { ...taskPayload, idempotencyKey: `removed-browser-task-${identity}` },
+      });
+      expect(removedRoleTaskCreate.statusCode, removedRoleTaskCreate.body).toBe(404);
+      for (const marker of fixture.hidden) expect(removedRoleTaskCreate.body).not.toContain(marker);
+    }
   });
 });

@@ -59,9 +59,11 @@ Local source installer entry point:
 
 Both installers perform the available requirement checks, install the frozen
 workspace dependencies, build the CLI and local bridge, start FormaSpec, start
-the loopback bridge, detect Codex, and configure the managed FormaSpec 0.3.0
+the loopback bridge, detect Codex, and configure the managed FormaSpec 0.4.0
 plugin when Codex is available. `--yes` grants that explicit setup
-authorization without further prompts.
+authorization without further prompts. Automatic tool approval is scoped only
+to the trusted local `formaspec` MCP entry; global Codex approval and sandbox
+settings are not changed.
 
 The source installer currently needs Node.js 24 or newer and pnpm 11.9 even
 when the selected application runtime is Docker, because `formaspecctl` and the
@@ -212,7 +214,7 @@ pnpm formaspecctl --help
 | `pnpm formaspecctl audit retention preview [--json]` | Produces a 15-minute, organization-scoped, bounded dry-run using the current audit-retention policy, exact candidate counts/ranges, canonical-byte hashes, and a plan hash. |
 | `pnpm formaspecctl audit retention list [--json]` | Lists immutable retention-run evidence and SHA-256 chain hashes without exposing deleted audit contents. |
 | `pnpm formaspecctl audit retention execute --preview-id <id> --plan-hash <sha256> --yes [--idempotency-key <key>] [--json]` | Revalidates and atomically commits only the reviewed old audit/published-outbox batch, then records immutable hash-chained evidence. |
-| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts or refreshes the bridge, consumes an Administration-issued ticket in authenticated mode, installs and verifies the single managed FormaSpec 0.3.0 plugin, removes only installer-owned legacy identities, saves MCP server `formaspec`, and verifies the credential-free Codex configuration. `--connection-id` is optional but valid only with a nonce. |
+| `pnpm formaspecctl agent connect codex [--pairing-nonce <nonce>] [--connection-id <id>] [--yes]` | Starts or refreshes the bridge, consumes an Administration-issued ticket in authenticated mode, installs and verifies the single managed FormaSpec 0.4.0 plugin, removes only installer-owned legacy identities, saves MCP server `formaspec` with server-scoped automatic approval, and verifies the credential-free Codex configuration without changing global approval or sandbox policy. `--connection-id` is optional but valid only with a nonce. |
 | `pnpm formaspecctl agent config generic [--format all\|json\|toml]` | Prints validated client-neutral loopback Streamable HTTP configuration and verification guidance; it never reads or modifies an unknown client file. |
 | `pnpm formaspecctl support-bundle preview [--json]` | Produces a read-only exact inventory of bounded sanitized diagnostic entries. |
 | `pnpm formaspecctl support-bundle create [OUTPUT.tar] --yes [--json]` | Creates the reviewed deterministic archive plus an adjacent local manifest; excludes databases, assets, backups, environment values, source, and credentials. |
@@ -309,16 +311,16 @@ The resulting setup is:
 - local bridge URL: `http://127.0.0.1:4312/mcp`;
 - upstream FormaSpec MCP URL: `http://127.0.0.1:4310/mcp` by default;
 - primary Codex mention: `[@FormaSpec](plugin://formaspec@formaspec)`;
-- installed managed identity: FormaSpec version 0.3.0;
+- installed managed identity: FormaSpec version 0.4.0;
 - recommended natural-language triggers: “Use FormaSpec,” “Design this with
   FormaSpec,” and “Refine this selection with FormaSpec.”
 
-For a website-created task opened with **Submit to @FormaSpec**, Codex claims
-the task, previews the requested change, inspects the PNG, runs linting, and
-transitions to `awaiting_approval` with the exact `previewId`. It does not
-commit or complete the task. The human **Commit** or **Discard** action in
-FormaSpec is the approval boundary. Direct requests create the same task-backed
-preview and never commit from the agent.
+The website does not create agent tasks. Codex or the CLI creates the task
+through MCP after exact Product/Design selection confirmation, then claims it,
+previews the requested change, inspects the PNG, runs linting, and transitions
+to `awaiting_approval` with the exact `previewId`. It does not commit or
+complete the task. The human **Commit** or **Discard** action in FormaSpec is
+the approval boundary.
 
 The Codex MCP configuration contains no bearer token. Administration creates
 the scoped, expiring connection and one-time nonce. The loopback bridge submits

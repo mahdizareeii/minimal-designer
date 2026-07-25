@@ -651,7 +651,7 @@ describe("designer server", () => {
       .session.current_section).toBe("product_purpose");
     expect(planning.json<{ sectionCount: number }>().sectionCount).toBe(22);
 
-    const taskResponse = await application.app.inject({
+    const removedBrowserTaskCreate = await application.app.inject({
       method: "POST",
       url: `/api/designs/${designId}/agent-tasks`,
       payload: {
@@ -662,14 +662,29 @@ describe("designer server", () => {
         idempotencyKey: "enterprise-http-task-0001",
       },
     });
-    expect(taskResponse.statusCode).toBe(201);
-    const task = taskResponse.json<{ task: { id: string; status: string }; launchUrl: string }>();
-    expect(task.task.status).toBe("queued");
+    expect(removedBrowserTaskCreate.statusCode).toBe(404);
+
+    const seededTask = application.enterprise.createAgentTask("local", {
+      designId,
+      brief: committed.naturalLanguageBrief,
+      selection: [],
+      baseVersion: 1,
+      expectedOutput: "design_preview",
+      idempotencyKey: "enterprise-service-task-0001",
+    });
+    const taskListResponse = await application.app.inject({
+      method: "GET",
+      url: `/api/designs/${designId}/agent-tasks`,
+    });
+    expect(taskListResponse.statusCode).toBe(200);
+    const task = taskListResponse.json<{ tasks: Array<{ id: string; status: string; launchUrl: string }> }>()
+      .tasks.find((candidate) => candidate.id === seededTask.id)!;
+    expect(task.status).toBe("queued");
     const taskLaunch = new URL(task.launchUrl);
     expect(taskLaunch.protocol).toBe("codex:");
     expect(taskLaunch.hostname).toBe("new");
     expect([...taskLaunch.searchParams.keys()]).toEqual(["prompt"]);
-    expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${task.task.id} with task_claim`);
+    expect(taskLaunch.searchParams.get("prompt")).toContain(`Claim task ${task.id} with task_claim`);
     expect(taskLaunch.searchParams.get("prompt")).toContain("design_preview_changes");
     expect(taskLaunch.searchParams.get("prompt")).toContain("returned PNG in Codex");
     expect(taskLaunch.searchParams.get("prompt")).toContain("immutable Product");
@@ -716,7 +731,7 @@ describe("designer server", () => {
     expect(inspect.limitations).toContain("No product specification version is explicitly pinned to this historical design revision.");
   });
 
-  it("accepts connection rotation through REST and rejects the replaced scoped grant immediately", async () => {
+  it("accepts staged connection rotation through REST and rejects the old grant only after pairing", async () => {
     const connectionInput = {
       adapter: "codex",
       displayName: "Codex through the local FormaSpec bridge",
@@ -744,13 +759,41 @@ describe("designer server", () => {
       payload: { ...connectionInput, replaceExisting: true },
     });
     expect(replacementResponse.statusCode).toBe(201);
-    const replacement = replacementResponse.json<{ connection: { id: string; status: string } }>();
+    const replacement = replacementResponse.json<{ connection: { id: string; status: string }; nonce: string }>();
     expect(replacement.connection).toMatchObject({ status: "pending" });
 
     const connectionsResponse = await application.app.inject({ method: "GET", url: "/api/agent-connections" });
     const connections = connectionsResponse.json<{ connections: Array<{ id: string; status: string }> }>().connections;
-    expect(connections.find((connection) => connection.id === first.connection.id)?.status).toBe("revoked");
+    expect(connections.find((connection) => connection.id === first.connection.id)?.status).toBe("active");
     expect(connections.find((connection) => connection.id === replacement.connection.id)?.status).toBe("pending");
+
+    const grantDuringPairing = await application.app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        authorization: `Bearer ${paired.grant.token}`,
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "rotation-test", version: "1.0.0" },
+        },
+      },
+    });
+    expect(grantDuringPairing.statusCode).toBe(200);
+
+    const pairedReplacement = await application.app.inject({
+      method: "POST",
+      url: "/api/agent-connections/pair",
+      payload: { nonce: replacement.nonce },
+    });
+    expect(pairedReplacement.statusCode).toBe(200);
 
     const rejectedGrant = await application.app.inject({
       method: "POST",
@@ -762,7 +805,7 @@ describe("designer server", () => {
       },
       payload: {
         jsonrpc: "2.0",
-        id: 1,
+        id: 2,
         method: "initialize",
         params: {
           protocolVersion: "2025-06-18",

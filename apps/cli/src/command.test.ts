@@ -259,7 +259,13 @@ if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then
   [ -f "$FAKE_CODEX_STATE" ] || exit 1
   url=$(sed -n '1p' "$FAKE_CODEX_STATE")
   if [ "$4" = "--json" ]; then
-    printf '{"name":"formaspec","transport":{"type":"streamable_http","url":"%s","bearer_token_env_var":null,"http_headers":null,"env_http_headers":null}}\\n' "$url"
+    transport_type="$FAKE_CODEX_MCP_TRANSPORT_TYPE"
+    [ -n "$transport_type" ] || transport_type="streamable_http"
+    if [ -n "$FAKE_CODEX_MCP_BEARER_ENV" ]; then
+      printf '{"name":"formaspec","transport":{"type":"%s","url":"%s","bearer_token_env_var":"%s","http_headers":null,"env_http_headers":null}}\\n' "$transport_type" "$url" "$FAKE_CODEX_MCP_BEARER_ENV"
+    else
+      printf '{"name":"formaspec","transport":{"type":"%s","url":"%s","bearer_token_env_var":null,"http_headers":null,"env_http_headers":null}}\\n' "$transport_type" "$url"
+    fi
   else
     printf 'formaspec %s\\n' "$url"
   fi
@@ -502,6 +508,9 @@ describe("formaspecctl", () => {
     expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
     expect(fs.readFileSync(log, "utf8").trim()).toBe("--version");
     expect(confirmation).toContain("single managed FormaSpec plugin");
+    expect(confirmation).toContain("Allow FormaSpec once");
+    expect(confirmation).toContain("automatic FormaSpec tool approval");
+    expect(confirmation).toContain("Global Codex approval and sandbox settings will not be changed");
     expect(confirmation).toContain("remove installer-owned legacy duplicate identities");
   });
 
@@ -512,7 +521,16 @@ describe("formaspecctl", () => {
     const state = path.join(root, "codex.state");
     installFakeCodex(bin, log, state);
     fs.mkdirSync(path.join(root, ".codex"), { recursive: true });
-    fs.writeFileSync(path.join(root, ".codex", "config.toml"), 'model = "test-model"\n');
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      'model = "test-model"',
+      'approval_policy = "on-request"',
+      'sandbox_mode = "workspace-write"',
+      "",
+      "[mcp_servers.unrelated]",
+      'url = "http://127.0.0.1:9999/mcp"',
+      'default_tools_approval_mode = "writes"',
+      "",
+    ].join("\n"));
     const bridge = fakeBridge();
     const io = collectingIo();
     const result = await runCli(["--yes", "agent", "connect", "codex"], {
@@ -536,7 +554,11 @@ describe("formaspecctl", () => {
     const codexConfig = fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8");
     expect(codexConfig).toContain('model = "test-model"');
     expect(codexConfig).toContain('[mcp_servers.formaspec]');
-    expect(codexConfig).toContain('default_tools_approval_mode = "writes"');
+    expect(codexConfig).toContain('approval_policy = "on-request"');
+    expect(codexConfig).toContain('sandbox_mode = "workspace-write"');
+    expect(codexConfig).toContain('[mcp_servers.unrelated]\nurl = "http://127.0.0.1:9999/mcp"\ndefault_tools_approval_mode = "writes"');
+    expect(codexConfig).toContain('[mcp_servers.formaspec]');
+    expect(codexConfig).toContain('default_tools_approval_mode = "approve"');
     expect(codexConfig.toLowerCase()).not.toContain("bearer");
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
     expect(fs.existsSync(path.join(root, ".codex", "skills", "minimal-ui"))).toBe(false);
@@ -575,6 +597,8 @@ describe("formaspecctl", () => {
     });
     expect(io.output.join("\n")).toContain("[@FormaSpec](plugin://formaspec@formaspec)");
     expect(io.output.join("\n")).toContain("Codex mention: [@FormaSpec]");
+    expect(io.output.join("\n")).toContain("trusted for this local server only");
+    expect(io.output.join("\n")).toContain("global Codex approval and sandbox settings were preserved");
     expect(io.output.join("\n")).toContain("Use FormaSpec in a new Codex task so it loads the updated single identity.");
     expect(io.output.join("\n")).not.toContain("[@Minimal UI]");
     const approvalConfig = [
@@ -589,8 +613,8 @@ describe("formaspecctl", () => {
       "'''",
       "",
       codexConfig
-        .replace("[mcp_servers.formaspec]", "[mcp_servers.formaspec] # managed FormaSpec MCP")
-        .replace('default_tools_approval_mode = "writes"', 'default_tools_approval_mode = "never"'),
+        .replace('default_tools_approval_mode = "approve"', 'default_tools_approval_mode = "never"')
+        .replace("[mcp_servers.formaspec]", "[mcp_servers.formaspec] # managed FormaSpec MCP"),
     ].join("\n");
     fs.writeFileSync(path.join(root, ".codex", "config.toml"), approvalConfig);
     expect(await runCli(["--yes", "agent", "connect", "codex"], {
@@ -600,10 +624,86 @@ describe("formaspecctl", () => {
       environment: fakeEnvironment(root, bin, log, state),
     })).toBe(0);
     const reconnectedConfig = fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8");
+    expect(reconnectedConfig.match(/default_tools_approval_mode = "approve"/g)).toHaveLength(1);
     expect(reconnectedConfig.match(/default_tools_approval_mode = "writes"/g)).toHaveLength(1);
     expect(reconnectedConfig).toContain("[mcp_servers.formaspec] # managed FormaSpec MCP");
     expect(reconnectedConfig).toContain('basic_approval_example = """\n[mcp_servers.formaspec]\ndefault_tools_approval_mode = "never"');
     expect(reconnectedConfig).toContain("literal_approval_example = '''\n[mcp_servers.formaspec]\ndefault_tools_approval_mode = \"never\"");
+
+    const quotedApprovalConfig = reconnectedConfig
+      .replace(
+        "[mcp_servers.formaspec] # managed FormaSpec MCP",
+        '[mcp_servers.formaspec] # managed FormaSpec MCP\n# "default_tools_approval_mode" = "never" — comment only',
+      )
+      .replace(
+        'default_tools_approval_mode = "approve"',
+        '"default_tools_approval_mode" = "writes" # preserve this approval comment',
+      );
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), quotedApprovalConfig);
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    })).toBe(0);
+    const repairedQuotedConfig = fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8");
+    expect(repairedQuotedConfig).toContain(
+      '"default_tools_approval_mode" = "approve" # preserve this approval comment',
+    );
+    expect(repairedQuotedConfig).toContain(
+      '# "default_tools_approval_mode" = "never" — comment only',
+    );
+    expect(repairedQuotedConfig).not.toContain('\ndefault_tools_approval_mode = "approve"\n');
+
+    const duplicateApprovalConfig = repairedQuotedConfig.replace(
+      '"default_tools_approval_mode" = "approve" # preserve this approval comment',
+      [
+        '"default_tools_approval_mode" = "approve" # preserve this approval comment',
+        "'default_tools_approval_mode' = 'never' # semantic duplicate",
+      ].join("\n"),
+    );
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), duplicateApprovalConfig);
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    })).toBe(1);
+    expect(fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8")).toBe(duplicateApprovalConfig);
+    expect(io.errors.at(-1)).toContain("Codex FormaSpec MCP approval policy is duplicated");
+  });
+
+  it("refuses to apply local automatic approval to a remote MCP bridge", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    const configPath = path.join(root, ".codex", "config.toml");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, 'approval_policy = "on-request"\n');
+    const bridge = fakeBridge();
+    bridge.ensureStarted = async () => ({
+      running: true,
+      url: "https://design.company.example",
+      owned: true,
+      upstreamOrigin: bridge.upstreamOrigin,
+      upstreamReady: true,
+      dataStoreId: bridge.dataStoreId,
+    });
+    const io = collectingIo();
+
+    expect(await runCli(["--yes", "agent", "connect", "codex"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    })).toBe(1);
+    expect(fs.readFileSync(configPath, "utf8")).toBe('approval_policy = "on-request"\n');
+    expect(fs.readFileSync(log, "utf8").trim()).toBe("--version");
+    expect(bridge.authorizations).toBe(0);
+    expect(io.errors.join("\n")).toContain("Refusing to configure automatic FormaSpec tool approval");
+    expect(io.errors.join("\n")).toContain("non-loopback");
   });
 
   it("passes a validated browser-issued pairing ticket to the bridge without printing it", async () => {
@@ -830,7 +930,7 @@ describe("formaspecctl", () => {
       "",
       "[mcp_servers.formaspec]",
       'url = "http://127.0.0.1:4312/mcp"',
-      'default_tools_approval_mode = "writes"',
+      'default_tools_approval_mode = "approve"',
       "",
       '[plugins."minimal-ui@formaspec"]',
       'legacy_parent_marker = "remove"',
@@ -969,7 +1069,7 @@ describe("formaspecctl", () => {
     fs.writeFileSync(configPath, [
       "[mcp_servers.formaspec]",
       'url = "http://127.0.0.1:4312/mcp"',
-      'default_tools_approval_mode = "writes"',
+      'default_tools_approval_mode = "approve"',
       "",
       '[plugins."minimal-ui@formaspec"]',
       'legacy_configuration = "preserve until Codex removal succeeds"',
@@ -1344,7 +1444,14 @@ describe("formaspecctl", () => {
     const log = path.join(root, "codex.log");
     const state = path.join(root, "codex.state");
     installFakeCodex(bin, log, state);
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
     writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "approve"',
+      "",
+    ].join("\n"));
     fs.writeFileSync(`${state}.plugins`, JSON.stringify({
       installed: [
         { pluginId: "formaspec@formaspec", version: "0.3.0", installed: true, enabled: true },
@@ -1376,7 +1483,14 @@ describe("formaspecctl", () => {
     const log = path.join(root, "codex.log");
     const state = path.join(root, "codex.state");
     installFakeCodex(bin, log, state);
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
     writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "approve"',
+      "",
+    ].join("\n"));
     fs.writeFileSync(`${state}.plugins`, JSON.stringify({
       installed: [
         {
@@ -1403,8 +1517,126 @@ describe("formaspecctl", () => {
       io,
       environment: fakeEnvironment(root, bin, log, state),
     })).toBe(0);
-    expect(io.output.join("\n")).toContain(`FormaSpec MCP/plugin contract: verified ${FORMASPEC_MCP_CONTRACT_VERSION}.`);
+    expect(io.output.join("\n")).toContain(`FormaSpec MCP/plugin contract: verified ${FORMASPEC_MCP_CONTRACT_VERSION}; local approval mode approve.`);
   });
+
+  it("fails strict doctor when a managed Codex install regresses to per-call approval", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      'approval_policy = "on-request"',
+      'sandbox_mode = "workspace-write"',
+      "",
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "writes"',
+      "",
+    ].join("\n"));
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [{
+        pluginId: "formaspec@formaspec",
+        version: FORMASPEC_MCP_CONTRACT_VERSION,
+        installed: true,
+        enabled: true,
+      }],
+    }));
+    const bridge = fakeBridge();
+    bridge.running = true;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+
+    expect(await runCli(["doctor", "local", "--strict"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+    })).toBe(1);
+    const output = io.output.join("\n");
+    expect(output).toContain("FormaSpec MCP approval mismatch");
+    expect(output).toContain("configured as writes; expected approve");
+    expect(output).toContain("formaspecctl --yes agent connect codex");
+    expect(output).toContain("without changing global Codex approval or sandbox policy");
+  });
+
+  it("fails strict doctor unless managed MCP configuration matches the exact active loopback bridge", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => new Response(
+      String(input).endsWith("/health/ready")
+        ? JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID })
+        : '{"ok":true}',
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const cases: Array<{
+      name: string;
+      configuredUrl?: string;
+      environment?: NodeJS.ProcessEnv;
+    }> = [
+      { name: "missing" },
+      { name: "remote", configuredUrl: "https://design.company.example/mcp" },
+      { name: "wrong loopback", configuredUrl: "http://127.0.0.1:4999/mcp" },
+      {
+        name: "unrelated transport",
+        configuredUrl: "http://127.0.0.1:4312/mcp",
+        environment: { FAKE_CODEX_MCP_TRANSPORT_TYPE: "stdio" },
+      },
+      {
+        name: "credential-bearing",
+        configuredUrl: "http://127.0.0.1:4312/mcp",
+        environment: { FAKE_CODEX_MCP_BEARER_ENV: "FORMASPEC_MCP_TOKEN" },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const root = makeProject(temporaryDirectory());
+      const bin = path.join(root, "bin");
+      const log = path.join(root, "codex.log");
+      const state = path.join(root, "codex.state");
+      installFakeCodex(bin, log, state);
+      if (testCase.configuredUrl !== undefined) fs.writeFileSync(state, testCase.configuredUrl);
+      writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+      fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+        "[mcp_servers.formaspec]",
+        'url = "http://127.0.0.1:4312/mcp"',
+        'default_tools_approval_mode = "approve"',
+        "",
+      ].join("\n"));
+      fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+        installed: [{
+          pluginId: "formaspec@formaspec",
+          version: FORMASPEC_MCP_CONTRACT_VERSION,
+          installed: true,
+          enabled: true,
+        }],
+      }));
+      const bridge = fakeBridge();
+      bridge.running = true;
+      const io = collectingIo();
+
+      expect(await runCli(["doctor", "local", "--strict"], {
+        projectRoot: root,
+        bridge,
+        io,
+        environment: {
+          ...fakeEnvironment(root, bin, log, state),
+          ...testCase.environment,
+        },
+      }), testCase.name).toBe(1);
+      const output = io.output.join("\n");
+      expect(output, testCase.name).toContain("FormaSpec MCP configuration mismatch");
+      expect(output, testCase.name).toContain("http://127.0.0.1:4312/mcp");
+      expect(output, testCase.name).toContain("formaspecctl --yes agent connect codex");
+      expect(output, testCase.name).not.toContain("local approval mode approve");
+    }
+  }, 15_000);
 
   it("rejects healthy UI and bridge processes when their upstream origin or data store differs", async () => {
     const root = makeProject(temporaryDirectory());
@@ -1506,6 +1738,98 @@ describe("formaspecctl", () => {
     expect(io.output.join("\n")).toContain("runtime mismatch");
     expect(io.output.join("\n")).toContain("http://127.0.0.1:4310");
     expect(io.output.join("\n")).toContain("http://127.0.0.1:4320");
+  });
+
+  it("makes status report a managed Codex approval regression", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    fs.writeFileSync(state, "http://127.0.0.1:4312/mcp");
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "never"',
+      "",
+    ].join("\n"));
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [{
+        pluginId: "formaspec@formaspec",
+        version: FORMASPEC_MCP_CONTRACT_VERSION,
+        installed: true,
+        enabled: true,
+      }],
+    }));
+    const bridge = fakeBridge();
+    bridge.running = true;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const runner = async (executable: string, args: readonly string[], options?: CommandOptions) => {
+      if (executable === path.join(root, "designer")) return { exitCode: 0, stdout: "", stderr: "" };
+      const { runCommand } = await import("./process.js");
+      return runCommand(executable, args, options);
+    };
+
+    expect(await runCli(["status"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+      commandRunner: runner,
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("managed Codex approval mode is never; expected approve");
+    expect(io.output.join("\n")).toContain("formaspecctl --yes agent connect codex");
+  });
+
+  it("makes status reject managed approval when the Codex MCP entry is missing", async () => {
+    const root = makeProject(temporaryDirectory());
+    const bin = path.join(root, "bin");
+    const log = path.join(root, "codex.log");
+    const state = path.join(root, "codex.state");
+    installFakeCodex(bin, log, state);
+    writeFormaSpecManagedMarker(path.join(root, ".codex", "formaspec-marketplace"));
+    fs.writeFileSync(path.join(root, ".codex", "config.toml"), [
+      "[mcp_servers.formaspec]",
+      'url = "http://127.0.0.1:4312/mcp"',
+      'default_tools_approval_mode = "approve"',
+      "",
+    ].join("\n"));
+    fs.writeFileSync(`${state}.plugins`, JSON.stringify({
+      installed: [{
+        pluginId: "formaspec@formaspec",
+        version: FORMASPEC_MCP_CONTRACT_VERSION,
+        installed: true,
+        enabled: true,
+      }],
+    }));
+    const bridge = fakeBridge();
+    bridge.running = true;
+    const io = collectingIo();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(
+      JSON.stringify({ ok: true, dataStoreId: TEST_DATA_STORE_ID }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    const runner = async (executable: string, args: readonly string[], options?: CommandOptions) => {
+      if (executable === path.join(root, "designer")) return { exitCode: 0, stdout: "", stderr: "" };
+      const { runCommand } = await import("./process.js");
+      return runCommand(executable, args, options);
+    };
+
+    expect(await runCli(["status"], {
+      projectRoot: root,
+      bridge,
+      io,
+      environment: fakeEnvironment(root, bin, log, state),
+      commandRunner: runner,
+    })).toBe(1);
+    expect(io.output.join("\n")).toContain("managed Codex MCP configuration does not match");
+    expect(io.output.join("\n")).toContain("active credential-free loopback bridge");
+    expect(io.output.join("\n")).not.toContain("trusted local server (approve)");
   });
 
   it("rejects a healthy recorded native store when a known Docker store is also active", async () => {
@@ -2015,6 +2339,9 @@ describe("formaspecctl", () => {
     expect(confirmations).toBe(0);
     expect(bridge.authorizations).toBe(1);
     expect(io.output).toContain("Refreshing the already-authorized managed Codex connection and FormaSpec plugin.");
+    const refreshedConfig = fs.readFileSync(path.join(root, ".codex", "config.toml"), "utf8");
+    expect(refreshedConfig).toContain('default_tools_approval_mode = "approve"');
+    expect(refreshedConfig).not.toContain('default_tools_approval_mode = "writes"');
     expect(fs.existsSync(path.join(root, ".codex", "skills", "formaspec"))).toBe(false);
     expect(fs.readFileSync(path.join(
       root,
@@ -2157,7 +2484,7 @@ describe("formaspecctl", () => {
       const { runCommand } = await import("./process.js");
       return runCommand(executable, args, options);
     };
-    let confirmations = 0;
+    const confirmations: string[] = [];
     const io = collectingIo();
     const result = await runCli(["--no-open", "install", "docker"], {
       projectRoot: root,
@@ -2166,10 +2493,13 @@ describe("formaspecctl", () => {
       environment,
       commandRunner: runner,
       recordDockerRuntimeBinding: async () => undefined,
-      confirm: async () => { confirmations += 1; return true; },
+      confirm: async (message) => { confirmations.push(message); return true; },
     });
     expect(result).toBe(0);
-    expect(confirmations).toBe(1);
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0]).toContain("Allow FormaSpec once");
+    expect(confirmations[0]).toContain("automatically approve FormaSpec tools only for its trusted local MCP server");
+    expect(confirmations[0]).toContain("Global Codex approval and sandbox settings will not be changed");
     expect(delegated).toEqual(["--yes setup docker", "--yes start docker --no-open"]);
     expect(fs.readFileSync(log, "utf8")).toContain("plugin add formaspec@formaspec --json");
     expect(io.output).toContain("FormaSpec installation and startup completed.");

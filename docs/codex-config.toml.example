@@ -1,15 +1,17 @@
 # Preferred setup: let FormaSpec start and authorize the loopback bridge,
-# configure Codex, install the managed FormaSpec 0.3.0 plugin, remove
+# configure Codex, install the managed FormaSpec 0.4.0 plugin, remove
 # installer-owned legacy identities, and verify the connection automatically:
 #
 #   pnpm formaspecctl --yes agent connect codex
 #
 # Manual fallback. Point Codex at the token-free local bridge, not directly at
 # the upstream API on port 4310, and do not add a bearer token to Codex config.
+# Automatic approval is scoped to this trusted local MCP server; it does not
+# change Codex's global approval policy or sandbox mode.
 [mcp_servers.formaspec]
 url = "http://127.0.0.1:4312/mcp"
 required = true
-default_tools_approval_mode = "writes"
+default_tools_approval_mode = "approve"
 tool_timeout_sec = 60
 
 # After the managed plugins are installed, start a new task and use:

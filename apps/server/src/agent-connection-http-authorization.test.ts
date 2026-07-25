@@ -275,7 +275,7 @@ async function pairConnection(application: DesignerApplication, nonce: string): 
 }
 
 describe("agent-connection HTTP authorization", () => {
-  it("runs the five public routes through trusted-header administration and immediately invalidates rotated grants", async () => {
+  it("runs the five public routes and keeps the working grant until reconnect pairing succeeds", async () => {
     const fixture = await createFixture("admin_lifecycle");
     const { application } = fixture;
     const challenge = await createConnection(application, {
@@ -328,8 +328,20 @@ describe("agent-connection HTTP authorization", () => {
     });
     expect(reconnect.statusCode, reconnect.body).toBe(200);
     const renewed = reconnect.json<PairingChallenge>();
-    expect(renewed.connection).toMatchObject({ id: challenge.connection.id, status: "pending" });
+    expect(renewed.connection).toMatchObject({ status: "pending", principalId: null });
+    expect(renewed.connection.id).not.toBe(challenge.connection.id);
     expect(renewed.nonce).not.toBe(challenge.nonce);
+
+    const grantDuringPairing = await application.app.inject({
+      method: "GET",
+      url: "/api/agent-authorization-context",
+      headers: grantHeaders(firstPair.grant.token),
+    });
+    expect(grantDuringPairing.statusCode, grantDuringPairing.body).toBe(200);
+
+    const secondPair = await pairConnection(application, renewed.nonce);
+    expect(secondPair.connection).toMatchObject({ id: renewed.connection.id, status: "active" });
+    expect(secondPair.connection.principalId).not.toBe(firstPair.connection.principalId);
 
     const rotatedGrant = await application.app.inject({
       method: "GET",
@@ -338,17 +350,13 @@ describe("agent-connection HTTP authorization", () => {
     });
     expectError(rotatedGrant, 401, "AUTH_REQUIRED", [firstPair.grant.token]);
 
-    const secondPair = await pairConnection(application, renewed.nonce);
-    expect(secondPair.connection).toMatchObject({ id: challenge.connection.id, status: "active" });
-    expect(secondPair.connection.principalId).toBe(firstPair.connection.principalId);
-
     const revoke = await application.app.inject({
       method: "POST",
-      url: `/api/agent-connections/${challenge.connection.id}/revoke`,
+      url: `/api/agent-connections/${secondPair.connection.id}/revoke`,
       headers: serverHeaders(),
     });
     expect(revoke.statusCode, revoke.body).toBe(200);
-    expect(revoke.json<AgentConnectionResult>()).toMatchObject({ id: challenge.connection.id, status: "revoked" });
+    expect(revoke.json<AgentConnectionResult>()).toMatchObject({ id: secondPair.connection.id, status: "revoked" });
 
     const revokedGrant = await application.app.inject({
       method: "GET",
@@ -358,12 +366,14 @@ describe("agent-connection HTTP authorization", () => {
     expectError(revokedGrant, 401, "AUTH_REQUIRED", [secondPair.grant.token]);
 
     const actions = application.database.sqlite.prepare(
-      "SELECT action FROM audit_events WHERE target_type = 'agent_connection' AND target_id = ? ORDER BY id",
-    ).all(challenge.connection.id) as Array<{ action: string }>;
+      `SELECT action FROM audit_events
+       WHERE target_type = 'agent_connection' AND target_id IN (?, ?) ORDER BY id`,
+    ).all(challenge.connection.id, secondPair.connection.id) as Array<{ action: string }>;
     expect(actions.map((row) => row.action)).toEqual([
       "agent_connection.create",
       "agent_connection.pair",
       "agent_connection.reconnect",
+      "agent_connection.revoke",
       "agent_connection.pair",
       "agent_connection.revoke",
     ]);
@@ -545,8 +555,8 @@ describe("agent-connection HTTP authorization", () => {
       "SELECT id, status FROM agent_connections WHERE organization_id = 'organization_legacy' ORDER BY id",
     ).all() as Array<{ id: string; status: string }>;
     const statuses = new Map(localRows.map((row) => [row.id, row.status]));
-    expect(statuses.get(active.connection.id)).toBe("revoked");
-    expect(statuses.get(pending.connection.id)).toBe("revoked");
+    expect(statuses.get(active.connection.id)).toBe("active");
+    expect(statuses.get(pending.connection.id)).toBe("pending");
     expect(statuses.get(replacement.connection.id)).toBe("pending");
     expect(application.database.sqlite.prepare(
       "SELECT status FROM agent_connections WHERE id = ? AND organization_id = ?",
@@ -554,6 +564,16 @@ describe("agent-connection HTTP authorization", () => {
     expect(application.database.sqlite.prepare(
       "SELECT revoked_at FROM pairing_nonces WHERE connection_id = ?",
     ).get(foreignCollisionId)).toEqual({ revoked_at: null });
+
+    const grantDuringPairing = await application.app.inject({
+      method: "GET",
+      url: "/api/agent-authorization-context",
+      headers: grantHeaders(active.grant.token),
+    });
+    expect(grantDuringPairing.statusCode, grantDuringPairing.body).toBe(200);
+
+    const pairedReplacement = await pairConnection(application, replacement.nonce);
+    expect(pairedReplacement.connection).toMatchObject({ id: replacement.connection.id, status: "active" });
 
     const invalidatedGrant = await application.app.inject({
       method: "GET",
@@ -569,6 +589,14 @@ describe("agent-connection HTTP authorization", () => {
       payload: { nonce: pending.nonce },
     });
     expectError(revokedPendingNonce, 410, "CONNECTION_REVOKED", [pending.nonce, ...foreign.markers]);
+
+    const pairedLocalRows = application.database.sqlite.prepare(
+      "SELECT id, status FROM agent_connections WHERE organization_id = 'organization_legacy' ORDER BY id",
+    ).all() as Array<{ id: string; status: string }>;
+    const pairedStatuses = new Map(pairedLocalRows.map((row) => [row.id, row.status]));
+    expect(pairedStatuses.get(active.connection.id)).toBe("revoked");
+    expect(pairedStatuses.get(pending.connection.id)).toBe("revoked");
+    expect(pairedStatuses.get(replacement.connection.id)).toBe("active");
 
     const replacementList = await application.app.inject({
       method: "GET",

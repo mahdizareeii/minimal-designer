@@ -95,7 +95,7 @@ describe("protected non-MCP route authentication matrix", () => {
       await expectAuthenticationFailure(application, contract);
     }
 
-    expect(PROTECTED_NON_MCP_ROUTE_CONTRACTS.size).toBe(124);
+    expect(PROTECTED_NON_MCP_ROUTE_CONTRACTS.size).toBe(123);
     expect(totalChanges(application)).toBe(before);
   }, 30_000);
 
@@ -107,7 +107,7 @@ describe("protected non-MCP route authentication matrix", () => {
       await expectAuthenticationFailure(application, contract, "alice@example.test,bob@example.test");
     }
 
-    expect(PROTECTED_NON_MCP_ROUTE_CONTRACTS.size).toBe(124);
+    expect(PROTECTED_NON_MCP_ROUTE_CONTRACTS.size).toBe(123);
     expect(totalChanges(application)).toBe(before);
   }, 30_000);
 
@@ -122,7 +122,7 @@ describe("protected non-MCP route authentication matrix", () => {
       await expectAuthenticationFailure(application, contract, "unmapped@example.test");
     }
 
-    expect(contracts).toHaveLength(123);
+    expect(contracts).toHaveLength(122);
     expect(totalChanges(application)).toBe(before);
   }, 30_000);
 
@@ -140,7 +140,7 @@ describe("protected non-MCP route authentication matrix", () => {
       await expectAuthenticationFailure(application, contract, "disabled-admin@example.test");
     }
 
-    expect(contracts).toHaveLength(123);
+    expect(contracts).toHaveLength(122);
     expect(totalChanges(application)).toBe(before);
   }, 30_000);
 

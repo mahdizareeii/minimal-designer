@@ -159,7 +159,6 @@ const definitions: DirectAuthorizationEvidenceDefinition[] = [
     ["GET", "/api/designs/:id/planning-sessions"],
     ["POST", "/api/designs/:id/planning-sessions"],
     ["GET", "/api/designs/:id/agent-tasks"],
-    ["POST", "/api/designs/:id/agent-tasks"],
   ]),
   ...evidence("apps/server/src/portable-http-authorization.test.ts", [
     ["GET", "/api/designs/:id/export.formaspec.zip"],

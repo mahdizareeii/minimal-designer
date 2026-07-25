@@ -1,5 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import { ProductLocaleSchema, ProductPlatformSchema } from "@designer/core";
 import { PLANNING_SECTIONS } from "@designer/core";
 import { z } from "zod";
 
@@ -246,35 +245,8 @@ export function registerEnterpriseHttpRoutes(
     };
   });
 
-  app.post("/api/designs/:id/agent-tasks", async (request, reply) => {
-    const rawId = (request.params as { id?: string }).id ?? "";
-    enterprise.authorizeAgentTaskCreate(request.actorId, rawId);
-    const { id } = designParams.parse(request.params);
-    const input = z.object({
-      brief: z.string().trim().min(1).max(100_000),
-      selection: z.array(identifier).max(500).default([]),
-      baseVersion: z.number().int().positive(),
-      expectedOutput: z.enum(AGENT_TASK_EXPECTED_OUTPUTS),
-      idempotencyKey,
-      expiresInSeconds: z.number().int().min(60).max(604_800).optional(),
-      locale: ProductLocaleSchema.optional(),
-      platform: ProductPlatformSchema.optional(),
-    }).strict().parse(request.body);
-    const task = enterprise.createAgentTask(request.actorId, {
-      designId: id,
-      ...input,
-    });
-    return reply.code(201).send({
-      task,
-      launchUrl: agentTaskCodexLaunchUrl(task.id),
-      websiteTaskLink: agentTaskWebsiteLink(
-        webBaseUrl,
-        task.designId,
-        task.id,
-        enterprise.database.dataStoreId(),
-      ),
-    });
-  });
+  // Agent task creation is intentionally MCP-only. The website may list and
+  // review durable tasks, but it must not expose a parallel browser submit path.
 
   app.get("/api/agent-tasks/:taskId", async (request) => {
     const { taskId } = taskParams.parse(request.params);

@@ -696,6 +696,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (result.removedManagedStandaloneSkillPaths.length > 0) {
         io.stdout(`Removed installer-owned duplicate standalone skills: ${result.removedManagedStandaloneSkillPaths.join(", ")}.`);
       }
+      io.stdout("FormaSpec MCP tools are trusted for this local server only; global Codex approval and sandbox settings were preserved.");
       io.stdout(`Codex mention: ${FORMASPEC_CODEX_MENTION}`);
       io.stdout("Use FormaSpec in a new Codex task so it loads the updated single identity.");
     };
@@ -718,7 +719,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       }
       if (managedRefresh) io.stdout("Refreshing the already-authorized managed Codex connection and FormaSpec plugin.");
       const authorized = alreadyAuthorized || assumeYes || managedRefresh || await confirm(
-        "Allow FormaSpec to configure Codex, install the single managed FormaSpec plugin, remove installer-owned legacy duplicate identities, and verify the loopback MCP connection?",
+        "Allow FormaSpec once to configure Codex, install the single managed FormaSpec plugin, automatically approve FormaSpec tools only for its trusted local MCP server, remove installer-owned legacy duplicate identities, and verify the connection? Global Codex approval and sandbox settings will not be changed.",
       );
       if (!authorized) {
         io.stdout("Codex connection skipped. Run 'formaspecctl agent connect codex' when ready.");
@@ -750,7 +751,7 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       }
       if (arguments_.length > 0) throw new Error(`Unexpected install option: ${arguments_[0]}`);
       const authorized = assumeYes || await confirm(
-        `Allow FormaSpec to prepare the ${target} runtime, start the local service, configure the bridge, and connect supported Codex?`,
+        `Allow FormaSpec once to prepare the ${target} runtime, start the local service, configure the bridge, connect supported Codex, and automatically approve FormaSpec tools only for its trusted local MCP server? Global Codex approval and sandbox settings will not be changed.`,
       );
       if (!authorized) throw new Error("FormaSpec installation was cancelled; no setup command was run.");
       const setupExitCode = await delegate(["--yes", "setup", target]);
@@ -846,14 +847,27 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
           io.stdout(`FormaSpec MCP contract mismatch: the recorded server reports ${verification.serverVersion}, but this formaspecctl expects ${FORMASPEC_MCP_CONTRACT_VERSION}. Update and restart the recorded runtime before reconnecting Codex.`);
           return 1;
         }
-        const managedContract = await inspectManagedCodexContract({ environment, commandRunner: runner });
+        const managedContract = await inspectManagedCodexContract({
+          environment,
+          commandRunner: runner,
+          expectedMcpUrl: `${bridgeStatus.url}/mcp`,
+        });
+        if (managedContract.managed && !managedContract.mcpConfigurationMatchesExpected) {
+          io.stdout(`FormaSpec MCP configuration mismatch: the managed Codex entry is missing, credential-bearing, not Streamable HTTP loopback, or does not target the active bridge at ${managedContract.expectedMcpUrl}. Run 'formaspecctl --yes agent connect codex' once to repair it before trusting automatic tool approval.`);
+          return 1;
+        }
         if (managedContract.managed
           && managedContract.installedPluginVersion !== verification.serverVersion) {
           io.stdout(`FormaSpec MCP/plugin contract mismatch: server ${verification.serverVersion}; managed plugin ${managedContract.installedPluginVersion ?? "missing or unreadable"}. Run 'formaspecctl --yes agent connect codex' to install the matching ${managedContract.expectedVersion} plugin, then start a new Codex task.`);
           return 1;
         }
+        if (managedContract.managed
+          && managedContract.approvalMode !== managedContract.expectedApprovalMode) {
+          io.stdout(`FormaSpec MCP approval mismatch: the managed local server is configured as ${managedContract.approvalMode === null ? "missing, duplicated, or unreadable" : managedContract.approvalMode}; expected ${managedContract.expectedApprovalMode}. Run 'formaspecctl --yes agent connect codex' once to repair the server-scoped trust setting without changing global Codex approval or sandbox policy.`);
+          return 1;
+        }
         if (managedContract.managed) {
-          io.stdout(`FormaSpec MCP/plugin contract: verified ${verification.serverVersion}.`);
+          io.stdout(`FormaSpec MCP/plugin contract: verified ${verification.serverVersion}; local approval mode ${managedContract.approvalMode}.`);
         } else {
           io.stdout(`FormaSpec MCP contract: server ${verification.serverVersion}; no formaspecctl-managed plugin installation was detected.`);
         }
@@ -1192,6 +1206,23 @@ export async function runCli(rawArguments: readonly string[], dependencies: CliD
       if (bridgeStatus.running && (!runtimeReady || !bridgeStatus.upstreamReady)) {
         io.stdout("FormaSpec status: UI/API and bridge data-store identity match, but the runtime is temporarily not ready.");
         return 1;
+      }
+      const managedContract = await inspectManagedCodexContract({
+        environment,
+        commandRunner: runner,
+        expectedMcpUrl: `${bridgeStatus.url}/mcp`,
+      });
+      if (managedContract.managed && !managedContract.mcpConfigurationMatchesExpected) {
+        io.stdout(`FormaSpec status: managed Codex MCP configuration does not match the active credential-free loopback bridge at ${managedContract.expectedMcpUrl}. Run 'formaspecctl --yes agent connect codex' once to repair it.`);
+        return 1;
+      }
+      if (managedContract.managed
+        && managedContract.approvalMode !== managedContract.expectedApprovalMode) {
+        io.stdout(`FormaSpec status: managed Codex approval mode is ${managedContract.approvalMode === null ? "missing, duplicated, or unreadable" : managedContract.approvalMode}; expected ${managedContract.expectedApprovalMode}. Run 'formaspecctl --yes agent connect codex' once to repair it.`);
+        return 1;
+      }
+      if (managedContract.managed) {
+        io.stdout(`FormaSpec Codex approval: trusted local server (${managedContract.approvalMode}).`);
       }
       return exitCode;
     }

@@ -8,6 +8,7 @@ import { AnyDesignDocumentSchema, type AnyDesignDocument } from "@designer/core"
 import SqliteDatabase from "better-sqlite3";
 import { z } from "zod";
 
+import { AGENT_CONNECTION_REPLACEMENT_PREFIX } from "./agent-connection-replacement.js";
 import { appendAuditEvent, type AccessContext } from "./authorization.js";
 import {
   BackupManager,
@@ -1841,6 +1842,8 @@ function reconcileAfterRestore(
       const nonces = database.sqlite.prepare(
         "UPDATE pairing_nonces SET revoked_at = COALESCE(revoked_at, ?) WHERE revoked_at IS NULL",
       ).run(completedAt).changes;
+      database.sqlite.prepare("DELETE FROM system_metadata WHERE key GLOB ?")
+        .run(`${AGENT_CONNECTION_REPLACEMENT_PREFIX}*`);
       const sessions = database.sqlite.prepare(
         "UPDATE browser_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE revoked_at IS NULL",
       ).run(completedAt).changes;

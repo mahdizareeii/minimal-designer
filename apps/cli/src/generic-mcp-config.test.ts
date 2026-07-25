@@ -102,7 +102,9 @@ url = "http://localhost:54321/mcp"`,
     const output = io.output.join("\n");
     expect(output).toContain("print-only; no client configuration file was read or changed");
     expect(output).toContain("curl --fail --silent --show-error http://127.0.0.1:4312/health");
-    expect(output).toContain("Keep write-tool approval enabled");
+    expect(output).toContain("approve this credential-free local FormaSpec MCP once");
+    expect(output).toContain("instead of prompting for every tool call");
+    expect(output).toContain("Preserve the client's global approval and sandbox policy");
     expect(output).toContain("Agent identity: FormaSpec");
     expect(output).not.toContain("Compatibility aliases:");
     expect(output).not.toContain("Minimal UI");

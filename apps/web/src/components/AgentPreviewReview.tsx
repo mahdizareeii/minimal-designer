@@ -4,7 +4,6 @@ import {
   CheckCircle2,
   Clock3,
   Columns2,
-  Copy,
   Eye,
   ExternalLink,
   GitCompareArrows,
@@ -202,25 +201,11 @@ export function AgentPreviewPng({
   );
 }
 
-export function agentTaskInstruction(task: AgentTaskRecord): string {
-  return `${FORMASPEC_AGENT_MENTION}\n\nUse FormaSpec. Claim task ${task.id} with task_claim and move it to in_progress. Read its immutable Product, Design/base version, selection, organization policy, product specification, effective design-system release, tokens/components/states, comparable screens, and authorized repository inventories/mappings. Decide what is reused, extended, or proposed. Call design_preview_changes with task_id ${task.id}, inspect its returned PNG in Codex, and run design_lint. Refine until applicable senior UI/UX, product, accessibility, RTL/localization, responsive, prototype, and engineering checks are resolved or explicitly reported. Then call task_transition to awaiting_approval with data {"previewId":"<preview id>","readiness":<complete DesignReadinessReport matching the immutable task context and tool schema>}. Do not commit it; the website must show the exact PNG, readiness report, and human Commit button.`;
-}
-
-export function codexTaskLaunchUrl(task: AgentTaskRecord): string {
-  const url = new URL("codex://new");
-  url.searchParams.set("prompt", agentTaskInstruction(task));
-  if (url.protocol !== "codex:" || url.hostname !== "new" || url.username || url.password || url.port || url.hash
-    || [...url.searchParams.keys()].some((key) => key !== "prompt") || url.searchParams.getAll("prompt").length !== 1) {
-    throw new Error("Could not create a strict Codex task link.");
-  }
-  return url.toString();
-}
-
 export function agentTaskStatusMessage(task: AgentTaskRecord | null): string {
-  if (!task) return "Submit a design command to create an immutable agent task.";
+  if (!task) return "Start a FormaSpec task from Codex or the CLI; its durable status will appear here.";
   const latestMessage = task.transitions.at(-1)?.message?.trim();
   switch (task.status) {
-    case "queued": return "Task created. Click Open task in Codex below so @FormaSpec can claim it.";
+    case "queued": return "This Codex/CLI task is queued and waiting for an authorized FormaSpec agent to claim it.";
     case "claimed": return `Claimed${task.claimedBy ? ` by ${task.claimedBy}` : " by Codex"}; waiting for design work to start.`;
     case "in_progress": return latestMessage || "Codex is reading the brief and preparing an exact design preview.";
     case "awaiting_approval": return "Codex returned a persisted preview. Review it below, then commit or discard it.";
@@ -260,7 +245,6 @@ export function AgentTaskWorkflowCard({
   canDiscard,
   previewRenderStatus,
   previewRenderRetryKey,
-  onCopyInstruction,
   onOpenCodex,
   onConnect,
   onRetry,
@@ -281,7 +265,6 @@ export function AgentTaskWorkflowCard({
   canDiscard: boolean;
   previewRenderStatus: PreviewRenderStatus;
   previewRenderRetryKey: number;
-  onCopyInstruction: () => void;
   onOpenCodex: () => void;
   onConnect: () => void;
   onRetry: () => void;
@@ -294,7 +277,7 @@ export function AgentTaskWorkflowCard({
 }) {
   const waiting = task && ["queued", "claimed", "in_progress"].includes(task.status);
   const terminalError = task && ["failed", "cancelled", "expired"].includes(task.status);
-  const canLaunchInCodex = task && ["queued", "claimed", "in_progress"].includes(task.status);
+  const canLaunchInCodex = task && task.launchUrl.length > 0 && ["queued", "claimed", "in_progress"].includes(task.status);
   const canCommitExactPreview = exactPreviewCommitAllowed(
     canCommit,
     previewRenderStatus,
@@ -303,24 +286,24 @@ export function AgentTaskWorkflowCard({
   return (
     <aside className={`agent-task-workflow is-${task?.status ?? "idle"}`} aria-label="Agent task workflow">
       <header>
-        <div><Bot size={15} /><span><strong>FormaSpec agent</strong><small>{connectionMessage}</small></span></div>
+        <div><Bot size={15} /><span><strong>Codex / CLI activity</strong><small>{connectionMessage}</small></span></div>
         <span className={`agent-connection-state is-${connectionState}`}>{connectionState.replaceAll("_", " ")}</span>
       </header>
 
       <div className="agent-task-stage-track" aria-label="Agent task progress">
         <span className={connectionState === "active" ? "is-complete" : connectionState === "loading" ? "is-current" : "is-error"}><i>1</i>Connected</span>
-        <span className={`is-${taskStageState(task, "queued")}`}><i>2</i>Queued</span>
-        <span className={`is-${taskStageState(task, "claimed")}`}><i>3</i>Claimed</span>
+        <span className={`is-${taskStageState(task, "queued")}`}><i>2</i>Created</span>
+        <span className={`is-${taskStageState(task, "claimed")}`}><i>3</i>Working</span>
         <span className={`is-${taskStageState(task, "preview")}`}><i>4</i>Preview</span>
       </div>
 
       {!task ? (
         <div className="agent-task-empty">
           <Play size={18} />
-          <strong>Ready for a design command</strong>
-          <span>Submitting creates a durable task. FormaSpec never calls an AI API itself; an authorized Codex connection claims the task through MCP.</span>
+          <strong>Start agent work in Codex or the CLI</strong>
+          <span>The FormaSpec website does not create agent tasks. Connect the MCP once, then ask @FormaSpec from Codex or run a CLI task; status and approval previews return here.</span>
           <div>
-            {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect Codex to @FormaSpec</button>}
+            {connectionState !== "active" && <button className="button button-primary" onClick={onConnect}><ExternalLink size={12} /> Connect / install FormaSpec MCP</button>}
             <button className="button button-secondary" onClick={onOpenPlanning}>Open PM interview</button>
           </div>
         </div>
@@ -332,7 +315,7 @@ export function AgentTaskWorkflowCard({
           </div>
           <p className={terminalError ? "is-error" : ""}>{agentTaskStatusMessage(task)}</p>
           <div className="agent-task-submitted-command" data-testid="agent-submitted-command">
-            <strong>Submitted to @FormaSpec</strong>
+            <strong>Task brief from Codex / CLI</strong>
             <span>{agentTaskBriefSummary(task.brief)}</span>
           </div>
 
@@ -373,8 +356,7 @@ export function AgentTaskWorkflowCard({
           {!preview && (
             <div className="agent-task-current-actions">
               {canLaunchInCodex && <button className="button button-primary" onClick={onOpenCodex}><ExternalLink size={12} /> Open task in Codex</button>}
-              {connectionState !== "active" && <button className="button button-secondary" onClick={onConnect}><ExternalLink size={12} /> Connect or repair @FormaSpec</button>}
-              {canLaunchInCodex && <button className="button button-secondary" onClick={onCopyInstruction}><Copy size={12} /> Copy Codex instruction</button>}
+              {connectionState !== "active" && <button className="button button-primary" onClick={onConnect}><ExternalLink size={12} /> Connect / install FormaSpec MCP</button>}
               <button className="button button-secondary" onClick={onRetry}><RefreshCcw size={12} /> Refresh status</button>
             </div>
           )}

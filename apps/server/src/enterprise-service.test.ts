@@ -10,6 +10,8 @@ import { resolveAccess } from "./authorization.js";
 import { DesignerDatabase } from "./db/database.js";
 import { EnterpriseService } from "./enterprise-service.js";
 import { EventHub } from "./events.js";
+import { DEFAULT_ORGANIZATION_POLICY } from "./organization-policy-model.js";
+import { OrganizationPolicyService } from "./organization-policy-service.js";
 import { encodeRgbaPng } from "./render.js";
 import { DesignerService } from "./service.js";
 import { designReadinessFixture } from "../test-fixtures/product.js";
@@ -613,25 +615,40 @@ describe("agent pairing and revocation", () => {
       expect(captureThrown(() => opened.enterprise.pairAgentConnection(challenge.nonce))).toMatchObject({ code: "VERSION_CONFLICT" });
 
       const reconnect = opened.enterprise.renewAgentConnectionPairing("local", paired.connection.id);
+      expect(reconnect.connection).toMatchObject({ status: "pending", principalId: null });
+      expect(reconnect.connection.id).not.toBe(paired.connection.id);
+      expect(opened.enterprise.resolveGrantActorId(paired.grant.token)).toBe(paired.grant.actorId);
+      const rePaired = opened.enterprise.pairAgentConnection(reconnect.nonce);
+      expect(rePaired.connection.id).toBe(reconnect.connection.id);
+      expect(rePaired.connection.principalId).not.toBe(paired.connection.principalId);
       expect(captureThrown(() => opened.enterprise.resolveGrantActorId(paired.grant.token))).toMatchObject({
         code: "AUTH_REQUIRED",
         statusCode: 401,
       });
-      const rePaired = opened.enterprise.pairAgentConnection(reconnect.nonce);
-      expect(rePaired.connection.principalId).toBe(paired.connection.principalId);
+      expect(opened.enterprise.resolveGrantActorId(rePaired.grant.token)).toBe(rePaired.grant.actorId);
+      expect(captureThrown(() => opened.enterprise.pairAgentConnection(reconnect.nonce))).toMatchObject({
+        code: "VERSION_CONFLICT",
+        statusCode: 409,
+      });
       expect(opened.enterprise.resolveGrantActorId(rePaired.grant.token)).toBe(rePaired.grant.actorId);
 
-      expect(opened.enterprise.revokeAgentConnection("local", paired.connection.id).status).toBe("revoked");
+      expect(opened.enterprise.revokeAgentConnection("local", rePaired.connection.id).status).toBe("revoked");
       expect(captureThrown(() => opened.enterprise.resolveGrantActorId(rePaired.grant.token))).toMatchObject({
         code: "AUTH_REQUIRED",
         statusCode: 401,
       });
-      const auditActions = opened.database.sqlite.prepare(
+      const originalAuditActions = opened.database.sqlite.prepare(
         "SELECT action FROM audit_events WHERE target_id = ? ORDER BY id",
       ).all(paired.connection.id) as Array<{ action: string }>;
-      expect(auditActions.map((row) => row.action)).toEqual([
+      expect(originalAuditActions.map((row) => row.action)).toEqual([
         "agent_connection.create",
         "agent_connection.pair",
+        "agent_connection.revoke",
+      ]);
+      const replacementAuditActions = opened.database.sqlite.prepare(
+        "SELECT action FROM audit_events WHERE target_id = ? ORDER BY id",
+      ).all(rePaired.connection.id) as Array<{ action: string }>;
+      expect(replacementAuditActions.map((row) => row.action)).toEqual([
         "agent_connection.reconnect",
         "agent_connection.pair",
         "agent_connection.revoke",
@@ -641,7 +658,7 @@ describe("agent pairing and revocation", () => {
     }
   });
 
-  it("atomically replaces matching connections and invalidates their grants and pairing challenges", () => {
+  it("stages matching connections and atomically invalidates predecessors only after pairing", () => {
     const opened = setup();
     try {
       const connectionInput = {
@@ -696,8 +713,8 @@ describe("agent pairing and revocation", () => {
         connection.id,
         connection.status,
       ]));
-      expect(statuses.get(active.connection.id)).toBe("revoked");
-      expect(statuses.get(pending.connection.id)).toBe("revoked");
+      expect(statuses.get(active.connection.id)).toBe("active");
+      expect(statuses.get(pending.connection.id)).toBe("pending");
       expect(statuses.get(staleRevoked.connection.id)).toBe("revoked");
       expect(statuses.get(unrelatedAdapter.connection.id)).toBe("pending");
       expect(statuses.get(unrelatedName.connection.id)).toBe("pending");
@@ -705,28 +722,31 @@ describe("agent pairing and revocation", () => {
       expect(opened.database.sqlite.prepare(
         "SELECT status FROM agent_connections WHERE id = ?",
       ).get(otherOrganizationConnectionId)).toEqual({ status: "pending" });
+      expect(opened.enterprise.resolveGrantActorId(active.grant.token)).toBe(active.grant.actorId);
+      const pairedPending = opened.enterprise.pairAgentConnection(pending.nonce);
+      expect(opened.enterprise.resolveGrantActorId(pairedPending.grant.token)).toBe(pairedPending.grant.actorId);
+
+      const pairedReplacement = opened.enterprise.pairAgentConnection(replacement.nonce);
+      expect(opened.enterprise.resolveGrantActorId(pairedReplacement.grant.token)).toBe(pairedReplacement.grant.actorId);
+      const pairedStatuses = new Map(opened.enterprise.listAgentConnections("local").map((connection) => [
+        connection.id,
+        connection.status,
+      ]));
+      expect(pairedStatuses.get(active.connection.id)).toBe("revoked");
+      expect(pairedStatuses.get(pending.connection.id)).toBe("revoked");
+      expect(pairedStatuses.get(replacement.connection.id)).toBe("active");
       expect(captureThrown(() => opened.enterprise.resolveGrantActorId(active.grant.token))).toMatchObject({
         code: "AUTH_REQUIRED",
         statusCode: 401,
       });
-      expect(captureThrown(() => opened.enterprise.pairAgentConnection(pending.nonce))).toMatchObject({
-        code: "CONNECTION_REVOKED",
-        statusCode: 410,
+      expect(captureThrown(() => opened.enterprise.resolveGrantActorId(pairedPending.grant.token))).toMatchObject({
+        code: "AUTH_REQUIRED",
+        statusCode: 401,
       });
-
-      opened.database.sqlite.prepare("UPDATE agent_grants SET revoked_at = NULL WHERE id = ?").run(active.grant.id);
-      opened.database.sqlite.prepare(
-        "UPDATE pairing_nonces SET revoked_at = NULL WHERE connection_id = ?",
-      ).run(active.connection.id);
       expect(captureThrown(() => resolveAccess(opened.database.sqlite, active.grant.actorId))).toMatchObject({
         code: "AUTH_REQUIRED",
         statusCode: 401,
       });
-      expect(captureThrown(() => opened.enterprise.resolveGrantActorId(active.grant.token))).toMatchObject({
-        code: "AUTH_REQUIRED",
-        statusCode: 401,
-      });
-      expect(opened.enterprise.revokeAgentConnection("local", active.connection.id).status).toBe("revoked");
 
       const persistedGrant = opened.database.sqlite.prepare(
         "SELECT revoked_at FROM agent_grants WHERE id = ?",
@@ -734,16 +754,15 @@ describe("agent pairing and revocation", () => {
       expect(persistedGrant.revoked_at).not.toBeNull();
       expect(opened.database.sqlite.prepare(
         "SELECT revoked_at FROM agent_grants WHERE id = ?",
-      ).get(staleRevoked.grant.id)).toMatchObject({ revoked_at: expect.any(String) });
+      ).get(pairedPending.grant.id)).toMatchObject({ revoked_at: expect.any(String) });
       const revokedNonces = opened.database.sqlite.prepare(
         `SELECT connection_id, revoked_at FROM pairing_nonces
-         WHERE connection_id IN (?, ?, ?) ORDER BY connection_id`,
+         WHERE connection_id IN (?, ?) ORDER BY connection_id`,
       ).all(
         active.connection.id,
         pending.connection.id,
-        staleRevoked.connection.id,
       ) as Array<{ connection_id: string; revoked_at: string | null }>;
-      expect(revokedNonces).toHaveLength(3);
+      expect(revokedNonces).toHaveLength(2);
       expect(revokedNonces.every((row) => row.revoked_at !== null)).toBe(true);
 
       const replacementAudit = opened.database.sqlite.prepare(
@@ -774,8 +793,9 @@ describe("agent pairing and revocation", () => {
         }),
       ]));
 
-      const pairedReplacement = opened.enterprise.pairAgentConnection(replacement.nonce);
-      expect(opened.enterprise.resolveGrantActorId(pairedReplacement.grant.token)).toBe(pairedReplacement.grant.actorId);
+      expect(opened.database.sqlite.prepare(
+        "SELECT value FROM system_metadata WHERE key = ?",
+      ).get(`agent_connection_replacement:${replacement.connection.id}`)).toBeUndefined();
     } finally {
       opened.database.close();
     }
@@ -806,9 +826,12 @@ describe("agent pairing and revocation", () => {
         connection.id,
         connection.status,
       ]));
-      expect(statuses.get(legacy.connection.id)).toBe("revoked");
+      expect(statuses.get(legacy.connection.id)).toBe("active");
       expect(statuses.get(unrelatedChallenge.connection.id)).toBe("pending");
       expect(statuses.get(replacement.connection.id)).toBe("pending");
+      expect(opened.enterprise.resolveGrantActorId(legacy.grant.token)).toBe(legacy.grant.actorId);
+
+      opened.enterprise.pairAgentConnection(replacement.nonce);
       expect(captureThrown(() => opened.enterprise.resolveGrantActorId(legacy.grant.token))).toMatchObject({
         code: "AUTH_REQUIRED",
         statusCode: 401,
@@ -818,7 +841,7 @@ describe("agent pairing and revocation", () => {
     }
   });
 
-  it("keeps replaced grants invalid after reopening a file-backed database", () => {
+  it("persists staged replacement intent across restart and switches only after pairing", () => {
     const filename = databasePath();
     const opened = setup(filename);
     const connectionInput = {
@@ -837,16 +860,25 @@ describe("agent pairing and revocation", () => {
     const reopenedDatabase = new DesignerDatabase(filename);
     const reopenedEnterprise = new EnterpriseService(reopenedDatabase, new EventHub());
     try {
-      expect(captureThrown(() => reopenedEnterprise.resolveGrantActorId(original.grant.token))).toMatchObject({
-        code: "AUTH_REQUIRED",
-        statusCode: 401,
-      });
+      expect(reopenedEnterprise.resolveGrantActorId(original.grant.token)).toBe(original.grant.actorId);
       const statuses = new Map(reopenedEnterprise.listAgentConnections("local").map((connection) => [
         connection.id,
         connection.status,
       ]));
-      expect(statuses.get(original.connection.id)).toBe("revoked");
+      expect(statuses.get(original.connection.id)).toBe("active");
       expect(statuses.get(replacement.connection.id)).toBe("pending");
+
+      reopenedEnterprise.pairAgentConnection(replacement.nonce);
+      expect(captureThrown(() => reopenedEnterprise.resolveGrantActorId(original.grant.token))).toMatchObject({
+        code: "AUTH_REQUIRED",
+        statusCode: 401,
+      });
+      const pairedStatuses = new Map(reopenedEnterprise.listAgentConnections("local").map((connection) => [
+        connection.id,
+        connection.status,
+      ]));
+      expect(pairedStatuses.get(original.connection.id)).toBe("revoked");
+      expect(pairedStatuses.get(replacement.connection.id)).toBe("active");
     } finally {
       reopenedDatabase.close();
     }
@@ -909,6 +941,173 @@ describe("agent pairing and revocation", () => {
       expect((opened.database.sqlite.prepare(
         "SELECT COUNT(*) AS count FROM agent_connections",
       ).get() as { count: number }).count).toBe(connectionCount);
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("rolls back the entire replacement switchover when final pair persistence fails", () => {
+    const opened = setup();
+    try {
+      const connectionInput = {
+        adapter: "codex" as const,
+        displayName: "Atomic pair Codex bridge",
+        scopes: ["design:read"],
+      };
+      const originalChallenge = opened.enterprise.createAgentConnection("local", connectionInput);
+      const original = opened.enterprise.pairAgentConnection(originalChallenge.nonce);
+      const replacement = opened.enterprise.createAgentConnection("local", {
+        ...connectionInput,
+        replaceExisting: true,
+      });
+      const grantCount = (opened.database.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM agent_grants",
+      ).get() as { count: number }).count;
+      opened.database.sqlite.exec(`
+        CREATE TRIGGER force_agent_connection_pair_audit_failure
+        BEFORE INSERT ON audit_events
+        WHEN NEW.action = 'agent_connection.pair' AND NEW.target_id = '${replacement.connection.id}'
+        BEGIN
+          SELECT RAISE(ABORT, 'forced replacement pair failure');
+        END;
+      `);
+
+      const error = captureThrown(() => opened.enterprise.pairAgentConnection(replacement.nonce));
+      expect(String(error)).toContain("forced replacement pair failure");
+      expect(opened.enterprise.resolveGrantActorId(original.grant.token)).toBe(original.grant.actorId);
+      expect(opened.database.sqlite.prepare(
+        "SELECT status FROM agent_connections WHERE id = ?",
+      ).get(replacement.connection.id)).toEqual({ status: "pending" });
+      expect(opened.database.sqlite.prepare(
+        "SELECT consumed_at, revoked_at FROM pairing_nonces WHERE connection_id = ?",
+      ).get(replacement.connection.id)).toEqual({ consumed_at: null, revoked_at: null });
+      expect((opened.database.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM agent_grants",
+      ).get() as { count: number }).count).toBe(grantCount);
+
+      opened.database.sqlite.exec("DROP TRIGGER force_agent_connection_pair_audit_failure");
+      const pairedReplacement = opened.enterprise.pairAgentConnection(replacement.nonce);
+      expect(opened.enterprise.resolveGrantActorId(pairedReplacement.grant.token)).toBe(pairedReplacement.grant.actorId);
+      expect(captureThrown(() => opened.enterprise.resolveGrantActorId(original.grant.token))).toMatchObject({
+        code: "AUTH_REQUIRED",
+        statusCode: 401,
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("allows one staged replacement at the logical connection limit without admitting an unrelated connection", () => {
+    const opened = setup();
+    try {
+      const policies = new OrganizationPolicyService(opened.database);
+      const currentPolicy = policies.read("local");
+      const policy = structuredClone(DEFAULT_ORGANIZATION_POLICY);
+      policy.agents.maximumActiveConnections = 1;
+      policies.update("local", {
+        expectedConfigurationHash: currentPolicy.configurationHash,
+        policy,
+      });
+      const connectionInput = {
+        adapter: "codex" as const,
+        displayName: "Limit-safe Codex bridge",
+        scopes: ["design:read"],
+      };
+      const originalChallenge = opened.enterprise.createAgentConnection("local", connectionInput);
+      const original = opened.enterprise.pairAgentConnection(originalChallenge.nonce);
+
+      const replacement = opened.enterprise.createAgentConnection("local", {
+        ...connectionInput,
+        replaceExisting: true,
+      });
+      expect(opened.enterprise.resolveGrantActorId(original.grant.token)).toBe(original.grant.actorId);
+      expect(captureThrown(() => opened.enterprise.createAgentConnection("local", {
+        ...connectionInput,
+        displayName: "Unrelated Codex bridge",
+      }))).toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+
+      const pairedReplacement = opened.enterprise.pairAgentConnection(replacement.nonce);
+      expect(opened.enterprise.resolveGrantActorId(pairedReplacement.grant.token)).toBe(pairedReplacement.grant.actorId);
+      expect(captureThrown(() => opened.enterprise.resolveGrantActorId(original.grant.token))).toMatchObject({
+        code: "AUTH_REQUIRED",
+        statusCode: 401,
+      });
+    } finally {
+      opened.database.close();
+    }
+  });
+
+  it("expires only the pending replacement and leaves the working predecessor grant usable", () => {
+    const database = new DesignerDatabase(":memory:");
+    const events = new EventHub();
+    const designer = new DesignerService(database, events, 900);
+    designer.createDesign("local", {
+      name: "Replacement expiry",
+      preset: "phone",
+      idempotencyKey: "replacement-expiry-design",
+    });
+    let clock = new Date("2026-07-19T12:00:00.000Z");
+    const enterprise = new EnterpriseService(database, events, {
+      now: () => clock,
+      pairingTtlSeconds: 60,
+    });
+    try {
+      const connectionInput = {
+        adapter: "codex" as const,
+        displayName: "Expiring replacement Codex",
+        scopes: ["design:read"],
+      };
+      const originalChallenge = enterprise.createAgentConnection("local", connectionInput);
+      const original = enterprise.pairAgentConnection(originalChallenge.nonce);
+      const replacement = enterprise.createAgentConnection("local", {
+        ...connectionInput,
+        replaceExisting: true,
+      });
+
+      clock = new Date("2026-07-19T12:01:01.000Z");
+      expect(captureThrown(() => enterprise.pairAgentConnection(replacement.nonce))).toMatchObject({
+        code: "PAIRING_EXPIRED",
+        statusCode: 410,
+      });
+      expect(enterprise.resolveGrantActorId(original.grant.token)).toBe(original.grant.actorId);
+      const statuses = new Map(enterprise.listAgentConnections("local").map((connection) => [
+        connection.id,
+        connection.status,
+      ]));
+      expect(statuses.get(original.connection.id)).toBe("active");
+      expect(statuses.get(replacement.connection.id)).toBe("expired");
+      expect(database.sqlite.prepare(
+        "SELECT value FROM system_metadata WHERE key = ?",
+      ).get(`agent_connection_replacement:${replacement.connection.id}`)).toBeUndefined();
+    } finally {
+      database.close();
+    }
+  });
+
+  it("revokes a cancelled pending replacement without touching the working predecessor", () => {
+    const opened = setup();
+    try {
+      const connectionInput = {
+        adapter: "codex" as const,
+        displayName: "Cancelled replacement Codex",
+        scopes: ["design:read"],
+      };
+      const originalChallenge = opened.enterprise.createAgentConnection("local", connectionInput);
+      const original = opened.enterprise.pairAgentConnection(originalChallenge.nonce);
+      const replacement = opened.enterprise.createAgentConnection("local", {
+        ...connectionInput,
+        replaceExisting: true,
+      });
+
+      expect(opened.enterprise.revokeAgentConnection("local", replacement.connection.id).status).toBe("revoked");
+      expect(opened.enterprise.resolveGrantActorId(original.grant.token)).toBe(original.grant.actorId);
+      expect(captureThrown(() => opened.enterprise.pairAgentConnection(replacement.nonce))).toMatchObject({
+        code: "CONNECTION_REVOKED",
+        statusCode: 410,
+      });
+      expect(opened.database.sqlite.prepare(
+        "SELECT value FROM system_metadata WHERE key = ?",
+      ).get(`agent_connection_replacement:${replacement.connection.id}`)).toBeUndefined();
     } finally {
       opened.database.close();
     }

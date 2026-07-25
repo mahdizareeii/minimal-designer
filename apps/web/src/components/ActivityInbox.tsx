@@ -119,7 +119,7 @@ export function ActivityInbox() {
     <main className="activity-inbox-shell">
       <header className="activity-inbox-header">
         <button className="button button-secondary" onClick={() => navigate("/")}><ArrowLeft size={14} /> Projects</button>
-        <div><span><Sparkles size={16} /></span><div><strong>FormaSpec Activity</strong><small>Resume tasks, recover exact review links, and reopen redesign assessments.</small></div></div>
+        <div><span><Sparkles size={16} /></span><div><strong>FormaSpec Activity</strong><small>Monitor Codex/CLI tasks, recover exact review links, and reopen redesign assessments.</small></div></div>
         <button className="icon-button" aria-label="Refresh activity" onClick={() => void refresh()} disabled={loading}><RefreshCcw size={15} className={loading ? "spin" : ""} /></button>
       </header>
 
@@ -127,7 +127,7 @@ export function ActivityInbox() {
         {error && <div className="administration-alert is-error" role="alert">{error}</div>}
         {notice && <div className="administration-alert"><CheckCircle2 size={14} /> {notice}</div>}
         <div className="activity-inbox-heading">
-          <div><h1>Continue where you left off</h1><p>These records live on the server, so links remain available after closing Codex or the browser.</p></div>
+          <div><h1>Durable agent activity</h1><p>Tasks start in Codex or the CLI. Their status and website approval links remain available after either app closes.</p></div>
           <nav aria-label="Activity filters">
             {(["all", "review", "active", "completed"] as const).map((value) => (
               <button key={value} className={filter === value ? "is-active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>
@@ -141,6 +141,7 @@ export function ActivityInbox() {
           <div className="activity-list">
             {visibleTasks.map(({ task, design }) => {
               const designArchived = design.status === "archived";
+              const taskActive = ["queued", "claimed", "in_progress"].includes(task.status);
               const updatedAt = task.transitions.at(-1)?.createdAt ?? task.createdAt;
               const reviewPath = localPath(task.reviewDeepLink ?? undefined, `/design/${encodeURIComponent(design.id)}?task=${encodeURIComponent(task.id)}`);
               const taskPath = localPath(task.websiteTaskLink, `/design/${encodeURIComponent(design.id)}?task=${encodeURIComponent(task.id)}`);
@@ -154,9 +155,9 @@ export function ActivityInbox() {
                 </div>
                 <div className="activity-card-actions">
                   {!designArchived && task.status === "awaiting_approval" && <button className="button button-primary" onClick={() => navigate(reviewPath)}><ExternalLink size={13} /> Review preview</button>}
-                  {!designArchived && ["queued", "claimed", "in_progress"].includes(task.status) && <a className="button button-primary" href={task.launchUrl} rel="noopener noreferrer"><ExternalLink size={13} /> {task.status === "in_progress" ? "Resume regeneration" : "Open in Codex"}</a>}
+                  {!designArchived && taskActive && task.launchUrl && <a className="button button-primary" href={task.launchUrl} rel="noopener noreferrer"><ExternalLink size={13} /> Open task in Codex</a>}
                   {!designArchived && task.status === "completed" && <button className="button button-secondary" onClick={() => navigate(reviewPath)}><CheckCircle2 size={13} /> View result</button>}
-                  <button className="button button-secondary" onClick={() => navigate(designArchived ? "/archived" : taskPath)}>{designArchived ? "Open archive" : "Open project"}</button>
+                  <button className="button button-secondary" onClick={() => navigate(designArchived ? "/archived" : taskPath)}>{designArchived ? "Open archive" : taskActive ? "View task status" : "Open project"}</button>
                   <button className="icon-button" aria-label={`Copy link for task ${task.id}`} onClick={() => void copyLink(copyTarget, "task link")}><Clipboard size={13} /></button>
                 </div>
               </article>;
@@ -177,7 +178,7 @@ export function ActivityInbox() {
               </article>
             ))}
 
-            {visibleTasks.length === 0 && visibleAssessments.length === 0 && <div className="activity-empty"><Sparkles size={22} /><strong>No matching activity</strong><span>Submit a Product brief or start a Redesign assessment, then return here to resume it.</span></div>}
+            {visibleTasks.length === 0 && visibleAssessments.length === 0 && <div className="activity-empty"><Sparkles size={22} /><strong>No matching activity</strong><span>Start a FormaSpec task from Codex or the CLI, or create a Redesign assessment, then return here to review its durable status.</span></div>}
           </div>
         )}
       </section>

@@ -384,7 +384,7 @@ to a client-provided value.
 
 The automatic Codex setup registers MCP server ID `formaspec` at the
 credential-free loopback URL `http://127.0.0.1:4312/mcp`, installs and verifies
-the single managed FormaSpec 0.3.0 plugin, removes installer-owned legacy
+the single managed FormaSpec 0.4.0 plugin, removes installer-owned legacy
 identity assets, and provides:
 
 ```text
@@ -396,6 +396,9 @@ Keychain, Linux Secret Service, or a Windows current-user DPAPI ciphertext
 file. Windows implementation tests pass through an injected PowerShell runner;
 real packaged service/ACL/lifecycle evidence is still required. The Codex
 configuration itself contains no bearer token.
+It sets `default_tools_approval_mode = "approve"` only inside the trusted local
+`[mcp_servers.formaspec]` table, preserving global Codex approval and sandbox
+policy while avoiding a prompt for every FormaSpec tool call.
 
 This automatic flow is local-machine only today. It does not configure a
 remote HTTPS bridge, OAuth client, or arbitrary MCP client. For unsupported

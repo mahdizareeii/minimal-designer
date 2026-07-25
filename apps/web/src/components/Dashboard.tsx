@@ -592,10 +592,10 @@ export function Dashboard() {
         }
     : !activeConnection
       ? {
-          eyebrow: "Repair the agent connection",
-          title: "Connect Codex before submitting work",
-          detail: "The Design is safe. Reconnect once, then queued work can resume from Activity.",
-          action: "Open agent settings",
+          eyebrow: "One-time Codex setup",
+          title: "Connect or install FormaSpec MCP",
+          detail: "Connect once, then create every FormaSpec task from Codex or the CLI. Returned previews remain reviewable on this website.",
+          action: "Connect / install MCP",
           run: () => navigate("/administration/agents"),
         }
       : awaitingReview
@@ -610,10 +610,10 @@ export function Dashboard() {
           }
         : resumableTask
           ? {
-              eyebrow: "Continue active work",
-              title: `Resume ${resumableTask.design.name}`,
-              detail: `Task ${resumableTask.task.id} is ${resumableTask.task.status.replaceAll("_", " ")} and remains recoverable from Activity.`,
-              action: "Resume task",
+              eyebrow: "Agent work in progress",
+              title: `Monitor ${resumableTask.design.name}`,
+              detail: `Codex/CLI task ${resumableTask.task.id} is ${resumableTask.task.status.replaceAll("_", " ")}. This website keeps its durable status and returned preview.`,
+              action: "View task status",
               run: () => navigate(`/design/${encodeURIComponent(resumableTask.design.id)}?task=${encodeURIComponent(resumableTask.task.id)}`),
             }
           : mostRecentProject

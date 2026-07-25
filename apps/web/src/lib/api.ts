@@ -1336,6 +1336,20 @@ export interface AgentTaskRecord {
   reviewLaunchLink?: string | null;
 }
 
+function strictCodexTaskLaunchUrl(input: unknown): string {
+  if (typeof input !== "string" || !input.trim()) return "";
+  try {
+    const url = new URL(input);
+    if (url.protocol !== "codex:" || url.hostname !== "new" || url.pathname || url.username || url.password || url.port || url.hash
+      || [...url.searchParams.keys()].some((key) => key !== "prompt")
+      || url.searchParams.getAll("prompt").length !== 1
+      || !url.searchParams.get("prompt")?.trim()) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
 function asAgentTaskRecord(
   input: unknown,
   launchUrl?: string,
@@ -1409,8 +1423,7 @@ function asAgentTaskRecord(
     ...(resolvedContext ? { resolvedContext } : {}),
     ...(rawReadiness !== undefined ? { readiness } : {}),
     transitions,
-    launchUrl: launchUrl ?? String(task.launchUrl ?? task.launch_url
-      ?? `codex://new?prompt=${encodeURIComponent(`[@FormaSpec](plugin://formaspec@formaspec)\n\nUse FormaSpec. Claim task ${id} with task_claim and return an exact persisted preview for website approval. Do not commit it.`)}`),
+    launchUrl: strictCodexTaskLaunchUrl(launchUrl ?? task.launchUrl ?? task.launch_url),
     ...(resolvedWebsiteLink ? { websiteTaskLink: resolvedWebsiteLink } : {}),
     ...(resolvedReviewLink !== undefined ? { reviewDeepLink: resolvedReviewLink } : {}),
     ...(resolvedReviewLaunchLink !== undefined ? { reviewLaunchLink: resolvedReviewLaunchLink } : {}),
@@ -1424,41 +1437,6 @@ export function taskPreviewId(task: AgentTaskRecord | null): string | null {
     if (typeof previewId === "string" && previewId.length > 0) return previewId;
   }
   return null;
-}
-
-export async function createAgentTask(input: {
-  designId: string;
-  baseVersion: number;
-  brief: string;
-  selection: string[];
-  expectedOutput?: string;
-  idempotencyKey?: string;
-}): Promise<AgentTaskRecord> {
-  const result = await request<Record<string, unknown>>(
-    `/designs/${encodeURIComponent(input.designId)}/agent-tasks`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        brief: input.brief,
-        selection: input.selection,
-        baseVersion: input.baseVersion,
-        expectedOutput: input.expectedOutput ?? "design_preview",
-        idempotencyKey: input.idempotencyKey ?? createClientKey("agent_task"),
-      }),
-    },
-  );
-  const task = result.task && typeof result.task === "object" ? result.task : result;
-  return asAgentTaskRecord(
-    task,
-    String(result.launchUrl ?? result.launch_url ?? "") || undefined,
-    String(result.websiteTaskLink ?? result.website_task_link ?? "") || undefined,
-    result.reviewDeepLink === null || result.review_deep_link === null
-      ? null
-      : String(result.reviewDeepLink ?? result.review_deep_link ?? "") || undefined,
-    result.reviewLaunchLink === null || result.review_launch_link === null
-      ? null
-      : String(result.reviewLaunchLink ?? result.review_launch_link ?? "") || undefined,
-  );
 }
 
 export async function readAgentTask(taskId: string): Promise<AgentTaskRecord> {

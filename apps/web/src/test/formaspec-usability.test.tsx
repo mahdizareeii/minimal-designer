@@ -6,28 +6,37 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { applicationRoute } from "../App";
 import {
   Administration,
+  agentConnectionCanReconnect,
   agentConnectionDisplayName,
   codexPairingCommand,
   codexPairingLink,
   groupAgentConnections,
   managedBackupRestoreCommand,
+  openCodexPairingLink,
 } from "../components/Administration";
 import { TextTypographyEditor } from "../components/InspectorPanel";
 import { compareProductSpecifications } from "../components/ProductSpecificationHistory";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("FormaSpec browser usability", () => {
   it("routes focused administration sections and keeps recovery/import workflows separate", () => {
     const overview = renderToStaticMarkup(<Administration section="overview" />);
+    const agents = renderToStaticMarkup(<Administration section="agents" />);
     const backups = renderToStaticMarkup(<Administration section="backups" />);
     const imports = renderToStaticMarkup(<Administration section="imports" />);
 
     expect(overview).toContain("FormaSpec Administration");
     expect(overview).toContain("Workspace overview");
     expect(overview).toContain("Recommended next action");
+    expect(agents).toContain("FormaSpec MCP for Codex");
+    expect(agents).toContain("Install / connect FormaSpec MCP");
+    expect(agents).toContain("Agent tasks are created only in Codex or the CLI");
+    expect(agents).not.toContain("Submit to @FormaSpec");
+    expect(agents).not.toContain("Finish FormaSpec connection");
     for (const route of [
       "/administration",
       "/administration/agents",
@@ -128,6 +137,31 @@ describe("FormaSpec browser usability", () => {
     })).toThrow(/not safe/i);
   });
 
+  it("opens the strict one-click FormaSpec connection handler without a second finish action", () => {
+    const click = vi.fn();
+    const remove = vi.fn();
+    const append = vi.fn();
+    const anchor = { href: "", rel: "", style: { display: "" }, click, remove };
+    const createElement = vi.fn(() => anchor);
+    vi.stubGlobal("document", { createElement, body: { append } });
+    const link = codexPairingLink({
+      nonce: `fspair_${"n".repeat(43)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      connection: { id: `connection_${"a".repeat(32)}` },
+    } as Parameters<typeof codexPairingLink>[0]);
+
+    openCodexPairingLink(link);
+
+    expect(createElement).toHaveBeenCalledWith("a");
+    expect(anchor.href).toBe(link);
+    expect(anchor.rel).toBe("noopener noreferrer");
+    expect(anchor.style.display).toBe("none");
+    expect(append).toHaveBeenCalledWith(anchor);
+    expect(click).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
+    expect(() => openCodexPairingLink("https://example.com/connect-agent")).toThrow(/invalid/i);
+  });
+
   it("presents current FormaSpec connections before collapsed immutable history", () => {
     const connection = (id: string, status: "active" | "pending" | "expired" | "revoked", displayName: string) => ({
       id,
@@ -151,6 +185,10 @@ describe("FormaSpec browser usability", () => {
     expect(grouped.current.map((item) => item.status)).toEqual(["active", "pending"]);
     expect(grouped.history.map((item) => item.status)).toEqual(["expired", "revoked"]);
     expect(agentConnectionDisplayName(active)).toBe("Codex — FormaSpec");
+    expect(agentConnectionCanReconnect(active)).toBe(true);
+    expect(agentConnectionCanReconnect(pending)).toBe(true);
+    expect(agentConnectionCanReconnect(expired)).toBe(false);
+    expect(agentConnectionCanReconnect(revoked)).toBe(false);
   });
 
   it("renders explicit Vazirmatn, Persian, and mixed-direction typography controls", () => {

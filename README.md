@@ -8,7 +8,7 @@ browser.
 
 The supported agent identity is exactly
 `[@FormaSpec](plugin://formaspec@formaspec)`. Upgrades remove installer-owned
-legacy identities after FormaSpec 0.3.0 has been installed and verified.
+legacy identities after FormaSpec 0.4.0 has been installed and verified.
 
 The application does not embed the OpenAI API and does not require an OpenAI
 API key. Codex connects through the local FormaSpec MCP bridge. Your Codex
@@ -25,7 +25,7 @@ subscription or API usage remains separate.
 Run one installer command from the repository root. It checks the operating
 system and requirements, prepares the selected runtime, starts FormaSpec and
 the loopback bridge, and—when Codex is detected—configures the token-free
-`formaspec` MCP server and the managed FormaSpec 0.3.0 plugin.
+`formaspec` MCP server and the managed FormaSpec 0.4.0 plugin.
 
 Docker is the easiest source installation:
 
@@ -55,8 +55,8 @@ uncommitted-source `NO-GO` checkpoints, not hosted provenance, a real remote-
 host/TLS recovery exercise, or production qualification.
 
 The compatibility `designer` launcher preserves existing `.designer` state and
-delegates supported commands to `formaspecctl`. Remove `--yes` if you want an
-authorization prompt before setup and Codex configuration.
+delegates supported commands to `formaspecctl`. Remove `--yes` if you want one
+explicit authorization prompt before setup and Codex configuration.
 
 After startup, open:
 
@@ -91,24 +91,30 @@ Refine this selection with FormaSpec.
 [@FormaSpec](plugin://formaspec@formaspec) create a professional mobile onboarding flow.
 ```
 
-FormaSpec 0.3.0 is the only managed plugin. Start a new Codex task after an
+FormaSpec 0.4.0 is the only managed plugin. Start a new Codex task after an
 installation or upgrade because an already-open task retains its original
 plugin inventory.
 
 The connection is intentionally token-free in Codex configuration. Codex talks
 to the loopback bridge; the bridge holds the short-lived upstream scoped grant
 in macOS Keychain, Linux Secret Service, or a Windows current-user DPAPI blob.
+The installer sets automatic tool approval only on the trusted local
+`[mcp_servers.formaspec]` entry, so Codex does not prompt for every FormaSpec
+tool call. `doctor` and `status` verify that this entry still targets the exact
+active credential-free loopback bridge before reporting it trusted. Global
+Codex approval and sandbox settings remain unchanged.
 Windows code-level DPAPI tests pass; a real packaged Windows lifecycle test is
 still required before release.
 
 FormaSpec’s MCP server is named `formaspec`.
 
-For a website-created task opened with **Submit to @FormaSpec**, Codex must
-claim the task, read its project and selection context, create the exact
-preview, inspect its PNG, run linting, and transition the task to
-`awaiting_approval` with the `previewId`. The agent must not commit the
-preview or complete the task. A human reviews the exact preview in FormaSpec
-and chooses **Commit** or **Discard**.
+The website does not create agent tasks. Start work from Codex or the CLI;
+after the exact Product, Design, base version, and selection are confirmed,
+FormaSpec creates the durable MCP task. Codex claims it, reads its authorized
+context, creates the exact preview, inspects its PNG, runs linting, and
+transitions it to `awaiting_approval` with the `previewId`. The agent must not
+commit the preview or complete the task. A human reviews the exact preview in
+FormaSpec and chooses **Commit** or **Discard**.
 
 For a direct, non-task request, the agent creates a task first and uses the same
 human approval boundary:
@@ -179,7 +185,7 @@ Currently implemented `formaspecctl` workflows are:
 | `backup restore --backup-id <id>` | Externally supervises a `HEALTHY_PLANNED_RESTORE_ONLY` operation for the launcher-recorded local Docker/server runtime through its pinned runtime binding, maintenance fence, shared worker lock, verified managed safety backup, render/database checks, credential revocation, and readiness-gated restart. This planned path still requires the current API/database for backup-ID resolution and preflight. |
 | `backup restore offline <bundle>` | With explicit `--yes`, verifies the operator-selected bundle before mutation, pins the same regular file by identity/hash/size, capacity-gates stdin and the whole workflow, streams only stdin into the network-disabled restore worker, applies forensic pre-copy capacity checks, creates and verifies an exact snapshot of the existing `/data` bytes even when SQLite is corrupt, then uses the standard verified cutover, schema/render checks, audit/outbox reconciliation, credential revocation, and readiness-gated restart. Child stdout/stderr shares one combined 4 MiB budget by default, with a 5-second SIGKILL fallback when SIGTERM is ignored. Any failure after fencing remains in maintenance for explicit resume; it never auto-aborts or restarts the API. |
 | `backup restore status\|resume\|rollback\|abort\|clear-stale-lock` | Inspects or safely recovers the exact durable Docker restore operation. Offline interruption before preparation resumes with `--offline-bundle <same-bundle>` under the current maintenance owner; `offlinePrepare` and the replacement worker never reuse a retained forensic predecessor's ID. Forensic rollback restores exact pre-state bytes, keeps maintenance active and the API stopped, and reports `maintenanceCleared: false`/`serviceReady: false`; direct clear is rejected and only a newly verified offline restore may atomically take over that fence. Abort accepts only pristine/prepared pre-cutover state with no journal/worker lock and a reverified healthy live database, so corrupt state remains fenced; stale-lock clearing requires proof that the pinned worker container is absent. |
-| `agent connect codex` | Starts or refreshes the bridge, configures token-free MCP, installs and verifies the single managed FormaSpec 0.3.0 plugin, removes only installer-owned legacy identities, and verifies the connection. |
+| `agent connect codex` | Starts or refreshes the bridge, configures token-free MCP with server-scoped automatic tool approval, installs and verifies the single managed FormaSpec 0.4.0 plugin, removes only installer-owned legacy identities, and verifies the connection without changing global Codex approval or sandbox policy. |
 | `agent config generic` | Prints validated token-free loopback JSON/TOML and verification guidance without reading or modifying an unknown client. |
 | `support-bundle preview\|create` | Previews or explicitly creates a deterministic bounded diagnostic archive with aggressive redaction and no database, assets, backups, environment values, source, or credentials. |
 

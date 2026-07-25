@@ -17,11 +17,11 @@ The repository is an incremental pnpm TypeScript workspace:
 | Shared model | `packages/core`: frozen strict V1 schemas, separate strict V2 schemas, deterministic V1→V2 conversion, typed operations, validation/linting, layout rules, linked responsive-frame relationships, product-specification types, the Foundation System, bounded token exporters, and canonical bounded detached component-source bundles. Component contracts include typed property-to-node bindings, slot anchors, allowed visual overrides, and nested component references. The core operation union includes a server-only `insert_component_instance` record, but generic MCP operations exclude it. |
 | Browser editor | `apps/web`: React/Vite, Zustand, structured DOM rendering, one viewport transform, Moveable/Selecto in an untransformed interaction overlay, product specification, planning, source-backed component authoring from immutable V2 revisions, and a Components-tab pinned-library flow that previews, renders, diagnoses, explicitly commits, or discards exact component insertions. Multi-selected same-page frames can be linked into ordered, non-overlapping responsive variants and later selected, recalculated, or unlinked. Design-system administration, engineering handoff, Redesign Studio, inspect, history, prototype, JSON/PNG/SVG/PDF, and portable export/import surfaces also exist. |
 | HTTP service | `apps/server`: Fastify REST, replayable SSE, Streamable HTTP MCP, static assets, password-session and trusted-header browser authentication, organization/Product/Design authorization, SQLite persistence, exact previews, revision-pinned inspection, source-backed design-system releases/pins/upgrades, exact pinned-release component insertion previews, project/revision-bound historical release reads, path-free inventories, exact implementation mappings, handoffs, Redesign Studio, audit/outbox, portable export/import, deterministic sanitized raster-backed SVG/PDF export, backups, and render orchestration. |
-| Persistence | Better SQLite3 with a numbered version-17 migration ledger, WAL, first-class Products, Product-bound immutable task context, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, bounded write-once exact preview-render metadata, and a canonical consume-once bootstrap-credential trigger. |
+| Persistence | Better SQLite3 with a numbered version-18 migration ledger, WAL, first-class Products, Product-bound immutable task context, content-addressed Brotli snapshots, immutable revision hash chains and implementation mappings, scoped idempotency, audit records, a transactional event outbox, bounded audit-retention evidence, immutable portable-import provenance, persistent render jobs, append-only handoff execution decisions, canonical component source JSON/SHA-256, exact design-system upgrade snapshot references, hardened browser-account/session/bootstrap/login-attempt state, bounded write-once exact preview-render metadata, and a canonical consume-once bootstrap-credential trigger. |
 | Rendering | Source development may use an explicitly allowed in-process renderer. Docker runs a separate non-root Playwright worker over a bounded Unix-socket protocol with no network, a read-only root filesystem, resource limits, and no software fallback. |
-| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP plus exactly one managed FormaSpec 0.3.0 plugin. Managed cleanup removes only the exact legacy Minimal UI TOML tables and preserves unrelated or lookalike configuration. A live macOS source-checkout upgrade verifies one 0.3.0 plugin, one token-free MCP entry, no standalone skills, no legacy compatibility marketplace/config residue, and strict authenticated MCP `initialize`/`tools/list` doctor checks; packaged supported-OS lifecycle remains open. |
+| Agent connection | `apps/local-bridge` provides the loopback authorization boundary and OS credential-store integration; an authenticated Organization Administrator creates a short-lived pairing ticket, the bridge consumes only its nonce through `/api/agent-connections/pair`, and `formaspecctl` configures token-free Codex MCP with server-scoped automatic tool approval plus exactly one managed FormaSpec 0.4.0 plugin. Managed cleanup removes only the exact legacy Minimal UI TOML tables and preserves unrelated or lookalike configuration. A live macOS source-checkout upgrade verifies one 0.4.0 plugin, one exact token-free loopback MCP entry, no standalone skills, no legacy compatibility marketplace/config residue, and strict authenticated MCP `initialize`/`tools/list` doctor checks; packaged supported-OS lifecycle remains open. |
 | Workspace handoff | `apps/workspace-bridge` provides explicit, expiring, revocable read-only repository grants, organization-policy exclusions, bounded secret-excluding inventories, and automatic path-free persistence through REST or the authorized MCP bridge. The server persists strict inventories, exact revision/product-spec/inventory-pinned mappings, and revision-pinned handoffs; local launch requires the immutable `start_implementation` transition. Automatic mapping suggestions and independently approved plan/diff/validation/commit/push/PR execution remain incomplete. |
-| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. A live macOS source-checkout upgrade built and started the current image on the recorded data store, reached schema-17 readiness, passed isolated rendering, and matched bridge origin/store identity; it is operational evidence rather than a retained release artifact. Current retained schema-16 image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1` passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery; its compatibility evidence paths remain under `artifacts/ci/docker-schema11/`. It is local uncommitted-source evidence, not hosted/signed/scanned release provenance. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; packaged native macOS/Linux/Windows and custom-protocol lifecycle proof is missing. |
+| Packaging | One `formaspec/server` image runs API and renderer as separate services. `formaspecctl` and `designer` support source installs. A live macOS source-checkout upgrade built and started the current image on the recorded data store, reached schema-18 readiness, passed isolated rendering, and matched bridge origin/store identity; it is operational evidence rather than a retained release artifact. Current retained schema-16 image `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1` passes deterministic restart rendering, egress denial, Firefox/WebKit 12/12, and copied-bundle recovery; its compatibility evidence paths remain under `artifacts/ci/docker-schema11/`. It is local uncommitted-source evidence, not hosted/signed/scanned release provenance. The retained unsigned macOS schema-12 checkpoint remains historical 51-tool/25-resource evidence, was not installed, and is nondeterministic at the outer PKG layer. All evidence remains `NO-GO`; packaged native macOS/Linux/Windows and custom-protocol lifecycle proof is missing. |
 
 ```mermaid
 flowchart LR
@@ -39,7 +39,7 @@ flowchart LR
 Current source advertises 54 MCP tools and 26 resources, including
 `product_list`, `product_read`, and `formaspec://products/{productId}`. The
 protected non-MCP manifest contains 119 routes: 55 project-scoped, 58
-organization-scoped, and six explicit exceptions. Focused schema-17 contract
+organization-scoped, and six explicit exceptions. Focused schema-18 contract
 tests verify exact inventory/route closure and authentication across that
 surface. This source contract is implemented foundation evidence, not a
 production qualification.
@@ -55,25 +55,25 @@ for every disposable project. These are historical local `NO-GO` results, not
 the retained schema-16 checkpoint, hosted provenance, or a release image.
 
 Installed/link verification confirms `drizzle-orm` 0.45.2. The current
-schema-17 source passes recursive typecheck and production build. Its package
-tests currently cover core 74/74, server 540/540, web 145/145, CLI 130/130
+schema-18 source passes recursive typecheck and production build. Its package
+tests currently cover core 74/74, server 551/551, web 148/148, CLI 146/146
 (124 ordinary plus six bridge-lifecycle), local bridge 27/27, Workspace Bridge
-37/37, and installer 75/75: 1,028 tests in
+37/37, and installer 75/75: 1,058 tests in
 total. Four real Chromium render/raster cases use a scoped 20-second test-
 harness timeout while the application render remains hard-bounded at 15
 seconds. Deterministic document-export tests pass 15/15, migration/backup/restore
 tests pass 59/59, Product/readiness/preview/MCP tests pass 44/44, and macOS
 packaged-runtime contracts pass 11/11. Launcher tests pass 280/280 and
 `docker compose config --quiet` passes. These are local source checks; the full
-schema-17 browser, Docker, recovery, security-scan, and supported-OS release
+schema-18 browser, Docker, recovery, security-scan, and supported-OS release
 matrix remains open. Retained local Docker restart/egress and copied-bundle
 recovery evidence uses the older schema-16 image
 `sha256:620d231484044701403ff688493492ff5f8d12d7b09db3de6f00be83cbc658a1`.
 Separately, the live macOS source-checkout upgrade built and started the current
-Docker image against the recorded store, reached schema-17 readiness, passed
+Docker image against the recorded store, reached schema-18 readiness, passed
 the isolated Playwright renderer and bridge origin/store checks, and passed
 strict MCP `initialize`/`tools/list` doctor verification for the 12 essential
-tools. Live Codex then contained exactly one 0.3.0 managed plugin and one
+tools. Live Codex then contained exactly one 0.4.0 managed plugin and one
 token-free MCP entry, with no standalone skills or legacy compatibility
 marketplace/configuration residue. A new Codex task is required to load that
 refreshed inventory. This run is not packaged, hosted, signed, scanned, or
@@ -98,11 +98,11 @@ matrices remain open.
    persisted ephemeral preview with engine versions, hashes, diagnostics,
    permanent-ID mapping, changed IDs, expiry, and status.
 4. The caller renders, inspects, and lints the exact preview before approval.
-5. Website-created and managed direct FormaSpec requests transition their
-   immutable task to `awaiting_approval` with the exact preview ID and stop; a
-   human commits or discards it in FormaSpec. A generic non-managed MCP client
-   may use the ordinary commit tool only under its explicit write approval and
-   authorization contract.
+5. Codex/CLI-created managed FormaSpec requests transition their immutable task
+   to `awaiting_approval` with the exact preview ID and stop; the website only
+   monitors the durable task and lets a human commit or discard it. A generic
+   non-managed MCP client may use the ordinary commit tool only under its
+   explicit write approval and authorization contract.
 6. Commit uses one `BEGIN IMMEDIATE` transaction to authorize, enforce scoped
    idempotency, validate the preview, reference its exact snapshot, insert the
    immutable revision/hash chain, compare-and-swap the head, and write audit
@@ -177,12 +177,12 @@ bounded JSON or raster entries are loaded only when parsed or normalized.
 | `portable_imports` | Immutable organization-scoped source bundle/revision hash claims, target revision, canonical ID map, manifest, diagnostics, actor, and timestamp | The source revision hash is preserved as a provenance claim; it is not revalidated as a local revision chain. Multipart and per-entry disk staging are bounded, but larger adversarial/concurrent-import and packaged cross-platform evidence remain incomplete. |
 | `handoff_execution_decisions` | Append-only, handoff-version-pinned plan/isolation/diff/validation/commit/push/PR decisions with evidence hashes, explicit supersession, and lifecycle/CAS triggers | Broader packaged-agent and real-repository execution evidence remains incomplete. |
 | `component_definitions` | Immutable definition versions plus paired canonical bounded component `source_json` and SHA-256 `source_hash`; schema-12 rows may remain null-source for compatibility but cannot enter a new release. Contracts support typed property-to-node bindings, slot anchors, allowed visual overrides, nested components, and verified content-hash asset copying during insertion. | Richer authoring UI, release-upgrade comparison, broader accessibility/conflict/portable/restore evidence, and company-wide component governance remain incomplete. |
-| `design_system_upgrade_previews` | Expiring upgrade diagnostics plus immutable base revision, base snapshot, and exact result snapshot hashes for V2 upgrades. | V1 compatibility previews retain their historical null exact-snapshot form; broader schema-17 hosted/off-site backup/restore and fault-injection evidence is pending. |
+| `design_system_upgrade_previews` | Expiring upgrade diagnostics plus immutable base revision, base snapshot, and exact result snapshot hashes for V2 upgrades. | V1 compatibility previews retain their historical null exact-snapshot form; broader schema-18 hosted/off-site backup/restore and fault-injection evidence is pending. |
 | Enterprise workflow tables | Organizations, Products, principals, roles, grants, audit, product specs, planning, Product-bound tasks, connections, design systems/releases/pins, repository inventories, handoffs, redesign assessments, backup/export metadata, and locks | V2-head migration, full authoring/mapping/implementation integration, delegated administration, policy rollout/version migration, and complete retention workflows remain incomplete. |
 
 The `schema_migrations` ledger and database, document, command-engine,
 renderer, font, application, and export versions are explicit and synchronized
-in current source at database schema 17. Runtime metadata is document schema 2,
+in current source at database schema 18. Runtime metadata is document schema 2,
 command engine 3, renderer 3, renderer IPC protocol 2, raster normalizer 1,
 font bundle 1, export format 1, and application build `0.2.0`. Migration-2 DDL
 defaults remain frozen at command engine 1, renderer 2, and font bundle 1 so a
@@ -291,7 +291,7 @@ Remaining risks are explicit:
   pending safe upgrade rematerialization. Richer contract authoring, visual
   upgrade comparison, broader component-
   library accessibility/conflict/portable/restore coverage, and retained
-  hosted/native schema-17 release evidence remain incomplete.
+  hosted/native schema-18 release evidence remain incomplete.
 - The Workspace Bridge persists bounded inventories, exact opaque mappings,
   and handoffs. Selected-workspace launch now requires the immutable
   `start_implementation` transition; the broader independently approved
@@ -329,8 +329,9 @@ Target runtime boundaries:
 - API and renderer run as separate non-root processes. Unix sockets are used on
   macOS/Linux and named pipes on Windows.
 - The local bridge is separately installed and stores upstream grants in the
-  operating-system secret store. Browser actions create immutable agent tasks;
-  the website never calls an OpenAI API directly.
+  operating-system secret store. Codex or the CLI creates immutable agent tasks
+  through MCP; browser actions only monitor tasks and approve or discard exact
+  previews. The website never calls an OpenAI API directly.
 - The Workspace Bridge is a workstation-only process. Repository paths,
   credentials, and development tools never enter the central server trust
   boundary.

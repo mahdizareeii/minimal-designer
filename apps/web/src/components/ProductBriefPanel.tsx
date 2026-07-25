@@ -5,11 +5,9 @@ import {
   ChevronUp,
   Clipboard,
   Clock3,
-  ExternalLink,
   FileCheck2,
   LoaderCircle,
   MessageSquareText,
-  Send,
   Sparkles,
   WandSparkles,
 } from "lucide-react";
@@ -20,7 +18,6 @@ import {
   ApiError,
   commitDesignPreview,
   commitProductSpecification,
-  createAgentTask,
   designPreviewReviewPath,
   listAgentConnections,
   listAgentTasks,
@@ -48,8 +45,6 @@ import {
   PreviewDiagnosticsSummary,
   PreviewRevisionSummary,
   FORMASPEC_AGENT_MENTION,
-  agentTaskInstruction,
-  codexTaskLaunchUrl,
   type AgentConnectionViewState,
   type PreviewRenderStatus,
 } from "./AgentPreviewReview";
@@ -60,28 +55,6 @@ export interface CodexConnectionSummary {
   state: AgentConnectionViewState;
   message: string;
 }
-
-export type AgentSubmissionPhase =
-  | "idle"
-  | "checking_design"
-  | "saving_design"
-  | "saving_specification"
-  | "queueing_task"
-  | "saved_without_task"
-  | "success"
-  | "error";
-
-export interface AgentSubmissionFeedback {
-  phase: AgentSubmissionPhase;
-  message: string;
-  task: AgentTaskRecord | null;
-}
-
-const idleSubmissionFeedback: AgentSubmissionFeedback = {
-  phase: "idle",
-  message: "",
-  task: null,
-};
 
 export function productSpecificationRequiresCommit(
   specification: ProductSpecificationRecord | null,
@@ -138,39 +111,6 @@ export async function commitInlineAgentPreviewWhenAllowed<T>(input: {
   const value = await input.commit();
   await input.openDesign();
   return { status: "committed", value };
-}
-
-export function AgentSubmissionStatus({
-  feedback,
-  onOpenCodex,
-}: {
-  feedback: AgentSubmissionFeedback;
-  onOpenCodex: (task: AgentTaskRecord) => void;
-}) {
-  if (feedback.phase === "idle") return null;
-  const pending = ["checking_design", "saving_design", "saving_specification", "queueing_task"].includes(feedback.phase);
-  const failed = feedback.phase === "error";
-  const savedWithoutTask = feedback.phase === "saved_without_task";
-  return (
-    <div
-      className={`product-submit-status is-${feedback.phase}`}
-      role={failed ? "alert" : "status"}
-      aria-live={failed ? "assertive" : "polite"}
-      aria-atomic="true"
-      data-testid="formaspec-submit-status"
-    >
-      {pending ? <LoaderCircle size={14} className="spin" /> : failed ? <MessageSquareText size={14} /> : <CheckCircle2 size={14} />}
-      <span>
-        <strong>{pending ? "Submitting to @FormaSpec" : failed ? "Submission failed" : savedWithoutTask ? "Specification saved; no task queued" : "Task ready for Codex"}</strong>
-        <small>{feedback.message}</small>
-      </span>
-      {feedback.phase === "success" && feedback.task && (
-        <button className="button button-primary" onClick={() => onOpenCodex(feedback.task!)}>
-          <ExternalLink size={12} /> Open task in Codex
-        </button>
-      )}
-    </div>
-  );
 }
 
 const CODEX_DESIGN_TASK_SCOPES = [
@@ -238,7 +178,7 @@ export function summarizeCodexConnection(
   if (usable) {
     return {
       state: "active",
-      message: usable.lastUsedAt ? `Connected · last used ${new Date(usable.lastUsedAt).toLocaleString()}` : "Connected and ready to claim tasks.",
+      message: usable.lastUsedAt ? `MCP connected · last used ${new Date(usable.lastUsedAt).toLocaleString()}` : "MCP connected. Start FormaSpec work from Codex or the CLI.",
     };
   }
   if (active.length > 0) {
@@ -251,7 +191,7 @@ export function summarizeCodexConnection(
         ? "Codex pairing is not complete. Finish or reconnect the managed FormaSpec connection."
         : projectBlocked
           ? "The active Codex connection cannot access this project. Reconnect FormaSpec to refresh its project grant."
-          : "The active Codex connection is missing required design-preview or task scopes. Reconnect it before submitting work.",
+          : "The active Codex connection is missing required design-preview or task scopes. Reconnect it before running work from Codex or the CLI.",
     };
   }
   if (codex.some((connection) => connection.status === "pending")) {
@@ -261,9 +201,9 @@ export function summarizeCodexConnection(
     return { state: "error", message: "The Codex connection is in an error state. Reconnect it before expecting task claims." };
   }
   if (codex.length > 0) {
-    return { state: "unavailable", message: "The previous Codex connection is expired or revoked. Reconnect to process queued tasks." };
+    return { state: "unavailable", message: "The previous FormaSpec MCP connection expired or was revoked. Reconnect it once to continue from Codex or the CLI." };
   }
-  return { state: "unavailable", message: "No Codex connection is active. The task can be queued, but it will wait until Codex is connected." };
+  return { state: "unavailable", message: "FormaSpec MCP is not connected. Install or connect it once, then start tasks from Codex or the CLI." };
 }
 
 const contextualActions = [
@@ -293,13 +233,16 @@ function specificationCounts(specification: Record<string, unknown> | null): Arr
   return labels.map(([key, label]) => [label, Array.isArray(specification[key]) ? specification[key].length : 0]);
 }
 
-function openExternalAppLink(url: string, protocol: "formaspec:" | "codex:", hostname: "connect-agent" | "new"): void {
-  const parsed = new URL(url);
-  if (parsed.protocol !== protocol || parsed.hostname !== hostname || parsed.username || parsed.password || parsed.port || parsed.hash) {
-    throw new Error(`The ${protocol.slice(0, -1)} application link is invalid.`);
+function openExistingCodexTask(link: string): void {
+  const url = new URL(link);
+  if (url.protocol !== "codex:" || url.hostname !== "new" || url.pathname || url.username || url.password || url.port || url.hash
+    || [...url.searchParams.keys()].some((key) => key !== "prompt")
+    || url.searchParams.getAll("prompt").length !== 1
+    || !url.searchParams.get("prompt")?.trim()) {
+    throw new Error("The server returned an invalid Codex task link.");
   }
   const anchor = document.createElement("a");
-  anchor.href = parsed.href;
+  anchor.href = url.toString();
   anchor.rel = "noopener noreferrer";
   anchor.style.display = "none";
   document.body.append(anchor);
@@ -322,7 +265,6 @@ async function withSubmissionTimeout<T>(promise: Promise<T>, label: string, time
 export function ProductBriefPanel() {
   const document = useDesignerStore((state) => state.document);
   const baseVersion = useDesignerStore((state) => state.baseVersion);
-  const selectedIds = useDesignerStore((state) => state.selectedIds);
   const pendingCount = useDesignerStore((state) => state.pendingOperations.length);
   const savingDesign = useDesignerStore((state) => state.saving);
   const archiveReview = useDesignerStore((state) => state.archiveReview);
@@ -339,8 +281,6 @@ export function ProductBriefPanel() {
   const [structuredDraftSourceVersion, setStructuredDraftSourceVersion] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [savingSpec, setSavingSpec] = useState(false);
-  const [startingAgent, setStartingAgent] = useState(false);
-  const [submissionFeedback, setSubmissionFeedback] = useState<AgentSubmissionFeedback>(idleSubmissionFeedback);
   const [agentConnections, setAgentConnections] = useState<AgentConnectionRecord[]>([]);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionError, setConnectionError] = useState<unknown>(null);
@@ -361,7 +301,6 @@ export function ProductBriefPanel() {
     previewId: string | null;
     idempotencyKey: string;
   } | null>(null);
-  const taskCreateAttempt = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
 
   const clearAgentReview = useCallback(() => {
     setReviewTask(null);
@@ -380,7 +319,6 @@ export function ProductBriefPanel() {
   const fallbackBrief = typeof document?.metadata.product_brief === "string" ? document.metadata.product_brief : "";
 
   useEffect(() => {
-    setSubmissionFeedback(idleSubmissionFeedback);
     setLatestTask(null);
     setStructuredDraft(null);
     setStructuredDraftSourceVersion(null);
@@ -518,9 +456,6 @@ export function ProductBriefPanel() {
   const effectiveSpecification = structuredDraft ?? specification?.specification ?? null;
   const counts = useMemo(() => specificationCounts(effectiveSpecification), [effectiveSpecification]);
   const briefChanged = brief !== loadedBrief || structuredDraft !== null;
-  const resumableLatestTask = latestTask !== null
-    && ["queued", "claimed", "in_progress"].includes(latestTask.status)
-    && !briefChanged;
   const connectionSummary = useMemo(
     () => summarizeCodexConnection(agentConnections, connectionError, connectionLoading, designId ?? null),
     [agentConnections, connectionError, connectionLoading, designId],
@@ -529,7 +464,7 @@ export function ProductBriefPanel() {
   const persistBrief = useCallback(async (): Promise<ProductSpecificationRecord> => {
     if (!designId) throw new Error("Open a project before saving its product specification.");
     const normalizedBrief = brief.trim();
-    if (!normalizedBrief) throw new Error("Describe the product before creating a specification or agent task.");
+    if (!normalizedBrief) throw new Error("Describe the product before saving a specification.");
     if (!productSpecificationRequiresCommit(specification, briefChanged)) return specification!;
 
     setSavingSpec(true);
@@ -627,120 +562,6 @@ export function ProductBriefPanel() {
     }
   };
 
-  const startWithCodex = async () => {
-    setStartingAgent(true);
-    setError(null);
-    setReviewError(null);
-    setSubmissionFeedback({
-      phase: "checking_design",
-      message: "Checking the current project and product specification…",
-      task: null,
-    });
-    try {
-      const normalizedBrief = brief.trim();
-      if (!normalizedBrief) throw new Error("Describe the product, business logic, and constraints before submitting to @FormaSpec.");
-      if (!designId) throw new Error("The project is not available. Reopen it before submitting to @FormaSpec.");
-      if (loading) throw new Error("The product specification is still loading. Wait for it to finish, then submit again.");
-
-      let current = useDesignerStore.getState();
-      if (!current.document || current.document.id !== designId) {
-        throw new Error("The open project changed before submission. Reopen the intended project and try again.");
-      }
-      if (current.pendingOperations.length > 0
-        || current.saving
-        || current.archiveReview
-        || current.conflictRecovery
-        || current.saveState !== "saved") {
-        window.requestAnimationFrame(() => window.document.querySelector<HTMLButtonElement>(".editor-save-button")?.focus());
-        throw new Error("Save / Commit the design first. Submit to @FormaSpec never silently commits canvas changes.");
-      }
-      const submissionBaseVersion = current.baseVersion;
-      const submissionSelection = [...current.selectedIds];
-      setSubmissionFeedback({
-        phase: "saving_specification",
-        message: productSpecificationRequiresCommit(specification, briefChanged)
-          ? "Creating or updating the versioned product specification…"
-          : "Confirming the saved product specification…",
-        task: null,
-      });
-      const committedSpec = await persistBrief();
-      current = useDesignerStore.getState();
-      const selectionUnchanged = current.selectedIds.length === submissionSelection.length
-        && current.selectedIds.every((id, index) => id === submissionSelection[index]);
-      if (!current.document
-        || current.document.id !== designId
-        || current.baseVersion !== submissionBaseVersion
-        || current.pendingOperations.length > 0
-        || current.saving
-        || current.archiveReview
-        || current.conflictRecovery
-        || current.saveState !== "saved"
-        || !selectionUnchanged) {
-        const message = `Product specification version ${committedSpec.version} was saved, but the editor context changed. No stale task was queued.`;
-        setSubmissionFeedback({ phase: "saved_without_task", message, task: null });
-        setNotice(message);
-        return;
-      }
-      setSubmissionFeedback({
-        phase: "queueing_task",
-        message: "Creating an immutable design task and direct Codex launch action…",
-        task: null,
-      });
-      const taskFingerprint = `${designId}\u0000${submissionBaseVersion}\u0000${submissionSelection.join("\u0001")}\u0000${committedSpec.version}\u0000${committedSpec.naturalLanguageBrief}`;
-      if (!taskCreateAttempt.current || taskCreateAttempt.current.fingerprint !== taskFingerprint) {
-        taskCreateAttempt.current = { fingerprint: taskFingerprint, idempotencyKey: createClientKey("agent_task") };
-      }
-      const task = await withSubmissionTimeout(createAgentTask({
-        designId,
-        baseVersion: submissionBaseVersion,
-        brief: committedSpec.naturalLanguageBrief,
-        selection: submissionSelection,
-        expectedOutput: "design_preview",
-        idempotencyKey: taskCreateAttempt.current.idempotencyKey,
-      }), "Agent task creation");
-      if (!task.id || task.designId !== designId) {
-        throw new Error("The server returned an invalid FormaSpec task. No Codex launch action was accepted.");
-      }
-      taskCreateAttempt.current = null;
-      setLatestTask(task);
-      clearAgentReview();
-      setCollapsed(false);
-      setPanelTab("activity");
-      const connectionNote = connectionSummary.state === "active"
-        ? ""
-        : ` The task is safely queued even though the Codex connection needs attention: ${connectionSummary.message}`;
-      const successMessage = `Task ${task.id} is queued. Click Open task in Codex to send the exact instruction to @FormaSpec.${connectionNote}`;
-      setSubmissionFeedback({ phase: "success", message: successMessage, task });
-      setNotice(successMessage);
-      void refreshAgentActivity();
-    } catch (cause) {
-      if (cause instanceof ApiError && cause.code === "TASK_STATE_CONFLICT") {
-        const details = cause.details && typeof cause.details === "object" && !Array.isArray(cause.details)
-          ? cause.details as Record<string, unknown>
-          : {};
-        const activeTaskId = typeof details.activeTaskId === "string" ? details.activeTaskId : null;
-        if (activeTaskId) {
-          try {
-            const existing = await readAgentTask(activeTaskId);
-            setLatestTask(existing);
-            setCollapsed(false);
-            setPanelTab("activity");
-            const message = `Project already has task ${existing.id} in ${existing.status.replaceAll("_", " ")}. Resume that durable task instead of creating a duplicate.`;
-            setSubmissionFeedback({ phase: "success", message, task: existing });
-            setNotice(message);
-            return;
-          } catch {
-            // Preserve the original conflict when the referenced task cannot be read safely.
-          }
-        }
-      }
-      const message = cause instanceof Error ? cause.message : "Could not create the FormaSpec task.";
-      setSubmissionFeedback({ phase: "error", message, task: null });
-    } finally {
-      setStartingAgent(false);
-    }
-  };
-
   const appendAction = (action: string) => {
     setBrief((current) => `${current.trim()}${current.trim() ? "\n\n" : ""}${action}`);
     setSpecView("brief");
@@ -762,34 +583,17 @@ export function ProductBriefPanel() {
     setNotice(`Copied Product logic version ${sourceVersion} into a new draft. Saving will create version ${(specification?.version ?? 0) + 1}; version ${sourceVersion} remains unchanged.`);
   };
 
-  const copyAgentInstruction = async () => {
-    if (!latestTask) return;
-    try {
-      await navigator.clipboard.writeText(agentTaskInstruction(latestTask));
-      setNotice(`Copied the Codex instruction for task ${latestTask.id}.`);
-    } catch {
-      setReviewError("The browser could not copy the instruction. In Codex, say “Use FormaSpec” and include the task ID shown here.");
-    }
-  };
-
   const openAgentConnection = () => {
-    window.location.assign("/administration/agents");
+    navigate("/administration/agents");
   };
 
-  const openTaskInCodex = (task = latestTask) => {
-    if (!task) {
-      setReviewError("No queued FormaSpec task is available to open. Submit the product brief first.");
-      return;
-    }
-    if (!["queued", "claimed", "in_progress"].includes(task.status)) {
-      setReviewError("This task is already terminal or awaiting website approval and cannot be relaunched in Codex.");
-      return;
-    }
+  const openTaskInCodex = () => {
+    if (!latestTask || !["queued", "claimed", "in_progress"].includes(latestTask.status)) return;
     try {
-      openExternalAppLink(codexTaskLaunchUrl(task), "codex:", "new");
-      setNotice(`Requested Codex to open task ${task.id} with @FormaSpec prefilled. Review the instruction, then press Send.`);
+      openExistingCodexTask(latestTask.launchUrl);
+      setNotice(`Opened existing task ${latestTask.id} in Codex. No new website task was created.`);
     } catch (cause) {
-      setReviewError(cause instanceof Error ? cause.message : "Codex could not be opened for this task.");
+      setReviewError(cause instanceof Error ? cause.message : "The existing task could not be opened in Codex.");
     }
   };
 
@@ -897,7 +701,7 @@ export function ProductBriefPanel() {
         <div className="product-panel-content">
           <div className="product-brief-editor">
             <div className="product-brief-title">
-              <div><WandSparkles size={16} /><span><strong>Describe the product, business logic, and constraints</strong><small>Website state is canonical. FormaSpec creates a versioned structured proposal before an agent can act.</small></span></div>
+              <div><WandSparkles size={16} /><span><strong>Describe the product, business logic, and constraints</strong><small>Save immutable Product logic here, then start agent work from Codex or the CLI.</small></span></div>
               <div className="spec-view-toggle">
                 <button className={specView === "brief" ? "is-active" : ""} onClick={() => setSpecView("brief")}><MessageSquareText size={10} /> Brief</button>
                 <button className={specView === "structured" ? "is-active" : ""} onClick={() => setSpecView("structured")}><Braces size={10} /> Structured</button>
@@ -909,7 +713,7 @@ export function ProductBriefPanel() {
               <textarea
                 value={brief}
                 onChange={(event) => setBrief(event.target.value)}
-                disabled={loading || savingSpec || startingAgent || Boolean(archiveReview)}
+                disabled={loading || savingSpec || Boolean(archiveReview)}
                 placeholder="Example: Build an internal courier operations dashboard. Dispatchers assign orders, couriers update delivery states, finance can view but not edit payouts, Persian and English are required, and sensitive actions need confirmation…"
                 aria-label="Describe the product, business logic, and constraints"
               />
@@ -926,18 +730,11 @@ export function ProductBriefPanel() {
               {contextualActions.map((action) => <button key={action} onClick={() => appendAction(action)}>{action}</button>)}
             </div>}
 
-            <AgentSubmissionStatus feedback={submissionFeedback} onOpenCodex={openTaskInCodex} />
-
             <div className="product-brief-actions">
               <div>
-                {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Task {latestTask.id} · {latestTask.status}</span> : <span>Agent mention: <code>{FORMASPEC_AGENT_MENTION}</code></span>}
+                {error ? <span className="product-panel-error">{error}</span> : latestTask ? <span className="product-panel-success"><CheckCircle2 size={11} /> Codex/CLI task {latestTask.id} · {latestTask.status}</span> : <span>In Codex or CLI, mention <code>{FORMASPEC_AGENT_MENTION}</code></span>}
               </div>
-              <button className="button button-secondary" disabled={!productSpecificationRequiresCommit(specification, briefChanged) || savingSpec || startingAgent || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
-              <button
-                className="button button-primary"
-                disabled={savingSpec || startingAgent}
-                onClick={() => resumableLatestTask ? openTaskInCodex(latestTask) : void startWithCodex()}
-              >{startingAgent ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />} {resumableLatestTask ? "Resume in Codex" : "Submit to @FormaSpec"}</button>
+              <button className="button button-primary" disabled={!productSpecificationRequiresCommit(specification, briefChanged) || savingSpec || loading} onClick={() => void saveBrief()}>{savingSpec ? <LoaderCircle size={13} className="spin" /> : <FileCheck2 size={13} />} Save specification</button>
             </div>
           </div>
 
@@ -961,8 +758,7 @@ export function ProductBriefPanel() {
               && !archiveReview
               && previewRenderStatus === "available")}
             canDiscard={Boolean(reviewTask && reviewPreview && reviewTask.status === "awaiting_approval")}
-            onCopyInstruction={() => void copyAgentInstruction()}
-            onOpenCodex={() => openTaskInCodex()}
+            onOpenCodex={openTaskInCodex}
             onConnect={openAgentConnection}
             onRetry={() => {
               retryPreviewRender();

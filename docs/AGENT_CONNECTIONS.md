@@ -46,8 +46,15 @@ ticket over its private control endpoint. The bridge posts only `{ "nonce":
 expected connection ID, verifies MCP and the returned authorization context,
 then stores the upstream scoped grant in the OS credential store. It writes a
 credential-free `formaspec` MCP entry, installs and verifies the managed
-FormaSpec 0.3.0 plugin, removes the legacy plugin through Codex, and verifies
+FormaSpec 0.4.0 plugin, removes the legacy plugin through Codex, and verifies
 the final single-identity configuration.
+
+The managed Codex entry uses server-scoped automatic approval for the trusted
+local FormaSpec bridge. The installation click or CLI confirmation is the
+single consent boundary; subsequent FormaSpec tool calls do not prompt one by
+one. `doctor` and `status` confirm the managed entry is credential-free
+Streamable HTTP and targets the exact active loopback bridge before reporting
+automatic approval. Global Codex approval and sandbox settings are preserved.
 
 Installer-owned standalone legacy skills are deleted only when their
 `.formaspec-managed.json` marker proves ownership. Unmanaged files are
@@ -58,13 +65,15 @@ and use the only supported mention:
 [@FormaSpec](plugin://formaspec@formaspec)
 ```
 
-## Website task approval boundary
+## Codex/CLI task approval boundary
 
-When **Submit to @FormaSpec** creates a website task, the connected agent claims
-the task, reads its authorized context, creates and inspects the exact rendered
-preview, runs linting, and transitions the task to `awaiting_approval` with the
-`previewId`. The agent must not commit the preview or complete the task. A
-human uses FormaSpec's before/after review to **Commit** or **Discard**.
+The website never creates agent tasks. Codex or the CLI creates the immutable
+task through MCP after exact Product/Design selection confirmation. The
+connected agent claims the task, reads its authorized context, creates and
+inspects the exact rendered preview, runs linting, and transitions the task to
+`awaiting_approval` with the `previewId`. The agent must not commit the preview
+or complete the task. A human uses FormaSpec's before/after review to **Commit**
+or **Discard**.
 
 Direct requests create and claim an immutable design-preview task first. The
 agent publishes the inspected exact preview and never calls
@@ -92,12 +101,15 @@ and read back for an exact constant-time verification before setup succeeds.
 
 ## Reconnect and revoke
 
-Reconnect in Administration issues a new one-time nonce for that exact
-connection and follows the same handler/fallback flow. Immediate revoke marks
-the connection and all current grants unusable; authentication requires the
-owning connection to remain active and unexpired on every request and event
-stream. A restore revokes restored grants, connections, pairing nonces, and
-browser sessions, so reconnect from Administration afterward.
+Reconnect in Administration stages a new pending replacement connection and
+one-time nonce while the existing active grant remains usable. Only successful
+pairing atomically activates the replacement and revokes its exact predecessor;
+an expired, cancelled, or blocked handler leaves the predecessor untouched.
+Immediate revoke still marks the selected connection and all current grants
+unusable; authentication requires the owning connection to remain active and
+unexpired on every request and event stream. A restore revokes restored grants,
+connections, pairing nonces, replacement intents, and browser sessions, so
+reconnect from Administration afterward.
 
 When a packaged protocol handler is installed, the Administration flow must
 parse the exact `connection`/`nonce` form above, invoke `formaspecctl` without a

@@ -15,6 +15,8 @@ const MANAGER_ID = "formaspecctl";
 const MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024;
 export const FORMASPEC_MCP_CONTRACT_VERSION = "0.4.0";
 const FORMASPEC_PLUGIN_VERSION = FORMASPEC_MCP_CONTRACT_VERSION;
+export const FORMASPEC_MCP_APPROVAL_MODE = "approve";
+const FORMASPEC_MCP_APPROVAL_KEY = "default_tools_approval_mode";
 
 export const FORMASPEC_CODEX_PLUGIN_ID = "formaspec@formaspec";
 export const FORMASPEC_CODEX_MENTION = "[@FormaSpec](plugin://formaspec@formaspec)";
@@ -57,10 +59,18 @@ export interface InspectManagedCodexOptions {
   commandRunner: CommandRunner;
 }
 
+export interface InspectManagedCodexContractOptions extends InspectManagedCodexOptions {
+  expectedMcpUrl: string;
+}
+
 export interface ManagedCodexContractInspection {
   managed: boolean;
   installedPluginVersion: string | null;
   expectedVersion: string;
+  approvalMode: string | null;
+  expectedApprovalMode: typeof FORMASPEC_MCP_APPROVAL_MODE;
+  mcpConfigurationMatchesExpected: boolean;
+  expectedMcpUrl: string;
 }
 
 function resolveCodexHome(environment: NodeJS.ProcessEnv): string {
@@ -215,6 +225,22 @@ function isCredentialFreeLoopbackConfiguration(stdout: string): boolean {
   }
 }
 
+function isCredentialFreeLoopbackMcpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return url.protocol === "http:"
+      && ["127.0.0.1", "::1", "localhost"].includes(host)
+      && url.pathname === "/mcp"
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
 export async function isManagedCodexInstall(options: InspectManagedCodexOptions): Promise<boolean> {
   const codexPath = findExecutable("codex", options.environment);
   if (codexPath === null) return false;
@@ -246,12 +272,20 @@ export async function isManagedCodexInstall(options: InspectManagedCodexOptions)
 }
 
 export async function inspectManagedCodexContract(
-  options: InspectManagedCodexOptions,
+  options: InspectManagedCodexContractOptions,
 ): Promise<ManagedCodexContractInspection> {
-  const unavailable = (managed: boolean): ManagedCodexContractInspection => ({
+  const unavailable = (
+    managed: boolean,
+    approvalMode: string | null = null,
+    mcpConfigurationMatchesExpected = false,
+  ): ManagedCodexContractInspection => ({
     managed,
     installedPluginVersion: null,
     expectedVersion: FORMASPEC_MCP_CONTRACT_VERSION,
+    approvalMode,
+    expectedApprovalMode: FORMASPEC_MCP_APPROVAL_MODE,
+    mcpConfigurationMatchesExpected,
+    expectedMcpUrl: options.expectedMcpUrl,
   });
   const codexPath = findExecutable("codex", options.environment);
   if (codexPath === null) return unavailable(false);
@@ -263,15 +297,28 @@ export async function inspectManagedCodexContract(
   }
   const marketplacePath = path.join(codexHome, "formaspec-marketplace");
   if (!hasManagedMarker(marketplacePath)) return unavailable(false);
+  const approvalMode = inspectManagedMcpApprovalMode(codexHome);
+  const configuredMcp = await options.commandRunner(codexPath, ["mcp", "get", "formaspec", "--json"], {
+    env: options.environment,
+    timeoutMs: 15_000,
+  });
+  const mcpConfigurationMatchesExpected = isCredentialFreeLoopbackMcpUrl(options.expectedMcpUrl)
+    && configuredMcp.exitCode === 0
+    && isCredentialFreeLoopbackConfiguration(configuredMcp.stdout)
+    && isDesiredConfiguration(configuredMcp.stdout, options.expectedMcpUrl);
   const plugins = await options.commandRunner(codexPath, ["plugin", "list", "--json"], {
     env: options.environment,
     timeoutMs: 15_000,
   });
-  if (plugins.exitCode !== 0) return unavailable(true);
+  if (plugins.exitCode !== 0) return unavailable(true, approvalMode, mcpConfigurationMatchesExpected);
   return {
     managed: true,
     installedPluginVersion: installedPluginVersion(plugins.stdout, FORMASPEC_CODEX_PLUGIN_ID) ?? null,
     expectedVersion: FORMASPEC_MCP_CONTRACT_VERSION,
+    approvalMode,
+    expectedApprovalMode: FORMASPEC_MCP_APPROVAL_MODE,
+    mcpConfigurationMatchesExpected,
+    expectedMcpUrl: options.expectedMcpUrl,
   };
 }
 
@@ -345,24 +392,44 @@ function ensureManagedMcpApprovalPolicy(codexHome: string): boolean {
     throw new Error("Codex configuration must contain exactly one managed [mcp_servers.formaspec] table.");
   }
   const { start: tableStart, end: tableEnd } = table;
-  const policyIndexes: number[] = [];
-  for (let index = tableStart + 1; index < tableEnd; index += 1) {
-    if (/^\s*default_tools_approval_mode\s*=/.test(config.lines[index]!)) policyIndexes.push(index);
-  }
+  const policyIndexes = tomlAssignmentIndexes(config.lines, tableStart + 1, tableEnd, FORMASPEC_MCP_APPROVAL_KEY);
   if (policyIndexes.length > 1) throw new Error("Codex FormaSpec MCP approval policy is duplicated.");
-  const desired = 'default_tools_approval_mode = "writes"';
-  if (policyIndexes.length === 1 && config.lines[policyIndexes[0]!]!.trim() === desired) return false;
+  // Keep automatic approval scoped to the exact installer-managed FormaSpec
+  // MCP table. Do not change Codex's global approval or sandbox policy.
+  const desired = `default_tools_approval_mode = "${FORMASPEC_MCP_APPROVAL_MODE}"`;
   if (policyIndexes.length === 1) {
-    config.lines[policyIndexes[0]!] = desired;
+    const policyIndex = policyIndexes[0]!;
+    const existing = parseTomlStringAssignment(config.lines[policyIndex]!);
+    if (existing?.value === FORMASPEC_MCP_APPROVAL_MODE) return false;
+    config.lines[policyIndex] = existing === undefined
+      ? desired
+      : `${config.lines[policyIndex]!.slice(0, existing.valueStart)}${JSON.stringify(FORMASPEC_MCP_APPROVAL_MODE)}${config.lines[policyIndex]!.slice(existing.valueEnd)}`;
   } else {
     let insertionIndex = tableStart + 1;
-    for (let index = tableStart + 1; index < tableEnd; index += 1) {
-      if (/^\s*url\s*=/.test(config.lines[index]!)) insertionIndex = index + 1;
-    }
+    const urlIndexes = tomlAssignmentIndexes(config.lines, tableStart + 1, tableEnd, "url");
+    if (urlIndexes.length > 0) insertionIndex = urlIndexes.at(-1)! + 1;
     config.lines.splice(insertionIndex, 0, desired);
   }
   writeCodexConfigText(codexHome, config, config.lines);
   return true;
+}
+
+function inspectManagedMcpApprovalMode(codexHome: string): string | null {
+  try {
+    const config = readCodexConfigText(codexHome);
+    const table = codexConfigTableRange(config.lines, "[mcp_servers.formaspec]");
+    if (!table) return null;
+    const policyIndexes = tomlAssignmentIndexes(
+      config.lines,
+      table.start + 1,
+      table.end,
+      FORMASPEC_MCP_APPROVAL_KEY,
+    );
+    if (policyIndexes.length !== 1) return null;
+    return parseTomlStringAssignment(config.lines[policyIndexes[0]!]!)?.value ?? null;
+  } catch {
+    return null;
+  }
 }
 
 type TomlMultilineString = "basic" | "literal" | undefined;
@@ -416,6 +483,54 @@ function parseTomlBasicKey(line: string, start: number): { value: string; end: n
 function parseTomlLiteralKey(line: string, start: number): { value: string; end: number } | undefined {
   const end = line.indexOf("'", start + 1);
   return end === -1 ? undefined : { value: line.slice(start + 1, end), end: end + 1 };
+}
+
+interface TomlStringAssignment {
+  key: string;
+  value: string;
+  valueStart: number;
+  valueEnd: number;
+}
+
+function parseTomlAssignment(line: string): { key: string; valueStart: number } | undefined {
+  let index = 0;
+  while (isTomlWhitespace(line[index])) index += 1;
+  let key: { value: string; end: number } | undefined;
+  if (line[index] === '"') {
+    key = parseTomlBasicKey(line, index);
+  } else if (line[index] === "'") {
+    key = parseTomlLiteralKey(line, index);
+  } else {
+    const match = /^[A-Za-z0-9_-]+/.exec(line.slice(index));
+    if (match !== null) key = { value: match[0], end: index + match[0].length };
+  }
+  if (key === undefined) return undefined;
+  index = key.end;
+  while (isTomlWhitespace(line[index])) index += 1;
+  if (line[index] !== "=") return undefined;
+  index += 1;
+  while (isTomlWhitespace(line[index])) index += 1;
+  return { key: key.value, valueStart: index };
+}
+
+function parseTomlStringAssignment(line: string): TomlStringAssignment | undefined {
+  const assignment = parseTomlAssignment(line);
+  if (assignment === undefined) return undefined;
+  const parsed = line[assignment.valueStart] === '"'
+    ? parseTomlBasicKey(line, assignment.valueStart)
+    : line[assignment.valueStart] === "'"
+      ? parseTomlLiteralKey(line, assignment.valueStart)
+      : undefined;
+  if (parsed === undefined) return undefined;
+  let end = parsed.end;
+  while (isTomlWhitespace(line[end])) end += 1;
+  if (end < line.length && line[end] !== "#") return undefined;
+  return {
+    key: assignment.key,
+    value: parsed.value,
+    valueStart: assignment.valueStart,
+    valueEnd: parsed.end,
+  };
 }
 
 function parseTomlTableHeader(line: string): { path: string[]; array: boolean } | undefined {
@@ -507,6 +622,24 @@ function tomlMultilineStringAfterLine(line: string, initial: TomlMultilineString
   return multiline;
 }
 
+function tomlAssignmentIndexes(
+  lines: string[],
+  start: number,
+  end: number,
+  expectedKey: string,
+): number[] {
+  const indexes: number[] = [];
+  let multiline: TomlMultilineString;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (multiline === undefined && index >= start && index < end) {
+      const assignment = parseTomlAssignment(lines[index]!);
+      if (assignment?.key === expectedKey) indexes.push(index);
+    }
+    multiline = tomlMultilineStringAfterLine(lines[index]!, multiline);
+  }
+  return indexes;
+}
+
 function scanTomlTableHeaders(lines: string[]): TomlTableHeader[] {
   const headers: TomlTableHeader[] = [];
   let multiline: TomlMultilineString;
@@ -568,13 +701,16 @@ export async function connectCodex(options: ConnectCodexOptions): Promise<Connec
     throw new Error(`Refusing to overwrite the unmanaged Codex marketplace at ${marketplacePath}. Move or rename it first.`);
   }
   if (!options.assumeYes && !await options.confirm(
-    `Allow FormaSpec to configure the 'formaspec' MCP server, install the single managed FormaSpec plugin, and remove installer-owned legacy duplicate identities in ${codexHome}?`,
+    `Allow FormaSpec once to configure the trusted local 'formaspec' MCP server with automatic FormaSpec tool approval, install the single managed FormaSpec plugin, and remove installer-owned legacy duplicate identities in ${codexHome}? Global Codex approval and sandbox settings will not be changed.`,
   )) {
     throw new Error("Codex connection was cancelled; no Codex files were changed.");
   }
 
   const bridge = await options.bridge.ensureStarted();
   const mcpUrl = `${bridge.url}/mcp`;
+  if (!isCredentialFreeLoopbackMcpUrl(mcpUrl)) {
+    throw new Error("Refusing to configure automatic FormaSpec tool approval for a non-loopback or credential-bearing MCP URL.");
+  }
   const existing = await options.commandRunner(codexPath, ["mcp", "get", "formaspec", "--json"], {
     env: options.environment,
     timeoutMs: 15_000,

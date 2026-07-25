@@ -322,21 +322,35 @@ test("product manager to verified backup restore captures the Codex URL and simu
       await expect(page.getByText("Schema v1")).toBeVisible();
     });
 
-    await step("Enter the canonical product brief and create a website-owned Codex task", async () => {
+    await step("Enter the canonical product brief and seed the Codex task outside the browser", async () => {
       const brief = [
         "Build a professional bilingual courier dispatch flow for operations managers.",
         "Dispatchers assign urgent orders, review courier availability, and confirm sensitive changes.",
         "English and Persian RTL must be supported, touch targets must be accessible, and every commit must remain auditable.",
       ].join(" ");
       await page.getByLabel("Describe the product, business logic, and constraints").fill(brief);
-      await page.getByRole("button", { name: "Submit to @FormaSpec" }).click();
-      await expect(page.locator(".product-panel-success")).toContainText("queued");
+      await page.getByRole("button", { name: "Save specification" }).click();
+      await expect.poll(async () => (await api<{ version: number }>(
+        baseURL,
+        `/api/designs/${encodeURIComponent(designId)}/product-specification`,
+      )).version).toBe(1);
+
+      if (!application) throw new Error("The isolated FormaSpec application is unavailable.");
+      const seededTask = application.enterprise.createAgentTask("local", {
+        designId,
+        brief,
+        selection: [],
+        baseVersion: 2,
+        expectedOutput: "design_preview",
+        idempotencyKey: "release-e2e-agent-task-0001",
+      });
 
       const tasks = await api<{ tasks: AgentTask[] }>(baseURL, `/api/designs/${encodeURIComponent(designId)}/agent-tasks`);
-      task = tasks.tasks[0]!;
+      task = tasks.tasks.find((candidate) => candidate.id === seededTask.id)!;
       expect(task).toMatchObject({ designId, baseVersion: 2, status: "queued", expectedOutput: "design_preview" });
+      await page.reload();
       expect(await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink)).toBeUndefined();
-      await page.getByTestId("formaspec-submit-status").getByRole("button", { name: "Open task in Codex" }).click();
+      await page.getByRole("complementary", { name: "Agent task workflow" }).getByRole("button", { name: "Open task in Codex" }).click();
       const taskLink = await page.evaluate(() => (window as unknown as { __formaspecTaskLink?: string }).__formaspecTaskLink);
       expect(taskLink).toBeTruthy();
       const parsedTaskLink = new URL(taskLink!);
@@ -426,7 +440,7 @@ test("product manager to verified backup restore captures the Codex URL and simu
       expect(initialized.result?.instructions?.length).toBeLessThanOrEqual(512);
     });
 
-    await step("Claim the immutable website task and record agent progress through MCP", async () => {
+    await step("Claim the immutable Codex task and record agent progress through MCP", async () => {
       const claimed = await callTool<{ task: { id: string; status: string } }>("task_claim", { task_id: task.id });
       expect(claimed.structured.task).toMatchObject({ id: task.id, status: "claimed" });
       const progressed = await callTool<{ task: { status: string } }>("task_transition", {
@@ -645,27 +659,22 @@ test("product manager to verified backup restore captures the Codex URL and simu
     });
 
     const refinementTask = await step("Create and claim a selection-scoped refinement task", async () => {
-      const createdTask = await api<{ task: { id: string; status: string } }>(
-        baseURL,
-        `/api/designs/${encodeURIComponent(designId)}/agent-tasks`,
-        {
-          method: "POST",
-          body: {
-            brief: "Refine the currently selected heading without changing its human-authored copy.",
-            selection: [titleNodeId],
-            baseVersion: 4,
-            expectedOutput: "design_preview",
-            idempotencyKey: "release-e2e-selection-task-0001",
-          },
-        },
-      );
-      await callTool("task_claim", { task_id: createdTask.task.id });
+      if (!application) throw new Error("The isolated FormaSpec application is unavailable.");
+      const createdTask = application.enterprise.createAgentTask("local", {
+        designId,
+        brief: "Refine the currently selected heading without changing its human-authored copy.",
+        selection: [titleNodeId],
+        baseVersion: 4,
+        expectedOutput: "design_preview",
+        idempotencyKey: "release-e2e-selection-task-0001",
+      });
+      await callTool("task_claim", { task_id: createdTask.id });
       await callTool("task_transition", {
-        task_id: createdTask.task.id,
+        task_id: createdTask.id,
         expected_status: "claimed",
         to_status: "in_progress",
       });
-      return createdTask.task;
+      return createdTask;
     });
 
     const refinementPreview = await step("Read the editor selection and preview a selection-scoped agent refinement", async () => {

@@ -39,6 +39,13 @@ import {
   type OrganizationRole,
 } from "./authorization.js";
 import { activeDesignSqlPredicate, requireActiveDesign } from "./active-design.js";
+import {
+  clearAgentConnectionReplacement,
+  consumeAgentConnectionReplacement,
+  persistAgentConnectionReplacement,
+  readAgentConnectionReplacement,
+  type AgentConnectionReplacementIntent,
+} from "./agent-connection-replacement.js";
 import type { DesignerDatabase } from "./db/database.js";
 import { DomainError } from "./errors.js";
 import type { DesignerEventType, EventHub } from "./events.js";
@@ -1515,8 +1522,7 @@ export class EnterpriseService {
     const transaction = this.database.sqlite.transaction(() => {
       const nowDate = this.#now();
       const now = nowDate.toISOString();
-      const connectionId = workflowId("connection");
-      const replacedConnectionIds: string[] = [];
+      let replacedConnectionIds: string[] = [];
       if (input.replaceExisting === true) {
         const replacementNames = input.adapter === "codex"
           && INSTALLER_MANAGED_CODEX_RECONCILIATION_NAMES.includes(
@@ -1528,61 +1534,27 @@ export class EnterpriseService {
           `SELECT * FROM agent_connections
            WHERE organization_id = ? AND adapter = ?
              AND display_name IN (${replacementNames.map(() => "?").join(", ")})
-             AND status IN ('active', 'pending', 'revoked')
+             AND status IN ('active', 'pending')
+             AND (expires_at IS NULL OR expires_at > ?)
            ORDER BY created_at, id`,
-        ).all(access.organizationId, input.adapter, ...replacementNames) as AgentConnectionRow[];
-        for (const existingRow of existingRows) {
-          this.revokeAgentConnectionRow(access, existingRow, now, {
-            reason: "replaced",
-            replacementConnectionId: connectionId,
-          });
-          if (existingRow.status === "active" || existingRow.status === "pending") {
-            replacedConnectionIds.push(existingRow.id);
-          }
-        }
-      }
-      const activeConnections = this.database.sqlite.prepare(
-        `SELECT COUNT(*) AS count FROM agent_connections
-         WHERE organization_id = ? AND status IN ('pending', 'active')
-           AND (expires_at IS NULL OR expires_at > ?)`,
-      ).get(access.organizationId, now) as { count: number };
-      if (activeConnections.count >= policy.agents.maximumActiveConnections) {
-        throw new DomainError("FORBIDDEN", "The organization agent-connection limit has been reached.", 403, {
-          details: { maximumActiveConnections: policy.agents.maximumActiveConnections },
-        });
+        ).all(access.organizationId, input.adapter, ...replacementNames, now) as AgentConnectionRow[];
+        replacedConnectionIds = existingRows.map((row) => row.id);
       }
       const connectionExpiresAt = new Date(nowDate.getTime() + expiresInSeconds * 1_000).toISOString();
-      const nonce = `fspair_${randomBytes(32).toString("base64url")}`;
-      const nonceExpiresAt = new Date(nowDate.getTime() + this.pairingTtlSeconds * 1_000).toISOString();
-      this.database.sqlite.prepare(
-        `INSERT INTO agent_connections
-         (id, organization_id, principal_id, adapter, display_name, status, scopes_json, project_ids_json,
-          expires_at, created_at, updated_at)
-         VALUES (?, ?, NULL, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
-      ).run(connectionId, access.organizationId, input.adapter, displayName, JSON.stringify(scopes), JSON.stringify(projectIds), connectionExpiresAt, now, now);
-      this.database.sqlite.prepare(
-        `INSERT INTO pairing_nonces
-         (nonce_hash, connection_id, created_by, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).run(sha256(nonce), connectionId, access.principalId, now, nonceExpiresAt);
-      appendAuditEvent(this.database.sqlite, access, "agent_connection.create", "agent_connection", connectionId, {
+      this.assertAgentConnectionCapacity(policy, access.organizationId, now, replacedConnectionIds, true);
+      return this.createPendingAgentConnectionRow(access, {
         adapter: input.adapter,
+        displayName,
         scopes,
         projectIds,
-        expiresAt: connectionExpiresAt,
-        replaceExisting: input.replaceExisting === true,
+        connectionExpiresAt,
         replacedConnectionIds,
-      });
-      this.enqueueEvent(access, "agent_connection.changed", {
-        connectionId,
-        adapter: input.adapter,
-        status: "pending",
-      }, now);
-      return {
-        connection: this.agentConnectionResult(this.requireAgentConnectionRow(access, connectionId)),
-        nonce,
-        expiresAt: nonceExpiresAt,
-      };
+        auditAction: "agent_connection.create",
+        auditDetails: {
+          replaceExisting: input.replaceExisting === true,
+          replacedConnectionIds,
+        },
+      }, nowDate);
     });
     const result = transaction.immediate();
     this.flushPendingEventsSafely();
@@ -1614,6 +1586,7 @@ export class EnterpriseService {
         this.database.sqlite.prepare(
           "UPDATE pairing_nonces SET revoked_at = ? WHERE nonce_hash = ? AND consumed_at IS NULL AND revoked_at IS NULL",
         ).run(now, nonceHash);
+        clearAgentConnectionReplacement(this.database.sqlite, row.id);
         const expiryAccess: AccessContext = {
           actorId: "system",
           principalId: row.created_by,
@@ -1627,7 +1600,16 @@ export class EnterpriseService {
         return null;
       }
       if (row.status !== "pending") throw new DomainError("VERSION_CONFLICT", `The connection is ${row.status}, not pending.`, 409);
-      const principalId = row.principal_id ?? workflowId("principal");
+      const replacementIntent = readAgentConnectionReplacement(
+        this.database.sqlite,
+        row.id,
+        row.organization_id,
+      );
+      const replacedRows = replacementIntent
+        ? this.requireAgentConnectionReplacementRows(row, replacementIntent)
+        : [];
+      const createPrincipal = replacementIntent !== null || !row.principal_id;
+      const principalId = createPrincipal ? workflowId("principal") : row.principal_id as string;
       const grantId = randomUUID().replaceAll("-", "");
       const grantToken = `fsg_${randomBytes(32).toString("base64url")}`;
       const scopes = jsonStringArray(row.scopes_json, "connection scopes");
@@ -1641,7 +1623,8 @@ export class EnterpriseService {
         projectIds,
         expiresInSeconds: Math.max(0, Math.ceil((new Date(expiresAt).getTime() - new Date(now).getTime()) / 1_000)),
       });
-      if (!row.principal_id) {
+      this.assertAgentConnectionCapacity(policy, row.organization_id, now, [], false);
+      if (createPrincipal) {
         this.database.sqlite.prepare(
           `INSERT INTO principals
            (id, organization_id, kind, display_name, external_id, created_at)
@@ -1665,13 +1648,19 @@ export class EnterpriseService {
          (id, organization_id, principal_id, token_hash, scopes_json, project_ids_json, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(grantId, row.organization_id, principalId, sha256(grantToken), row.scopes_json, row.project_ids_json, now, expiresAt);
-      this.database.sqlite.prepare(
+      const activated = this.database.sqlite.prepare(
         `UPDATE agent_connections SET principal_id = ?, status = 'active', updated_at = ?
          WHERE id = ? AND status = 'pending'`,
       ).run(principalId, now, row.id);
-      this.database.sqlite.prepare(
+      if (activated.changes !== 1) {
+        throw new DomainError("VERSION_CONFLICT", "The pending agent connection changed before activation.", 409);
+      }
+      const consumed = this.database.sqlite.prepare(
         "UPDATE pairing_nonces SET consumed_at = ? WHERE nonce_hash = ? AND consumed_at IS NULL AND revoked_at IS NULL",
       ).run(now, nonceHash);
+      if (consumed.changes !== 1) {
+        throw new DomainError("VERSION_CONFLICT", "The pairing challenge changed before activation.", 409);
+      }
       const pairedAccess: AccessContext = {
         actorId: `grant_${grantId}`,
         principalId,
@@ -1681,10 +1670,18 @@ export class EnterpriseService {
         projectIds,
         grantId,
       };
+      for (const replacedRow of replacedRows) {
+        this.revokeAgentConnectionRow(pairedAccess, replacedRow, now, {
+          reason: "replaced",
+          replacementConnectionId: row.id,
+        });
+      }
+      if (replacementIntent) consumeAgentConnectionReplacement(this.database.sqlite, replacementIntent);
       appendAuditEvent(this.database.sqlite, pairedAccess, "agent_connection.pair", "agent_connection", row.id, {
         adapter: row.adapter,
         grantId,
         expiresAt,
+        replacedConnectionIds: replacementIntent?.replaced_connection_ids ?? [],
       });
       this.enqueueEvent(pairedAccess, "agent_connection.changed", {
         connectionId: row.id,
@@ -1724,35 +1721,40 @@ export class EnterpriseService {
       const remainingSeconds = row.expires_at
         ? Math.max(0, Math.ceil((new Date(row.expires_at).getTime() - nowDate.getTime()) / 1_000))
         : policy.agents.maximumExpirySeconds;
+      if (row.status === "expired" || remainingSeconds === 0) {
+        throw new DomainError("PAIRING_EXPIRED", "The agent connection expired and must be created again.", 410);
+      }
       this.assertAgentConnectionPolicy(policy, {
         adapter: row.adapter,
         scopes,
         projectIds,
         expiresInSeconds: remainingSeconds,
       });
-      const nonce = `fspair_${randomBytes(32).toString("base64url")}`;
-      const expiresAt = new Date(nowDate.getTime() + this.pairingTtlSeconds * 1_000).toISOString();
-      this.database.sqlite.prepare(
-        "UPDATE agent_grants SET revoked_at = ? WHERE principal_id = ? AND revoked_at IS NULL",
-      ).run(now, row.principal_id);
-      this.database.sqlite.prepare(
-        "UPDATE pairing_nonces SET revoked_at = ? WHERE connection_id = ? AND consumed_at IS NULL AND revoked_at IS NULL",
-      ).run(now, row.id);
-      this.database.sqlite.prepare(
-        "UPDATE agent_connections SET status = 'pending', updated_at = ? WHERE id = ?",
-      ).run(now, row.id);
-      this.database.sqlite.prepare(
-        `INSERT INTO pairing_nonces
-         (nonce_hash, connection_id, created_by, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).run(sha256(nonce), row.id, access.principalId, now, expiresAt);
-      appendAuditEvent(this.database.sqlite, access, "agent_connection.reconnect", "agent_connection", row.id);
-      this.enqueueEvent(access, "agent_connection.changed", { connectionId: row.id, status: "pending" }, now);
-      return {
-        connection: this.agentConnectionResult(this.requireAgentConnectionRow(access, row.id)),
-        nonce,
-        expiresAt,
-      };
+      const inheritedIntent = readAgentConnectionReplacement(
+        this.database.sqlite,
+        row.id,
+        row.organization_id,
+      );
+      const replacedConnectionIds = [...new Set([
+        row.id,
+        ...(inheritedIntent?.replaced_connection_ids ?? []),
+      ])];
+      this.assertAgentConnectionCapacity(policy, access.organizationId, now, replacedConnectionIds, true);
+      const connectionExpiresAt = row.expires_at
+        ?? new Date(nowDate.getTime() + remainingSeconds * 1_000).toISOString();
+      return this.createPendingAgentConnectionRow(access, {
+        adapter: row.adapter,
+        displayName: row.display_name,
+        scopes,
+        projectIds,
+        connectionExpiresAt,
+        replacedConnectionIds,
+        auditAction: "agent_connection.reconnect",
+        auditDetails: {
+          sourceConnectionId: row.id,
+          replacedConnectionIds,
+        },
+      }, nowDate);
     });
     const result = transaction.immediate();
     this.flushPendingEventsSafely();
@@ -2791,6 +2793,122 @@ export class EnterpriseService {
     };
   }
 
+  private createPendingAgentConnectionRow(
+    access: AccessContext,
+    input: {
+      adapter: "codex" | "generic_mcp";
+      displayName: string;
+      scopes: string[];
+      projectIds: string[];
+      connectionExpiresAt: string;
+      replacedConnectionIds: string[];
+      auditAction: "agent_connection.create" | "agent_connection.reconnect";
+      auditDetails: Record<string, unknown>;
+    },
+    nowDate: Date,
+  ): PairingChallenge {
+    const now = nowDate.toISOString();
+    const connectionId = workflowId("connection");
+    const nonce = `fspair_${randomBytes(32).toString("base64url")}`;
+    const nonceExpiresAt = new Date(nowDate.getTime() + this.pairingTtlSeconds * 1_000).toISOString();
+    this.database.sqlite.prepare(
+      `INSERT INTO agent_connections
+       (id, organization_id, principal_id, adapter, display_name, status, scopes_json, project_ids_json,
+        expires_at, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+    ).run(
+      connectionId,
+      access.organizationId,
+      input.adapter,
+      input.displayName,
+      JSON.stringify(input.scopes),
+      JSON.stringify(input.projectIds),
+      input.connectionExpiresAt,
+      now,
+      now,
+    );
+    this.database.sqlite.prepare(
+      `INSERT INTO pairing_nonces
+       (nonce_hash, connection_id, created_by, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(sha256(nonce), connectionId, access.principalId, now, nonceExpiresAt);
+    persistAgentConnectionReplacement(this.database.sqlite, {
+      pending_connection_id: connectionId,
+      organization_id: access.organizationId,
+      replaced_connection_ids: input.replacedConnectionIds,
+      created_by: access.principalId,
+      created_at: now,
+    });
+    appendAuditEvent(this.database.sqlite, access, input.auditAction, "agent_connection", connectionId, {
+      adapter: input.adapter,
+      scopes: input.scopes,
+      projectIds: input.projectIds,
+      expiresAt: input.connectionExpiresAt,
+      ...input.auditDetails,
+    });
+    this.enqueueEvent(access, "agent_connection.changed", {
+      connectionId,
+      adapter: input.adapter,
+      status: "pending",
+    }, now);
+    return {
+      connection: this.agentConnectionResult(this.requireAgentConnectionRow(access, connectionId)),
+      nonce,
+      expiresAt: nonceExpiresAt,
+    };
+  }
+
+  private assertAgentConnectionCapacity(
+    policy: OrganizationPolicy,
+    organizationId: string,
+    now: string,
+    additionalReplacedConnectionIds: string[],
+    addingConnection: boolean,
+  ): void {
+    const liveRows = this.database.sqlite.prepare(
+      `SELECT id, status FROM agent_connections
+       WHERE organization_id = ? AND status IN ('pending', 'active')
+         AND (expires_at IS NULL OR expires_at > ?)`,
+    ).all(organizationId, now) as Array<{ id: string; status: "pending" | "active" }>;
+    const replacedConnectionIds = new Set(additionalReplacedConnectionIds);
+    for (const row of liveRows) {
+      if (row.status !== "pending") continue;
+      const intent = readAgentConnectionReplacement(this.database.sqlite, row.id, organizationId);
+      for (const replacedConnectionId of intent?.replaced_connection_ids ?? []) {
+        replacedConnectionIds.add(replacedConnectionId);
+      }
+    }
+    const logicalConnectionCount = liveRows.reduce(
+      (count, row) => count + (replacedConnectionIds.has(row.id) ? 0 : 1),
+      0,
+    );
+    const requestedLogicalConnectionCount = logicalConnectionCount + (addingConnection ? 1 : 0);
+    if (requestedLogicalConnectionCount > policy.agents.maximumActiveConnections) {
+      throw new DomainError("FORBIDDEN", "The organization agent-connection limit has been reached.", 403, {
+        details: {
+          maximumActiveConnections: policy.agents.maximumActiveConnections,
+          logicalConnectionCount,
+        },
+      });
+    }
+  }
+
+  private requireAgentConnectionReplacementRows(
+    pendingRow: AgentConnectionRow,
+    intent: AgentConnectionReplacementIntent,
+  ): AgentConnectionRow[] {
+    const placeholders = intent.replaced_connection_ids.map(() => "?").join(", ");
+    const rows = this.database.sqlite.prepare(
+      `SELECT * FROM agent_connections
+       WHERE organization_id = ? AND id IN (${placeholders})`,
+    ).all(pendingRow.organization_id, ...intent.replaced_connection_ids) as AgentConnectionRow[];
+    if (rows.length !== intent.replaced_connection_ids.length) {
+      throw new DomainError("INTERNAL_ERROR", "Persisted agent connection replacement predecessors are invalid.", 500);
+    }
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    return intent.replaced_connection_ids.map((connectionId) => rowsById.get(connectionId) as AgentConnectionRow);
+  }
+
   private revokeAgentConnectionRow(
     access: AccessContext,
     row: AgentConnectionRow,
@@ -2812,6 +2930,7 @@ export class EnterpriseService {
     this.database.sqlite.prepare(
       "UPDATE pairing_nonces SET revoked_at = ? WHERE connection_id = ? AND revoked_at IS NULL",
     ).run(now, row.id);
+    clearAgentConnectionReplacement(this.database.sqlite, row.id);
     if (!alreadyRevoked) {
       appendAuditEvent(this.database.sqlite, access, "agent_connection.revoke", "agent_connection", row.id, details);
       this.enqueueEvent(access, "agent_connection.changed", {

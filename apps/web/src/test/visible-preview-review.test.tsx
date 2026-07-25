@@ -387,12 +387,15 @@ describe("visible exact preview review", () => {
     }, "document_review_0001")).toBe(false);
   });
 
-  it("never silently saves canvas edits during brief submission or opens archive approval automatically", () => {
+  it("does not create agent tasks from the website or open archive approval automatically", () => {
     const briefSource = readFileSync(new URL("../components/ProductBriefPanel.tsx", import.meta.url), "utf8");
+    const apiSource = readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8");
     const editorSource = readFileSync(new URL("../components/Editor.tsx", import.meta.url), "utf8");
-    expect(briefSource).toContain("Save / Commit the design first");
-    expect(briefSource).toContain("never silently commits canvas changes");
+    expect(briefSource).not.toContain("Submit to @FormaSpec");
+    expect(briefSource).not.toContain("createAgentTask");
     expect(briefSource).not.toContain("await saveDesign()");
+    expect(apiSource).not.toContain("export async function createAgentTask");
+    expect(briefSource).toContain("start agent work from Codex or the CLI");
     expect(editorSource).not.toContain("setArchiveDialogOpen(true)");
     expect(editorSource).toContain("Archive preview approval actions");
     expect(editorSource).toContain("Commit archive");

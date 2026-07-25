@@ -340,23 +340,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .contextual-agent-actions { min-width: 0; overflow: auto hidden; display: flex; gap: 5px; padding-bottom: 1px; }
 .contextual-agent-actions button { flex: 0 0 auto; min-height: 30px; max-width: 280px; overflow: hidden; border: 1px solid #292f3c; border-radius: 999px; padding: 0 10px; background: #141920; color: #87909f; cursor: pointer; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 .contextual-agent-actions button:hover { border-color: #4c456f; color: #c1bbef; background: #1a1825; }
-.product-brief-actions { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; }
+.product-brief-actions { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; }
 .product-brief-actions > div { min-width: 0; overflow: hidden; color: #7e8796; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 .product-brief-actions code { color: #a8a0ef; font: inherit; }
 .product-brief-actions .button { min-height: 34px; padding: 0 12px; border-radius: 7px; font-size: 12px; }
 .product-panel-error { color: #ef8999; }
 .product-panel-success { display: inline-flex; align-items: center; gap: 5px; color: #77c9a1; }
-.product-submit-status { min-width: 0; min-height: 48px; padding: 8px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid #393555; border-radius: 8px; background: rgba(91, 77, 197, .1); color: #a8a0ef; }
-.product-submit-status > svg { flex: 0 0 auto; }
-.product-submit-status > span { min-width: 0; }
-.product-submit-status strong, .product-submit-status small { display: block; white-space: normal; }
-.product-submit-status strong { color: #d8d4ff; font-size: 12px; }
-.product-submit-status small { margin-top: 3px; color: #a5adba; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
-.product-submit-status.is-success { border-color: #285846; background: rgba(42, 132, 94, .1); color: #77c9a1; }
-.product-submit-status.is-success strong { color: #9fe0bd; }
-.product-submit-status.is-error { border-color: #66333d; background: rgba(180, 61, 79, .1); color: #ef8999; }
-.product-submit-status.is-error strong { color: #ffb0bd; }
-.product-submit-status .button { min-height: 32px; padding: 0 10px; white-space: nowrap; }
 .agent-task-workflow { min-width: 0; min-height: 0; padding: 10px; overflow: auto; display: grid; align-content: start; gap: 8px; border-left: 1px solid var(--line-soft); background: linear-gradient(150deg, rgba(91, 77, 197, .1), transparent 60%); }
 .agent-task-workflow > header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .agent-task-workflow > header > div { min-width: 0; display: flex; align-items: flex-start; gap: 7px; }

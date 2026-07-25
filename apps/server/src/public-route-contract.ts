@@ -207,7 +207,6 @@ export const PROTECTED_NON_MCP_ROUTE_CONTRACTS = defineProtectedNonMcpRouteContr
   project("product_spec_and_agents", "POST", "/api/planning-sessions/:sessionId/answers"),
   project("product_spec_and_agents", "POST", "/api/planning-sessions/:sessionId/transition"),
   project("product_spec_and_agents", "GET", "/api/designs/:id/agent-tasks"),
-  project("product_spec_and_agents", "POST", "/api/designs/:id/agent-tasks"),
   organization("product_spec_and_agents", "GET", "/api/agent-tasks"),
   project("product_spec_and_agents", "GET", "/api/agent-tasks/:taskId"),
   project("product_spec_and_agents", "POST", "/api/agent-tasks/:taskId/claim"),

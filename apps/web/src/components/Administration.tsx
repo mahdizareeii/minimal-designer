@@ -106,7 +106,7 @@ const ADMINISTRATION_NAVIGATION: ReadonlyArray<{
 
 const ADMINISTRATION_SECTION_COPY: Record<AdministrationSection, { title: string; description: string }> = {
   overview: { title: "Workspace overview", description: "Live runtime identity, recovery readiness, and the next safe action." },
-  agents: { title: "Connections", description: "Connect, renew, or revoke Codex and other scoped agent access." },
+  agents: { title: "FormaSpec MCP connection", description: "Install or reconnect the managed Codex MCP in one click, then run tasks only from Codex or the CLI." },
   "design-system": { title: "Design system", description: "Manage organization libraries, reusable components, and project release pins." },
   policy: { title: "Organization policy", description: "Edit one focused policy category at a time with optimistic-lock protection." },
   backups: { title: "Backups and recovery", description: "Create, verify, download, and register managed recovery points." },
@@ -150,8 +150,33 @@ export function codexPairingLink(challenge: AgentPairingChallenge): string {
   return url.toString();
 }
 
+export function openCodexPairingLink(link: string): void {
+  const url = new URL(link);
+  const connectionId = url.searchParams.get("connection") ?? "";
+  const nonce = url.searchParams.get("nonce") ?? "";
+  if (url.protocol !== "formaspec:" || url.hostname !== "connect-agent" || url.pathname || url.username || url.password || url.port || url.hash
+    || [...url.searchParams.keys()].some((key) => key !== "connection" && key !== "nonce")
+    || url.searchParams.getAll("connection").length !== 1
+    || url.searchParams.getAll("nonce").length !== 1
+    || !/^connection_[a-f0-9]{32}$/.test(connectionId)
+    || !/^fspair_[A-Za-z0-9_-]{43}$/.test(nonce)) {
+    throw new Error("The FormaSpec MCP connection link is invalid.");
+  }
+  const anchor = document.createElement("a");
+  anchor.href = url.toString();
+  anchor.rel = "noopener noreferrer";
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 export function agentConnectionDisplayName(connection: Pick<AgentConnectionRecord, "adapter" | "displayName">): string {
   return connection.adapter === "codex" ? "Codex — FormaSpec" : connection.displayName;
+}
+
+export function agentConnectionCanReconnect(connection: Pick<AgentConnectionRecord, "status">): boolean {
+  return connection.status === "active" || connection.status === "pending";
 }
 
 export function groupAgentConnections(connections: readonly AgentConnectionRecord[]): {
@@ -334,12 +359,13 @@ export function Administration({ section = "overview" }: { section?: Administrat
   };
 
   const connectCodex = async () => {
-    if (!window.confirm("Authorize Codex for 24 hours with scoped access to organization policy, editor context, designs, product specifications, planning and tasks, design-system reads, workspace inventories, handoffs, and redesign planning/design? Approval, implementation completion, and cancellation remain human-only.")) return;
     await run("connect-codex", async () => {
       const challenge = await createCodexConnection();
+      const link = codexPairingLink(challenge);
       setPairingCommand(codexPairingCommand(challenge));
-      setPairingLink(codexPairingLink(challenge));
-      setNotice("The one-time FormaSpec pairing request is ready. Click Finish FormaSpec connection below; if the protocol handler is unavailable, use the installer command.");
+      setPairingLink(link);
+      openCodexPairingLink(link);
+      setNotice("FormaSpec opened the installed connection handler. Codex will keep this MCP approval so tasks can start from Codex or the CLI; no website submission is required.");
       await refresh();
     });
   };
@@ -356,11 +382,13 @@ export function Administration({ section = "overview" }: { section?: Administrat
           <small>{connection.projectIds.length > 0 ? `${connection.projectIds.length} restricted projects` : "All projects in this organization"}</small>
         </div>
         <div className="administration-row-actions">
-          {connection.status !== "revoked" && <button className="icon-button" title="Reconnect" disabled={busy !== null} onClick={() => void run(`reconnect-${connection.id}`, async () => {
+          {agentConnectionCanReconnect(connection) && <button className="icon-button" title="Reconnect" disabled={busy !== null} onClick={() => void run(`reconnect-${connection.id}`, async () => {
             const challenge = await reconnectAgentConnection(connection.id);
+            const link = codexPairingLink(challenge);
             setPairingCommand(codexPairingCommand(challenge));
-            setPairingLink(codexPairingLink(challenge));
-            setNotice("A new one-time FormaSpec pairing request is ready. Click Finish FormaSpec connection.");
+            setPairingLink(link);
+            openCodexPairingLink(link);
+            setNotice("FormaSpec opened the installed connection handler with a renewed one-time pairing request.");
             await refresh();
           })}><RefreshCcw size={14} /></button>}
           {connection.status !== "revoked" && <button className="icon-button is-danger" title="Revoke immediately" disabled={busy !== null} onClick={() => {
@@ -431,7 +459,7 @@ export function Administration({ section = "overview" }: { section?: Administrat
             </article>
             <article>
               <span><Bot size={17} /></span>
-              <div><small>Codex connection</small><strong>{activeConnection ? "Connected" : "Not connected"}</strong><span>{activeConnection ? `Expires ${dateTime(activeConnection.expiresAt)}` : "Connect Codex before submitting agent work"}</span></div>
+              <div><small>FormaSpec MCP</small><strong>{activeConnection ? "Connected" : "Not connected"}</strong><span>{activeConnection ? `Expires ${dateTime(activeConnection.expiresAt)}` : "Connect once, then start tasks from Codex or the CLI"}</span></div>
             </article>
             <article>
               <span><FileArchive size={17} /></span>
@@ -442,7 +470,7 @@ export function Administration({ section = "overview" }: { section?: Administrat
             <div><strong>Recommended next action</strong><span>{!runtimeHealth?.ok
               ? "Recover or inspect the recorded runtime before changing organization data."
               : !activeConnection
-                ? "Connect Codex so design tasks can return durable review links."
+                ? "Install or connect FormaSpec MCP once. After that, create tasks only from Codex or the CLI."
                 : !latestVerifiedBackup
                   ? "Create and download a verified recovery point before deployment."
                   : "Administration is healthy. Continue to your Products and Designs."}</span></div>
@@ -456,7 +484,7 @@ export function Administration({ section = "overview" }: { section?: Administrat
                 : !activeConnection
                   ? "/administration/agents"
                   : !latestVerifiedBackup ? "/administration/backups" : "/")}
-            >{!runtimeHealth?.ok ? "Check connections" : !activeConnection ? "Connect Codex" : !latestVerifiedBackup ? "Create backup" : "Open projects"}</a>
+            >{!runtimeHealth?.ok ? "Check connections" : !activeConnection ? "Connect / install MCP" : !latestVerifiedBackup ? "Create backup" : "Open projects"}</a>
           </div>
         </section>}
 
@@ -535,15 +563,20 @@ export function Administration({ section = "overview" }: { section?: Administrat
 
           {section === "agents" && canAdministerOrganization !== false && <section className="administration-card">
             <div className="administration-card-heading">
-              <div><span><Bot size={18} /></span><div><h2>Agent Connections</h2><p>Scoped, expiring, revocable machine identities.</p></div></div>
-              <button className="button button-primary" disabled={busy !== null} onClick={() => void connectCodex()}>{busy === "connect-codex" ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />} Connect Codex to FormaSpec</button>
+              <div><span><Bot size={18} /></span><div><h2>FormaSpec MCP for Codex</h2><p>One click creates a scoped pairing request and opens the installed FormaSpec handler. Agent tasks are created only in Codex or the CLI.</p></div></div>
+              <button className="button button-primary" disabled={busy !== null} onClick={() => void connectCodex()}>{busy === "connect-codex" ? <LoaderCircle size={14} className="spin" /> : <KeyRound size={14} />} {activeConnection ? "Reconnect FormaSpec MCP" : "Install / connect FormaSpec MCP"}</button>
             </div>
-            {pairingCommand ? <div className="agent-install-command">
-              <code>{pairingCommand}</code>
-              <button className="icon-button" title="Copy one-time pairing command" aria-label="Copy one-time Codex pairing command" onClick={() => void copyText(pairingCommand).then(() => setNotice("One-time Codex pairing command copied."))}><Copy size={14} /></button>
-            </div> : <div className="pairing-link"><KeyRound size={13} /><span>Choose Connect Codex to FormaSpec to issue the short-lived pairing command required by authenticated FormaSpec.</span></div>}
-            {pairingCommand && <div className="pairing-link"><KeyRound size={13} /><span>Installed users run <code>formaspecctl</code> from PATH. A source checkout may use <code>./designer</code> only as the compatibility wrapper.</span></div>}
-            {pairingLink && <div className="pairing-link"><ExternalLink size={13} /><span>Pairing is ready. Use this direct click so the browser can open the installed FormaSpec handler; the fallback command expires with it and contains no bearer grant.</span><a className="button button-primary" href={pairingLink} rel="noopener noreferrer">Finish FormaSpec connection</a></div>}
+            {!pairingLink && <div className="pairing-link"><KeyRound size={13} /><span>This managed connection is the only website action needed. Once connected, mention <code>[@FormaSpec](plugin://formaspec@formaspec)</code> in Codex or use the CLI.</span></div>}
+            {pairingLink && <details className="agent-connection-history">
+              <summary>Connection handler did not open? <span>Retry or use the expiring CLI fallback</span></summary>
+              <div>
+                <div className="pairing-link"><ExternalLink size={13} /><span>Retry the exact one-time connection link.</span><button className="button button-secondary" onClick={() => openCodexPairingLink(pairingLink)}>Retry connection</button></div>
+                {pairingCommand && <div className="agent-install-command">
+                  <code>{pairingCommand}</code>
+                  <button className="icon-button" title="Copy one-time pairing command" aria-label="Copy one-time Codex pairing command" onClick={() => void copyText(pairingCommand).then(() => setNotice("One-time Codex pairing command copied."))}><Copy size={14} /></button>
+                </div>}
+              </div>
+            </details>}
             <div className="administration-list">
               {loading ? <div className="administration-empty"><LoaderCircle className="spin" size={20} /> Loading agent connections…</div> : connections.length === 0 ? (
                 <div className="administration-empty"><Bot size={24} /><strong>No connected agents</strong><span>Connect Codex once, then mention [@FormaSpec](plugin://formaspec@formaspec).</span></div>

@@ -33,7 +33,8 @@ Open `http://127.0.0.1:4310` for the built application or
    and constraints**.
 4. Save the typed product-specification preview.
 5. Optionally complete the persistent 22-section planning interview.
-6. Select **Submit to @FormaSpec**, or invoke FormaSpec from Codex directly.
+6. Open Codex or the CLI and invoke FormaSpec there. The website saves Product
+   logic and reviews returned previews; it does not create agent tasks.
 
 ## Use FormaSpec from Codex
 
@@ -52,14 +53,14 @@ Then use:
 Other supported triggers include `Use FormaSpec`, `Design this with FormaSpec`,
 and `Refine this selection with FormaSpec`.
 
-The managed FormaSpec plugin is version 0.3.0. Start a new Codex task after an
+The managed FormaSpec plugin is version 0.4.0. Start a new Codex task after an
 installation or upgrade so the task receives the new plugin inventory.
 
-When **Submit to @FormaSpec** creates a website task, Codex previews the design,
-inspects the PNG, runs linting, and returns the task in
-`awaiting_approval`. The product manager then commits or discards the exact
-preview in FormaSpec. Direct requests create the same immutable task first;
-Codex never commits a design preview. The website Commit button is the approval
+For a direct request, Codex confirms the exact Product, Design, base version,
+and selection before creating the immutable MCP task. It previews the design,
+inspects the PNG, runs linting, and returns the task in `awaiting_approval`.
+The product manager then commits or discards the exact preview in FormaSpec.
+Codex never commits a design preview; the website Commit button is the approval
 boundary.
 
 ## Export and administer

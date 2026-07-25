@@ -12,16 +12,16 @@ The scenario records these 20 observable steps:
 2. Create a web project from the dashboard in a real browser.
 3. Create and verify the backup required before V2 migration.
 4. Migrate only the active project head from V1 to strict V2.
-5. Enter the canonical product brief and choose **Submit to @FormaSpec** to
-   create a website-owned agent task.
+5. Enter and save the canonical product brief without creating an agent task.
 6. Complete all 22 versioned product-manager interview sections.
 7. Pair a short-lived, project-scoped Codex connection and initialize MCP.
-8. Claim the immutable task and append an in-progress transition.
+8. Confirm the exact Product/Design selection, create the immutable task through
+   MCP, claim it, and append an in-progress transition.
 9. Read the active browser context and canonical V2 project head.
 10. Preview a structured multi-screen design using transaction-local IDs.
 11. Lint the persisted preview without changing history.
 12. Render the same preview as a bounded PNG.
-13. Transition the website task to `awaiting_approval` with its exact preview
+13. Transition the MCP-created task to `awaiting_approval` with its exact preview
     output; the agent does not commit or complete it.
 14. Use the website's human **Commit** action to atomically commit the exact
     preview as an immutable revision and complete the task.

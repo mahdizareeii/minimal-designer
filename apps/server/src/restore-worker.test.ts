@@ -147,6 +147,20 @@ function installActiveAgent(database: DesignerDatabase): void {
     `INSERT INTO pairing_nonces (nonce_hash, connection_id, created_by, expires_at, consumed_at, created_at, revoked_at)
      VALUES (?, 'connection_restore_agent', 'principal_local', '2099-01-01T00:00:00.000Z', NULL, ?, NULL)`,
   ).run(createHash("sha256").update("restore-pairing-nonce").digest("hex"), now);
+  database.sqlite.prepare(
+    "INSERT INTO system_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+  ).run(
+    "agent_connection_replacement:connection_restore_agent",
+    JSON.stringify({
+      schema_version: 1,
+      pending_connection_id: "connection_restore_agent",
+      organization_id: "organization_legacy",
+      replaced_connection_ids: ["connection_restore_predecessor"],
+      created_by: "principal_local",
+      created_at: now,
+    }),
+    now,
+  );
 }
 
 function installActiveBrowserSession(database: DesignerDatabase): void {
@@ -834,6 +848,9 @@ describe("one-shot restore worker", () => {
       expect(restored.sqlite.prepare(
         "SELECT revoked_at FROM pairing_nonces WHERE connection_id = 'connection_restore_agent'",
       ).get()).toMatchObject({ revoked_at: "2026-07-20T00:03:00.000Z" });
+      expect(restored.sqlite.prepare(
+        "SELECT value FROM system_metadata WHERE key GLOB 'agent_connection_replacement:*'",
+      ).get()).toBeUndefined();
       expect(restored.sqlite.prepare(
         "SELECT revoked_at FROM browser_sessions WHERE id = 'session_restore_browser'",
       ).get()).toMatchObject({ revoked_at: "2026-07-20T00:03:00.000Z" });
